@@ -1953,6 +1953,55 @@ The Stage 6 reviewer accepted with minors. Each item below was fixed test-first:
 
 **Residuals.** Stage 6 residual 1 is closed: Telegram now has a persistent pause and resume. The `pending` presentation change applies to the session op-state only; the card still reads Starting.
 
+### Step 4b — OpenCode server managed-turn contract (2026-10-02, branch `feat/a82-opencode-managed` from `b823f63`, commits `13d5daf` (tests, RED), `6eecd77` (impl, GREEN) + this record) — SUBMITTED, NOT ACCEPTED
+
+**Scope.** `OpenCodeServerBackend` (`src/backends/opencode.py`, the `opencode-server` backend) implements the `CodingBackend` managed contract against OpenCode's own HTTP protocol. The carrier is unchanged and has no name branching: the worker advertises the backend through the existing `supports_managed_turns()` probe. The CLI `OpenCodeBackend` keeps the fail-closed defaults (operator decision pending). The only shared-file edits are two capability assertions in `tests/test_turn_queue_4b_carrier.py` (K06) and `tests/test_turn_queue_carrier_integration.py` (INT10b). They had encoded "OpenCode has no managed path". Expect a one-line merge conflict there with the Codex step, which edits the same tuple.
+
+**Ground truth (read from the installed opencode 1.18.32 bundle, binary not run).**
+- Identifier: the server only checks the `msg` prefix. Native ids are `msg_` + 12 hex + 14 base62.
+- `MessageV2.page` and `latest` order by `time_created` then `id`, so a hashed id cannot reorder history.
+- `GET /session/{id}/message/{messageID}` exists. A missing message or session returns 404 (`NotFoundError`).
+- `POST /session/{id}/abort` is session-wide.
+- `POST /session/{id}/summarize` is synchronous (it calls `SessionCompaction.create` and then `loop`). It returns `true` and creates a server-id user message with a `compaction` part.
+- MCP: `POST /mcp` adds a server to the directory instance ("to the system"). There is no per-session MCP seam.
+- Sessions live in SQLite (`MessageV2.page` selects from the db), so native ids survive an `opencode serve` restart.
+
+**Design / capability matrix.**
+
+| Contract item | OpenCode server |
+|---|---|
+| 1 `run_managed_turn` | `messageID = managed_message_id(turn_uuid)` (sha256-derived). The result is ONLY the assistant whose `parentID` is ours. Pre-submit refusal → `managed_conflict` (carrier releases not-invoked): local active/held attempt, repo lock busy, `/session/status` not idle or unknown, own-id existence unverifiable. Never aborts to make room. If our id is already recorded (re-invocation after a crash), the turn re-binds and is never resubmitted. A lost or failed ack is reconciled by `GET message/{ourId}`. A definitive 4xx with the id absent is a plain failure. Still absent → `recovery_required`. The deadline and a server lost mid-turn → `recovery_required` with no abort. Idle + our message + no reply after a grace period → attributable failure ("finished without a reply"). Returns the native `backend_session_id` (it creates the session on a first turn). |
+| 2 `on_process` | `process_identity(pid)` of the per-repo `opencode serve`, reported before submit. **Process-gone proof:** OpenCode runs turns in-process, so the shared server's death proves every turn it hosted stopped, ours included. A dead server also kills its neighbours' turns; each attempt recovers independently. In the same incarnation, held attempts resolve via status/history. |
+| 3 `is_quiescent` | False while a local attempt is reserved or submitted, or a held one is not provably resolved. Then `/session/status` must be idle (an absent entry is idle). Unknown or unreachable ⇒ False. No native session ⇒ True. It may start the repo server when a native id is known; a spawn failure ⇒ False. |
+| 4 `cancel_managed_turn` | No entry yet → armed by uuid, never submitted. Reserved → armed. Submitted → abort only while busy AND the latest user message (OpenCode's own order) is ours; another message running → False and disarmed. Otherwise it stays armed and the waiter delivers the abort when that becomes provable. Held → immediate provable abort only. Compaction: "ours" = the latest user message carries a `compaction` part and was not in the pre-submit snapshot. |
+| 5 `forget` / `run_managed_compaction` | forget drops a held attempt or an armed cancel. An attempt still running in-call is not dropped. Compaction uses native `/summarize` with the session or default model, behind the same idle gate and identity. A failed or lost response → `recovery_required`, because the call is synchronous and the server picks the ids. |
+| 6 `provision_sender_capability` | **False, fail closed.** MCP is per server process or per instance. One `opencode serve` is shared by every session in the repo, so provisioning would leak one session's sender token to its neighbours, and launch config would put the raw token in env or on disk. Agent send is not available on OpenCode. |
+| 7 restart persistence | Native ids persist (SQLite). A saved id the server no longer knows → `recovery_required` and never re-created (no `POST /session` is made). |
+| 8 advertise | `supports_managed_turns()` is True on the server backend and False on the CLI. Advertising goes through the existing probe. |
+
+**Tests (TDD).** `tests/test_opencode_managed_turns.py` has 24 tests. They drive the REAL backend against a fake OpenCode HTTP+SSE server, using a real `sleep` stand-in process for identity and gone-proof. `_exe` points at a nonexistent path, so no opencode binary or model can run.
+- The fake covers: delayed or lost ack, prompts that are never recorded, foreign and late messages, an idle window, busy status, a status error, server death, history reconciliation, abort and summarize.
+- Backend tests cover: conflict without interrupt (native busy and local active); deterministic-id re-bind after a carrier crash with no resubmit; rejection of foreign or late replies; lost ack → reconciled; never recorded → recovery; deadline → recovery with no abort and the late reply parented to our id only; server death → recovery plus process-gone proof; native session lost → recovery with no re-create; quiescence when unknown, busy, idle or with no native id; cancel of our own turn, cancel armed before start, cancel refused while a foreign message runs; compaction success, conflict and recovery; compaction cancel; the capability matrix.
+- Carrier integration uses the real worker `_handle_task` with the in-process task server and real MeshDB. It covers: completed plus the native id persisted and the deterministic id equal to the carrier's turn_uuid; native busy → row `pending` (released before start); ambiguous → `recovery_required` with ownership held and `backend_identity` recorded; then a same-incarnation reconcile → `failed`.
+
+**RED → GREEN.**
+- RED: the module failed to import at collection (`managed_message_id` missing; every contract method was the fail-closed default).
+- GREEN: 24 passed.
+- Kill checks (temporary mutations, all reverted): abort without the ours-check, no idle gate, uncorrelated latest-assistant pick, and abort on ambiguity were each caught by at least one test. The foreign-reply test was strengthened with an idle window after the uncorrelated mutation initially survived.
+
+**Verification.** `timeout 1800 pytest tests/test_opencode_managed_turns.py tests/test_opencode_backend.py tests/test_opencode_server_integration.py tests/test_backend_activity.py tests/test_turn_queue*.py` → **582 passed, 12 skipped** (the skips are the opt-in real-binary e2e tests).
+
+**§7 boundary notes.** These are not new endpoints. Concurrency is bounded by the per-repo lock plus the existing capacity semaphore (8). The deadline is `opencode.timeout_seconds`. HTTP bodies are capped at 8 MiB by `_http`. Server unavailable before submit → a failed result. Status unknown → conflict. Unknown after submit → recovery.
+
+**Open risks.**
+1. A late reply after `recovery_required` is not captured. It stays in native history parented to our id; the hold resolves `failed` through quiescence. No equivalent of Claude's late-capture sink exists here.
+2. The carrier's boot reaper only targets `claude`. An orphaned `opencode serve` from a crashed incarnation keeps the old attempt held for the operator until that process exits (fail closed). Extending the reaper is a shared `agent.py` change and was left out to keep the merge simple.
+3. TOCTOU in cancel: a foreign prompt landing between the ours-check and `POST abort` would be aborted. The window is sub-second and inherent to OpenCode's session-wide abort.
+4. Idle + our message + no reply over 3 polls is treated as terminal. A transient idle longer than about 3 s right after the user-message write would misclassify the outcome.
+5. `_http`'s existing connection-error branch terminates the shared server on any refused or reset connection, killing neighbours' turns. This is pre-existing behaviour and unchanged.
+6. The derived id's 6 "time" bytes are hash bytes. That is harmless on 1.18.x ordering, but an OpenCode version that orders history by id alone would misplace managed turns. The pre-existing legacy path already used random ids.
+7. Validated against a fake server only. A live OpenCode proof is still owed (no binary or model was run, per the rules).
+
 ## 16. Review record
 
 ### Stage 0 review — Manager/A87 — 2026-09-25 — VERDICT: ACCEPT (authorize Stage 1)
