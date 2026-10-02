@@ -844,3 +844,44 @@ def test_m7_first_turn_recovery_keeps_its_native_session_across_a_restart(backen
     assert nxt.success is True, nxt.errors
     assert nxt.backend_session_id == native and fake.created == [native], "history lost: a second session"
     assert [p["session"] for p in fake.prompts] == [native, native]
+
+
+# =========================================================================== #
+# [A82 pre-cutover backend carries] m6 refusal streak decays; m7 write-ahead
+# store under the carrier state dir + cleanup; close() stops the late watcher.
+# =========================================================================== #
+def _refuse_status(monkeypatch) -> None:
+    import src.backends.opencode as oc_mod
+
+    def urlopen(req, *a, **k):
+        raise ConnectionRefusedError("refused")
+
+    monkeypatch.setattr(oc_mod.urllib.request, "urlopen", urlopen)
+
+
+def test_m6_isolated_refusals_further_apart_than_the_window_never_terminate_the_serve(
+        backend, fake, tmp_path, stand_in_proc, monkeypatch):
+    backend._UNREACHABLE_TERMINATE_SEC = 0.6
+    key = backend._server_key(str(tmp_path))
+    _refuse_status(monkeypatch)
+    _body, err = backend._http(key, "GET", "/session/status", timeout=1)
+    assert "server kept" in err
+    time.sleep(0.75)  # no refusal for longer than the window: the streak decays
+    _body, err = backend._http(key, "GET", "/session/status", timeout=1)
+    assert "server kept" in err, err
+    assert stand_in_proc.poll() is None and backend._base_urls.get(key) == fake.url
+
+
+def test_m6_a_continuous_refusal_streak_still_terminates_a_live_non_serving_process(
+        backend, fake, tmp_path, stand_in_proc, monkeypatch):
+    backend._UNREACHABLE_TERMINATE_SEC = 0.6
+    key = backend._server_key(str(tmp_path))
+    _refuse_status(monkeypatch)
+    deadline = time.monotonic() + 3
+    err = ""
+    while "will restart" not in err and time.monotonic() < deadline:
+        _body, err = backend._http(key, "GET", "/session/status", timeout=1)
+        time.sleep(0.1)
+    assert "will restart" in err
+    assert key not in backend._base_urls
+    stand_in_proc.wait(5)
