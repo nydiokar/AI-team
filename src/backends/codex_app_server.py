@@ -13,6 +13,7 @@ import queue
 import signal
 import subprocess
 import threading
+import time
 from collections.abc import Callable
 
 from pydantic import JsonValue
@@ -94,6 +95,10 @@ class CodexRPCTimeout(CodexProtocolError):
     scoped: the shared app-server and every other thread on it stay healthy;
     the late reply is routed to the request's ``on_late`` (or dropped)."""
 
+    def __init__(self, message: str, request_id: int = 0) -> None:
+        super().__init__(message)
+        self.request_id = request_id
+
 
 class CodexRPCError(CodexProtocolError):
     def __init__(self, error: dict[str, JsonValue]) -> None:
@@ -127,6 +132,10 @@ class CodexAppServerClient:
         self.failure: str = ""
         self.pending: dict[int, queue.Queue[dict[str, JsonValue]]] = {}
         self.late: dict[int, Callable[[dict[str, JsonValue]], None] | None] = {}
+        # [A82 pre-cutover, N1] When each still-unanswered late id was given up
+        # on, and the late ids whose waiter was forgotten (reply discarded).
+        self.late_at: dict[int, float] = {}
+        self.ignored: set[int] = set()
         self.channels: dict[str, EventChannel] = {}
         self.buffered: int = 0
         self.sequence: int = 0
@@ -235,7 +244,7 @@ class CodexAppServerClient:
             self.check()
             if method not in REQUEST_METHODS or not isinstance(params, dict):
                 raise CodexProtocolError("codex_invalid_client_request")
-            if len(self.pending) >= MAX_PENDING or len(self.late) >= MAX_LATE:
+            if len(self.pending) >= MAX_PENDING or len(self.late) + len(self.ignored) >= MAX_LATE:
                 # Request-scoped refusal; never evict a late id (its reply would
                 # then read as unmatched and fail the shared client).
                 raise CodexProtocolError("codex_rpc_capacity_exceeded")
@@ -264,7 +273,9 @@ class CodexAppServerClient:
                         # fail the SHARED client (that would kill every other
                         # thread's turn). Its late reply is routed, not fatal.
                         self.late[request_id] = on_late
-                        raise CodexRPCTimeout(f"codex_rpc_deadline_exceeded:{method}") from None
+                        self.late_at[request_id] = time.monotonic()
+                        raise CodexRPCTimeout(f"codex_rpc_deadline_exceeded:{method}",
+                                              request_id) from None
             self.check()
             if "error" in response:
                 error = response["error"]
@@ -278,6 +289,28 @@ class CodexAppServerClient:
         finally:
             with self.lock:
                 self.pending.pop(request_id, None)
+
+    def outstanding(self, request_id: int) -> bool:
+        """[A82 pre-cutover, N1] The late request ``request_id`` is still unanswered."""
+        with self.lock:
+            return request_id in self.late or request_id in self.ignored
+
+    def forget_late(self, request_id: int) -> bool:
+        """[A82 pre-cutover, N1] Drop the late route of ``request_id``: its reply,
+        if it ever comes, is discarded (still matched, so it never reads as an
+        unmatched response that would fail the shared client). True iff the
+        request is still unanswered."""
+        with self.lock:
+            if request_id in self.late:
+                self.late.pop(request_id)
+                self.ignored.add(request_id)
+            return request_id in self.ignored
+
+    def unresponsive(self, window: float) -> bool:
+        """[A82 pre-cutover, N1] Some request has gone unanswered for longer than
+        ``window`` seconds while the process is alive: the app-server is hung."""
+        with self.lock:
+            return bool(self.late_at) and time.monotonic() - min(self.late_at.values()) > window
 
     def _fail(self, reason: str) -> None:
         with self.lock:
@@ -308,9 +341,14 @@ class CodexAppServerClient:
                             raise CodexProtocolError("codex_unsupported_server_request")
                         request_id = event["id"]
                         if type(request_id) is int and request_id in self.late:
+                            self.late_at.pop(request_id, None)
                             route = self.late.pop(request_id)
                             if route is not None:
                                 route(event)  # must not block: the reader holds the lock
+                            continue
+                        if type(request_id) is int and request_id in self.ignored:
+                            self.late_at.pop(request_id, None)
+                            self.ignored.discard(request_id)  # [N1] forgotten waiter
                             continue
                         if type(request_id) is not int or request_id not in self.pending:
                             raise CodexProtocolError("codex_unmatched_response")
