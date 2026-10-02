@@ -1443,6 +1443,18 @@ class WorkerAgent:
             logger.warning("event=managed_quiescence_probe_failed backend=%s", backend_name, exc_info=True)
             return False
 
+    def _backend_quiescence_reason(self, backend_name: str, session: Any) -> str:
+        """[A82 pre-cutover, m2] The backend's own reason for its last
+        not-quiescent answer (optional interface hook), or ""."""
+        probe = getattr((self._backends or {}).get(backend_name), "quiescence_reason", None)
+        if not callable(probe) or session is None:
+            return ""
+        try:
+            return str(probe(session) or "")[:300]
+        except Exception:
+            logger.warning("event=managed_quiescence_reason_failed backend=%s", backend_name, exc_info=True)
+            return ""
+
     def _is_definitive_refusal(self, exc: BaseException) -> bool:
         return (
             isinstance(exc, urllib.error.HTTPError)
@@ -1578,7 +1590,15 @@ class WorkerAgent:
                 "event=managed_session_not_quiescent task_id=%s — releasing before "
                 "start; prompt stays pending", task_id,
             )
-            await self._release_managed_claim(task_id, claim_token)
+            # [A82 pre-cutover, m2] Never a silent loop: the backend was not
+            # invoked, so release with that attestation and a visible reason
+            # (backend-supplied when it has one) — the server counts it and
+            # backs a repeated refusal off, exactly like a run-time conflict.
+            reason = self._backend_quiescence_reason(str(task_row.get("backend") or ""), session)
+            await self._release_managed_claim(
+                task_id, claim_token, not_invoked=True,
+                blocked_reason="session_not_quiescent" + (f": {reason}" if reason else ""),
+            )
             return None
         body = {
             "node_id": self.cfg.node_id,

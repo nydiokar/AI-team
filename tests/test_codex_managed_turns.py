@@ -924,3 +924,16 @@ def test_N1_unresponsive_app_server_is_never_recycled_under_a_live_neighbour_tur
     _neighbour_survives(h, th_a, box_a, pid)
     h.ctl()
     wait_for(lambda: h.backend.is_quiescent(h.session("sess-b")))
+
+
+def test_m2_quiescence_reason_names_an_identityless_legacy_owner(h):
+    legacy = CodexOwnership()
+    legacy.acquire("sess-1", "thr-legacy", str(Path(h.repo).resolve()))
+    successor = h.make()
+    session = h.session(native="thr-legacy")
+    assert successor.quiescence_reason(session) is None
+    assert successor.is_quiescent(session) is False
+    assert successor.quiescence_reason(session) == "other_owner_not_provably_gone"
+    legacy.release()
+    assert successor.is_quiescent(session) is True
+    assert successor.quiescence_reason(session) is None
