@@ -111,3 +111,73 @@ def test_TG_R5_resume_is_authorized_and_registered(tmp_path: Any, monkeypatch: A
     assert "Access denied" in upd.message.replies[-1] and _paused(db) is True
     names: List[str] = [c.command for c in TelegramInterface._bot_commands()]
     assert "session_resume" in names
+
+
+# --------------------------------------------------------------------------- #
+# [A82 Stage 7] Stage-6 review NITs
+# --------------------------------------------------------------------------- #
+def test_TG_R6_resume_refuses_a_session_the_user_does_not_own(tmp_path: Any, monkeypatch: Any) -> None:
+    """An ALLOWED Telegram user who does not own the session cannot release
+    its operator pause (owner check, not just the allowlist)."""
+    db, o = _setup(tmp_path, monkeypatch)
+    _wire(o)
+    db.set_turn_queue_paused("sess-1", True)
+    foreign = _sess()
+    foreign.owner_user_id = 999  # the test user is 1
+    monkeypatch.setattr(o.session_store, "get", lambda _sid: foreign)
+    bot = _bot(o)
+    upd = _Upd()
+    asyncio.run(bot._handle_session_resume(upd, _Ctx(["sess-1"])))
+    assert "do not own" in upd.message.replies[-1]
+    assert _paused(db) is True
+
+
+def test_TG_R7_stop_reply_omits_pause_hint_when_pause_skipped(tmp_path: Any, monkeypatch: Any) -> None:
+    """The pause is skipped when the session closed meanwhile (typed ownership
+    conflict): the stop reply must not claim "Queue paused"."""
+    from src.control import turn_admission
+    from src.control.turn_queue import OwnershipConflictError
+
+    db, o = _setup(tmp_path, monkeypatch)
+    _wire(o)
+
+    def _closed(*_a: Any, **_k: Any) -> None:
+        raise OwnershipConflictError("session closed")
+
+    monkeypatch.setattr(turn_admission, "set_queue_paused_sync", _closed)
+    bot = _bot(o)
+    upd = _Upd()
+    asyncio.run(bot._handle_session_cancel(upd, _Ctx(["sess-1"])))
+    assert "No active turn" in upd.message.replies[-1]
+    assert "/session_resume" not in upd.message.replies[-1]
+    assert _paused(db) is False
+    monkeypatch.setattr(o.session_store, "get_active", lambda _chat: _sess())
+    upd = _Upd()
+    asyncio.run(bot._handle_cancel_command(upd, _Ctx([])))
+    assert "/session_resume" not in upd.message.replies[-1]
+
+
+def test_TG_R8_paused_wording_read_runs_off_the_event_loop(tmp_path: Any, monkeypatch: Any) -> None:
+    """The reply-wording pause read is a sync SQLite read: it must run in a
+    worker thread, never on the bot's event loop."""
+    import threading
+
+    import src.telegram.interface as tg
+
+    db, o = _setup(tmp_path, monkeypatch)
+    _wire(o)
+    db.set_turn_queue_paused("sess-1", True)
+    seen: List[int] = []
+    real = tg._session_queue_paused
+
+    def _spy(sid: str) -> bool:
+        seen.append(threading.get_ident())
+        return real(sid)
+
+    monkeypatch.setattr(tg, "_session_queue_paused", _spy)
+    bot = _bot(o)
+    upd = _Upd()
+    loop_thread: int = threading.get_ident()  # asyncio.run drives the loop here
+    asyncio.run(bot._queue_instruction(upd, "while paused", _sess()))
+    assert "/session_resume" in upd.message.replies[-1]
+    assert seen and all(t != loop_thread for t in seen)
