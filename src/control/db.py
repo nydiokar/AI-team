@@ -5065,7 +5065,7 @@ class MeshDB:
             with self._write() as conn:
                 row = conn.execute(
                     "SELECT id, session_id, status, queue_protocol, claim_token, cancel_token, "
-                    "flow_run_id FROM mesh_tasks WHERE id = ?",
+                    "flow_run_id, action FROM mesh_tasks WHERE id = ?",
                     (task_id,),
                 ).fetchone()
                 if row is None or row["queue_protocol"] != 1:
@@ -5155,7 +5155,8 @@ class MeshDB:
                 if sid:
                     self._commit_completion_identity(
                         conn, sid, native_session_id=native_session_id,
-                        last_task_id=task_id, driver_state=driver_state,
+                        last_task_id=task_id,
+                        driver_state=_reported_driver_state(row["action"], driver_state),
                     )
                 return CompletionResult(
                     task_id=task_id, status=status,
@@ -11057,6 +11058,21 @@ _COMPLETION_DRIVER_COLUMNS = frozenset({
     "driver_type", "driver_status", "cache_health", "cache_unhealthy_count",
     "previous_backend_session_ids",
 })
+
+
+def _reported_driver_state(
+    action: Optional[str], driver_state: Optional[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    """[A84 review F1] The carrier reports real driver state only for a
+    conversational action (``create_session`` / ``resume_session``); every
+    other action (compaction, ...) — and a carrier that sent none
+    (``driver_type`` empty) — carries placeholder defaults that must never
+    overwrite the session's real state (e.g. ``driver_status='lost'``)."""
+    if str(action or "") not in ("create_session", "resume_session"):
+        return None
+    if not str((driver_state or {}).get("driver_type") or "").strip():
+        return None
+    return driver_state
 
 
 def _apply_turn_enrichment(
