@@ -1159,6 +1159,9 @@ class ManagedAttemptPayload(BaseModel):
     # Release only: the carrier's write-ahead attestation that the backend was
     # never invoked for this attempt (allows release of a started row).
     backend_not_invoked: bool = False
+    # [A82 step 4 rework, m2] Release only: the backend's pre-submit refusal
+    # reason (``managed_conflict``), made operator-visible on the row.
+    blocked_reason: Optional[str] = Field(default=None, max_length=2000)
 
 
 # [A82 Stage 3 rework, m2] Server-side byte cap for managed carrier bodies: one
@@ -1218,6 +1221,7 @@ def release_managed(task_id: str, payload: ManagedAttemptPayload) -> Dict[str, A
             claim_token=payload.claim_token,
             backend_not_invoked=payload.backend_not_invoked,
             node_id=payload.node_id,
+            blocked_reason=payload.blocked_reason if payload.backend_not_invoked else None,
         )
     except TurnQueueError as e:
         raise HTTPException(status_code=getattr(e, "status_code", 503), detail=str(e))
@@ -1226,7 +1230,13 @@ def release_managed(task_id: str, payload: ManagedAttemptPayload) -> Dict[str, A
             status_code=409,
             detail="managed turn not releasable (started, superseded or not claimed)",
         )
-    _emit_managed_change(_turn_session(db, task_id), task_id, "released", "pending")
+    status = "pending"
+    if payload.blocked_reason and payload.backend_not_invoked:
+        try:
+            status = (db.get_task(task_id) or {}).get("status") or status
+        except Exception:  # noqa: BLE001 — the UI signal only
+            pass
+    _emit_managed_change(_turn_session(db, task_id), task_id, "released", status)
     return {"status": "released", "task_id": task_id}
 
 
