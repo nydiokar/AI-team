@@ -43,9 +43,12 @@ export const TURN_TERMINAL_STATUSES: ReadonlySet<string> = new Set([
   "withdrawn",
 ]);
 
-/** In flight (start authorized or about to be): the session is working. */
+/**
+ * In flight (a carrier holds it): the session is working. `pending` is NOT —
+ * an activated head waits for its carrier to claim it (a pinned carrier that
+ * went offline keeps it), so it reads Starting on its card, never "running".
+ */
 const TURN_IN_FLIGHT_STATUSES: ReadonlySet<string> = new Set([
-  "pending",
   "claimed",
   "running",
 ]);
@@ -105,6 +108,7 @@ const BLOCKED_REASON_LABEL: Record<string, string> = {
   case_manager_rebound: "Case moved to another Manager",
   prepare_failed: "Could not prepare — retrying",
   operator_stop: "Stopped by operator",
+  carrier_offline: "Carrier offline — waits for it to return",
 };
 
 /** Bounded, human label for a blocked/recovery reason (raw detail kept as title). */

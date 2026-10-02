@@ -93,8 +93,19 @@ describe("UI02 session state from the ledger overlay (queued is not BUSY)", () =
     expect(toSession({ ...base, turn_queue: queue(null, 3) }).opState).toBe("idle");
   });
 
+  it("an activated-but-unclaimed (pending) head is Starting, never running", () => {
+    // [S6-F2] A pinned carrier that went offline keeps its pending head: the
+    // session must not read "running" forever; the card carries the reason.
+    expect(queueOpState(toSessionTurnQueue(queue("pending")))).toBeNull();
+    expect(deriveOpState({ ...base, turn_queue: queue("pending") })).toBe("idle");
+    expect(deriveOpState({ ...base, status: "busy", turn_queue: queue("pending") })).toBe("idle");
+    expect(blockedReasonLabel("carrier_offline: worker-a")).toBe(
+      "Carrier offline — waits for it to return",
+    );
+  });
+
   it("an in-flight slot holder is running; a held turn needs attention", () => {
-    for (const s of ["pending", "claimed", "running"]) {
+    for (const s of ["claimed", "running"]) {
       expect(deriveOpState({ ...base, turn_queue: queue(s) })).toBe("running");
     }
     const held = toSession({ ...base, turn_queue: queue("recovery_required") });

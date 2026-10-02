@@ -151,14 +151,18 @@ export function TurnQueuePanel({
     }
   };
 
+  // An operator-stop hold blocks activation like a pause; Resume releases both.
+  const held = page.paused || page.hold != null;
+  const holdReason = blockedReasonLabel(page.hold);
+
   const toggleQueue = () =>
     void run(() =>
-      page.paused
+      held
         ? api.resumeTurnRequests(token, sessionId)
         : api.pauseTurnRequests(token, sessionId),
     );
 
-  if (!page.enrolled || (cards.length === 0 && !page.paused)) return null;
+  if (!page.enrolled || (cards.length === 0 && !held)) return null;
 
   return (
     <section
@@ -174,15 +178,15 @@ export function TurnQueuePanel({
           type="button"
           disabled={busy}
           onClick={toggleQueue}
-          aria-pressed={page.paused}
+          aria-pressed={held}
           className="h-9 rounded-full border border-hairline px-3 text-[12px] text-ink-soft hover:bg-surface-2 disabled:opacity-50"
         >
-          {page.paused ? "Resume queue" : "Pause queue"}
+          {held ? "Resume queue" : "Pause queue"}
         </button>
       </div>
-      {page.paused && (
-        <p className="mt-1 text-[12px] text-warn">
-          Queue paused — nothing new starts until you resume.
+      {held && (
+        <p className="mt-1 text-[12px] text-warn" title={page.hold ?? undefined}>
+          {holdReason ? `${holdReason} — ` : "Queue paused — "}nothing new starts until you resume.
         </p>
       )}
       {notice && (
