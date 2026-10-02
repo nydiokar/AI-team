@@ -83,6 +83,9 @@ class SchedulerPassResult(BaseModel):
     # [A82 Stage 4b] withdrawn turns whose Case lineage is still `void`.
     lineage_voided: int = 0
     void_outstanding: int = 0
+    # [A82 Stage 6 F1] The shared allowance refused this pass's DB count (an
+    # admission reserved/committed meanwhile): the cache may be stale-high.
+    refresh_deferred: bool = False
 
 
 PrepareFn = Callable[[Dict[str, Any], Dict[str, Any]], Awaitable[PreparedTurn]]
@@ -243,7 +246,7 @@ async def run_scheduler_pass(
     shared = allowance if allowance is not None else ALLOWANCE
     generation = shared.snapshot_generation()
     totals: Dict[str, int] = await asyncio.to_thread(db.managed_waiting_totals)
-    shared.refresh_managed(totals["count"], generation)
+    result.refresh_deferred = not shared.refresh_managed(totals["count"], generation)
     result.waiting = int(totals["queued"])
     result.pending = int(totals["count"]) - int(totals["queued"])
     if result.waiting:
@@ -259,6 +262,20 @@ async def run_scheduler_pass(
 
 
 def _next_timeout(
+    res: SchedulerPassResult, limit: int, safety_net_sec: float,
+    slot_backoff_sec: Optional[float] = None,
+) -> Optional[float]:
+    """[A82 Stage 6 F1] A deferred allowance refresh keeps the bounded fallback
+    wake: the admission that blocked it may end without committing (replay,
+    DB-side refusal) and never hint, and legacy puts never hint either, so the
+    stale-high managed cache would otherwise refuse legacy work indefinitely."""
+    timeout = _wake_timeout(res, limit, safety_net_sec, slot_backoff_sec)
+    if not res.refresh_deferred:
+        return timeout
+    return FALLBACK_INTERVAL_SEC if timeout is None else min(timeout, FALLBACK_INTERVAL_SEC)
+
+
+def _wake_timeout(
     res: SchedulerPassResult, limit: int, safety_net_sec: float,
     slot_backoff_sec: Optional[float] = None,
 ) -> Optional[float]:
