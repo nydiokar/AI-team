@@ -5028,6 +5028,8 @@ class MeshDB:
         error: Optional[str] = None,
         artifact_path: Optional[str] = None,
         error_class: Optional[str] = None,
+        enrichment: Optional[Dict[str, Any]] = None,
+        driver_state: Optional[Dict[str, Any]] = None,
     ) -> "CompletionResult":
         """ATOMIC managed completion (design §6, A82 §15 decision 2).
 
@@ -5044,7 +5046,14 @@ class MeshDB:
           * A never-started (queued/pending) turn ⇒ `OwnershipConflictError`
             (OWN08b: managed completion refuses a result for a non-running turn).
         Raises typed failures instead of swallowing — a losing predicate NEVER
-        returns silently as success (unlike legacy `complete_task`)."""
+        returns silently as success (unlike legacy `complete_task`).
+
+        [A84] Also in the SAME transaction: the transcript enrichment
+        (``enrichment``: reply_text / files_modified / usage / return_code), the
+        carrier's driver state onto the session row (``driver_state``), the
+        session ``task_events`` row (legacy result-route parity) and the
+        post-commit effects outbox mark (``effects_state='pending'``) that the
+        gateway consumer drains exactly once."""
         from .turn_queue import CompletionResult, TERMINAL_STATUSES
 
         if status not in TERMINAL_STATUSES:
@@ -5116,7 +5125,8 @@ class MeshDB:
                         retry_pause_state = COALESCE(?, retry_pause_state),
                         completed_at = ?, updated_at = ?, blocked_attempts = 0,
                         blocked_reason = CASE WHEN blocked_reason LIKE 'backend_conflict:%'
-                                         THEN NULL ELSE blocked_reason END
+                                         THEN NULL ELSE blocked_reason END,
+                        effects_state = 'pending'
                     WHERE id = ? AND queue_protocol = 1 AND claim_token = ?
                       AND status IN ('running', 'recovery_required')
                     """,
@@ -5127,6 +5137,15 @@ class MeshDB:
                     raise OwnershipConflictError(
                         "completion lost the state race", task_id=task_id,
                     )
+                if enrichment:
+                    _apply_turn_enrichment(conn, task_id, enrichment, now)
+                if row["session_id"]:
+                    conn.execute(
+                        "INSERT INTO task_events (session_id, task_id, timestamp, success, "
+                        "execution_time, error) VALUES (?, ?, ?, ?, ?, ?)",
+                        (row["session_id"], task_id, now, int(status == "completed"),
+                         result.get("execution_time"), error or ""),
+                    )
                 # ATOMICALLY commit the native session id + active identity onto
                 # the session row — field-scoped so a stale full-session save
                 # cannot revert it (design §6 / OWN08). Only touch columns this
@@ -5136,7 +5155,7 @@ class MeshDB:
                 if sid:
                     self._commit_completion_identity(
                         conn, sid, native_session_id=native_session_id,
-                        last_task_id=task_id,
+                        last_task_id=task_id, driver_state=driver_state,
                     )
                 return CompletionResult(
                     task_id=task_id, status=status,
@@ -5154,6 +5173,7 @@ class MeshDB:
         *,
         native_session_id: Optional[str] = None,
         last_task_id: Optional[str] = None,
+        driver_state: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Field-scoped write of the completion-owned session identity columns,
         executed INSIDE the caller's transaction (design §6 atomicity).
@@ -5176,6 +5196,13 @@ class MeshDB:
         if last_task_id is not None:
             sets.insert(0, "last_task_id = ?")
             params.insert(0, last_task_id)
+        # [A84] The carrier's driver state (legacy `_dispatch_to_node` parity:
+        # each field the result carries is applied) — field-scoped too.
+        for col, value in (driver_state or {}).items():
+            if col not in _COMPLETION_DRIVER_COLUMNS or value is None:
+                continue
+            sets.insert(0, f"{col} = ?")
+            params.insert(0, json.dumps(value) if isinstance(value, list) else value)
         params.append(session_id)
         conn.execute(
             f"UPDATE sessions SET {', '.join(sets)} WHERE session_id = ?",
@@ -5301,7 +5328,8 @@ class MeshDB:
                     """
                     UPDATE mesh_tasks
                     SET status = ?, completed_at = ?, updated_at = ?,
-                        blocked_reason = NULL, error = ?
+                        blocked_reason = NULL, error = ?,
+                        effects_state = 'pending'  -- [A84] a started turn's outcome
                     WHERE id = ? AND queue_protocol = 1 AND claim_token = ?
                       AND status = 'recovery_required'
                     """,
@@ -7478,6 +7506,90 @@ class MeshDB:
                 (_now(), task_id),
             )
             return conn.execute("SELECT changes()").fetchone()[0] > 0
+
+    # ------------------------------------------------------------------ #
+    # [A84] Managed-completion effects outbox (mesh_tasks.effects_state):
+    # 'pending' (marked in the terminal txn) → 'notifying' (notify fence) →
+    # 'notified' → 'done' | 'failed'. Drained by the gateway consumer.
+    # ------------------------------------------------------------------ #
+    _PENDING_EFFECTS_SQL = (
+        "SELECT id FROM mesh_tasks INDEXED BY idx_mesh_tasks_turn_effects "
+        "WHERE effects_state IN ('pending', 'notifying', 'notified') "
+        "ORDER BY completed_at LIMIT ?"
+    )
+
+    def pending_turn_effects(self, limit: int = 25) -> List[str]:
+        """Ids of terminal managed turns with effects outstanding, oldest
+        completion first. Bounded; served by the partial index (ids only, so a
+        batch never loads large result bodies)."""
+        rows = self._conn().execute(self._PENDING_EFFECTS_SQL, (int(limit),)).fetchall()
+        return [str(r[0]) for r in rows]
+
+    def transition_turn_effects(
+        self,
+        task_id: str,
+        from_state: str,
+        to_state: str,
+        *,
+        error: Optional[str] = None,
+        bump_attempts: bool = False,
+    ) -> bool:
+        """CAS ``effects_state`` ``from_state``→``to_state`` (optionally
+        recording ``error`` and counting a failed attempt). True iff this call
+        moved the row. Raises on a DB error."""
+        with self._managed_write("transition_turn_effects") as conn:
+            conn.execute(
+                "UPDATE mesh_tasks SET effects_state = ?, "
+                "effects_error = COALESCE(?, effects_error), "
+                "effects_attempts = effects_attempts + ?, updated_at = ? "
+                "WHERE id = ? AND effects_state = ?",
+                (to_state, (error or None) and str(error)[:2000], 1 if bump_attempts else 0,
+                 _now(), task_id, from_state),
+            )
+            return conn.execute("SELECT changes()").fetchone()[0] > 0
+
+    def project_turn_session(
+        self,
+        session_id: str,
+        task_id: str,
+        *,
+        entry: Dict[str, Any],
+        summary: str,
+        files_modified: List[str],
+        artifact_path: Optional[str] = None,
+    ) -> bool:
+        """[A84] Field-scoped, idempotent session projection of a managed turn
+        (the legacy ``_task_worker`` session update, without a whole-row save):
+        appends ``entry`` to ``task_history`` once per task id (last 20 kept)
+        and, only while this turn is the session's latest completion
+        (``last_task_id``), sets the last-result preview fields. Raises."""
+        with self._managed_write("project_turn_session") as conn:
+            row = conn.execute(
+                "SELECT task_history, last_task_id FROM sessions WHERE session_id = ?",
+                (session_id,),
+            ).fetchone()
+            if row is None:
+                return False
+            try:
+                history = json.loads(row["task_history"] or "[]")
+            except (TypeError, ValueError):
+                history = []
+            if not isinstance(history, list):
+                history = []
+            if not any(isinstance(h, dict) and h.get("task_id") == task_id for h in history):
+                history = (history + [entry])[-20:]
+            sets = ["task_history = ?", "updated_at = ?"]
+            params: List[Any] = [json.dumps(history), _now()]
+            if str(row["last_task_id"] or "") == task_id:
+                sets += ["last_result_summary = ?", "last_summary = ?",
+                         "last_files_modified = ?",
+                         "last_artifact_path = COALESCE(?, last_artifact_path)"]
+                params += [summary, summary, json.dumps(files_modified), artifact_path]
+            conn.execute(
+                f"UPDATE sessions SET {', '.join(sets)} WHERE session_id = ?",
+                params + [session_id],
+            )
+            return True
 
     def decide_retry(self, **kw: Any) -> "Any":
         """The pure A/B/R rule (``turn_queue.decide_retry``)."""
@@ -10358,6 +10470,18 @@ def _get_migrations() -> List[tuple]:
                # the managed claim that minted it (audit), and a partial index
                # so carrier replacement revokes by node without a table scan.
                # Additive; 40 stays unchanged (it may already be applied).
+        (42, """
+            ALTER TABLE mesh_tasks ADD COLUMN effects_state TEXT;
+            ALTER TABLE mesh_tasks ADD COLUMN effects_attempts INTEGER NOT NULL DEFAULT 0;
+            ALTER TABLE mesh_tasks ADD COLUMN effects_error TEXT;
+            CREATE INDEX IF NOT EXISTS idx_mesh_tasks_turn_effects
+                ON mesh_tasks(completed_at)
+                WHERE effects_state IN ('pending', 'notifying', 'notified')
+        """),  # A84: post-commit effects outbox of a STARTED managed turn
+               # (notification, telemetry reconcile, session summary/history,
+               # Case task.finished), marked 'pending' in its terminal txn and
+               # drained by the gateway consumer. NULL on every legacy row; the
+               # partial index holds only rows with effects outstanding.
     ]
 
 
@@ -10925,6 +11049,42 @@ def _cancel_requested_for(row: Any, claim_token: str) -> bool:
 
     recorded = row["cancel_token"] if "cancel_token" in row.keys() else None
     return bool(recorded) and hmac.compare_digest(str(recorded), str(claim_token or ""))
+
+
+#: [A84] Session columns a managed completion may set from the carrier's
+#: driver state (the same fields legacy ``_dispatch_to_node`` applied).
+_COMPLETION_DRIVER_COLUMNS = frozenset({
+    "driver_type", "driver_status", "cache_health", "cache_unhealthy_count",
+    "previous_backend_session_ids",
+})
+
+
+def _apply_turn_enrichment(
+    conn: sqlite3.Connection, task_id: str, enrichment: Dict[str, Any], now: str,
+) -> None:
+    """[A84] The transcript enrichment of a managed completion, inside its
+    transaction (``enrich_task`` semantics: COALESCE keeps existing values)."""
+    files = enrichment.get("files_modified")
+    usage = enrichment.get("usage")
+    conn.execute(
+        """
+        UPDATE mesh_tasks SET
+            reply_text          = COALESCE(?, reply_text),
+            files_modified_json = COALESCE(?, files_modified_json),
+            usage_json          = COALESCE(?, usage_json),
+            return_code         = COALESCE(?, return_code),
+            updated_at          = ?
+        WHERE id = ?
+        """,
+        (
+            enrichment.get("reply_text"),
+            json.dumps(files) if files is not None else None,
+            json.dumps(usage) if usage is not None else None,
+            enrichment.get("return_code"),
+            now,
+            task_id,
+        ),
+    )
 
 
 def _now() -> str:

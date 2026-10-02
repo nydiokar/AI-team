@@ -1340,6 +1340,7 @@ def submit_managed_result(task_id: str, payload: ManagedResultPayload) -> Dict[s
         backend_session_id=payload.backend_session_id,
         artifact_path=payload.artifact_path,
         error_class=payload.error_class,
+        envelope=payload,
     )
     return {
         "status": "accepted",
@@ -1366,21 +1367,32 @@ def _commit_managed_result(
     backend_session_id: Optional[str],
     artifact_path: Optional[str] = None,
     error_class: Optional[str] = None,
+    envelope: Optional[_ManagedResultFields] = None,
 ) -> Any:
     """Classify through the SHARED helper and commit atomically via
     ``complete_turn`` (terminal status + result + native id + active identity in
     one transaction). Used by the managed result route and by quiescence
-    reconciliation of a spooled terminal result, so the two never diverge."""
+    reconciliation of a spooled terminal result, so the two never diverge.
+
+    [A84] ``envelope`` (the carrier's full result) is persisted in the same
+    commit: the legacy-shaped result dict, the transcript enrichment and the
+    driver state. The post-commit effects run in the gateway consumer."""
     from .turn_queue import TurnQueueError
 
     effective_success, downgraded = classify_completion_outcome(success, output, errors)
-    result_dict = {
+    result_dict: Dict[str, Any] = {
         "success": effective_success,
         "output": output,
         "errors": errors,
         "backend_session_id": backend_session_id,
         "error_detail": downgraded,
     }
+    enrichment: Optional[Dict[str, Any]] = None
+    driver_state: Optional[Dict[str, Any]] = None
+    if envelope is not None:
+        result_dict, enrichment, driver_state = _managed_result_projection(
+            envelope, result_dict, effective_success,
+        )
     if effective_success:
         status, error = "completed", None
     else:
@@ -1400,12 +1412,69 @@ def _commit_managed_result(
             # [A82 Stage 4e] the carrier's class (a downgraded success keeps its
             # own class); persisted and used to mark a Case pause candidate.
             error_class=(error_class or downgraded or None) if not effective_success else None,
+            enrichment=enrichment,
+            driver_state=driver_state,
         )
     except TurnQueueError as e:
         raise HTTPException(status_code=getattr(e, "status_code", 409), detail=str(e))
     _hint_turn_scheduler()  # [A82 Stage 4a] slot freed → next head may activate
     _emit_managed_change(_turn_session(db, task_id), task_id, str(completion.status), str(completion.status))
     return completion
+
+
+def _managed_result_projection(
+    envelope: _ManagedResultFields, base: Dict[str, Any], effective_success: bool,
+) -> Tuple[Dict[str, Any], Dict[str, Any], Dict[str, Any]]:
+    """[A84] Pure: the legacy-shaped result dict (every field the legacy result
+    route persists), the transcript enrichment (``_mesh_complete_task`` reply
+    precedence; usage from the envelope, else its NDJSON) and the driver state
+    the carrier reported. Raw stdout/stderr are read here and never stored."""
+    from types import SimpleNamespace
+
+    from src.services.result_text import (
+        extract_usage_from_ndjson, session_reply_text, short_failure_reason,
+    )
+
+    result_dict = dict(base)
+    result_dict.update({
+        "files_modified": list(envelope.files_modified),
+        "execution_time": envelope.execution_time,
+        "timestamp": envelope.timestamp,
+        "return_code": envelope.return_code,
+        "driver_type": envelope.driver_type,
+        "driver_status": envelope.driver_status,
+        "cache_health": envelope.cache_health,
+        "cache_unhealthy_count": envelope.cache_unhealthy_count,
+        "previous_backend_session_ids": list(envelope.previous_backend_session_ids),
+        "usage": envelope.usage,
+        "telemetry_invocation_id": envelope.telemetry_invocation_id,
+        "error_detail": envelope.error_detail or base.get("error_detail"),
+    })
+    view = SimpleNamespace(
+        success=effective_success, output=envelope.output, errors=envelope.errors,
+        parsed_output=None, raw_stdout=envelope.raw_stdout, raw_stderr=envelope.raw_stderr,
+    )
+    if effective_success:
+        reply = session_reply_text(view).strip()
+    else:
+        reply = (envelope.output or "").strip() or (short_failure_reason(view) or "(failed)").strip()
+    usage = envelope.usage
+    if usage is None and envelope.raw_stdout:
+        try:
+            usage = extract_usage_from_ndjson(envelope.raw_stdout)
+        except Exception:  # noqa: BLE001 — usage is optional enrichment
+            usage = None
+    enrichment = {
+        "reply_text": reply, "files_modified": list(envelope.files_modified),
+        "usage": usage, "return_code": envelope.return_code,
+    }
+    driver_state = {
+        "driver_type": envelope.driver_type, "driver_status": envelope.driver_status,
+        "cache_health": envelope.cache_health,
+        "cache_unhealthy_count": envelope.cache_unhealthy_count,
+        "previous_backend_session_ids": list(envelope.previous_backend_session_ids),
+    }
+    return result_dict, enrichment, driver_state
 
 
 def _turn_session(db: Any, task_id: str) -> Optional[str]:
@@ -1538,6 +1607,7 @@ def record_quiescence_observation(
             backend_session_id=res.backend_session_id or payload.native_session_id,
             artifact_path=res.artifact_path,
             error_class=res.error_class,
+            envelope=res,
         )
         return {"status": "reconciled", "task_id": outcome.task_id, "resolved_status": outcome.status}
     # No result: a quiescence observation must carry an explicit terminal/stop
