@@ -114,9 +114,9 @@ def _legacy_put_admitted(cap: int, legacy_waiting: int) -> bool:
     from src.core.session_task_queue import SessionTaskQueue
 
     q = SessionTaskQueue(maxsize=cap, key=lambda t: str(t.id))
-    q.share_allowance(turn_scheduler.ALLOWANCE)
-    for i in range(legacy_waiting):
+    for i in range(legacy_waiting):  # occupancy that predates the managed rows
         q.put_nowait(SimpleNamespace(id=f"seed-{i}"))  # type: ignore[arg-type]
+    q.share_allowance(turn_scheduler.ALLOWANCE)
     try:
         q.put_nowait(SimpleNamespace(id="over"))  # type: ignore[arg-type]
     except asyncio.QueueFull:

@@ -86,6 +86,10 @@ class SchedulerPassResult(BaseModel):
     # [A82 Stage 6 F1] The shared allowance refused this pass's DB count (an
     # admission reserved/committed meanwhile): the cache may be stale-high.
     refresh_deferred: bool = False
+    # [A82 Stage 7] managed grants claimed but not started. Counted in the
+    # shared allowance (a hand-back makes them waiting again, possibly in an
+    # out-of-process task server that cannot touch this allowance).
+    claimed: int = 0
 
 
 PrepareFn = Callable[[Dict[str, Any], Dict[str, Any]], Awaitable[PreparedTurn]]
@@ -255,7 +259,14 @@ async def run_scheduler_pass(
     shared = allowance if allowance is not None else ALLOWANCE
     generation = shared.snapshot_generation()
     totals: Dict[str, int] = await asyncio.to_thread(db.managed_waiting_totals)
-    result.refresh_deferred = not shared.refresh_managed(totals["count"], generation)
+    # [A82 Stage 7] The legacy gate counts unstarted grants too: a carrier
+    # release (claimed → pending) committed by an out-of-process task server
+    # (MESH_EMBEDDED_SERVER=false) then never lowers the true figure below the
+    # cache; a start only over-counts until the next (bounded) refresh.
+    result.claimed = int(totals.get("claimed", 0))
+    result.refresh_deferred = not shared.refresh_managed(
+        totals["count"] + result.claimed, generation,
+    )
     result.waiting = int(totals["queued"])
     result.pending = int(totals["count"]) - int(totals["queued"])
     if result.waiting:
@@ -277,9 +288,11 @@ def _next_timeout(
     """[A82 Stage 6 F1] A deferred allowance refresh keeps the bounded fallback
     wake: the admission that blocked it may end without committing (replay,
     DB-side refusal) and never hint, and legacy puts never hint either, so the
-    stale-high managed cache would otherwise refuse legacy work indefinitely."""
+    stale-high managed cache would otherwise refuse legacy work indefinitely.
+    [A82 Stage 7] Likewise while grants are claimed-not-started: their start /
+    hand-back may commit in an out-of-process task server that cannot hint."""
     timeout = _wake_timeout(res, limit, safety_net_sec, slot_backoff_sec)
-    if not res.refresh_deferred:
+    if not res.refresh_deferred and not res.claimed:
         return timeout
     return FALLBACK_INTERVAL_SEC if timeout is None else min(timeout, FALLBACK_INTERVAL_SEC)
 
