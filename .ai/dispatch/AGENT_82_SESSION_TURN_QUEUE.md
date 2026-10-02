@@ -2230,6 +2230,68 @@ Every fix was written test-first. RED was observed on the unchanged code and GRE
 6. The carrier writes `uploads/<filename>` by overwriting. The gateway-local `_1` de-duplication no longer applies to enrolled sessions, which always stage.
 7. Not run live. No Docker or carrier run was done; everything above was proved against fake carriers and the in-process task server.
 
+### Pre-cutover rework (review round 1) — 2026-10-02, branch `feat/session-turn-queue`, commits `ebb7363` (F1), `ef4d831` (F2), `d624fc4` (F3), `f506510` (F4), `541b921` (F6), `eed5824` (file-only evidence gap) + this record — SUBMITTED FOR RE-REVIEW, NOT ACCEPTED
+
+Every fix was written test-first. RED was observed on the unchanged code and GREEN after; each commit message records its RED.
+
+**F1 — forget dropped the cross-process fence.** (`ebb7363`)
+- `forget_managed_turn` no longer releases a forgotten hold's ownership while that hold's app-server is alive. The ownership moves into the `_unanswered` entry (now a Pydantic `_Forgotten`: client, request id or 0, ownership, thread id).
+- `_busy_reason` keeps the session busy: `forgotten_submission_unanswered` while the late id is outstanding, then `forgotten_turn_running` while the thread is not natively quiet on that app-server. The rows are released only when the request was answered AND the thread is quiet, or when the process is gone (recycle or death).
+- A successor or another carrier on the same `CODEX_HOME` sees `other_owner_not_provably_gone` until then. After the process dies, `clear_dead_owners` clears it by process proof.
+- Forget still drops the hold, its late route and late delivery.
+- Tests (`tests/test_codex_managed_turns.py`, inverting `test_probe_n1_forget_fence.py`):
+  - the unanswered submission keeps B busy; B runs only after A's turn ended, with exactly one A `turn/start` on the thread and no concurrent second one;
+  - the native-running variant;
+  - B becomes quiescent after A's app-server is recycled;
+  - B becomes quiescent after A's app-server is killed.
+- RED: owners `[]` right after forget, and B quiescent at once. The native-running and kill variants passed before too; they pin existing behavior.
+
+**F2 — a refused Manager invoke left an orphan Case and a bare 500.** (`ef4d831`)
+- `invoke_manager` resolves the enrolled session's carrier through `_managed_admission_carrier` (offline policy) BEFORE `open_case`.
+- Any `TurnQueueError`, before or after the Case exists, runs `_abandon_manager_boot`: the Case is closed `cancelled` (`actor=system`, `force=True`) and the session is closed through `SessionService.close_session`, whose managed close withdraws anything admitted. Then the error is re-raised.
+- `/api/manager` maps `TurnQueueError` to `_turn_queue_http`, so an unavailable carrier is a structured 503 `carrier_unavailable`.
+- Tests (`tests/test_turn_queue_precutover_rework.py`):
+  - unregistered carrier: no Case and no open session;
+  - post-Case refusal: Case `cancelled` and session closed;
+  - API: 503 three times with the same key, 0 Cases, 0 open sessions.
+- RED: an open Case and an idle session, then a 500.
+
+**F3 — flapping refusal reasons never backed off.** (`d624fc4`) `_apply_backend_conflict` compares the reason CLASS (`backend_conflict: <class>`, the token before the backend detail). The visible `blocked_reason` is still the latest full reason. Test: `test_F3_flapping_refusal_details_of_one_class_still_back_off`. RED: attempts reset on every flip.
+
+**F4 — a permanently missing staged file blocked the queue head.** (`f506510`)
+- `_fetch_staged_file(strict=True)`, used on the managed path, raises `StagedFileMissing` on a urllib 404.
+- `_execute_task` then returns a terminal `staged_file_missing` failure with a visible "re-send it" error. Nothing is invoked and there is no DELETE.
+- Transient errors (503, transport) still return `managed_conflict`, which is a not-invoked release.
+- Tests: unit, parametrized 404 and 503, plus the real task server + carrier (404 ⇒ row `failed` with the error). PC08c's fake maps every HTTP error to a transport error; that is now commented.
+
+**F6 — a returning carrier waited out the backoff.** (`541b921`)
+- `NodeRegistry.register`, and `heartbeat` on an offline or heartbeat-stale → online transition, call `_carrier_back_online`. That runs `MeshDB.release_carrier_offline_holds(node)`, which clears `blocked_until` on queued protocol-1 rows held `carrier_offline: <node>` (read-first, so there is no write lock when nothing is held) and keeps the visible reason. It then calls `notify_turn_queue_changed()`.
+- *Cross-process finding:* the task server is embedded in the gateway process (`embedded_server.py`, D1), so the registry handlers and the scheduler share `_ACTIVE` and the hint is direct. A standalone `uvicorn src.control.task_server:app` would only clear the row, and the scheduler's ≤60 s safety-net pass picks it up (queued rows ⇒ `SAFETY_NET_SEC`).
+- *Not done:* a backend becoming quiescent has no gateway-side event. A `backend_conflict` row stays bounded by its backoff (≤300 s).
+- Tests: registration releases the hold and hints, and the next pass activates at once; a steady heartbeat does nothing; a heartbeat after expiry releases the hold; another node's registration does not touch it.
+
+**Evidence gap — file-only delivery during a running managed turn.** (`eed5824`)
+- End-to-end with the real task server + carrier: the `fetch-staged-<id>` protocol-0 row for an ENROLLED session is claimed and completed while the managed turn blocks. The file lands in `uploads/`, the staged copy is spent, the managed turn stays `running` and then completes with its own result, and session status / native id / `last_task_id` are untouched.
+- *Bug found and fixed:* `_handle_task` added and then discarded the session in `_inflight_sessions` for the control row. That cleared the running turn's mark, so `_wait_for_inflight_turn` (close_session) would stop waiting for the live turn. Now backend-less actions (`_BACKENDLESS_ACTIONS` = `fetch_staged_file`, `inspect`) do not touch the mark.
+- *Legacy `submit_result` for the row:*
+  - `complete_task` and an `append_event` `task_events` row: audit only, and `get_events` has no `src/` reader;
+  - telemetry reconcile: no invocation was emitted, so it is a no-op;
+  - Stage-6 truth reads protocol-1 rows only;
+  - no session or BUSY write.
+  Nothing else needed fixing.
+
+**F5:** accepted as-is (record only).
+
+**Verification.**
+- `timeout 1800 pytest tests/test_codex_*.py tests/test_opencode*.py tests/test_backend_activity.py tests/test_turn_queue*.py tests/test_control_api*.py tests/test_manager_role.py tests/test_manager_loop_integration.py tests/test_case_*.py`: run 1 gave 1144 passed, 12 skipped (opt-in e2e), 1 failed. The failure was `test_turn_queue_4a_r3.py::test_2b_idle_fleet_pending_on_dead_carrier_is_requeued`, a 0.3 s real-scheduler activation sleep under full-suite load; it passed 5/5 in isolation and with its file. Run 2 (same command): **1145 passed, 12 skipped, 0 failed**.
+- Adjacent: `tests/test_telegram_*.py`, `test_claim_reaper.py`, `test_task_server_upload_safety.py`, `test_worker_startup_registration.py`, `test_heartbeat_live_state.py`, `test_mesh_self_awareness.py`, `test_node_inspector.py` gave 107 passed.
+- All against fakes. No live Codex/OpenCode, gateway or carrier run.
+
+**Open / uncertain.**
+1. *F1 recovery bound.* A forgotten hold on a live but wedged app-server keeps the fence until the unresponsive recycle, which needs this carrier's `is_quiescent` to run past `UNRESPONSIVE_AFTER_SEC`. Recycle is still not on a timer (as before).
+2. *F2 leftover rows.* The session close of a never-run Manager session still enqueues the carrier `close_session` teardown row pinned to the (unknown) node. That is existing managed-close behavior, one row per refused invoke. Each retry also creates and then closes a new session. A refusal is not cached by idempotency, because the carrier may come back.
+3. *F2 scope.* Only `TurnQueueError` is rolled back. The `HarnessAdmissionBlocked` deferral in the docstring is unchanged.
+4. *F3 probe.* The reviewer probe `test_probe_m2_flap.py` now errors at its 4th `claim_turn`: the row is `queued` (backed off), and `claim_turn` raises 409 instead of returning None. The regression test asserts the backoff directly.
 ## 16. Review record
 
 ### Stage 0 review — Manager/A87 — 2026-09-25 — VERDICT: ACCEPT (authorize Stage 1)
