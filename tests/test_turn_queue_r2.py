@@ -407,6 +407,11 @@ def test_B2_boot_resolution_only_with_process_gone_proof(db, tmp_path, monkeypat
         "no-ticks": {"pid": live["pid"], "create_time": 1000.0},
         "unrecorded": {},
     }[ident_kind]
+    if ident_kind == "no-ticks":
+        # The case is defined as "no ticks + no psutil"; with psutil present a
+        # mismatched create_time is proof the recorded process is gone.
+        import src.core.process_utils as pu
+        monkeypatch.setattr(pu, "psutil", None)
     monkeypatch.setattr(agent_mod, "_execute_task", _crash_after_invoke(ident))
     client = TestClient(ts.app)
     w1 = _worker(tmp_path, _ClientHTTP(client), incarnation="inc-old")
