@@ -369,7 +369,10 @@ def test_K06_backends_without_a_managed_compaction_path_fail_closed():
     from src.backends.codex_native import CodexBackend
     from src.backends.opencode import OpenCodeBackend, OpenCodeServerBackend
 
-    for cls in (CodexBackend, OpenCodeBackend, OpenCodeServerBackend):
+    # [A82 Step 4b] OpenCodeServerBackend now implements the contract natively
+    # (tests/test_opencode_managed_turns.py); the CLI OpenCode stays fail-closed.
+    assert OpenCodeServerBackend.run_managed_compaction is not CodingBackend.run_managed_compaction
+    for cls in (CodexBackend, OpenCodeBackend):
         assert cls.run_managed_compaction is CodingBackend.run_managed_compaction
         assert cls.cancel_managed_turn is CodingBackend.cancel_managed_turn
     fake = SimpleNamespace()
