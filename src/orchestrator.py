@@ -6862,6 +6862,26 @@ class TaskOrchestrator(ITaskOrchestrator):
                 session_id, e,
             )
 
+    def _abandon_manager_boot(self, session_id: str, case_id: Optional[str]) -> None:
+        """[A82 pre-cutover rework, F2] Undo a Manager boot whose first turn was
+        refused, through the existing close paths: the Case closed ``cancelled``
+        (force: nothing will ever meet its criteria), then the session closed
+        (an enrolled session's managed close withdraws anything admitted).
+        Best-effort: the caller re-raises the refusal either way."""
+        if case_id:
+            res = self.close_case(case_id, outcome="cancelled", actor="system", force=True)
+            if not res.get("ok"):
+                logger.warning("event=manager_boot_case_abandon_failed case_id=%s reason=%s",
+                               case_id, res.get("reason"))
+        try:
+            closed = self.session_service.close_session(session_id, backends=getattr(self, "_backends", {}))
+        except Exception as e:  # noqa: BLE001 — logged; the refusal still reaches the caller
+            logger.warning("event=manager_boot_session_abandon_failed session_id=%s err=%s", session_id, e)
+            return
+        if not getattr(closed, "ok", False):
+            logger.warning("event=manager_boot_session_abandon_failed session_id=%s reason=%s",
+                           session_id, getattr(closed, "reason", None))
+
     # ---------------------------------------------------------------------------
     # MANAGER INVOCATION  (M3.1)
     # Flag: MANAGER_ROLE_ENABLED (default OFF).
@@ -6907,7 +6927,9 @@ class TaskOrchestrator(ITaskOrchestrator):
         that session. Returns ``{ok, session_id, case_id, task_id}``; a structured
         ``{ok: False, reason}`` when the role path is disabled or a step fails.
         Raises ``HarnessAdmissionBlocked`` from the first-turn submit (the caller
-        translates it), exactly like the ``/api/instructions`` seam.
+        translates it), exactly like the ``/api/instructions`` seam. A typed
+        ``TurnQueueError`` (managed first turn refused) is re-raised only after
+        the Case is cancelled and the session closed ([A82 pre-cutover rework, F2]).
 
         [Manager-fork] Optionally seed the boot from a prior conversation:
         ``continued_from`` stamps session→session lineage; ``continue_inline`` (a
@@ -6962,6 +6984,21 @@ class TaskOrchestrator(ITaskOrchestrator):
             return {"ok": False, "reason": getattr(result, "reason", "create_session_failed")}
         session = result.session
 
+        # [A82 pre-cutover rework, F2] An enrolled Manager session's first turn
+        # needs a managed carrier: resolve it (per the offline-carrier policy)
+        # BEFORE the Case exists, so a refusal opens nothing; the created
+        # session is closed, never left orphaned.
+        from src.control.db import get_db
+        from src.control.turn_admission import session_enrollment
+        from src.control.turn_queue import TurnQueueError
+
+        try:
+            if await session_enrollment(get_db(), session.session_id):
+                self._managed_admission_carrier(session, str(session.backend or backend))
+        except TurnQueueError:
+            self._abandon_manager_boot(session.session_id, None)
+            raise
+
         case_id = self.open_case(
             objective, session.session_id, role="manager",
             completion_criteria=completion_criteria,
@@ -6994,17 +7031,23 @@ class TaskOrchestrator(ITaskOrchestrator):
                 f"line of work, call read_session_history(session_id='{continued_from.strip()}') "
                 f"(page with `limit` if it is long)."
             )
-        task_id = await self.submit_instruction(
-            description=assignment,
-            session_id=session.session_id,
-            cwd=session.repo_path,
-            source="manager_invoke",
-            extra_metadata=fork_meta,
-            # [A82 pre-cutover P1] Durable trigger identity of this invoke: its
-            # Case ⇒ at most one first turn per Case (managed path only; the
-            # legacy path strips it).
-            operation_id=f"manager_invoke:{case_id}",
-        )
+        try:
+            task_id = await self.submit_instruction(
+                description=assignment,
+                session_id=session.session_id,
+                cwd=session.repo_path,
+                source="manager_invoke",
+                extra_metadata=fork_meta,
+                # [A82 pre-cutover P1] Durable trigger identity of this invoke: its
+                # Case ⇒ at most one first turn per Case (managed path only; the
+                # legacy path strips it).
+                operation_id=f"manager_invoke:{case_id}",
+            )
+        except TurnQueueError:
+            # [A82 pre-cutover rework, F2] The first turn was refused: cancel
+            # the Case and close the session (a retry starts clean).
+            self._abandon_manager_boot(session.session_id, case_id)
+            raise
         return {
             "ok": True,
             "session_id": session.session_id,
