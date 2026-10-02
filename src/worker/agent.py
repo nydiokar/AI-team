@@ -582,11 +582,17 @@ def _make_session_from_payload(payload: Dict[str, Any]) -> Any:
 # Task executor
 # ---------------------------------------------------------------------------
 
+class StagedFileMissing(Exception):
+    """[A82 pre-cutover rework, F4] The controller answered 404 for a staged
+    file: it is definitively gone (no retry can fetch it)."""
+
+
 async def _fetch_staged_file(
     staged: Dict[str, Any],
     payload: Dict[str, Any],
     http: "_HTTP",
     delete: bool = True,
+    strict: bool = False,
 ) -> Optional[str]:
     """Fetch a staged file from the controller and save it into the session's uploads dir.
 
@@ -594,6 +600,8 @@ async def _fetch_staged_file(
     [A82 pre-cutover P2] ``delete=False`` keeps the controller copy (a managed
     turn deletes it only after its prompt was submitted, so a not-invoked
     release can re-fetch it on the next attempt).
+    [A82 pre-cutover rework, F4] ``strict=True`` raises ``StagedFileMissing``
+    on a definitive 404 instead of returning None (transient errors still None).
     """
     file_id = staged.get("file_id", "")
     filename = staged.get("filename", "upload")
@@ -614,6 +622,8 @@ async def _fetch_staged_file(
         logger.info("event=staged_file_fetched file_id=%s dest=%s size=%d", file_id, dest, len(file_bytes))
     except Exception as e:
         logger.error("event=staged_file_fetch_failed file_id=%s err=%s", file_id, e)
+        if strict and isinstance(e, urllib.error.HTTPError) and e.code == 404:
+            raise StagedFileMissing(file_id) from e
         return None
     if delete:
         await _delete_staged_file(staged, http)
@@ -670,7 +680,23 @@ async def _execute_task(
     staged = (payload.get("metadata") or {}).get("staged_file")
     fetched: Optional[str] = None
     if staged and http is not None:
-        fetched = await _fetch_staged_file(staged, payload, http, delete=not managed)
+        try:
+            fetched = await _fetch_staged_file(staged, payload, http, delete=not managed, strict=managed)
+        except StagedFileMissing:
+            # [A82 pre-cutover rework, F4] Definitively gone (404): a terminal,
+            # visible failure — a requeue could never fetch it (it would block
+            # the session's queue head forever). Nothing was invoked.
+            return {
+                "success": False,
+                "output": "",
+                "errors": [f"staged_file_missing: {str(staged.get('file_id', ''))[:64]} "
+                           "(the gateway no longer holds the attachment; re-send it)"],
+                "files_modified": [],
+                "execution_time": 0.0,
+                "timestamp": datetime.now(tz=timezone.utc).isoformat(),
+                "return_code": 1,
+                "error_class": "staged_file_missing",
+            }
     if managed and staged and fetched is None:
         # [A82 pre-cutover P2] Never run a managed turn without its file: a
         # pre-submit refusal ⇒ the carrier releases the attempt NOT invoked
