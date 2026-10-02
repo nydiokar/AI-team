@@ -143,3 +143,57 @@ def test_enrolled_admission_never_reaches_legacy_unknown_node_rejection(tmp_path
     row = w.db.get_task(tid)
     assert row["status"] in ("queued", "pending"), row["status"]
     assert row["machine_id"] == w.node
+
+
+# --------------------------------------------------------------------------- #
+# A88 "claim no work before the controller flag snapshot is known" covers the
+# managed carrier too: no /tasks/pending-managed poll (so no /claim-managed)
+# until the snapshot exists.
+# --------------------------------------------------------------------------- #
+class _RecHTTP:
+    def __init__(self) -> None:
+        self.calls: list = []
+        self.flag_responses: list = [OSError("controller down"),
+                                     {"revision": "r1", "flags": []}]
+
+    def get(self, path, params=None, timeout=10):
+        self.calls.append(("GET", path))
+        if path == "/control/runtime-flags":
+            item = self.flag_responses.pop(0)
+            if isinstance(item, Exception):
+                raise item
+            return item
+        return []
+
+    def post(self, path, body=None, timeout=10):
+        self.calls.append(("POST", path))
+        return {"ok": True}
+
+
+def test_managed_carrier_claims_nothing_before_controller_snapshot(monkeypatch):
+    import asyncio
+    from types import SimpleNamespace
+
+    from src.control import controller_state
+    from src.worker.agent import WorkerAgent
+    from src.worker.controller_state_client import RemoteControllerState
+
+    http = _RecHTTP()
+    remote = RemoteControllerState(http)
+    controller_state.install(remote)
+    try:
+        w = WorkerAgent.__new__(WorkerAgent)
+        w._http = http
+        w.cfg = SimpleNamespace(node_id="Horse", backends=["claude"], max_concurrent=1,
+                                accept_unpinned=True, managed_turns=True)
+        w._backends = {"claude": SimpleNamespace(supports_managed_turns=lambda: True)}
+        w._managed_claims_blocked = None
+        assert w._managed_backends() == ["claude"]
+        assert remote.refresh() is False  # startup outage: no snapshot yet
+        assert asyncio.run(w._fetch_pending()) == []
+        assert [c for c in http.calls if c[1].startswith("/tasks")] == []
+        assert remote.refresh() is True
+        asyncio.run(w._fetch_pending())
+        assert ("GET", "/tasks/pending-managed") in http.calls
+    finally:
+        controller_state.uninstall()
