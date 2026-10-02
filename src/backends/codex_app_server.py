@@ -175,7 +175,7 @@ class CodexAppServerClient:
             "approvalPolicy": "never", "sandbox": "danger-full-access", "config": config}
         if thread_id:
             params.update({"threadId": thread_id, "excludeTurns": True})
-        return self.request("thread/resume" if thread_id else "thread/start", params)
+        return self.request("thread/resume" if thread_id else "thread/start", params, timeout=RPC_TIMEOUT)
 
     def start_turn(self, thread_id: str, message: str, cwd: str,
                    model: str | None, effort: str | None,

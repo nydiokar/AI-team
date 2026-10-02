@@ -136,6 +136,8 @@ for line in sys.stdin:
         emit({"id": rid, "result": {"userAgent": "codex/fake"}})
     elif method in ("thread/start", "thread/resume"):
         tid = p.get("threadId") or ("thr-" + uuid.uuid4().hex[:10])
+        if c.get("attach_delay"):
+            time.sleep(c["attach_delay"])
         with lock:
             th = threads.setdefault(tid, {"active": None, "status": "idle"})
             status = c.get("attach_status") or ("active" if th["active"] else "idle")
@@ -849,3 +851,24 @@ def test_token_audit_sender_token_only_travels_in_the_mcp_env_thread_config(h, c
     for path in h.tmp_path.rglob("*"):
         if path.is_file() and path.resolve() != spy:
             assert token.encode() not in path.read_bytes(), f"capability persisted in {path}"
+
+
+# =========================================================================== #
+# [A82 pre-cutover backend carries] N2 — a pre-submit RPC deadline is a
+# not-submitted conflict (requeue); N1 — a hung app-server never wedges a
+# session (bounded late window + recycle; forget drops the hold + late id).
+# =========================================================================== #
+def test_N2_pre_submit_thread_start_timeout_is_not_submitted_and_requeues(h, monkeypatch):
+    monkeypatch.setattr(app_server_mod, "RPC_TIMEOUT", 0.3)
+    h.ctl(attach_delay=1.0)
+    result = h.backend.run_managed_turn(h.session(), "x", own(turn_uuid="uuid-n2"))
+    assert result.error_class == "managed_conflict", result.errors
+    assert h.requests("turn/start") == []
+    assert owners(h.home) == [], "nothing of ours runs: ownership released"
+    client = h.backend._client
+    assert client is not None and client.failure == "" and client.process.poll() is None
+    h.ctl()
+    wait_for(lambda: not client.late)  # the late thread/start reply drained (dropped)
+    again = h.backend.run_managed_turn(h.session(), "x", own(turn_uuid="uuid-n2"))
+    assert again.success, again.errors
+    assert len(h.requests("turn/start")) == 1

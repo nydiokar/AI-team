@@ -577,7 +577,10 @@ class CodexBackend(CodingBackend):
                          submitted: bool, terminal: bool) -> tuple[ExecutionResult | None, bool]:
         """Classify a managed failure → (typed result, or None for the generic
         failure projection; whether ownership is HELD for recovery)."""
-        if isinstance(exc, _NotSubmitted) or (not submitted and str(exc) in _PRE_SUBMIT_CONFLICTS):
+        if isinstance(exc, _NotSubmitted) or (not submitted and (
+                str(exc) in _PRE_SUBMIT_CONFLICTS or isinstance(exc, CodexRPCTimeout))):
+            # [A82 pre-cutover, N2] A pre-submit deadline (thread/start|resume,
+            # status read) proves nothing of ours ran: requeue, never a failure.
             return _managed_conflict(native_id, str(exc)), False
         if isinstance(exc, _Unattributable):
             return _recovery_required(native_id, str(exc)), False
