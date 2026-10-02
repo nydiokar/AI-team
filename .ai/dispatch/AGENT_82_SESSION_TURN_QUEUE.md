@@ -1953,6 +1953,83 @@ The Stage 6 reviewer accepted with minors. Each item below was fixed test-first:
 
 **Residuals.** Stage 6 residual 1 is closed: Telegram now has a persistent pause and resume. The `pending` presentation change applies to the session op-state only; the card still reads Starting.
 
+### Step 4a — Codex managed-turn contract (2026-10-02, branch `feat/session-turn-queue`, commits `f029f33` (tests, RED), `04d09a2` (backend), `6a5133b` (carrier integration + retired assertions) + this record) — SUBMITTED, NOT ACCEPTED
+
+Per A87 ruling 3, `CodexBackend` now implements the whole `CodingBackend` managed contract against the native `codex app-server` JSON-RPC protocol. The carrier is unchanged: it reaches Codex only through the interface, with no backend-name branching, and Codex is advertised through the existing `supports_managed_turns()` probe.
+
+**Protocol ground truth.** Every protocol shape used here was checked against codex-cli 0.157.1: the schema from `codex app-server generate-json-schema`, plus a probe in an isolated, unauthenticated `CODEX_HOME`. With no credentials, every model call returns 401, so the probe could not bill. The probe verified the following.
+- `turn/start` accepts `clientUserMessageId`. The value is echoed as the `userMessage` item's `clientId` and persisted in the thread's turn history (`thread/turns/list`).
+- `thread/read` returns `status.type` ∈ {`notLoaded`, `idle`, `systemError`, `active`}. After a failed turn the status is `systemError`.
+- `codex app-server` exits about 1.6 s after stdin EOF, even with a turn in flight. A fresh app-server then reads that thread as `notLoaded` and lists the dead turn as `interrupted`, with its `clientId` intact.
+- Dotted `mcp_servers.<name>.{command,args,env}` thread-config overrides really start a new MCP server with that env. The stub server dumped a canary token from its own environment.
+- After `thread/start` plus a turn, a canary token passed in the thread config appeared in no file under `CODEX_HOME`: not the rollout `.jsonl` and none of the `*.sqlite`/WAL files (`grep -r --binary-files=text`). Codex does not persist the thread config, so no env indirection is needed. The token lives only in the JSON-RPC pipe and in the sender MCP server's process environment, the same exposure as the Claude path.
+
+**Design decisions.**
+1. **Correlation and write-ahead.** `codex_ownership.managed_turns(turn_uuid PK, session_key, thread_id, native_turn_id, kind, state, owner, process)` is written in the order below. Native events must carry the bound turn id, as before. A `userMessage` whose `clientId` is not ours is an identity mismatch.
+   - Before the prompt is sent, the row is inserted as `submitting`. The turn uuid is sent as `clientUserMessageId`.
+   - The native turn id from the `turn/start` response is bound to the row (state `started`). For compaction it comes from the first `turn/started`, because the thread is idle-gated and held.
+   - The row then moves to its terminal native status.
+   - If a row already exists for the turn uuid, the turn is `recovery_required` and is never re-submitted. This covers a crash between submit and response in any earlier life.
+2. **No interrupt.** These cases return a typed `managed_conflict` (`not_submitted`) before any `turn/start`:
+   - a busy in-memory session or a held turn;
+   - a live or unprovable owner row;
+   - a thread status other than `idle`/`systemError` (attach or loaded);
+   - capacity exhausted;
+   - a cancel armed before submission, or the deadline expiring before submission.
+
+   The legacy 10 h self-interrupt is disabled for managed turns. Deadline expiry (`MANAGED_TURN_SECONDS`) is decided atomically against submission, under the call lock: either the turn is refused unsubmitted, or it becomes `recovery_required` and keeps running. Its eventual reply goes to the carrier's proactive sink as `late_managed`, bound only by `managed_turn_uuid` (the existing `_capture_late_managed_result`).
+3. **Process proof (honest, coarse).** `on_process` reports the identity of the SHARED app-server, before the prompt is sent. "Process gone" means that app-server died, so every turn it ran is provably stopped (the probe showed it exits on carrier death, through stdin EOF). Outcomes then depend on the case.
+   - Healthy transport but an unattributable outcome (foreign-turn event, `clientId` mismatch, unconfirmed interrupt, a failed DB bind): `recovery_required`. Ownership is HELD and the turn is never interrupted. The hold is released only when `thread/read` on that same app-server reports no active turn, or that process is gone.
+   - Lost transport: the already-unusable client is closed (legacy behavior) to make the stop provable. A known native turn id gives an attributable failure (`codex_runtime_lost`). An unknown one (death or RPC deadline before the `turn/start` response) gives `recovery_required`.
+   - Native status from a *fresh* app-server is never treated as proof while another app-server may still hold the thread.
+4. **Ownership interplay.** `owner_processes(owner, process)` is written in the same transaction as a managed acquire. A successor calls `clear_dead_owners` (on a managed busy conflict and in `is_quiescent`), with these rules:
+   - It clears another owner's no-TTL rows only when that owner's recorded app-server is provably gone. Those owner rows are dropped and the owner's active managed rows become `stopped`.
+   - A live owner is never stolen.
+   - An owner with no recorded identity (a legacy `_run` crash) stays unknown, so the session reads busy (operator route, as before).
+5. **`is_quiescent`** returns True only when all of these hold: no live run, no held turn still active natively, no foreign owner that is not provably dead, and native status (on this carrier's app-server) not `active`. If `thread/read` fails, the answer is False (unknown ⇒ busy).
+6. **`cancel_managed_turn`** arms the uuid (bounded to 256) and signals only the run whose `turn_uuid` matches. That run's loop interrupts its own native turn id, either at once or as soon as `turn/start` answers. `forget_managed_turn` cancels late delivery and marks the row `forgotten`; quiescence still follows native truth.
+7. **`supports_managed_turns()`** is True iff the `codex` binary resolves on this host. Protocol support is then enforced at runtime, failing closed: an older app-server without `thread/read` yields an unknown status, which refuses the turn or keeps it busy.
+
+**Capability matrix (Codex).**
+
+| Contract | Native mechanism | Tests |
+|---|---|---|
+| `run_managed_turn` | `thread/start\|resume` → idle gate → write-ahead → `turn/start{clientUserMessageId}` → bound events | capability/happy, delayed response, foreign event, `clientId` mismatch, carrier E2E |
+| `on_process` before submit | app-server `process_identity` | capability, crash, death |
+| `is_quiescent` | active map + hold + `owner_processes` proof + `thread/read` | in-flight, foreign→idle, unknown⇒busy, successor ×3 |
+| `cancel_managed_turn` | arm + exact `turn/interrupt{turnId}` | exact turn (2 sessions), unknown uuid, armed-before-start, cancel during delayed start |
+| `forget_managed_turn` | flag + durable `forgotten` | forget test |
+| `run_managed_compaction` | `thread/compact/start`, id from `turn/started` | compaction (+ refusal while active) |
+| `provision_sender_capability` | dotted `mcp_servers.ai_team_sender.*` thread config (Stage 5) | config reaches thread, token absent from `CODEX_HOME` |
+| `supports_managed_turns` / advertisement | binary present; worker probe | capability, no-binary fail-closed, carrier advertises `["codex"]` |
+
+**Tests.** All run the REAL `CodexBackend` and REAL `CodexAppServerClient` against a fake app-server that speaks the real JSON-RPC protocol over stdio. The fake can delay the `turn/start` response, emit foreign-turn events, report non-idle status, die before the response or mid-turn, and hold a turn for a late result.
+- `tests/test_codex_managed_turns.py` (25). RED at `f029f33`: 24 failed, 1 passed (the no-binary fail-closed case). GREEN at `04d09a2`: 25 passed.
+- `tests/test_codex_managed_carrier_integration.py` (3) uses the real `WorkerAgent._handle_task` and reconciler, the in-process task server and a real `MeshDB`:
+  - end-to-end completion that commits the native thread id;
+  - foreign event → `recovery_required` → held while native is active → `failed` through `backend_quiescent`;
+  - crash before the `turn/start` response → successor incarnation resolves it through process proof, with no re-submit, then runs the next turn.
+
+  These were written after the implementation (test-after) and were GREEN on first run.
+- Two pre-existing assertions that "Codex has no managed path" (`test_K06`, `test_INT10b`) were retired for Codex only. OpenCode keeps them.
+- Command: `pytest tests/test_turn_queue*.py tests/test_codex_*.py` → **573 passed** (239 s). The new files were run 3× more for flakiness: 28/28 each time.
+
+**§7 boundary checklist.**
+- Concurrency is bounded by the existing `_capacity` semaphore (8), checked before any submission. A refusal returns `managed_conflict`. A deadline-held run keeps its slot and thread until native completion.
+- Memory per turn is bounded by `MAX_OUTPUT` (8 MiB) and input by 1 MiB, both as before.
+- Timeouts: `turn/start` and `thread/read` use `RPC_TIMEOUT` (30 s); the managed deadline is `MANAGED_TURN_SECONDS`.
+- Malformed or foreign protocol input fails closed to recovery or failure.
+- The ownership DB failing before submission gives a failure result. After submission it gives a hold plus recovery.
+
+**Open risks (honest).**
+- (a) Across carrier incarnations, the successor resolves an uncertain turn as `failed` by process proof. It does not read the native turn history to attribute a real completion. That history is preserved on disk and correlatable by `clientId`; the carrier has no interface hook for it today.
+- (b) The process proof is coarse. One shared app-server serves up to 8 threads, so any carrier death stops every Codex turn on that carrier.
+- (c) Exit-on-EOF was observed on 0.157.1 during a 401 retry loop, not during a long-running tool call. If an app-server outlived its carrier, its owner rows would correctly stay busy, but nothing reaps it. `reap_stale_worker_children` only matches `claude`.
+- (d) Codex instances outside the gateway (the desktop app-server daemon) can drive the same thread without the gateway's ownership table seeing them. This is pre-existing.
+- (e) Managed compaction attributes the first `turn/started` on the idle-gated, held thread. Compaction has no `clientId`.
+- (f) `terminate_active_processes` and legacy `cancel`/`close` still set the cancel event (interrupt) for a managed run. This is carrier shutdown and explicit legacy control, unchanged.
+- (g) A late reply that the carrier fails to capture falls through to the worker's proactive-turn post. That post hardcodes `backend: "claude"` (pre-existing).
+
 ## 16. Review record
 
 ### Stage 0 review — Manager/A87 — 2026-09-25 — VERDICT: ACCEPT (authorize Stage 1)
