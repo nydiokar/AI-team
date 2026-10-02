@@ -212,9 +212,21 @@ def test_R4_documented_precondition_enroll_in_gateway_process(tmp_path, monkeypa
 
 
 # R5 — dead carrier: refused, backs off visibly, pending never wedges -------- #
-def test_R5_offline_carrier_refused_at_admission(tmp_path, monkeypatch):
+@pytest.mark.parametrize("queue_for_offline", [True, False], ids=["policy-queue", "policy-refuse"])
+def test_R5_offline_carrier_refused_at_admission(tmp_path, monkeypatch, queue_for_offline):
+    """[A82 pre-cutover] Retired as an unconditional refusal: a REGISTERED
+    managed carrier that is offline follows the offline-carrier admission
+    policy (queued + ``carrier_offline`` when ON; 503 when OFF)."""
+    from src.orchestrator import TaskOrchestrator
+
+    monkeypatch.setattr(TaskOrchestrator, "_QUEUE_TURNS_FOR_OFFLINE_CARRIER", queue_for_offline)
     db, o = _setup(tmp_path, monkeypatch)
     db.mark_node_offline("worker-a")
+    if queue_for_offline:
+        tid = _submit(o, operation_id="z")
+        r = db.get_task(tid)
+        assert r["status"] == "queued" and r["blocked_reason"] == "carrier_offline: worker-a"
+        return
     with pytest.raises(tq.CarrierUnavailableError):
         _submit(o, operation_id="z")
     assert _managed_rows(db) == []
@@ -227,14 +239,21 @@ def test_R5b_stale_heartbeat_counts_as_dead(tmp_path, monkeypatch):
     assert db.node_managed_backends("worker-a") == []
 
 
-def test_R5c_carrier_dies_before_activation_backs_off_visibly(tmp_path, monkeypatch):
+@pytest.mark.parametrize("queue_for_offline", [True, False], ids=["policy-queue", "policy-refuse"])
+def test_R5c_carrier_dies_before_activation_backs_off_visibly(tmp_path, monkeypatch, queue_for_offline):
+    from src.orchestrator import TaskOrchestrator
+
+    monkeypatch.setattr(TaskOrchestrator, "_QUEUE_TURNS_FOR_OFFLINE_CARRIER", queue_for_offline)
     db, o = _setup(tmp_path, monkeypatch)
     tid = _submit(o, operation_id="z")
     db.mark_node_offline("worker-a")
     res = _pass(db, o)
     r = db.get_task(tid)
     assert res.activated == 0 and r["status"] == "queued" and r["blocked_until"]
-    assert "CarrierUnavailableError" in r["blocked_reason"] and "worker-a" in r["blocked_reason"]
+    if queue_for_offline:  # [A82 pre-cutover] the typed reason, same as a requeue
+        assert r["blocked_reason"] == "carrier_offline: worker-a"
+    else:
+        assert "CarrierUnavailableError" in r["blocked_reason"] and "worker-a" in r["blocked_reason"]
 
 
 def test_R5d_pending_on_carrier_that_went_offline_is_requeued_visibly(tmp_path, monkeypatch):

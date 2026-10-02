@@ -190,8 +190,11 @@ def test_P1_05_unconverted_producers_fail_closed(tmp_path, monkeypatch, source):
 
 
 def test_P1_05b_file_ingestion_fails_closed(tmp_path, monkeypatch):
+    """[A82 pre-cutover P2] Retired: file ingestion is converted (producer 8,
+    see test_turn_queue_precutover PC04-PC08). A malformed staged-file ref still
+    fails closed (422) — never a legacy fallback."""
     db, o = _setup(tmp_path, monkeypatch)
-    with pytest.raises(tq.ManagedUnsupportedError):
+    with pytest.raises(tq.MalformedTurnError):
         _submit(o, extra_metadata={"staged_file": {"name": "a.txt"}})
     assert _managed_rows(db) == [] and o.task_queue.qsize() == 0
 
@@ -418,11 +421,18 @@ def test_P1_09b_telegram_refusal_is_honest():
 
 
 def test_P1_10_web_upload_into_enrolled_session_refused_before_side_effects(tmp_path, monkeypatch):
+    """[A82 pre-cutover P2] Retired refusal: the upload is staged and the
+    attached instruction is ONE managed submit — still no BUSY mark."""
+    from src.control import control_api
+
+    monkeypatch.setattr(control_api, "_upload_staging_root", lambda: tmp_path / "uploads")
     orch, c = _web(tmp_path, monkeypatch)
     r = c.post("/api/sessions/sess-1/upload", headers={"Authorization": "Bearer tok"},
                files={"file": ("a.txt", b"hi")}, data={"instruction": "read it"})
-    assert r.status_code == 422 and r.json()["detail"]["reason"] == "managed_unsupported"
-    assert orch.busy_marks == [] and orch.calls == []
+    assert r.status_code == 200 and r.json()["delivery"] == "attached"
+    assert orch.busy_marks == [] and len(orch.calls) == 1
+    assert orch.calls[0]["turn_queue_enrolled"] is True
+    assert orch.calls[0]["extra_metadata"]["staged_file"]["filename"] == "a.txt"
 
 
 def test_P1_10b_telegram_document_into_enrolled_session_refused(tmp_path, monkeypatch):
@@ -449,7 +459,10 @@ def test_P1_10b_telegram_document_into_enrolled_session_refused(tmp_path, monkey
 
     tg._flush_buffer = _no_flush
     asyncio.run(tg._handle_document(update, None))
-    assert replies and "not supported yet" in replies[-1]
+    # [A82 pre-cutover P2] Retired refusal: enrollment no longer stops the
+    # handler (the enrolled document paths are PC07*); nothing here is a file.
+    assert replies and "not supported yet" not in replies[-1]
+    assert replies[-1] == "❌ Unsupported file type."
     assert sess.status == SessionStatus.IDLE and saved == []
 
 

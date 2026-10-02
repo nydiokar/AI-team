@@ -1263,8 +1263,13 @@ def test_F04b_coalesced_automation_admission_keeps_the_hold(tmp_path, monkeypatc
 
 
 def test_F05_web_upload_into_a_held_enrolled_session_has_no_side_effect(tmp_path, monkeypatch):
-    """Item 4 check: the 4a refusal runs BEFORE any file write or BUSY mark —
-    through the real app, the session status and the repo are untouched."""
+    """Item 4 check, updated for the A82 pre-cutover P2 conversion (the 4a
+    refusal is retired): through the real app the upload is STAGED (never
+    written into the repo by the gateway), the session status is untouched
+    (no BUSY mark), and only the attached instruction becomes a managed turn."""
+    from src.control import control_api
+
+    monkeypatch.setattr(control_api, "_upload_staging_root", lambda: tmp_path / "stage")
     repo = tmp_path / "repo"
     repo.mkdir()
     db, o = _setup(tmp_path, monkeypatch)
@@ -1274,10 +1279,13 @@ def test_F05_web_upload_into_a_held_enrolled_session_has_no_side_effect(tmp_path
     s.status = SessionStatus.AWAITING_INPUT
     o.session_store.save(s)
     c = _client(monkeypatch, o)
+    deliveries = []
     for data in ({"instruction": "read it"}, {}):
         r = c.post("/api/sessions/sess-1/upload", headers={"Authorization": "Bearer tok"},
                    files={"file": ("a.txt", b"hi")}, data=data)
-        assert r.status_code == 422 and r.json()["detail"]["reason"] == "managed_unsupported"
+        assert r.status_code == 200, r.text
+        deliveries.append(r.json()["delivery"])
+    assert deliveries == ["attached", "pending_instruction"]
     assert _sess().status == SessionStatus.AWAITING_INPUT
     assert not (repo / "uploads").exists()
-    assert _managed_rows(db) == []
+    assert len(_managed_rows(db)) == 1
