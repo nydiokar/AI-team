@@ -28,9 +28,6 @@ from src.control.turn_queue import ManagedTurnOwnership, OwnershipConflictError
 from src.core.interfaces import Session, SessionStatus
 from src.core.process_utils import process_gone_proof
 
-REPO_KEY_PLACEHOLDER = "__repo__"
-
-
 # --------------------------------------------------------------------------- #
 # Fake OpenCode server
 # --------------------------------------------------------------------------- #
@@ -45,6 +42,7 @@ class FakeOpenCode:
         self.aborts: List[str] = []
         self.summaries: List[Dict[str, Any]] = []
         self.created: List[str] = []
+        self.aborted_ids: set[str] = set()
         self.release = threading.Event()
         self.release.set()            # cleared ⇒ replies are held (turn keeps running)
         self.ack_delay = 0.0          # seconds to delay the prompt_async ack
@@ -52,6 +50,7 @@ class FakeOpenCode:
         self.reply_text = "managed reply"
         self.summarize_error = False
         self.status_error = False
+        self.idle_while_held = False  # status omits the session while the reply is held
         self._clock = 1_000
         self._n = 0
         fake = self
@@ -134,8 +133,6 @@ class FakeOpenCode:
         with self.lock:
             self.busy.pop(oc_id, None)
 
-    aborted_ids: set = set()
-
     def handle(self, h: Any, method: str) -> None:
         if not self.alive:
             h.close_connection = True
@@ -197,7 +194,7 @@ class FakeOpenCode:
                 if self.record_prompt:
                     self.add_user(oc_id, msg_id)
                     with self.lock:
-                        self.busy[oc_id] = True
+                        self.busy[oc_id] = not self.idle_while_held
                     threading.Thread(target=self._run_reply, args=(oc_id, msg_id), daemon=True).start()
                 if self.ack_delay:
                     time.sleep(self.ack_delay)
@@ -243,7 +240,6 @@ class FakeOpenCode:
 @pytest.fixture
 def fake():
     f = FakeOpenCode()
-    f.aborted_ids = set()
     yield f
     if f.alive:
         f.release.set()
@@ -390,6 +386,8 @@ def test_local_active_turn_is_conflict(backend, fake, tmp_path):
 def test_foreign_and_late_messages_are_never_our_result(backend, fake, tmp_path):
     fake.add_session("ses_f")
     fake.release.clear()
+    fake.idle_while_held = True             # idle window: history is consulted
+    backend._MANAGED_IDLE_GRACE_POLLS = 10_000
     th, out = _bg(backend.run_managed_turn, _session(tmp_path, native="ses_f"), "mine", _own(turn="u-f"))
     _wait(lambda: len(fake.prompts) == 1)
     # A late reply of an EARLIER turn and a foreign user/assistant pair land

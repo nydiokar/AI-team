@@ -564,7 +564,10 @@ def test_INT10b_worker_advertises_only_backends_with_a_managed_path(tmp_path):
     from src.core.interfaces import CodingBackend
 
     # Codex/OpenCode keep the interface default today (verified: no override).
-    for cls in (CodexBackend, OpenCodeBackend, OpenCodeServerBackend):
+    # [A82 Step 4b] OpenCodeServerBackend implements it natively (advertised
+    # through the same probe — see tests/test_opencode_managed_turns.py).
+    assert OpenCodeServerBackend().supports_managed_turns() is True
+    for cls in (CodexBackend, OpenCodeBackend):
         assert cls.supports_managed_turns is CodingBackend.supports_managed_turns
         assert cls.run_managed_turn is CodingBackend.run_managed_turn
     reg = _RecordingHTTP()
