@@ -364,6 +364,19 @@ def test_ROLL05b_legacy_poller_never_receives_managed_rows(tmp_path: Any, monkey
     assert row["status"] == "pending" and row["queue_protocol"] == 1  # durable, not run
     err = _refused(_submit, o)
     assert err.status_code == 503 and err.code == "carrier_unavailable"
+    # Legacy keeps working on the old worker: an UNENROLLED session's legacy
+    # execution row is offered and claimable exactly as before.
+    from src.core.interfaces import Session
+
+    db.upsert_session(Session(session_id="legacy-s", backend="claude", repo_path="/tmp/repo",
+                              status=SessionStatus.IDLE, created_at="2026-10-02T00:00:00",
+                              updated_at="2026-10-02T00:00:00", machine_id="worker-a"))
+    db.enqueue_task("legacy-t", "legacy-s", "worker-a", "claude", "resume_session", {"prompt": "x"})
+    legacy = client.get("/tasks/pending", params={"node_id": "worker-a"}, headers=h).json()
+    rows = legacy if isinstance(legacy, list) else legacy.get("tasks", [])
+    assert [r.get("id") for r in rows] == ["legacy-t"]
+    assert client.post("/tasks/legacy-t/claim", json={"node_id": "worker-a"},
+                       headers=h).status_code == 200
 
 
 # --------------------------------------------------------------------------- #
