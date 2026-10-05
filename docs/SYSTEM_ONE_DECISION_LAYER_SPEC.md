@@ -440,7 +440,7 @@ CREATE INDEX IF NOT EXISTS ix_s1_case ON system_one_decisions(case_id, created_a
 | `S1_DELIVERY_BOUNCE` | `0` | Move 3 bounce; refuses to enable unless the A96 precondition artefact exists (§6.3) |
 
 All entries are `effect_scope: live` and `registry_writable: 1` in `RUNTIME_FLAG_DEFINITIONS`
-(`src/control/db.py:246`), documented in `docs/ENV_FEATURE_FLAGS.md`.
+(`src/control/db.py:246`), documented in `docs/backend/ENV_FEATURE_FLAGS.md`.
 
 Environment: `TYPESAFE_API_KEY` (secret, controller only) and optional `TYPESAFE_BASE_URL`. Add both
 to `_MANAGED_ENV_KEYS` (`config/settings.py:13`) and to the controller env passthrough in

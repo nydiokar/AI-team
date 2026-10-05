@@ -122,5 +122,5 @@ screen/component actually does.
 - [`SCREENS_AND_COMPONENTS.md`](SCREENS_AND_COMPONENTS.md) — route-by-route and
   component-group tour.
 - [`DEV_AND_BUILD.md`](DEV_AND_BUILD.md) — running, testing, building, PWA.
-- [`docs/CONTROL_CONTRACT.md`](../CONTROL_CONTRACT.md) — the backend-side half
+- [`docs/backend/CONTROL_CONTRACT.md`](../backend/CONTROL_CONTRACT.md) — the backend-side half
   of this contract (event envelope, entry points, backend registry).

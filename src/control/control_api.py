@@ -1412,7 +1412,7 @@ def build_control_api(orchestrator) -> FastAPI:
     # Disable FastAPI's built-in (unauthenticated) docs endpoints. /docs, /redoc and
     # /openapi.json leak the full API shape to anyone who can reach the port and have
     # no reason to be open even on the tailnet (defense in depth). The human-facing
-    # map lives in docs/ARCHITECTURE.md; a developer who wants live Swagger can flip
+    # map lives in docs/backend/ARCHITECTURE.md; a developer who wants live Swagger can flip
     # CONTROL_API_DOCS=true to re-enable them locally.
     _docs_on = _control_api_docs_enabled()
     app = FastAPI(

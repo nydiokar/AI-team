@@ -2,7 +2,7 @@
 
 The worker reads controller-owned state (runtime-flag registry, Manager boot
 reconcile) from the task-server over its existing authenticated HTTP plane —
-never from a mesh.db file (docs/DATABASE_AUTHORITY.md).
+never from a mesh.db file (docs/backend/DATABASE_AUTHORITY.md).
 
 Flags are held as an immutable last-known-good snapshot swapped atomically, so
 reads are memory-only and safe from any thread or the event loop. A failed or

@@ -16,7 +16,7 @@ mesh credentials to replace the single shared `WORKER_TOKEN` identity model.
 **Status of this packet:** ready (authored, not executed)
 **Depends on:** — (operator decision from A67 R2 escalation; read `.security/mesh_findings_2026-08.md`
 first — PRIVATE, do not copy its contents into this file or any commit).
-**Also read:** `docs/MESH_SECURITY.md` (the current public model this changes) and
+**Also read:** `docs/backend/MESH_SECURITY.md` (the current public model this changes) and
 `AGENT_67_MESH_SECURITY_REVIEW_THREAT_MODEL.md` (closure records which P1s this resolves).
 
 > **Why this packet exists.** The A67 mesh security review concluded that the single shared
@@ -49,7 +49,7 @@ first — PRIVATE, do not copy its contents into this file or any commit).
 4. **Tests** (plain `pytest`, touched modules only — TEST COST GUARD): identity binding on
    claim/result, pinned-task refusal for wrong node, spoofed re-register does NOT bump a live
    node's incarnation, flag-off ⇒ existing tests byte-identical.
-5. **Docs**: update `docs/MESH_SECURITY.md` "What the tokens mean" + "Limits by design" to the
+5. **Docs**: update `docs/backend/MESH_SECURITY.md` "What the tokens mean" + "Limits by design" to the
    new model once landed. No exploit detail, consistent with A67 Part B rules.
 
 ## Constraints / hard rules
@@ -69,6 +69,6 @@ first — PRIVATE, do not copy its contents into this file or any commit).
 - Per-node credentials enforced on register/heartbeat/claim/result with pinned-task refusal, and a
   spoofed re-register cannot bump a live node's incarnation (flag-gated; default off).
 - Worker-side provisioning + tests green; targeted `pytest` evidence paths recorded.
-- `docs/MESH_SECURITY.md` updated to the new model.
+- `docs/backend/MESH_SECURITY.md` updated to the new model.
 - Operator-decision items (worker redeploy) surfaced, not done silently.
 - Set `evidence:` to the design note + test report paths and `status: done`.

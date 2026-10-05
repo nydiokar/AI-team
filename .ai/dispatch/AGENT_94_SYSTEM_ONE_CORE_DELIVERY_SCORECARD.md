@@ -60,7 +60,7 @@ The literal deliverable is a wake-text block. The real outcome is a **proven-or-
      (`src/control/db.py:246`), default `0`, live, registry-writable.
    - `TYPESAFE_API_KEY` (+ optional `TYPESAFE_BASE_URL`) in `_MANAGED_ENV_KEYS`
      (`config/settings.py:13`) and the controller env in `compose.yaml`.
-   - Document in `docs/ENV_FEATURE_FLAGS.md`.
+   - Document in `docs/backend/ENV_FEATURE_FLAGS.md`.
 4. **Delivery battery** `src/system_one/batteries/delivery.py`: state, questions, gate and render
    exactly as spec §6.1.
    - Tolerant envelope section parser for TASK / ACCEPTANCE / SCOPE OUT / RESERVED DECISIONS (the

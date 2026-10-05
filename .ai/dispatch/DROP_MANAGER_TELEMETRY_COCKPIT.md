@@ -87,7 +87,7 @@ any scripts still running / orphaned."*
   the `POST /api/sessions` body (`sess_body`). Tool description gains the reused-session caveat.
 - `docs/harness/roles/manager.md`: `dispatch_worker` now tiers models per job; **`watch_job` is for
   long-running non-agent scripts only — never to spawn agents.**
-- `docs/ENV_FEATURE_FLAGS.md`: note the model-tiering capability.
+- `docs/backend/ENV_FEATURE_FLAGS.md`: note the model-tiering capability.
 - Tests: plain `pytest` on `mcp_manager` dispatch body + `control_api` create-session model pass-through.
 
 ### PR-2 — The cockpit (backend read-model + frontend)
