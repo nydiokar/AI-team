@@ -299,7 +299,7 @@ surface that needs to *change* session state on a workflow step calls §4a/§4b 
   `db.list_*` (§6); issue intent via `SessionService` (§4a) + `submit_instruction` (§4b);
   tag sessions with `SessionOrigin("web")` (§5). Add a delivery handler to
   `NotificationService` for outbound (§3). **No core refactor required.**
-  **Reference implementation: `src/control/control_api.py`** — the gateway's own
+  **Reference implementation: `src/control/control_api.py` + `src/control/routes/`** — the gateway's own
   in-process read API (U1 of `docs/archive/control-surface-unification/CONTROL_SURFACE_UNIFICATION.md`). Built by
   `build_control_api(orchestrator)` and mounted on the gateway event loop via
   `EmbeddedControlServer` (`src/control/embedded_server.py`), so its handlers call the
