@@ -9,8 +9,8 @@ a process. The "many equal interfaces" end state it describes was the goal of
 This file describes what the system **is**. Which deployment mode and which flags are
 live right now is `.ai/CONTEXT.md`'s job, not this file's.
 
-Last updated: 2026-10-05 (re-grounded against `main` @ `5282fca`: controller/worker split,
-PM2 + Docker deployment modes, full Control API and task-server route maps)
+Last updated: 2026-10-05 (Control API split into per-area routers in `src/control/routes/`;
+re-grounded against `main` @ `5282fca`)
 
 ---
 
@@ -121,7 +121,25 @@ All `/api/*` require `Authorization: Bearer <token>`, where the token is
 `DASHBOARD_TOKEN` (falls back to `WORKER_TOKEN` when unset; `WORKER_TOKEN` is also
 accepted alongside it). Exceptions are noted per row. Lifecycle ops return the
 `CommandResult` envelope (`{ok, reason, session}`) with **no prose**: the client maps
-`reason` codes to wording. Code: `src/control/control_api.py`.
+`reason` codes to wording.
+
+**Code layout.** `src/control/control_api.py::build_control_api()` builds the app: middleware,
+auth (`_require_auth`), the idempotency cache, the Web UI mount, and the shared helpers and
+request/response models. Each area below is one `APIRouter` in `src/control/routes/`, included
+in this order:
+
+| Area (section below) | Module | Auth |
+|---|---|---|
+| Monitoring | `routes/monitoring.py` | per route (`/health` and the SSE stream are special) |
+| Turn requests | `routes/turn_requests.py` | per route (admission also accepts `AITeamSender`) |
+| Approvals, push, runtime flags, git | `routes/admin.py` | router-level Bearer |
+| Sessions | `routes/sessions.py` | router-level Bearer |
+| Work / flows (§2b) | `routes/work.py` | router-level Bearer |
+| Manager / Case (§2b) | `routes/cases.py` | router-level Bearer |
+| Cost, metrics, quota | `routes/cost.py` | router-level Bearer |
+
+Routes marked `# REVISIT` in code have no caller yet. Each needs to be either wired up or
+removed (git ×3, session `bind`, `/api/metrics/system`, `/api/turns/{id}` + `/diagnostics`).
 
 ### Sessions
 
@@ -165,7 +183,7 @@ Only meaningful for sessions **enrolled** on the managed queue. Enrollment is ga
 | POST | `/api/sessions/{id}/turn-requests/enroll` | enroll the session (flag-gated, above) |
 | POST | `/api/sessions/{id}/turn-requests/unenroll` | unenroll when no obligations remain |
 
-### Observability — tasks, turns, events, mesh
+### Monitoring — tasks, turns, events, mesh
 
 | Method | Path | Purpose |
 |---|---|---|

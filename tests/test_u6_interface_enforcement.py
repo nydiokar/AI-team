@@ -23,9 +23,14 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
 
+# The HTTP interface = the app factory + its per-area routers (src/control/routes/).
+CONTROL_API_FILES = [REPO / "src" / "control" / "control_api.py"] + sorted(
+    (REPO / "src" / "control" / "routes").glob("*.py")
+)
+
 INTERFACE_FILES = [
     REPO / "src" / "telegram" / "interface.py",
-    REPO / "src" / "control" / "control_api.py",
+    *CONTROL_API_FILES,
 ]
 
 # Direct lifecycle mutations no interface may perform (must go via SessionService).
@@ -47,9 +52,11 @@ def _lines(path: Path):
 def test_control_api_has_no_direct_lifecycle_mutation():
     """The HTTP interface must route 100% of lifecycle writes through the service."""
     offenders = []
-    for i, line in enumerate(_lines(REPO / "src" / "control" / "control_api.py"), 1):
-        if any(p.search(line) for p in _FORBIDDEN):
-            offenders.append(f"control_api.py:{i}: {line.strip()}")
+    assert len(CONTROL_API_FILES) > 1, "src/control/routes/ not found - guard would be vacuous"
+    for path in CONTROL_API_FILES:
+        for i, line in enumerate(_lines(path), 1):
+            if any(p.search(line) for p in _FORBIDDEN):
+                offenders.append(f"{path.name}:{i}: {line.strip()}")
     assert not offenders, "Control API must not mutate session state directly:\n" + "\n".join(offenders)
 
 
