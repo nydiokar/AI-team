@@ -227,7 +227,7 @@ stored across 3 sources stitched together at read time:
 3. `results/task_<id>.json` → `parsed_output` (fallback, backend-dependent schema)
 
 Read logic lives in `src/control/transcript.py` `get_transcript()`.
-API endpoint: `GET /api/sessions/:id/messages` in `src/control/control_api.py`.
+API endpoint: `GET /api/sessions/:id/messages` in `src/control/routes/sessions.py`.
 Frontend hook: `useSessionMessages()` in `web/src/hooks/useLiveData.ts`.
 Frontend rendering: `useSessionTimeline()` in `web/src/hooks/useSessionTimeline.ts`.
 
@@ -245,7 +245,7 @@ Schema in `docs/backend/CONVERSATION_DATA_FLOW.md §7`.
 4. Update `src/control/transcript.py` `get_transcript()` to query `conversation_turns`
    first; fall back to the file-stitching logic only when the table has no rows for
    this session (backwards compat for old sessions).
-5. Update `GET /api/sessions/:id/messages` in `control_api.py` — no signature change needed,
+5. Update `GET /api/sessions/:id/messages` in `routes/sessions.py` — no signature change needed,
    the transcript layer handles it transparently.
 6. No frontend changes needed — the API contract (`RawTranscriptTurn`) stays identical.
 

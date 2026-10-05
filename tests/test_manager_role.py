@@ -12,6 +12,7 @@ Covers, without any live/paid backend:
 import types
 
 import pytest
+from fastapi.routing import iter_route_contexts
 
 from src.control.db import MeshDB
 from src.orchestrator import TaskOrchestrator
@@ -418,7 +419,9 @@ def test_api_close_case_returns_result_dict():
     orch = types.SimpleNamespace(close_case=_close)
     app = control_api.build_control_api(orch)
     body = control_api.CaseCloseBody(continuation_plan="Next: resolve the open child flow.")
-    route = next(r for r in app.routes if getattr(r, "path", None) == "/api/cases/{case_id}/close")
+    # Routes live in included APIRouters (src/control/routes/); iterate the effective routes.
+    route = next(r for r in iter_route_contexts(app.routes)
+                 if getattr(r, "path", None) == "/api/cases/{case_id}/close")
     result = route.endpoint("c1", body).body
     # A blocked close is a normal 200 decision signal, not an HTTP error.
     assert b"case has 1 open child flow(s)" in result

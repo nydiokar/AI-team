@@ -21,6 +21,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from fastapi.routing import iter_route_contexts
 from fastapi.testclient import TestClient
 
 from src.control import control_api
@@ -155,7 +156,7 @@ def test_review_route_idempotency_key_dedupes_retry(monkeypatch, client, db):
     monkeypatch.setenv("REVIEW_EMITTER_ENABLED", "1")
     fid = db.open_case("obj", "sess-idem")
     endpoint = next(
-        r.endpoint for r in client.app.routes
+        r.endpoint for r in iter_route_contexts(client.app.routes)
         if getattr(r, "path", "") == "/api/cases/{case_id}/review"
     )
     body = control_api.CaseReviewBody(
@@ -185,7 +186,7 @@ def test_review_route_db_failure_is_structured_retryable(monkeypatch, db):
     fid = db.open_case("obj", "sess-fail")
 
     endpoint = next(
-        r.endpoint for r in client.app.routes
+        r.endpoint for r in iter_route_contexts(client.app.routes)
         if getattr(r, "path", "") == "/api/cases/{case_id}/review"
     )
     r = endpoint(
