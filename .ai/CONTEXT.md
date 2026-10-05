@@ -1,6 +1,6 @@
 # AI-Team Gateway — Hot Context
 
-**Last Updated:** 2026-08-10
+**Last Updated:** 2026-10-05
 **Branch policy:** `main` for docs-only; `feat/<slug>` + PR + self-merge for any `src/` or config
 change. Restart the **gateway** freely when deploying merged code. Never restart a worker/node-carrier
 without surfacing it to the operator first.
@@ -32,6 +32,13 @@ Current work:
 1. **A65 alert-delivery remediation** — final review found that P3 displays alerts in the Cost tab
    but does not deliver them through the existing browser-push seam stipulated by the packet. Reuse
    bounded `PushService` fanout at terminal task outcome; no new kill path or quota integration.
+2. **System-One decision layer (TypeSafe Jev) → Governor programme.** Spec
+   `docs/SYSTEM_ONE_DECISION_LAYER_SPEC.md` (accepted 2026-10-05). Next: **A94** (core + replay +
+   wake scorecard; Level 3; needs a read-only controller DB copy and `TYPESAFE_API_KEY` from the
+   operator). Then A95 (pre-flight). A96 (bounce) is blocked on A94's measured precision. The Governor
+   programme design (`.ai/context/GOVERNOR_OUTER_LOOP_V1.md` + `BOOTSTRAP_GOVERNOR_PROGRAMME_JOBS.md`,
+   bootstrap not yet run) now carries the S1 slots (§37) and three design conflicts (DC-1..3) awaiting
+   an owner ruling.
 
 
 > **Finding active jobs:** until the dispatch-state-kit is installed, read
@@ -46,6 +53,10 @@ Only jobs that are genuinely open. Everything merged/done is in git and the disp
 
 | Job | Packet | Depends on | Status | What it is |
 |---|---|---|---|---|
+| **A94** | `AGENT_94_SYSTEM_ONE_CORE_DELIVERY_SCORECARD.md` | — | ready (Level 3) | S1 core + decision log + replay baseline + advisory wake scorecard. Operator inputs: read-only controller DB copy, `TYPESAFE_API_KEY`. |
+| **A95** | `AGENT_95_SYSTEM_ONE_DISPATCH_PREFLIGHT.md` | A94 | ready after A94 (Level 3) | Soft pre-flight on `dispatch_worker` (Manager can override). |
+| **A96** | `AGENT_96_SYSTEM_ONE_DELIVERY_BOUNCE.md` | A94 + measured precision | blocked | Bounce a clearly-not-ready delivery instead of waking the Manager. |
+| **A97** | `AGENT_97_FAILURE_TEXT_ERROR_CLASS_FIX.md` | — | ready (Level 2) | Error-class keyword matching scans the agent's reply → wrong retry/pause class. Code fix. |
 | **A82** | `AGENT_82_SESSION_TURN_QUEUE.md` | — | active — **R0 merged + deployed 2026-10-02** (PR #182, flags OFF, nothing enrolled); Stage 8 next | Unified durable turn queue now on `main`. **Stage 8 prerequisites (open):** (1) **A84-scope completion consumer** — managed completions skip notify/telemetry/enrichment/session summary (final-review F1; Telegram users would never get the reply) — must land before ANY session is enrolled; (2) R1 operator-gated worker restarts on this host + Horse with `WORKER_MANAGED_TURNS=1`, psutil installed (`.venv/bin/pip install -c constraints.txt -e .`), `MESH_LOCAL_CARRIER_NODE_ID` set in the controller env (not in `compose.yaml`); (3) Stage 8a: born-managed sessions, migration enrolling existing sessions + protocol-0 drain predicate, OpenCode CLI retired (operator decision 2026-10-02), unenroll fixes (F2 hold/pause, F3 retry-pause/producer links), Telegram stop off-loop (F4), task-server enrollment cache TTL (F5), Codex close/forget N-A, refused-invoke close row N-B; (4) 8b: delete legacy session execution. **Rules:** never roll back to pre-A82 main while protocol-1 rows exist (main's `get_pending_tasks` has no protocol filter → double execution); rollback image `ai-team:pre-a82`, DB backup `~/ai-team-data/backups/mesh-pre-a82-20261002.db`. **Deferrals (s)–(v)** and all stage carries: packet §15/§16. Plan: packet + Stage 8 plan in session notes. |
 | **A75** | `AGENT_75_DASHBOARD_TOKEN_NOT_IN_HTML.md` | A71 design | dispatched | Remove the control token from served dashboard HTML (`window` global); keep TokenGate working via a non-page-inspectable flow. Sequenced after A71's credential design. |
 | **A71** | `AGENT_71_MESH_PER_NODE_CREDENTIALS.md` | — | dispatched | Replace the single shared `WORKER_TOKEN` with gateway-issued per-node credentials bound to `node_id` on register/heartbeat/claim/result; refuse cross-node claims; stop spoofed incarnation-bump DoS. Flag-gated default OFF. Worker-side lands on surfaced redeploy (Horse). |
@@ -68,6 +79,26 @@ Only jobs that are genuinely open. Everything merged/done is in git and the disp
 ---
 
 ## Recent shift notes
+
+**2026-10-05 — System-One (TypeSafe Jev) decision layer specified and dispatched; tied into the Governor programme.**
+Owner decision after a 3-round analysis (30+ candidates scored on impact / fit / ground truth /
+doability / safety / non-Jev-alternative). The full reasoning record is in
+`docs/SYSTEM_ONE_DECISION_LAYER_SPEC.md` §2.
+- **Bet:** one thin S1 core (httpx client, pure "batteries", one `system_one_decisions` table,
+  fail-open, pinned `jev-1.13.0`) on the two existing choke points: `_render_wake_turn` (both wake
+  producers) and `dispatch_worker`.
+- **Moves:** A94 scorecard in the wake (advisory, A/B by case hash), then A95 soft pre-flight, then A96
+  bounce (blocked until replay precision ≥ 0.90 on ≥ 100 Manager verdicts).
+- **Baseline first:** a replay over a read-only DB copy measures AUROC against historical `review.*`
+  verdicts before anything ships.
+- **Governor programme:** the Governor files in `.ai/context/` were committed as the bootstrap's input
+  and annotated `[S1]`: §10.3 materiality, §15.3/§34 adversary trigger, §17 semantic guards, §26
+  metrics, §37 addendum. Three design conflicts need an owner ruling:
+  - **DC-1:** S1 checks vs "no inference while waiting";
+  - **DC-2:** calibrated vs deterministic guards;
+  - **DC-3:** no project-domain content to the Jev API until ruled.
+- **Rejected on purpose:** Jev for error classification (real bug → A97 code fix), model selection
+  (contract forbids), session hygiene, Telegram intent, tool gates, skill routing (only 3 skills).
 
 **2026-10-02 — A82 Stage 8a READY, MERGE HELD: PR #185 (`feat/a82-stage8a` @ `0b34905`) reviewed ACCEPT + CI green. DO NOT MERGE OR DEPLOY before R1.**
 Merging puts the cutover on `main`; any routine gateway redeploy would then make every session turn 503 until workers run managed turns. Order: (1) R1 — operator restarts `ai-team-worker` (this host, `kanebra-worker`) and the Horse worker after `git pull --ff-only && .venv/bin/pip install -c constraints.txt -e .` with `WORKER_MANAGED_TURNS=1`; set `MESH_LOCAL_CARRIER_NODE_ID=kanebra-worker` in the controller `.env`; (2) verify nodes advertise `managed_backends`; (3) pre-check SQL (packet runbook), backup, merge #185, rebuild controller (migration 43 ≈5 s on the Pi, fsync-bound); (4) verify schema 43, `/health` `turn_queue.coverage_ok=true`, real turns on Claude/Codex/opencode-server. Rollback: `ai-team:pre-a82`-era images run on schema 43; never pre-A82 main with protocol-1 rows. Operator defaults pending confirmation: no-carrier single-box refuses session turns (`_REFUSE_SESSION_TURNS_WITHOUT_MESH`); offline registered carrier queues (`_QUEUE_TURNS_FOR_OFFLINE_CARRIER`). OpenCode CLI retired (operator decision).
