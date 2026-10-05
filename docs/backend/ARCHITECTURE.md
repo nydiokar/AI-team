@@ -140,6 +140,10 @@ in this order:
 
 Routes marked `# REVISIT` in code have no caller yet. Each needs to be either wired up or
 removed (git ×3, session `bind`, `/api/metrics/system`, `/api/turns/{id}` + `/diagnostics`).
+`POST /api/instructions` and `POST /api/sessions/{id}/turn-requests` carry a `# REVISIT` for
+a different reason: both admit an enrolled session's turn; fold them at A82 Stage 8b (plan in
+the comment in `routes/sessions.py`). The public surface (no Bearer) is pinned by
+`tests/test_control_api_auth_coverage.py`.
 
 ### Sessions
 

@@ -229,6 +229,16 @@ def build_router(
             }
         )
 
+    # REVISIT (2026-10-05, A82 Stage 8b): two admission routes for one session turn. Here,
+    # an enrolled session already goes through core._submit_managed_instruction - the same
+    # path as POST /api/sessions/{id}/turn-requests. When 8b deletes the legacy (BUSY)
+    # branch, fold the session branch onto that admission path; keep this route and its
+    # 200 {ok, task_id, session} envelope (A82 packet, Stage 6 "Routes as built"), adding
+    # receipt fields only additively. Neither route is a superset today: only this one carries
+    # target_files / case_id / upload_attachment and the PRINCIPAL_HEADER automation label
+    # (dispatch_worker); only turn-requests has the agent-sender scope and the 202 receipt.
+    # Its idempotency is the durable operation_id; this route also keeps the in-process
+    # idem cache, which becomes redundant for the managed branch.
     @router.post("/api/instructions")
     async def api_instructions(
         body: InstructionBody,
