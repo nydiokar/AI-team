@@ -136,7 +136,8 @@ def build_router(orchestrator: Any, *, require_auth: Callable[..., Any]) -> APIR
         }
         return JSONResponse(result)
 
-    # REVISIT (2026-10-05): no UI caller yet (tests only); meant for worker diagnostics.
+    # REVISIT (2026-10-05): no UI caller yet (tests only); the gateway's own per-minute
+    # host/app metrics ring (app_metrics) - wire it into the System tab or drop it.
     @router.get("/api/metrics/system")
     def api_metrics_system(minutes: int = Query(60, ge=1, le=180)) -> JSONResponse:
         """Per-minute rollups: event-loop lag, request latency by route, disk/CPU/memory
