@@ -234,7 +234,7 @@ Frontend rendering: `useSessionTimeline()` in `web/src/hooks/useSessionTimeline.
 **The task:** Add a `conversation_turns` table to `mesh.db` (SQLite, managed by
 `src/control/db.py`) and wire it as the canonical conversation store.
 
-Schema in `docs/CONVERSATION_DATA_FLOW.md §7`.
+Schema in `docs/backend/CONVERSATION_DATA_FLOW.md §7`.
 
 **Steps:**
 1. Add `conversation_turns` table to `src/control/db.py` (schema migration, safe to add if not exists).
@@ -252,6 +252,6 @@ Schema in `docs/CONVERSATION_DATA_FLOW.md §7`.
 **Do NOT break:** existing sessions that have no rows in `conversation_turns` yet —
 they must continue to work via the file fallback in `transcript.py`.
 
-Read `docs/CONVERSATION_DATA_FLOW.md` for the full picture before starting.
+Read `docs/backend/CONVERSATION_DATA_FLOW.md` for the full picture before starting.
 
 ---

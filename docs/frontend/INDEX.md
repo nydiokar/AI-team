@@ -15,10 +15,11 @@ full `docs/` catalog see [`docs/INDEX.md`](../INDEX.md).
 
 | Doc | Why |
 |---|---|
-| [`docs/CONTROL_CONTRACT.md`](../CONTROL_CONTRACT.md) | The backend-side half of the contract this UI binds to — event envelope, inbound entry points, backend registry, read model. |
+| [`docs/backend/INDEX.md`](../backend/INDEX.md) | The backend counterpart of this folder — topology, Control API route map, contracts, data ownership. |
+| [`docs/backend/CONTROL_CONTRACT.md`](../backend/CONTROL_CONTRACT.md) | The backend-side half of the contract this UI binds to — event envelope, inbound entry points, backend registry, read model. |
 | [`docs/archive/frontend-backend-gap/FRONTEND_BACKEND_GAP.md`](../archive/frontend-backend-gap/FRONTEND_BACKEND_GAP.md) | 🟡 superseded — the historical gap analysis that produced the ✅/🟡/❌/⛔ tags you'll see in `web/src/domain/*.ts`. The in-code comments are current; this is the trace. |
 | [`docs/SESSION_STATE_TIMELINE_ARCHITECTURE_REVIEW.md`](../SESSION_STATE_TIMELINE_ARCHITECTURE_REVIEW.md) | Why the durable session timeline / diagnostic-vs-durable split exists. |
-| [`docs/ENV_FEATURE_FLAGS.md`](../ENV_FEATURE_FLAGS.md) | Feature flags that gate what data the Web UI actually sees live (e.g. `HARNESS_FLOW_DRIVE` for the Work tab). |
+| [`docs/backend/ENV_FEATURE_FLAGS.md`](../backend/ENV_FEATURE_FLAGS.md) | Feature flags that gate what data the Web UI actually sees live (e.g. `HARNESS_FLOW_DRIVE` for the Work tab). |
 | [`docs/RUNBOOKS/OPERATIONS_PM2.md`](../RUNBOOKS/OPERATIONS_PM2.md) / [`CONTROL_SURFACE_DEPLOY_RUNBOOK.md`](../RUNBOOKS/CONTROL_SURFACE_DEPLOY_RUNBOOK.md) | Running/deploying the gateway process this UI is served from. |
 
 ## Maintenance

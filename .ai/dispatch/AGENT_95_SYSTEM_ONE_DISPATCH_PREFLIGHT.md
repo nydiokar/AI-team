@@ -45,7 +45,7 @@ The Manager retains control (P1), and the effect is measured as flagged-vs-unfla
    - New optional tool arg `preflight_ack` (bool) skips the hold and is logged as an override.
    - Update the tool schema in `_TOOLS` and `manager.md`'s dispatch section with one sentence on the
      hold/ack semantics.
-4. Flags `S1_PREFLIGHT_SHADOW` and `S1_PREFLIGHT_ACTIVE` (registry plus `docs/ENV_FEATURE_FLAGS.md`).
+4. Flags `S1_PREFLIGHT_SHADOW` and `S1_PREFLIGHT_ACTIVE` (registry plus `docs/backend/ENV_FEATURE_FLAGS.md`).
 5. Tests:
    - endpoint auth, size bound and fail-open;
    - `mcp_manager` hold/ack paths with a stubbed `_api_request`;

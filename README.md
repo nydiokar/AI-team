@@ -104,7 +104,7 @@ State is DB-canonical: sessions, tasks, Case membership, dispatch lineage, and a
 conversation and artifact store all live in SQLite (WAL). Per-session JSON files are a
 never-deleted fallback, not the source of truth. Restarting the gateway does not lose a Case.
 
-Full process and API map: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+Full process and API map: [`docs/backend/ARCHITECTURE.md`](docs/backend/ARCHITECTURE.md).
 
 ## Agent backends
 
@@ -126,7 +126,7 @@ The main ones:
 | `CASE_CONTINUATION_ENABLED` | Autonomous Case continuation — incurs real spend; explicit operator decision |
 | `HARNESS_FLOW_DRIVE` | Authoritative Case writes; required for Case attach and worker JOIN |
 
-Full inventory: [`docs/ENV_FEATURE_FLAGS.md`](docs/ENV_FEATURE_FLAGS.md).
+Full inventory: [`docs/backend/ENV_FEATURE_FLAGS.md`](docs/backend/ENV_FEATURE_FLAGS.md).
 
 ## Tech stack
 
@@ -143,8 +143,8 @@ tests that invoke a paid CLI are opt-in behind an explicit flag — never run au
 | Topic | Link |
 |---|---|
 | First session walkthrough | [`docs/QUICK_START.md`](docs/QUICK_START.md) |
-| Runtime and API map | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) |
-| Environment flags reference | [`docs/ENV_FEATURE_FLAGS.md`](docs/ENV_FEATURE_FLAGS.md) |
+| Runtime and API map | [`docs/backend/ARCHITECTURE.md`](docs/backend/ARCHITECTURE.md) |
+| Environment flags reference | [`docs/backend/ENV_FEATURE_FLAGS.md`](docs/backend/ENV_FEATURE_FLAGS.md) |
 | Manager / worker harness | [`docs/harness/dispatch_pipeline.md`](docs/harness/dispatch_pipeline.md) |
 | Web UI development | [`web/README.md`](web/README.md) |
 | Full doc index | [`docs/INDEX.md`](docs/INDEX.md) |

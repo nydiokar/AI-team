@@ -66,7 +66,7 @@ Work from OUR code, not assumptions. Surfaces to audit (at minimum):
 For each finding: severity (P0 breach / P1 serious / P2 hardening / P3 note), the exact code path,
 a NON-public reproduction sketch, and a remediation. **Private artifact only.**
 
-## PART B — Public threat-model doc (`docs/MESH_SECURITY.md`)
+## PART B — Public threat-model doc (`docs/backend/MESH_SECURITY.md`)
 Written AFTER Part A (and after any P0/P1 is patched). Structure modeled on hcom's README security
 section, describing the DESIGNED model — not live holes:
 - **Trust domain & membership** — what a node/operator is trusted with (be honest, like hcom:
@@ -82,7 +82,7 @@ section, describing the DESIGNED model — not live holes:
 The public doc must contain **no exploit recipe for an unpatched finding.**
 
 ## TYPE
-Part A = review, private (`.security/`, git-ignored). Part B = docs (`docs/MESH_SECURITY.md`) on
+Part A = review, private (`.security/`, git-ignored). Part B = docs (`docs/backend/MESH_SECURITY.md`) on
 `main`. Any code fix for a confirmed P0/P1 = `feat/<slug>` branch + PR + self-merge, description
 written to avoid disclosing the exploit (reference the private finding ID, not the recipe).
 
@@ -106,7 +106,7 @@ written to avoid disclosing the exploit (reference the private finding ID, not t
    surface in Part A audited (or explicitly marked "no finding") — private, uncommitted.
 2. Every P0/P1 either patched (private-first branch → PR, non-disclosing description) or, if a fix
    is a larger decision, escalated to the operator with the private finding — NOT left silent.
-3. `docs/MESH_SECURITY.md` written, hcom-structured, describing the designed model + honest
+3. `docs/backend/MESH_SECURITY.md` written, hcom-structured, describing the designed model + honest
    limits, containing NO exploit recipe for an unpatched hole.
 4. `pytest` on any touched module only (TEST COST GUARD).
 
@@ -125,14 +125,14 @@ written to avoid disclosing the exploit (reference the private finding ID, not t
 
 ## TRAIL / EVIDENCE (fill at close)
 - `.security/mesh_findings_2026-08.md` (private, NOT committed — note its existence, not contents,
-  in DISPATCH_LOG) · `docs/MESH_SECURITY.md` · any patch PR numbers · `results_ref` → DISPATCH_LOG.
+  in DISPATCH_LOG) · `docs/backend/MESH_SECURITY.md` · any patch PR numbers · `results_ref` → DISPATCH_LOG.
 
 ---
 ## Milestone (burndown)
 - [x] Step 0: `.security/` git-ignored confirmed/added
 - [x] Part A: every surface audited; findings triaged P0–P3 (private)
 - [x] P0/P1 patched private-first OR escalated to operator
-- [x] Part B: `docs/MESH_SECURITY.md` written (no exploit recipes)
+- [x] Part B: `docs/backend/MESH_SECURITY.md` written (no exploit recipes)
 
 ## Closure (fill on completion)
 Executed 2026-08-05 by opencode-agent.
@@ -153,7 +153,7 @@ Executed 2026-08-05 by opencode-agent.
   single shared `WORKER_TOKEN` (with self-reported node identity), claim/result identity binding,
   server-side dispatch bounds + rate limits, dashboard token out of served HTML, proactive-turn
   ownership. Details + recommendations in the private findings.
-- **Part B:** `docs/MESH_SECURITY.md` on `main` — hcom-structured trust domain / token meaning /
+- **Part B:** `docs/backend/MESH_SECURITY.md` on `main` — hcom-structured trust domain / token meaning /
   limits-by-design / bounded-execution / incident response / storage. No exploit recipes.
 - **Cost guard:** plain `pytest` on touched modules only; no full/e2e suite, no paid backends.
 - **State:** `status: done`, `owner: opencode-agent`, `evidence: .security/mesh_findings_2026-08.md`,

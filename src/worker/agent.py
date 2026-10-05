@@ -3422,7 +3422,7 @@ def _install_controller_state(http: _HTTP) -> None:
 
     Installed before anything reads a flag, with one bounded first fetch. Until a
     snapshot exists the poll loop claims no work (``_controller_state_ready``) and
-    the refresh loop retries (docs/DATABASE_AUTHORITY.md §3.3)."""
+    the refresh loop retries (docs/backend/DATABASE_AUTHORITY.md §3.3)."""
     from src.control import controller_state
     from src.worker.controller_state_client import RemoteControllerState
 

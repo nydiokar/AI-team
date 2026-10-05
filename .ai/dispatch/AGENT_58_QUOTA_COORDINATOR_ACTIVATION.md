@@ -46,7 +46,7 @@ code (Phase-2, if taken). Phase-1 is config + restart. Branch `feat/quota-coordi
 - Flag/config: `config/settings.py` `QuotaConfig` (`enabled`/`db_path`/`observe_interval_sec`) + env overrides.
 - Orchestrator lifecycle hook: `src/orchestrator.py` (build only when enabled; `start()`/`stop()` in the
   server lifespan). `start()` no-ops when disabled.
-- Spec: `docs/SESSION_WINDOW_WARMING_SPEC.md` + `docs/QUOTA_WINDOW_COORDINATOR_PHASE1.md`.
+- Spec: `docs/SESSION_WINDOW_WARMING_SPEC.md` + `docs/backend/QUOTA_WINDOW_COORDINATOR_PHASE1.md`.
 - Overlap check: this is orthogonal to M3.4 (wake-dispatch) and A53 (turn/cost governor). It observes the
   *account-level quota window*; those bound a *single loop's* turns/rounds. Keep them distinct.
 
