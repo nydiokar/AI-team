@@ -34,7 +34,7 @@ Telegram (optional) ──┘          │
 
 The web UI, Control API, and optional Telegram bot run in one gateway process.
 When mesh mode is enabled, the task server runs alongside it and remote workers
-connect to that server. Read the [architecture map](ARCHITECTURE.md) for the
+connect to that server. Read the [architecture map](backend/ARCHITECTURE.md) for the
 full process and HTTP surface.
 
 ## Quick start (Linux)
@@ -99,7 +99,7 @@ The product direction and anti-goals live in
 - `GET /health` is an unauthenticated liveness check. `/api/*` requires a bearer
   token; API docs are off by default.
 - Mesh, Manager/Case orchestration, and other advanced behavior are feature
-  gated. Review [the feature-flag reference](ENV_FEATURE_FLAGS.md) before
+  gated. Review [the feature-flag reference](backend/ENV_FEATURE_FLAGS.md) before
   activating them—some flags can create paid agent work.
 - The current deployment and work-in-progress are deliberately kept out of this
   README. Check [the live context](../.ai/CONTEXT.md) for that information.
@@ -108,8 +108,8 @@ The product direction and anti-goals live in
 
 | If you want to… | Start here |
 | --- | --- |
-| Understand the runtime topology and API | [Architecture](ARCHITECTURE.md) |
-| Configure a local or production deployment | [Quick Start](QUICK_START.md) · [Environment flags](ENV_FEATURE_FLAGS.md) |
+| Understand the runtime topology and API | [Architecture](backend/ARCHITECTURE.md) |
+| Configure a local or production deployment | [Quick Start](QUICK_START.md) · [Environment flags](backend/ENV_FEATURE_FLAGS.md) |
 | Work on the web UI | [Web UI README](../web/README.md) |
 | Use the Manager/worker harness | [Dispatch pipeline](harness/dispatch_pipeline.md) |
 | Find the document that owns a topic | [Documentation overview](OVERVIEW.md) · [full index](INDEX.md) |

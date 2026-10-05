@@ -152,7 +152,7 @@ python main.py health     # expect OK (telegram + a backend present)
 
    For Codex package upgrades, do not assume the install updates an already
    running app-server. Follow the deliberate validation and worker/runtime
-   recycle procedure in [Codex app-server adapter convergence](../CODEX_APP_SERVER_ADAPTER_CONVERGENCE.md#codex-upgrades-and-runtime-recycle).
+   recycle procedure in [Codex app-server adapter convergence](../backend/CODEX_APP_SERVER_ADAPTER_CONVERGENCE.md#codex-upgrades-and-runtime-recycle).
 
 ---
 

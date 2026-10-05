@@ -12,7 +12,7 @@ Run directly (no PM2 required):
 
 Binds {MESH_TAILSCALE_IP or 127.0.0.1}:{MESH_TASK_SERVER_PORT}. Shares the
 gateway's mesh.db (the controller authority); workers never open it — they read
-controller state over this server's API (docs/DATABASE_AUTHORITY.md).
+controller state over this server's API (docs/backend/DATABASE_AUTHORITY.md).
 """
 import sys
 from pathlib import Path

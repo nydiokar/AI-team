@@ -247,7 +247,7 @@ The live write (`orchestrator._mesh_complete_task`) is DB-first and untruncated 
 backends (claude/codex/opencode). `results/task_*.json` is now a fallback/debug artifact,
 not the source — droppable per `docs/RUNBOOK_db_self_sufficient.md`. The `raw_stdout` debug
 NDJSON (87% of artifact bytes) is gzipped to `results/raw/<id>.ndjson.gz` when
-`system.slim_artifacts` is on. Full picture: `docs/CONVERSATION_DATA_FLOW.md` §0.
+`system.slim_artifacts` is on. Full picture: `docs/backend/CONVERSATION_DATA_FLOW.md` §0.
 
 A Web UI dashboard renders `events.ndjson` for live deltas (§1) and these reads for state.
 
@@ -300,7 +300,7 @@ surface that needs to *change* session state on a workflow step calls §4a/§4b 
   tag sessions with `SessionOrigin("web")` (§5). Add a delivery handler to
   `NotificationService` for outbound (§3). **No core refactor required.**
   **Reference implementation: `src/control/control_api.py`** — the gateway's own
-  in-process read API (U1 of `docs/CONTROL_SURFACE_UNIFICATION.md`). Built by
+  in-process read API (U1 of `docs/archive/control-surface-unification/CONTROL_SURFACE_UNIFICATION.md`). Built by
   `build_control_api(orchestrator)` and mounted on the gateway event loop via
   `EmbeddedControlServer` (`src/control/embedded_server.py`), so its handlers call the
   **live** `orchestrator.session_service.list_views()` (§6) and the in-process

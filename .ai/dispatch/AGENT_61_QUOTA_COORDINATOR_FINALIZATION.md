@@ -93,7 +93,7 @@ adapter lands, every message will read "adapter unsupported" — that *is* the s
 4. **Adaptive cadence** — stop 5-min spam once a window is confirmed; back off to the reset boundary. Configurable,
    safe defaults, idempotent.
 5. **Telegram digest subscriber** — separate module, own default-OFF flag, event-driven, bounded, removable.
-6. Update `docs/QUOTA_WINDOW_COORDINATOR_PHASE1.md` + `SESSION_WINDOW_WARMING_SPEC.md` §17 to reflect true state;
+6. Update `docs/backend/QUOTA_WINDOW_COORDINATOR_PHASE1.md` + `SESSION_WINDOW_WARMING_SPEC.md` §17 to reflect true state;
    reframe/close A58 against this reality.
 
 ## TYPE
@@ -110,7 +110,7 @@ byte-identical until the operator activates.
 - Notification seam: `src/services/notification_service.py` (`notify_error`/`notify_heartbeat`) →
   `src/telegram/interface.py` (`notify_completion` ~L2870). Event envelope: `src/core/observability.py`.
 - Spec: `docs/SESSION_WINDOW_WARMING_SPEC.md` (§0/§3/§6/§7/§8/§9A/§15/§17/§18) +
-  `docs/QUOTA_WINDOW_COORDINATOR_PHASE1.md` (note the operator's inline cadence complaint at L45).
+  `docs/backend/QUOTA_WINDOW_COORDINATOR_PHASE1.md` (note the operator's inline cadence complaint at L45).
 
 ## ACCEPTANCE (proof, not vibes)
 1. Written merged-vs-spec audit verdict exists and every gap-table row is confirmed or corrected.

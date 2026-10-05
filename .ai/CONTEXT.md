@@ -116,7 +116,7 @@ so `/api/flags` toggles never reached it. Now: workers read controller state ove
 (`/control/runtime-flags`, `/control/cases/{id}/boot-reconcile`) and never open a mesh.db.
 Controller containers rebuilt on `684b506` (rollback image `ai-team:pre-a88`); route verified (401
 without token, 14 live flags with the worker token). **Not yet live on the worker** — it still runs
-old code until `pm2 restart ai-team-worker` (operator-gated). Then follow `docs/DATABASE_AUTHORITY.md`
+old code until `pm2 restart ai-team-worker` (operator-gated). Then follow `docs/backend/DATABASE_AUTHORITY.md`
 §6 steps 4-5 (verify no `mesh.db` fd, `controller_flags_refreshed` in logs; move the old file aside).
 Pre-retirement report: `scripts/db_authority_report.py` → exit 5 with the 3 classified rows (expected).
 Follow-up **A93**: worker `quota_windows.db` (120 MB) is never pruned; `coordinator_events` unbounded on
@@ -334,7 +334,7 @@ be flipped on/off with **no restart** (the whole point of the registry). The onl
 Deployment-shape-independent: works single-process or split. **Enablement/toggle:** via
 `/api/flags` or `scripts/ops_flag.sh` (controller registry). *(Superseded 2026-10-02 by A88: once the
 worker runs merged code it reads flags from the controller over `GET /control/runtime-flags`, never a
-local mesh.db — see `docs/DATABASE_AUTHORITY.md`. Until that worker restart it still reads its stale
+local mesh.db — see `docs/backend/DATABASE_AUTHORITY.md`. Until that worker restart it still reads its stale
 local copy.)* **§7 deferral (multi-worker):** with N
 claude workers each running a prewarmer, up to N minimal `haiku` turns could fire at a window boundary
 before any observes the new window. Bounded and cheap: warming is idempotent (skip-if-open is
@@ -354,7 +354,7 @@ An activation that opens nothing counts as a failure, and 3 consecutive failures
 rather than retrying: the anchored-window premise is checked every cycle, never assumed. Schedules
 off the provider's own `reset_at`, so ≤ ~5 activations/day, bounded again by
 `QUOTA_PREWARM_MAX_PER_DAY`/`MIN_INTERVAL_SEC`. **Deliberate spec deviation: no quiet hours** — the
-value only exists before the operator starts work (see `ENV_FEATURE_FLAGS.md` §D). Status rides on
+value only exists before the operator starts work (see `docs/backend/ENV_FEATURE_FLAGS.md` §D). Status rides on
 `GET /api/quota-windows` under `prewarm`.
 **(2) The quota-resume gate keyed on stale telemetry.** PR #97's restore check only consulted the
 429's own `resetsAt` when evidence was exactly `no_telemetry`. But this host's observer legitimately
@@ -488,7 +488,7 @@ migration. Executing A72 then A73 next (both provably non-breaking).
 
 **2026-08-05 — Mesh security review shipped (PR #72, `AGENT_67`).**
 Adversarial review of the mesh surfaces completed: private findings in `.security/` (git-ignored —
-never commit/publish), public threat-model in `docs/MESH_SECURITY.md` (hcom-structured). A **P0 was
+never commit/publish), public threat-model in `docs/backend/MESH_SECURITY.md` (hcom-structured). A **P0 was
 verified and fixed live**: the task-server `/files` staging upload used the client filename verbatim
 as a path segment, so a `../../` name escaped the staging root (arbitrary file write on the gateway
 host). PR #72 adds sanitize + containment; gateway restarted post-merge; worker untouched. `.env`
@@ -496,7 +496,7 @@ and `state/mesh.db` chmod `0600`. **Escalated to operator** (R2, not silently pa
 credentials replacing the single shared `WORKER_TOKEN` (self-reported node identity), claim/result
 identity binding, server-side dispatch bounds + rate limits, dashboard token out of served HTML.
 Until the credential model lands, treat `WORKER_TOKEN`/`DASHBOARD_TOKEN` as full-admin — see
-`docs/MESH_SECURITY.md`.
+`docs/backend/MESH_SECURITY.md`.
 
 **2026-08-05 — Close-session race gate merged (PR #70, `AGENT_70`).**
 The close-vs-turn race behind `task_ed5283f1` is fixed at the root: the worker now defers a
@@ -616,7 +616,7 @@ logs/events.ndjson                    system-wide event log
 
 **Config flags:** `MESH_ENABLED` (default `false`), `MESH_SHADOW_WRITE` (default `true`),
 `WORKER_TOKEN`, `MESH_TAILSCALE_IP`, `MESH_TASK_SERVER_PORT`. Feature flags →
-`docs/ENV_FEATURE_FLAGS.md`.
+`docs/backend/ENV_FEATURE_FLAGS.md`.
 
 ---
 
@@ -648,8 +648,8 @@ logs/events.ndjson                    system-wide event log
 | `src/worker/agent.py` | worker daemon (own process on worker nodes) |
 | `scripts/mcp_manager.py` | Manager MCP tool surface (`dispatch_worker`, `open_case`, etc.) |
 | `config/settings.py` | all config incl. `MeshConfig` |
-| `docs/ENV_FEATURE_FLAGS.md` | feature-flag reference |
-| `docs/CONTROL_CONTRACT.md` | M1 — event + inbound-command + backend + read-model contract |
+| `docs/backend/ENV_FEATURE_FLAGS.md` | feature-flag reference |
+| `docs/backend/CONTROL_CONTRACT.md` | M1 — event + inbound-command + backend + read-model contract |
 | `docs/harness/roles/manager.md` | Manager role behavior + dispatch-envelope template |
 | `docs/harness/roles/worker.md` | Worker role behavior |
 | `docs/Task_Harness_v0.7_AUTOMATION.md` | active harness automation spec (M0–M4) |

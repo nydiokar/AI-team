@@ -5,7 +5,7 @@ client here at startup. While one is installed:
 
 * ``src.control.db.get_db()`` returns ``None`` — the process never opens,
   creates or migrates a ``mesh.db`` of its own (controller state lives only in
-  the controller's database; see ``docs/DATABASE_AUTHORITY.md``);
+  the controller's database; see ``docs/backend/DATABASE_AUTHORITY.md``);
 * runtime-flag registry rows are resolved from the client (the controller's
   registry over authenticated HTTP) instead of a local file;
 * controller-ledger operations (Manager boot reconcile) go through the client.
