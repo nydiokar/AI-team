@@ -37,7 +37,7 @@ This is the normal operator path after `git pull` or local edits.
 
 For mesh-worker Codex package upgrades, do not use gateway auto-deploy or assume
 the install replaces a running app-server. Follow the explicit validation and
-carrier-recycle boundary in [Codex app-server adapter convergence](../CODEX_APP_SERVER_ADAPTER_CONVERGENCE.md#codex-upgrades-and-runtime-recycle).
+carrier-recycle boundary in [Codex app-server adapter convergence](../backend/CODEX_APP_SERVER_ADAPTER_CONVERGENCE.md#codex-upgrades-and-runtime-recycle).
 
 ## Stop / Remove
 

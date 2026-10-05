@@ -62,7 +62,7 @@ updated_at: "2026-08-03T13:24:45.189368+00:00"
     <assumptions>These are taken as true but MUST be re-verified against the live files
       before writing any link or claim (see validation): (a) the owning surfaces are
       `.ai/CONTEXT.md`, `.ai/dispatch/DISPATCH_LOG.md`, `.ai/DOC_MAP.md`,
-      `.ai/context/production_vision.md`, `docs/ARCHITECTURE.md`, `docs/QUICK_START.md`,
+      `.ai/context/production_vision.md`, `docs/backend/ARCHITECTURE.md`, `docs/QUICK_START.md`,
       `docs/README.md`, `docs/harness/` (dispatch_pipeline.md is the harness entry).
       (b) the gateway is one process (`python main.py`) with Telegram + Control API
       (:9003) + mesh task server (:9002) as in-process coroutines (ARCHITECTURE.md §1).
@@ -95,7 +95,7 @@ updated_at: "2026-08-03T13:24:45.189368+00:00"
          - "The shape (as it runs)" — a PLAIN FENCED ASCII topology block (no Mermaid): one process
            `python main.py` hosting Telegram + Control API (:9003, serves Web UI) + mesh
            task server (:9002); workers are separate processes on other machines.
-           Keep it a *thumbnail* and point to `docs/ARCHITECTURE.md` for the full map.
+           Keep it a *thumbnail* and point to `docs/backend/ARCHITECTURE.md` for the full map.
          - "Where things live / where to go next" — the router table (see below).
          - "Check it's alive" — the one-liner `curl http://127.0.0.1:9003/health`, with an
            explicit "do NOT run `python main.py status`" note (Test Cost Guard).
@@ -104,7 +104,7 @@ updated_at: "2026-08-03T13:24:45.189368+00:00"
          current state / priorities / shipped → `.ai/CONTEXT.md`
          state of every dispatched job → `.ai/dispatch/DISPATCH_LOG.md`
          which doc owns which info (the doc contract) → `.ai/DOC_MAP.md`
-         full process/HTTP architecture → `docs/ARCHITECTURE.md`
+         full process/HTTP architecture → `docs/backend/ARCHITECTURE.md`
          install + first run → `docs/QUICK_START.md`
          strategic intent + anti-goals → `.ai/context/production_vision.md`
          the task-quality harness (how work gets dispatched) → `docs/harness/dispatch_pipeline.md`
@@ -116,7 +116,7 @@ updated_at: "2026-08-03T13:24:45.189368+00:00"
 
     <validation>Docs-only — NO pytest, NO paid CLI, NO `python main.py`. Checks:
       - Every relative link target exists:
-        `for f in .ai/CONTEXT.md .ai/dispatch/DISPATCH_LOG.md .ai/DOC_MAP.md .ai/context/production_vision.md docs/ARCHITECTURE.md docs/QUICK_START.md docs/README.md docs/harness/dispatch_pipeline.md docs/archive/progress/_archive_PROGRESS_LOG.md; do test -e "$f" && echo "OK $f" || echo "MISSING $f"; done`
+        `for f in .ai/CONTEXT.md .ai/dispatch/DISPATCH_LOG.md .ai/DOC_MAP.md .ai/context/production_vision.md docs/backend/ARCHITECTURE.md docs/QUICK_START.md docs/README.md docs/harness/dispatch_pipeline.md docs/archive/progress/_archive_PROGRESS_LOG.md; do test -e "$f" && echo "OK $f" || echo "MISSING $f"; done`
         (run from repo root; each must print OK).
       - Anti-Test-Cost-Guard: `grep -n "main.py status" docs/OVERVIEW.md` returns only
         the "do NOT run" warning line (0 as an instruction to run it).
@@ -188,7 +188,7 @@ updated_at: "2026-08-03T13:24:45.189368+00:00"
         router that holds no state. OVERVIEW is the broader whole-system version. Copy
         this shape; do NOT duplicate ROADMAP's roadmap rows.</why_relevant>
     </snippet>
-    <snippet id="S4" source="docs/ARCHITECTURE.md §1 — the one-process topology">
+    <snippet id="S4" source="docs/backend/ARCHITECTURE.md §1 — the one-process topology">
       <quote>There is one long-running process on the gateway box: python main.py.
         Telegram, the Control API (which also serves the Web UI), and the mesh task
         server are all coroutines inside it… workers are separate processes on other

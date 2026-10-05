@@ -214,6 +214,6 @@ the **M2.5 Case Admission** milestone (`Task_Harness_v0.7_AUTOMATION.md`). The a
 - Automation roadmap: `docs/Task_Harness_v0.6_AUTOMATION.md` (§0.2 anti-goal bound, M2 lineage, M3 Manager, M4 spec-authoring).
 - Dispatch machinery: `docs/harness/dispatch_pipeline.md` (7 steps, the `_enqueue_task` choke point, Level-3 guard, `.task.md` contract).
 - First salvage dispatch: `.ai/dispatch/AGENT_24_DECOMPOSER_GENERATOR.md` (M4 generators-early split — by-hand decomposer prompt).
-- Manager driver: `docs/harness/manager_invocation.md`. Topology: `docs/ARCHITECTURE.md`.
+- Manager driver: `docs/harness/manager_invocation.md`. Topology: `docs/backend/ARCHITECTURE.md`.
 - Source project (parts donor, do not build on): `~/dev/MAX` — `Phase 1 Core Infrastructure.md`, `component_guide.md`, `MAX/agents/task_expert/`, `MAX/agents/supervisor_agent.py`, `MAX/storage/utils/types.py`, `MAX/types/collaboration_types.py`.
 </content>

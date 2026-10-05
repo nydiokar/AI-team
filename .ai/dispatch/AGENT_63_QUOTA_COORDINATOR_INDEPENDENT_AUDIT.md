@@ -59,7 +59,7 @@ mode this project's review gate exists to catch. This job re-runs that gate afte
    - Confirm the Telegram digest subscriber (`src/services/quota_digest.py`) is genuinely a separate
      module that the coordinator itself never imports/calls (spec §15 boundary).
 2. **Compare against the two spec docs directly** (`docs/SESSION_WINDOW_WARMING_SPEC.md`,
-   `docs/QUOTA_WINDOW_COORDINATOR_PHASE1.md`, both touched by `cbbaa10`) — check whether the docs
+   `docs/backend/QUOTA_WINDOW_COORDINATOR_PHASE1.md`, both touched by `cbbaa10`) — check whether the docs
    were updated to match the code or whether either still asserts something the code doesn't do
    (the original A61 dispatch flagged the two docs as self-contradictory; confirm that's now
    resolved to ONE truth, not just moved).
@@ -90,7 +90,7 @@ written verdict + a DISPATCH_LOG correction if warranted.
 
 ## CONTEXT (reuse verbatim)
 - The commit under audit: `git show cbbaa10` (or `git log -p cbbaa10 -- <path>` per file).
-- Spec: `docs/SESSION_WINDOW_WARMING_SPEC.md`, `docs/QUOTA_WINDOW_COORDINATOR_PHASE1.md`.
+- Spec: `docs/SESSION_WINDOW_WARMING_SPEC.md`, `docs/backend/QUOTA_WINDOW_COORDINATOR_PHASE1.md`.
 - Original finalization packet (claims to verify): `.ai/dispatch/AGENT_61_QUOTA_COORDINATOR_FINALIZATION.md`.
 - Code: `src/services/quota_window_coordinator.py` (`ClaudeStatusLineQuotaAdapter` ~L553,
   `build_default_quota_adapters` ~L1003), `scripts/claude_statusline_capture.py`,
@@ -108,7 +108,7 @@ written verdict + a DISPATCH_LOG correction if warranted.
 1. Written verdict, per gap-table row (re-derived from the tree, not copied from A61's Closure):
    confirmed-correct / confirmed-wrong-and-fixed / confirmed-wrong-and-documented-as-a-known-gap.
 2. 0-token proof independently re-traced (show the actual call path, not just cite the prior claim).
-3. `docs/SESSION_WINDOW_WARMING_SPEC.md` and `docs/QUOTA_WINDOW_COORDINATOR_PHASE1.md` agree with each
+3. `docs/SESSION_WINDOW_WARMING_SPEC.md` and `docs/backend/QUOTA_WINDOW_COORDINATOR_PHASE1.md` agree with each
    other and with the code on one thing: does `GET /api/quota-windows` exist and where.
 4. Flags-off byte-identical re-verified live (not just by reading code — actually check no DB file
    gets created with the flag off).

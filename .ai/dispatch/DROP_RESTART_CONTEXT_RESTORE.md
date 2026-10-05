@@ -76,7 +76,7 @@ semantically dense. Not built now; comment in the code keeps it discoverable.
 | File | Change |
 |---|---|
 | `config/settings.py` | + `RESTART_CONTEXT_RESTORE_ENABLED: bool = False` |
-| `docs/ENV_FEATURE_FLAGS.md` | + flag entry |
+| `docs/backend/ENV_FEATURE_FLAGS.md` | + flag entry |
 | `src/control/db.py` | + `get_session_turns_tail(session_id, limit)` |
 | `src/orchestrator.py` | + `_maybe_inject_restart_recovery_context` + call site |
 | `tests/test_restart_context_restore.py` | hermetic unit tests |
@@ -94,7 +94,7 @@ semantically dense. Not built now; comment in the code keeps it discoverable.
   constants `_RESTART_CTX_TURN_LIMIT=3`, `_RESTART_CTX_PER_TURN_CHARS=1_500`,
   `_RESTART_CTX_TOTAL_CHARS=4_000`, `_RESTART_CTX_MAX_AGE_HOURS=24`. `TODO(A50-tier2)` comment
   documents the Haiku-summariser upgrade path in place.
-- `docs/ENV_FEATURE_FLAGS.md` — flag entry added.
+- `docs/backend/ENV_FEATURE_FLAGS.md` — flag entry added.
 - `tests/test_restart_context_restore.py` — 16 hermetic tests: all passing.
 - Compact-context + driver regression suites: 74/74 clean.
 

@@ -37,7 +37,7 @@ while A71 lands the full per-node credential model).
 2. Tests (plain `pytest`, touched modules only): proactive turn to a pinned session from a
    mismatched node ⇒ 403; from the owning node ⇒ accepted; unpinned session from any node ⇒
    accepted (regression: no change for the normal flow).
-3. Docs: one line in `docs/MESH_SECURITY.md` "Limits by design" if a "bounded execution" note is
+3. Docs: one line in `docs/backend/MESH_SECURITY.md` "Limits by design" if a "bounded execution" note is
    warranted.
 
 ## Constraints / hard rules

@@ -17,7 +17,7 @@ On top of that base, the gateway can also **invoke a Manager** — a Claude sess
 bound to a durable Case that can dispatch worker sessions and authoritatively close
 the Case once done. This is invoked, not autonomous-by-default: it runs only when
 something calls `/api/manager`, and it's flag-gated (`MANAGER_ROLE_ENABLED`). See
-[`docs/ARCHITECTURE.md` §2b](ARCHITECTURE.md#2b-manager--case-surface-m2m3-flag-gated).
+[`docs/backend/ARCHITECTURE.md` §2b](backend/ARCHITECTURE.md#2b-manager--case-surface-m2m3-flag-gated).
 
 ## The shape (as it runs)
 
@@ -34,7 +34,7 @@ something calls `/api/manager`, and it's flag-gated (`MANAGER_ROLE_ENABLED`). Se
 ```
 
 A thumbnail only. For the full process / HTTP map see
-[`docs/ARCHITECTURE.md`](ARCHITECTURE.md).
+[`docs/backend/ARCHITECTURE.md`](backend/ARCHITECTURE.md).
 
 ## Where things live / where to go next
 
@@ -44,7 +44,7 @@ A thumbnail only. For the full process / HTTP map see
 | state of every dispatched job | [`.ai/dispatch/DISPATCH_LOG.md`](../.ai/dispatch/DISPATCH_LOG.md) |
 | which doc owns which info | [`.ai/DOC_MAP.md`](../.ai/DOC_MAP.md) |
 | full catalog of every doc in `docs/` | [`docs/INDEX.md`](INDEX.md) |
-| full process/HTTP architecture | [`docs/ARCHITECTURE.md`](ARCHITECTURE.md) |
+| full process/HTTP architecture | [`docs/backend/ARCHITECTURE.md`](backend/ARCHITECTURE.md) |
 | install + first run | [`docs/QUICK_START.md`](QUICK_START.md) |
 | strategic intent + anti-goals | [`.ai/context/production_vision.md`](../.ai/context/production_vision.md) |
 | the task-quality harness | [`docs/harness/dispatch_pipeline.md`](harness/dispatch_pipeline.md) |

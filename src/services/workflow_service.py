@@ -1,7 +1,7 @@
 """Transport-neutral workflow events (Cockpit M4).
 
 Implements the **reserved workflow vocabulary** declared in
-docs/CONTROL_CONTRACT.md §7 — review / handoff / approval — as the third
+docs/backend/CONTROL_CONTRACT.md §7 — review / handoff / approval — as the third
 transport-neutral inbound entry point, beside ``SessionService`` (lifecycle) and
 ``orchestrator.submit_instruction`` (dispatch).
 
