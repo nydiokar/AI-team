@@ -720,18 +720,27 @@ anchored the window, so `skip_window_open` covers the real hazard (double-anchor
 guards against — activation racing a user's session — cannot apply here: activation is a one-shot
 process in an empty temp directory with no session persistence and no shared state.
 
-### 19.4 Cross-node locking not needed (§9A)
+### 19.4 Cross-node locking (§9A) — not built; activation is per process
 
-The prewarmer is constructed only inside the gateway process (`TaskOrchestrator._build_quota_prewarmer`),
-and worker daemons never construct one. Activation is therefore a singleton by architecture rather
-than by lease. `principal_unknown` still disables activation, as §9A requires. If a second gateway
-ever runs against the same account, the DB-backed lock in §9A becomes required — that is the trigger
-to build it.
+Corrected 2026-10-06 (an earlier version of this section said worker daemons never construct a
+prewarmer; they do). A prewarmer is built in two places, each gated by `QUOTA_PREWARM_ENABLED`:
+the gateway (`TaskOrchestrator._build_quota_prewarmer`), only when its coordinator has an
+activation-capable adapter (local execution; an ingest-only controller logs
+`quota_prewarmer_skipped` instead), and a claude-capable worker daemon
+(`src/worker/agent.py` `_build_quota_prewarmer`, reconciled every supervisor cycle). Activation is
+therefore **not** a singleton by architecture: two such processes against the same account can
+each run a prewarmer, bounded only by their own per-process gates (open-window skip, min interval,
+daily budget). `principal_unknown` still disables activation, as §9A requires. The DB-backed lock
+in §9A is not built; a deployment with more than one activation-capable process per account is the
+trigger to build it.
 
 ### 19.5 `automation_ready` is not consulted (§16)
 
-It is structurally unreachable today (`active_session_state` is a local literal — A78 §1), so gating
-on it would mean gating on `False` forever. The gates that DO run are the ones with real inputs:
+Corrected 2026-10-06. `active_session_state` is no longer a local literal: the coordinator threads
+the adapter's `detect_active_user_session()` reading into each stored snapshot (A78 §1). But the
+production Claude adapter (`ClaudeGetUsageQuotaAdapter`) has no session sensor and returns `None`,
+so the state stays `unknown` and `automation_ready` remains `False` in production. Gating on it
+would mean gating on `False` forever. The gates that DO run are the ones with real inputs:
 telemetry freshness, window state, principal identity, cost delta, drift, budget, circuit.
 
 ### 19.6 Acceptance criteria (§16) — where each one stands

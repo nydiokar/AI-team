@@ -147,7 +147,9 @@ them.
 before work starts. Every other activation gate is kept and several are stronger than proposed:
 verification after every activation, permanent anchor-drift detection (drift ⇒ circuit open), a cost
 gate measured from the provider's own utilization delta, and a principal-identity gate.
-`automation_ready` is NOT consulted — it is structurally unreachable today (A78 §1).
+`automation_ready` is NOT consulted — the `active_session_state` plumbing exists (A78 §1), but the
+production `get_usage` adapter has no session sensor, so it stays `unknown` and `automation_ready` stays
+`False` in production.
 
 ---
 
