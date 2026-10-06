@@ -5,7 +5,7 @@ status: active              # ready | active | blocked | done | dead
 owner: claude-session-2026-10-02:feat/database-authority-unification
 depends_on: []
 results_ref: DISPATCH_LOG.md#A88             # -> DISPATCH_LOG.md section with the verdict prose
-evidence: docs/DATABASE_AUTHORITY.md,tests/test_database_authority.py,tests/test_database_authority_process.py,scripts/db_authority_report.py                  # artifact paths that PROVE it ran (checked to exist)
+evidence: docs/backend/DATABASE_AUTHORITY.md,tests/test_database_authority.py,tests/test_database_authority_process.py,scripts/db_authority_report.py                  # artifact paths that PROVE it ran (checked to exist)
 updated_at: "2026-10-01T22:10:17.101887+00:00"
 ```
 
@@ -93,7 +93,7 @@ The intended end state is one canonical controller-owned control-plane and runti
   /control/cases/{id}/boot-reconcile` on existing `WORKER_TOKEN` auth;
   `src/worker/controller_state_client.py` (LKG snapshot, 30 s refresh); worker `main()` installs it;
   `claude_driver` boot reconcile routes through it; `scripts/db_authority_report.py`.
-  Authority map + runbook: `docs/DATABASE_AUTHORITY.md`.
+  Authority map + runbook: `docs/backend/DATABASE_AUTHORITY.md`.
 - **R2:** worker `quota_windows.db` kept as a classified worker-local observation cache.
 - **Verification:** 21 new tests (incl. a real `server_main.py` subprocess on a separate DB root;
   mutation-checked: 4 seam tests RED without the `db.py` wiring); 340 existing tests across touched
@@ -101,7 +101,7 @@ The intended end state is one canonical controller-owned control-plane and runti
   A82 adds no worker-side `get_db()` (its worker gates are env-based).
 - **Rollout hazard:** controller must be redeployed before the worker restarts on this code
   (old task-server ⇒ 404 ⇒ env/default flags, logged at ERROR). Hence: PR opened, **merge held**
-  for the operator-approved sequence in `docs/DATABASE_AUTHORITY.md` §6.
+  for the operator-approved sequence in `docs/backend/DATABASE_AUTHORITY.md` §6.
 
 - **Pre-merge sweep (independent adversarial review + own pass), all fixed:** deploy preflight
   recreated the retired `mesh.db` (now installs the client and refuses a worker newer than its

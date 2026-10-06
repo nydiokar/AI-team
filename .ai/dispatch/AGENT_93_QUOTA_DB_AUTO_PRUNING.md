@@ -19,7 +19,7 @@ copy only starts pruning after the operator restarts the worker on merged code).
 ## Problem (measured read-only 2026-10-02)
 
 A88 classified the native worker's `state/quota_windows.db` as a **worker-local observation cache**
-(the prewarmer decides from this host's Claude status line; see `docs/DATABASE_AUTHORITY.md` §2/§4 R2).
+(the prewarmer decides from this host's Claude status line; see `docs/backend/DATABASE_AUTHORITY.md` §2/§4 R2).
 A cache must be bounded. It is not:
 
 | File | Size | `coordinator_events` | `snapshots` |
@@ -59,7 +59,7 @@ Root causes (verify in the tree before changing):
 
 - After one daily cycle on merged code, the worker store holds no snapshot older than retention and no
   event older than the chosen event window; same for the controller store.
-- Steady-state size is bounded and documented (rows/day × window) in `docs/DATABASE_AUTHORITY.md` §4 R2.
+- Steady-state size is bounded and documented (rows/day × window) in `docs/backend/DATABASE_AUTHORITY.md` §4 R2.
 - No behaviour change to quota decisions (prewarm, windows API) — prove with the existing coordinator/
   prewarmer tests plus the new ones.
 
@@ -67,7 +67,7 @@ Root causes (verify in the tree before changing):
 
 - Moving the worker cache into the controller (A88 R2 decided it stays worker-local).
 - Changing quota observation semantics or the `QUOTA_COORDINATOR_ENABLED` env-vs-registry split
-  (recorded separately in `docs/DATABASE_AUTHORITY.md` §2).
+  (recorded separately in `docs/backend/DATABASE_AUTHORITY.md` §2).
 
 ## Milestone (burndown)
 

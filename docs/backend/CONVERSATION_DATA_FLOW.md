@@ -227,14 +227,14 @@ stored across 3 sources stitched together at read time:
 3. `results/task_<id>.json` → `parsed_output` (fallback, backend-dependent schema)
 
 Read logic lives in `src/control/transcript.py` `get_transcript()`.
-API endpoint: `GET /api/sessions/:id/messages` in `src/control/control_api.py`.
+API endpoint: `GET /api/sessions/:id/messages` in `src/control/routes/sessions.py`.
 Frontend hook: `useSessionMessages()` in `web/src/hooks/useLiveData.ts`.
 Frontend rendering: `useSessionTimeline()` in `web/src/hooks/useSessionTimeline.ts`.
 
 **The task:** Add a `conversation_turns` table to `mesh.db` (SQLite, managed by
 `src/control/db.py`) and wire it as the canonical conversation store.
 
-Schema in `docs/CONVERSATION_DATA_FLOW.md §7`.
+Schema in `docs/backend/CONVERSATION_DATA_FLOW.md §7`.
 
 **Steps:**
 1. Add `conversation_turns` table to `src/control/db.py` (schema migration, safe to add if not exists).
@@ -245,13 +245,13 @@ Schema in `docs/CONVERSATION_DATA_FLOW.md §7`.
 4. Update `src/control/transcript.py` `get_transcript()` to query `conversation_turns`
    first; fall back to the file-stitching logic only when the table has no rows for
    this session (backwards compat for old sessions).
-5. Update `GET /api/sessions/:id/messages` in `control_api.py` — no signature change needed,
+5. Update `GET /api/sessions/:id/messages` in `routes/sessions.py` — no signature change needed,
    the transcript layer handles it transparently.
 6. No frontend changes needed — the API contract (`RawTranscriptTurn`) stays identical.
 
 **Do NOT break:** existing sessions that have no rows in `conversation_turns` yet —
 they must continue to work via the file fallback in `transcript.py`.
 
-Read `docs/CONVERSATION_DATA_FLOW.md` for the full picture before starting.
+Read `docs/backend/CONVERSATION_DATA_FLOW.md` for the full picture before starting.
 
 ---

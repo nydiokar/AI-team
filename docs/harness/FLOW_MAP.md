@@ -15,7 +15,7 @@
 > - Kernel spec & §11 field list: [`docs/Task_Harness_v0.4.md`](../Task_Harness_v0.4.md)
 > - Automation roadmap & milestones: [`docs/Task_Harness_v0.6_AUTOMATION.md`](../Task_Harness_v0.6_AUTOMATION.md)
 > - Loop stages & roles: [`dispatch_pipeline.md`](dispatch_pipeline.md) · [`operating_model.md`](operating_model.md)
-> - Environment flag reference: [`docs/ENV_FEATURE_FLAGS.md`](../ENV_FEATURE_FLAGS.md)
+> - Environment flag reference: [`docs/backend/ENV_FEATURE_FLAGS.md`](../backend/ENV_FEATURE_FLAGS.md)
 
 ---
 

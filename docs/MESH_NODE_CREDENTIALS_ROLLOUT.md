@@ -4,7 +4,7 @@ Operates **after PR #77 (`feat/security-per-node-credentials`, A71) is reviewed 
 into `main`. This is the hands-on runbook: exact commands, verification at every step, and
 the rollback for each step. The design rationale lives in
 `.ai/dispatch/AGENT_71_MESH_PER_NODE_CREDENTIALS.md` and the public model in
-`docs/MESH_SECURITY.md`.
+`docs/backend/MESH_SECURITY.md`.
 
 ## What you are doing
 

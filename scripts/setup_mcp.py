@@ -190,7 +190,7 @@ def main() -> None:
     if with_manager:
         print("Manager tools:      mcp__manager__dispatch_worker, mcp__manager__wait_for_worker")
         print("  ⚠️  Also set MANAGER_TOOLS_ENABLED=1 in the gateway env — the tools stay")
-        print("      inert until that flag is on (see docs/ENV_FEATURE_FLAGS.md).")
+        print("      inert until that flag is on (see docs/backend/ENV_FEATURE_FLAGS.md).")
     print()
     print("Backends load MCP automatically from their configs.")
     print("If a gateway worker was already running, restart it to pick up changes.")
