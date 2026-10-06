@@ -170,6 +170,66 @@ CACHE_HEARTBEAT_PROMPT = (
     "If you are not actually waiting on useful work, reply exactly STOP_CACHE_HEARTBEAT."
 )
 
+#: Early supervision checkpoint. Not a blind ping — a deliberate step-back that
+#: tells the Manager to assess the work it is waiting on and act if warranted.
+#: May use tools. The CONTINUE/CONCLUDE token drives the controller lifecycle.
+CACHE_HEARTBEAT_AWARENESS_PROMPT = (
+    "[supervision-checkpoint]\n"
+    "This is a periodic checkpoint on the work you are currently waiting on.\n"
+    "Step back and assess it honestly — use your tools if it helps (the latest\n"
+    "worker activity, the case and task state, the repository, the machine):\n"
+    "  - Is the work you are waiting on still genuinely in progress and on track\n"
+    "    toward the goal?\n"
+    "  - Is anything stuck, stalled, drifting from the goal, already finished, or\n"
+    "    lost?\n"
+    "  - Is the thing you are waiting for actually still coming, or are you\n"
+    "    waiting on nothing?\n"
+    "Then decide, and take action if action is warranted (nudge, re-scope, or\n"
+    "re-dispatch). End your reply with exactly one of these tokens on its own line:\n"
+    "  CONTINUE_SUPERVISION  — the work is live and worth continuing to oversee.\n"
+    "  CONCLUDE_SUPERVISION  — the work is done, abandoned, or no longer worth\n"
+    "                          waiting on (including once you have resolved it)."
+)
+
+#: Late decision checkpoint. Deliberately says NOTHING about caches, heartbeats,
+#: timeouts, or any infrastructure — the Manager reasons only about the work's
+#: stage and quality. Its CONTINUE here is the sole trigger that renews the
+#: heartbeat budget; the mapping is invisible to the Manager by design.
+CACHE_HEARTBEAT_DECISION_PROMPT = (
+    "[supervision-checkpoint]\n"
+    "This is a checkpoint on the work you are overseeing. Take stock of where it\n"
+    "stands right now — its stage, what remains, and whether it is meeting the bar\n"
+    "you set. Use your tools if you need to look.\n"
+    "Then make a deliberate call, based only on the state of the work. End your\n"
+    "reply with exactly one of these tokens on its own line:\n"
+    "  CONTINUE_SUPERVISION  — this work still needs your active oversight and you\n"
+    "                          intend to see it through.\n"
+    "  CONCLUDE_SUPERVISION  — it is complete, blocked on something you cannot\n"
+    "                          move, or should be wrapped up, escalated, or\n"
+    "                          abandoned."
+)
+
+
+def _select_cache_heartbeat_prompt(beat_number: int, max_beats: int) -> str:
+    """Pick a beat's prompt. When checkpoints are enabled, two beats become
+    deliberate supervision checkpoints — an early awareness beat and a late
+    decision beat (``max_beats - 1``) — and every other beat stays the blind
+    keep-warm ping. When disabled, every beat is the keep-warm ping (byte
+    identical to the pre-checkpoint behaviour)."""
+    from src.control.db import (
+        cache_heartbeat_awareness_beat,
+        cache_heartbeat_checkpoint_enabled,
+    )
+    if not cache_heartbeat_checkpoint_enabled():
+        return CACHE_HEARTBEAT_PROMPT
+    decision_beat = max(1, int(max_beats or 0) - 1)
+    if beat_number == decision_beat:
+        return CACHE_HEARTBEAT_DECISION_PROMPT
+    awareness_beat = cache_heartbeat_awareness_beat()
+    if awareness_beat < decision_beat and beat_number == awareness_beat:
+        return CACHE_HEARTBEAT_AWARENESS_PROMPT
+    return CACHE_HEARTBEAT_PROMPT
+
 #: [A82 Stage 4d] A managed cache-heartbeat turn is optional work with a
 #: deadline: if it has not STARTED within this many seconds of admission it is
 #: withdrawn (at the head by the scheduler, at claim by the ledger) — never a
@@ -1727,7 +1787,7 @@ class TaskOrchestrator(ITaskOrchestrator):
             try:
                 beat_number = int(hb.get("beat_count") or 0) + 1
                 wake_task_id = await self.submit_instruction(
-                    CACHE_HEARTBEAT_PROMPT,
+                    _select_cache_heartbeat_prompt(beat_number, int(hb.get("max_beats") or 0)),
                     session_id=session_id,
                     cwd=getattr(session, "repo_path", None),
                     source="cache_heartbeat",
@@ -1793,7 +1853,7 @@ class TaskOrchestrator(ITaskOrchestrator):
         ).isoformat()
         try:
             admission = await self.submit_instruction(
-                CACHE_HEARTBEAT_PROMPT,
+                _select_cache_heartbeat_prompt(beat_number, int(hb.get("max_beats") or 0)),
                 session_id=session_id,
                 cwd=getattr(session, "repo_path", None),
                 source="cache_heartbeat",
