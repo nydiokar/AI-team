@@ -1,12 +1,12 @@
 ```yaml
 job_id: AGENT_97_FAILURE_TEXT_ERROR_CLASS_FIX
 created_at: "2026-10-05T08:46:36.619883+00:00"        # CANONICAL — set once at dispatch, never derive again
-status: active              # ready | active | blocked | done | dead
+status: done              # ready | active | blocked | done | dead
 owner: cloud-burn #4 (PR #18)
 depends_on: []
 results_ref: DISPATCH_LOG.md#A97             # -> DISPATCH_LOG.md section with the verdict prose
 evidence: tests/test_failure_text_scope.py                  # artifact paths that PROVE it ran (checked to exist)
-updated_at: "2026-10-06T16:28:30.018265+00:00"
+updated_at: "2026-10-06T16:29:40.327328+00:00"
 ```
 
 # DISPATCH — A97 · `_classify_error` reads the agent's own reply as error text (misclassification fix)
@@ -108,7 +108,8 @@ structured signals (SDK `subtype`, `api_error_status`, `rate_limit_event`) stay 
   equality alone no longer counts, so print_resume's `output == raw_stdout` stream keeps its rejected
   `rate_limit_event` over the mesh; (2) when the gateway falls back to the worker's `error_detail`
   for `raw_stderr`, its `stdout_tail` (the agent's stream) is dropped (`error_detail_without_stdout`).
-  **Status set back to `active`** (governor/reviewer, round 2) until the round-3 review verifies.
+  Status was set back to `active` in round 2, then returned to `done` on head `3747921`, the state
+  submitted for round-3 review (a PASS counts only for the reviewed head, so no post-PASS commit).
 - **Evidence:** `tests/test_failure_text_scope.py` (35 tests; round 2 added 3 that fail on `d5810c3`; the original 24 — 17 fail on `main` —
   plus 8 for round 1, 7 of which fail on `570b4dc`; all pass on the branch). Targeted `pytest` of `test_claude_driver`, `test_retry_transient`,
   `test_case_quota_resume`, `test_output_truncation`, `test_quota_window_coordinator` green (2
