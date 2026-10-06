@@ -29,10 +29,7 @@ instead and leave a one-liner here.
 
 Current work:
 
-1. **A65 alert-delivery remediation** — final review found that P3 displays alerts in the Cost tab
-   but does not deliver them through the existing browser-push seam stipulated by the packet. Reuse
-   bounded `PushService` fanout at terminal task outcome; no new kill path or quota integration.
-2. **System-One decision layer (TypeSafe Jev) → Governor programme.** Spec
+1. **System-One decision layer (TypeSafe Jev) → Governor programme.** Spec
    `docs/SYSTEM_ONE_DECISION_LAYER_SPEC.md` (accepted 2026-10-05). Next: **A94** (core + replay +
    wake scorecard; Level 3; needs a read-only controller DB copy and `TYPESAFE_API_KEY` from the
    operator). Then A95 (pre-flight). A96 (bounce) is blocked on A94's measured precision. The Governor
@@ -62,7 +59,6 @@ Only jobs that are genuinely open. Everything merged/done is in git and the disp
 | **A97** | `AGENT_97_FAILURE_TEXT_ERROR_CLASS_FIX.md` | — | ready (Level 2) | Error-class keyword matching scans the agent's reply → wrong retry/pause class. Code fix. |
 | **A75** | `AGENT_75_DASHBOARD_TOKEN_NOT_IN_HTML.md` | A71 design | dispatched | Remove the control token from served dashboard HTML (`window` global); keep TokenGate working via a non-page-inspectable flow. Sequenced after A71's credential design. |
 | **A71** | `AGENT_71_MESH_PER_NODE_CREDENTIALS.md` | — | dispatched | Replace the single shared `WORKER_TOKEN` with gateway-issued per-node credentials bound to `node_id` on register/heartbeat/claim/result; refuse cross-node claims; stop spoofed incarnation-bump DoS. Flag-gated default OFF. Worker-side lands on surfaced redeploy (Horse). |
-| **A65** | `AGENT_65_COST_MONITORING_VISIBILITY.md` | — | active — final-review remediation | Add the missing bounded browser-push delivery for P3 budget alerts; UI/API and enforcement-off governor seam already landed. |
 | **A54** | `AGENT_54_M34_JOB2_RECONSTRUCTION.md` | A52 ✅ | dispatched | `get_case_brief` DB read + auto-reconcile/re-arm at role-boot. Prerequisite for crash-respawn. |
 | **A55** | `AGENT_55_M34_JOB3_CRASH_RESPAWN.md` | A54 | dispatched | Respawn a role-full Manager on a dead-session Case. Closes "survive a process restart." |
 | **A56** | `AGENT_56_M4_SPEC_AUTHORING_DECOMPOSER.md` | A52 ✅ | dispatched | M4: spec authoring + rubric-scored review + decomposer-as-task-DAG inside ONE Case. |
