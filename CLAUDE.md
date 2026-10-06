@@ -52,7 +52,8 @@ When the objective is open-ended ("continue the project", "advance the work", "d
 - **TEST COST GUARD — safety-critical.** Tests can invoke the **paid** Claude CLI and have
   previously burned millions of tokens. Run **plain `pytest`** on the touched modules only. **NEVER**
   run the full or e2e suite "to verify" (real e2e is opt-in only: `AI_TEAM_ALLOW_OPENCODE_E2E=1
-  pytest --run-e2e` — do not run it).
+  pytest --run-e2e` — do not run it). Enforced by the `.claude/hooks/pytest_guard.py` PreToolUse
+  hook; pick targets with the `running-targeted-tests` skill.
 - **Checking the running gateway.** Use `curl http://127.0.0.1:9003/health` — a read-only
   liveness/status probe that reflects the actual running gateway.
 - **Branch policy.** Docs-only work commits straight to `main`. Any `src/` / config / migration
@@ -62,13 +63,14 @@ When the objective is open-ended ("continue the project", "advance the work", "d
   merging PRs are yours, not the operator's. `--force` still stays out (§0 above), and don't carry
   another loop's unmerged edits into your merge.**
 - **Restart policy (restart the gateway freely; NEVER a worker reflexively).** Restarting the
-  **gateway** (`pm2 restart ai-team-gateway`) to make merged code live is delegated to you — the
+  **gateway** (it runs in Docker Compose: rebuild + recreate via the `deploying-the-gateway` skill —
+  `pm2 restart ai-team-gateway` is a retired PM2-era command) to make merged code live is delegated to you — the
   operator is fine with it; just do it when a deploy needs it. **Do NOT restart a worker / node-carrier
   process (e.g. the `ai-team-worker` daemon or the worker on `Horse`) on your own** — that disrupts
   live worker sessions. If a worker restart is genuinely needed, surface it to the operator as a
   decision instead of doing it silently. (Still never take a gateway/global lock to "verify", e.g.
   `python main.py status`, which kills the live gateway as a side-effect — that is distinct from a
-  clean, intentional `pm2 restart`.)
+  clean, intentional redeploy.)
 - **Minimal diff / least action.** Change only what the task requires; preserve existing structure
   and formatting; no drive-by refactors.
 - **Ground in git before you change; cross-layer honesty.** A green test on *your* layer does not

@@ -1,0 +1,18 @@
+{
+  "skill_name": "reviewing-worker-deliveries",
+  "evals": [
+    {
+      "id": 1,
+      "name": "review-a89-pr171",
+      "prompt": "The worker on A89 says it's done: PR #171, 4 targeted tests green. Review the delivery and tell me which verdict you'd record and why.",
+      "expected_output": "Evidence from git (commits/diff), acceptance items from the A89 packet mapped to evidence, record_review verdict from the enum, seams verified vs not.",
+      "files": [],
+      "assertions": [
+        "Inspects the actual commits/diff in git rather than trusting the summary",
+        "Reads the A89 packet's acceptance criteria and maps them to evidence",
+        "Proposes a verdict from accepted | rework_requested | waived",
+        "States which seams/layers were verified and which were not"
+      ]
+    }
+  ]
+}
