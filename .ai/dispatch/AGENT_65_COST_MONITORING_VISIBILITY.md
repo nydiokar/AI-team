@@ -253,17 +253,20 @@ targeted regression test. The alert remains billable-USD-only and enforcement re
 **What changed:** `NotificationService.notify_task_outcome` (the terminal-outcome seam every
 completion path shares, including the A84 managed-completion consumer) now calls
 `_maybe_push_cost_alerts()` next to the existing outcome push. It never awaits anything inline:
-with any budget knob set, push available, and no check in the last 60 s (or still running), it
-schedules a detached task that runs `check_cost_alerts` through `asyncio.to_thread` and pushes each
+with any budget knob set and push available, it schedules a detached task that waits 5 s (so the
+finishing turn's telemetry is projected), runs `check_cost_alerts` through `asyncio.to_thread`, and
+pushes each
 newly crossed alert through `PushService.fanout` (same concurrency/timeout bounds) with deep link
-`/cost`. Dedupe is per (rule, scope, UTC day) and held in process: it resets at the UTC-day
+`/cost`. At most one check runs per 60 s; a completion inside that window (or during a running
+check) arms one trailing check for the window's end instead of being dropped (review F1 on PR #16).
+Dedupe is per (rule, scope, UTC day) and held in process: it resets at the UTC-day
 rollover, and a gateway restart can repeat an already-pushed alert at most once that day (accepted;
 no table, no migration). Unset/0/negative/garbage knobs, or push unavailable, mean no check and no
 push. Only the gateway process builds `TaskOrchestrator`/`NotificationService`; the standalone task
 server (`server_main.py`) does not, so pushes are not doubled.
 
 **Verification:** `.venv/bin/python -m pytest -q tests/test_cost_alert_push.py tests/test_cost_alerts.py
-tests/test_push_notifications.py` → 52 passed. Without the source change, 8 of the 15 new tests fail.
+tests/test_push_notifications.py` → 53 passed. Without the source change, 9 of the 16 new tests fail.
 
 **Scope held:** billable-USD only, no kill or enforcement path, enforcement flag still OFF, no quota
 coordinator wiring, no pricing or UI change, no Telegram delivery.

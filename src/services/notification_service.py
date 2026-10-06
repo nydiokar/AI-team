@@ -34,8 +34,13 @@ class NotificationService:
     """
 
     # A65 P3 budget-alert push: at most one cost read-model check per this many
-    # seconds per process, however many terminal outcomes arrive.
+    # seconds per process, however many terminal outcomes arrive. A completion
+    # that lands inside the window arms ONE trailing check at its end, so the
+    # turn that crossed the budget is still checked.
     _COST_ALERT_CHECK_INTERVAL_SEC = 60.0
+    # Each check waits this long first so the finishing turn's telemetry has been
+    # projected into llm_model_requests (the task server flushes every ~1 s).
+    _COST_ALERT_SETTLE_SEC = 5.0
 
     def __init__(self, orchestrator: Any):
         self._orchestrator = orchestrator
@@ -44,6 +49,8 @@ class NotificationService:
         # today can repeat at most once per restart; accepted, documented.
         self._cost_alert_last_check = float("-inf")
         self._cost_alert_inflight = False
+        self._cost_alert_rerun = False          # a completion arrived mid-check
+        self._cost_alert_trailing_armed = False
         self._cost_alert_sent: set = set()  # {(utc_day, rule, scope)}
 
     @property
@@ -174,12 +181,14 @@ class NotificationService:
     def _maybe_push_cost_alerts(self) -> None:
         """A65 P3: schedule a detached, best-effort budget-alert Web Push.
 
-        No budget knob set, push unavailable, or a check ran in the last
-        ``_COST_ALERT_CHECK_INTERVAL_SEC`` (or is still running) → nothing
-        happens. Otherwise ``check_cost_alerts`` (SQL) runs via
-        ``asyncio.to_thread`` so it never blocks the event loop, and each
-        newly crossed alert is pushed once per (rule, scope, UTC day) through
-        the same bounded ``PushService.fanout``. Read-only: no kill path.
+        No budget knob set, or push unavailable → nothing happens. A check
+        already running, or one in the last ``_COST_ALERT_CHECK_INTERVAL_SEC``,
+        means this call arms (at most) one trailing check for the end of the
+        window instead of being dropped. A check waits
+        ``_COST_ALERT_SETTLE_SEC``, runs ``check_cost_alerts`` (SQL) via
+        ``asyncio.to_thread`` so it never blocks the event loop, and pushes
+        each newly crossed alert once per (rule, scope, UTC day) through the
+        same bounded ``PushService.fanout``. Read-only: no kill path.
         """
         import asyncio
         import time
@@ -188,12 +197,6 @@ class NotificationService:
             from src.services.cost_alerts import check_cost_alerts, read_budget_knobs
 
             if not any(v > 0 for v in read_budget_knobs().values()):
-                return
-            now_mono = time.monotonic()
-            if (
-                self._cost_alert_inflight
-                or now_mono - self._cost_alert_last_check < self._COST_ALERT_CHECK_INTERVAL_SEC
-            ):
                 return
 
             from config import config as _cfg
@@ -206,11 +209,20 @@ class NotificationService:
             if not ok:
                 return
             loop = asyncio.get_running_loop()
+            if self._cost_alert_inflight:
+                self._cost_alert_rerun = True  # re-armed when the running check ends
+                return
+            now_mono = time.monotonic()
+            wait = self._cost_alert_last_check + self._COST_ALERT_CHECK_INTERVAL_SEC - now_mono
+            if wait > 0:
+                self._arm_cost_alert_trailing(loop, wait)
+                return
             self._cost_alert_last_check = now_mono
             self._cost_alert_inflight = True
 
             async def _run() -> None:
                 try:
+                    await asyncio.sleep(self._COST_ALERT_SETTLE_SEC)
                     now = _utc_now()
                     result = await asyncio.to_thread(check_cost_alerts, db, now=now)
                     day = now.date().isoformat()
@@ -220,12 +232,22 @@ class NotificationService:
                         key = (day, alert.get("rule"), alert.get("scope"))
                         if key in self._cost_alert_sent:
                             continue
+                        # Marked before fan-out: a failed or skipped send is not
+                        # retried today (best-effort, never a spam loop).
                         self._cost_alert_sent.add(key)
                         await svc.fanout(self._cost_alert_payload(alert))
                 except Exception as e:
                     logger.debug("cost alert push failed err=%s", e)
                 finally:
                     self._cost_alert_inflight = False
+                    if self._cost_alert_rerun:
+                        self._cost_alert_rerun = False
+                        self._arm_cost_alert_trailing(
+                            loop,
+                            self._cost_alert_last_check
+                            + self._COST_ALERT_CHECK_INTERVAL_SEC
+                            - time.monotonic(),
+                        )
 
             loop.create_task(_run())
         except RuntimeError:
@@ -233,6 +255,18 @@ class NotificationService:
             logger.debug("no running loop for cost alert push")
         except Exception as e:
             logger.debug("maybe_push_cost_alerts failed err=%s", e)
+
+    def _arm_cost_alert_trailing(self, loop: Any, delay: float) -> None:
+        """Arm at most one deferred re-entry into ``_maybe_push_cost_alerts``."""
+        if self._cost_alert_trailing_armed:
+            return
+        self._cost_alert_trailing_armed = True
+
+        def _fire() -> None:
+            self._cost_alert_trailing_armed = False
+            self._maybe_push_cost_alerts()
+
+        loop.call_later(max(delay, 0.0), _fire)
 
     @staticmethod
     def _cost_alert_payload(alert: dict) -> dict:

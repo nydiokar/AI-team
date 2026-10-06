@@ -73,6 +73,8 @@ def _knob(monkeypatch, value="10"):
 async def _drain():
     me = asyncio.current_task()
     while True:
+        for _ in range(3):              # let due call_later callbacks run
+            await asyncio.sleep(0)
         pending = [t for t in asyncio.all_tasks() if t is not me and not t.done()]
         if not pending:
             return
@@ -92,6 +94,7 @@ def _outcomes(svc, n, *, between=None):
 def _svc(interval=0.0):
     svc = ns.NotificationService(orchestrator=_Orch())
     svc._COST_ALERT_CHECK_INTERVAL_SEC = interval
+    svc._COST_ALERT_SETTLE_SEC = 0.0
     return svc
 
 
@@ -218,14 +221,19 @@ def test_throttle_bounds_read_model_calls(monkeypatch, pushes, calls):
 
 
 def test_inflight_check_is_not_doubled(monkeypatch, pushes):
-    """A burst arriving while the (slow) check is still running starts no second one."""
+    """A burst arriving while the (slow) check is still running starts no
+    concurrent check — it is folded into ONE trailing check after it ends."""
     _knob(monkeypatch)
     gate = threading.Event()
     n: list = []
+    running: list = [0, 0]                       # [current, max]
 
     def _blocking(db, *, now=None):
+        running[0] += 1
+        running[1] = max(running)
         n.append(1)
         gate.wait(2)
+        running[0] -= 1
         return {"alerts": []}
 
     monkeypatch.setattr(cost_alerts, "check_cost_alerts", _blocking)
@@ -235,11 +243,54 @@ def test_inflight_check_is_not_doubled(monkeypatch, pushes):
         for i in range(5):
             await svc.notify_task_outcome(f"t{i}", _result())
             await asyncio.sleep(0.01)
+        assert len(n) == 1                       # nothing started mid-check
         gate.set()
         await _drain()
 
     asyncio.run(_go())
-    assert len(n) == 1
+    assert len(n) == 2 and running[1] == 1
+
+
+def test_crossing_on_a_throttled_completion_is_still_pushed(monkeypatch, pushes):
+    """Review F1: with the production 60 s window, turn A's check is under
+    budget, turn B (inside the window) crosses it, then no further turns. B must
+    not be dropped: one trailing check is armed for the window's end and pushes."""
+    _knob(monkeypatch)
+    seen: list = []
+
+    def _check(db, *, now=None):
+        seen.append(1)
+        return {"alerts": [] if len(seen) == 1 else [dict(ALERT)]}
+
+    monkeypatch.setattr(cost_alerts, "check_cost_alerts", _check)
+    svc = _svc(interval=60.0)
+    delays: list = []
+
+    async def _go():
+        loop = asyncio.get_running_loop()
+        real_call_later = loop.call_later
+
+        def _spy(delay, cb, *a, **k):            # record the real delay, then fire
+            delays.append(delay)                 # as if the window had elapsed
+
+            def _elapsed():
+                svc._cost_alert_last_check -= delay
+                cb(*a)
+
+            return real_call_later(0, _elapsed)
+
+        monkeypatch.setattr(loop, "call_later", _spy)
+        await svc.notify_task_outcome("A", _result())
+        await _drain()
+        assert (len(seen), len(pushes)) == (1, 0)
+        for t in ("B", "C", "D"):                # burst inside the window
+            await svc.notify_task_outcome(t, _result())
+        await _drain()
+
+    asyncio.run(_go())
+    assert len(delays) == 1 and 59.0 < delays[0] <= 60.0   # one trailing check, at window end
+    assert len(seen) == 2                        # bounded: leading + one trailing
+    assert len(pushes) == 1
 
 
 def test_real_read_model_crossing_pushes_once(monkeypatch, pushes):
