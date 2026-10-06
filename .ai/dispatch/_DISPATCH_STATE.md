@@ -4,7 +4,7 @@
 
 | status | job_id | created | updated | depends_on | proof | flags |
 |---|---|---|---|---|---|---|
-| active | AGENT_60_WARM_WORKER_IDLE_REAPER | 2026-07-30 | 2026-08-21 | — | ✓ | STALE_45d |
+| active | AGENT_60_WARM_WORKER_IDLE_REAPER | 2026-07-30 | 2026-08-21 | — | ✓ | STALE_46d |
 | active | AGENT_65_COST_MONITORING_VISIBILITY | 2026-08-03 | 2026-08-03 | — | ✓ | STALE_63d |
 | active | AGENT_82_SESSION_TURN_QUEUE | 2026-09-22 | 2026-09-27 | — | ✓ |  |
 | active | AGENT_84_WORKER_COMPLETION_OUTBOX | 2026-09-24 | 2026-10-02 | AGENT_82_SESSION_TURN_QUEUE | — |  |
@@ -80,7 +80,7 @@
 | done | AGENT_67_MESH_SECURITY_REVIEW_THREAT_MODEL | 2026-08-03 | 2026-08-05 | — | ✓ |  |
 | done | AGENT_69_DISPATCH_STATE_HARDENING | 2026-08-04 | 2026-08-04 | — | ✓ |  |
 | done | AGENT_70 | 2026-08-04 | 2026-08-04 | — | ✓ |  |
-| done | AGENT_76_SKILLS_LIBRARY_O1 | 2026-08-08 | 2026-08-08 | — | ✓ |  |
+| done | AGENT_76_SKILLS_LIBRARY_O1 | 2026-08-08 | 2026-08-08 | — | ✗MISSING | CLAIMED_DONE_NO_PROOF |
 | done | AGENT_77_REPO_READABILITY_INDEX_O4 | 2026-08-08 | 2026-08-08 | — | ✓ |  |
 | done | AGENT_79_PWA_LIVE_REFRESH_UX | 2026-08-24 | 2026-08-24 | — | ✓ |  |
 | done | AGENT_80_SESSION_CACHE_HEARTBEAT | 2026-08-26 | 2026-08-29 | — | ✓ |  |

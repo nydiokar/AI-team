@@ -72,7 +72,7 @@ others are kept as trace, not duplicated history.
 | [`PERSISTENT_MANAGER_LOOP_ANALYSIS.md`](PERSISTENT_MANAGER_LOOP_ANALYSIS.md) | 🟡 | Opening analysis for M3.4. §0–§4 still valid; §5–§7 superseded by the continuation design above (see its banner). |
 | [`SPEC_COMPLETION_PLAN.md`](SPEC_COMPLETION_PLAN.md) | 🟡 | Ordered v0.7 backlog as of 2026-07-30. Forward priorities now live in `.ai/CONTEXT.md` — use this only for the dependency reasoning. |
 | [`MANAGER_CONTEXT_CONTINUITY_SPEC.md`](MANAGER_CONTEXT_CONTINUITY_SPEC.md) | 🔵 | Proposed context-pressure rollover for long-running Managers (generalizes crash-respawn). Not built; flag-gated, default OFF. |
-| [`SKILLS_LIBRARY_O1.md`](SKILLS_LIBRARY_O1.md) | 🟢 | O1 skills library — attach professional attitudes to dispatches by reference. Built (A76, PR #86) behind `SKILLS_LIBRARY_ENABLED`, default OFF. |
+| [`SKILLS_LIBRARY_O1.md`](SKILLS_LIBRARY_O1.md) | 🟡 | **Superseded 2026-10-06** by native project skills in `.claude/skills/`. A76's `skills/` text-expansion slice and `SKILLS_LIBRARY_ENABLED` are removed. |
 | [`SYSTEM_ONE_DECISION_LAYER_SPEC.md`](SYSTEM_ONE_DECISION_LAYER_SPEC.md) | 🔵 | System-One (TypeSafe Jev) calibrated decision layer — accepted 2026-10-05; build dispatched as A94 → A95 → A96. |
 | [`PEER_MESSAGING_INVESTIGATION.md`](PEER_MESSAGING_INVESTIGATION.md) | 🔵 | A68 design recommendation for a durable, authority-free agent-to-agent message primitive. No implementation. |
 | [`PRIOR_ART_MAX_REUSE.md`](PRIOR_ART_MAX_REUSE.md) | 🔵 | Advisory salvage map — ideas mined from the retired MAX orchestrator for harness M3/M4. Not a build surface itself. |

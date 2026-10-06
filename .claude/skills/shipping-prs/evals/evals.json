@@ -1,0 +1,19 @@
+{
+  "skill_name": "shipping-prs",
+  "evals": [
+    {
+      "id": 1,
+      "name": "ship-skill-branch",
+      "prompt": "work's done on this branch, ship it",
+      "expected_output": "Scoped staging, conventional commit, PR with verification + not-verified, CI, merge with --merge --delete-branch, post-merge hand-off.",
+      "files": [],
+      "assertions": [
+        "Stages explicit paths (no git add -A / .)",
+        "Opens a PR with verification evidence",
+        "Merges it (does not leave it open for sign-off)",
+        "Never uses --force",
+        "States post-merge deploy/worker needs"
+      ]
+    }
+  ]
+}
