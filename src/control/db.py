@@ -310,6 +310,12 @@ RUNTIME_FLAG_DEFINITIONS: Dict[str, Dict[str, str]] = {
         "registry_writable": "1",
         "description": "Send paid session-cache heartbeat turns for eligible observed controllers. Default OFF; switch ON to move from observe-only to acting.",
     },
+    "CACHE_HEARTBEAT_CHECKPOINT_ENABLED": {
+        "default": "1",
+        "effect_scope": "live",
+        "registry_writable": "1",
+        "description": "Turn two of the heartbeat beats into deliberate supervision checkpoints instead of blind keep-warm pings: an early assessment beat (is the awaited work still real and on track?) and a late decision beat (continue supervising or conclude). The late beat's CONTINUE is the ONLY way the heartbeat budget renews — there is no automatic renewal. Default ON.",
+    },
     "MANAGER_ADVANCEMENT_GATE": {
         "default": "0",
         "effect_scope": "live",
@@ -681,11 +687,41 @@ def cache_heartbeat_interval_sec() -> int:
 
 
 def cache_heartbeat_max_beats_default() -> int:
-    return _env_int("CACHE_HEARTBEAT_MAX_BEATS_DEFAULT", 6, 1)
+    """Beat budget for ONE backend turn-timeout window.
+
+    Semantically anchored to the guaranteed wake: the worker/turn timeout
+    (``SDK_TURN_TIMEOUT_SEC``, default 36000s = 10h) is the moment the Manager
+    is woken regardless, so the cache must stay warm right up to it — and never
+    past it. The budget is therefore ``ceil(timeout / interval)`` (≈14 at the
+    defaults), floored at 6 so a misconfigured tiny timeout can't drop below the
+    historical budget. An explicit ``CACHE_HEARTBEAT_MAX_BEATS_DEFAULT`` still
+    wins for operators who want a flat number.
+    """
+    explicit = os.environ.get("CACHE_HEARTBEAT_MAX_BEATS_DEFAULT")
+    if explicit:
+        try:
+            return max(1, int(explicit))
+        except (TypeError, ValueError):
+            pass
+    interval = cache_heartbeat_interval_sec()
+    timeout = _env_int("SDK_TURN_TIMEOUT_SEC", 36000, 60)
+    derived = -(-timeout // max(1, interval))  # ceil(timeout / interval)
+    return max(6, derived)
 
 
 def cache_heartbeat_hard_max_beats() -> int:
     return _env_int("CACHE_HEARTBEAT_MAX_BEATS_HARD", 15, 1)
+
+
+def cache_heartbeat_checkpoint_enabled() -> bool:
+    """Whether the two supervision checkpoints replace the dumb keep-warm beats."""
+    return runtime_flag_enabled("CACHE_HEARTBEAT_CHECKPOINT_ENABLED")
+
+
+def cache_heartbeat_awareness_beat() -> int:
+    """Which beat (since the controller was armed) is the early awareness
+    checkpoint. Default 6 ≈ 4.5h of unbroken silence at the 45-min interval."""
+    return _env_int("CACHE_HEARTBEAT_AWARENESS_BEAT", 6, 1)
 
 
 def cache_heartbeat_min_cache_tokens() -> int:
@@ -10082,12 +10118,15 @@ class MeshDB:
         now = _now()
         read_tokens = max(0, int(cache_read_tokens or 0))
         creation_tokens = max(0, int(cache_creation_tokens or 0))
+        out_s = str(output or "")
         beat_count = int(row.get("beat_count") or 0) + 1
         status = str(row.get("status") or "active")
         circuit: Optional[str] = None
-        if "STOP_CACHE_HEARTBEAT" in str(output or ""):
+        max_cap = min(int(row.get("max_beats") or 0), int(row.get("hard_max_beats") or 0))
+        renew_expires: Optional[str] = None
+        if "STOP_CACHE_HEARTBEAT" in out_s or "CONCLUDE_SUPERVISION" in out_s:
             status = "stopped"
-            circuit = "agent_requested_stop"
+            circuit = "agent_concluded" if "CONCLUDE_SUPERVISION" in out_s else "agent_requested_stop"
         elif error_class in ("usage_limit", "rate_limit", "upstream_error"):
             status = "stopped"
             circuit = f"heartbeat_{error_class}"
@@ -10097,7 +10136,23 @@ class MeshDB:
         elif creation_tokens >= cache_heartbeat_min_cache_tokens() and read_tokens < creation_tokens:
             status = "circuit_open"
             circuit = "cache_miss_rewrite"
-        elif beat_count >= min(int(row.get("max_beats") or 0), int(row.get("hard_max_beats") or 0)):
+        elif (
+            "CONTINUE_SUPERVISION" in out_s
+            and cache_heartbeat_checkpoint_enabled()
+            and beat_count >= max(1, max_cap - 1)
+        ):
+            # Deliberate renewal — the ONLY path that extends the budget. At the
+            # decision checkpoint the Manager chose to keep supervising the work,
+            # so reset the idle-beat budget and push the controller expiry out by
+            # another full window. There is NO automatic renewal on real turns.
+            beat_count = 0
+            ttl = cache_heartbeat_ttl_sec()
+            interval_sec = int(row.get("interval_sec") or cache_heartbeat_interval_sec())
+            renew_expires = (
+                datetime.now(timezone.utc)
+                + timedelta(seconds=(interval_sec * max(1, max_cap)) + ttl)
+            ).isoformat()
+        elif beat_count >= max_cap:
             status = "stopped"
             circuit = "max_beats_reached"
         next_due = self._cache_heartbeat_next_due(now, int(row.get("interval_sec") or 2700))
@@ -10109,15 +10164,30 @@ class MeshDB:
             SET beat_count = ?, last_beat_task_id = ?,
                 last_cache_touch_at = CASE WHEN ? > 0 THEN ? ELSE last_cache_touch_at END,
                 last_cache_read_tokens = ?, last_cache_creation_tokens = ?,
-                next_due_at = ?, status = ?, circuit_reason = COALESCE(?, circuit_reason),
+                next_due_at = ?, status = ?,
+                circuit_reason = CASE WHEN ? THEN NULL ELSE COALESCE(?, circuit_reason) END,
+                expires_at = COALESCE(?, expires_at),
                 updated_at = ?
             WHERE id = ?
             """,
             (
                 beat_count, task_id, read_tokens, now, read_tokens, creation_tokens,
-                next_due, status, circuit, now, heartbeat_id,
+                next_due, status,
+                1 if renew_expires else 0, circuit,
+                renew_expires, now, heartbeat_id,
             ),
         )
+        if renew_expires is not None:
+            # Keep active owners alive across the renewed window so the expiry
+            # sweep (``expire_cache_heartbeat_state``) does not stop the controller.
+            conn.execute(
+                """
+                UPDATE session_cache_heartbeat_owners
+                SET expires_at = ?, updated_at = ?
+                WHERE heartbeat_id = ? AND status = 'active'
+                """,
+                (renew_expires, now, heartbeat_id),
+            )
         if status not in ("active", "observe_only"):
             conn.execute(
                 """
