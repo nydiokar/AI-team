@@ -1,12 +1,12 @@
 ```yaml
 job_id: AGENT_97_FAILURE_TEXT_ERROR_CLASS_FIX
 created_at: "2026-10-05T08:46:36.619883+00:00"        # CANONICAL — set once at dispatch, never derive again
-status: ready              # ready | active | blocked | done | dead
-owner: ""
+status: done              # ready | active | blocked | done | dead
+owner: cloud-burn #4 (PR #18)
 depends_on: []
 results_ref: DISPATCH_LOG.md#A97             # -> DISPATCH_LOG.md section with the verdict prose
-evidence: []                  # artifact paths that PROVE it ran (checked to exist)
-updated_at: "2026-10-05T08:46:50.314095+00:00"
+evidence: tests/test_failure_text_scope.py                  # artifact paths that PROVE it ran (checked to exist)
+updated_at: "2026-10-06T12:34:20.442987+00:00"
 ```
 
 # DISPATCH — A97 · `_classify_error` reads the agent's own reply as error text (misclassification fix)
@@ -66,10 +66,35 @@ structured signals (SDK `subtype`, `api_error_status`, `rate_limit_event`) stay 
 
 ---
 ## Milestone (burndown)
-- [ ] Failing test reproduces misclassification
-- [ ] Scoped failure text + tightened status patterns
-- [ ] Shared marker tuple; drift removed
-- [ ] `_run_backend_local` error_class finding recorded
-- [ ] Targeted tests green; PR merged
+- [x] Failing test reproduces misclassification
+- [x] Scoped failure text + tightened status patterns
+- [x] Shared marker tuple; drift removed
+- [x] `_run_backend_local` error_class finding recorded
+- [x] Targeted tests green; PR opened (#18 — merge is the operator's/governor's during the burn-down)
 
 ## Closure (fill on completion)
+**2026-10-06 — done on `feat/failure-text-scope`, PR Yuird/AI-team#18 (issue #4; not self-merged per
+`.claude/rules/cloud-burn.md`).**
+- **TASK 1/2:** `_failure_text` (and `result_text.failure_text`) read only error-bearing fields —
+  `errors`, `raw_stderr`, error events in `raw_stdout` (is_error result, REJECTED rate_limit_event,
+  `error` events / CLI-synthesised API-error messages), a terminal-error `parsed_output` (never its
+  `assistant_text`). The reply is read only when nothing error-bearing exists (fallback = today's
+  reading). Bare `503`/`504` → standalone-token regex `UPSTREAM_STATUS_RE`.
+- **TASK 3:** one marker vocabulary, `src/core/failure_markers.py`, imported by the driver,
+  `_classify_error`, `_short_failure_reason`, `result_text.short_failure_reason`; drifted copies gone.
+- **TASK 4 finding:** confirmed — BOTH `TaskResult` builders (`_run_backend_local` and the main
+  in-process path) dropped `raw.error_class`, and `_classify_error` overwrote it anyway. Fixed: the
+  field is copied, and `_classify_error` prefers backend classes in `PREFERRED_BACKEND_ERROR_CLASSES`
+  (`max_turns`, `upstream_error`, `sdk_stream_closed`, `context_overflow`, `rate_limit`; `usage_limit`
+  via `_usage_limit_class`). NOT preferred (still re-derived from text): `session_lost`,
+  `cache_unhealthy`, `permission_block`, `transient`, `managed_conflict`, `recovery_required` and the
+  OpenCode classes — they have no retry-policy entry, so honouring them would route them to the
+  default (2 retries): a retry-policy decision, out of scope. Follow-up only if the owner wants it.
+- **Class changes for common cases** (RESERVED DECISIONS): listed in full in PR #18 §3 — chiefly
+  reply prose no longer yields usage_limit/rate_limit/timeout/network; allowed_warning
+  rate_limit_events no longer usage_limit; remote 5xx now `upstream_error` via the worker's class;
+  `sdk_stream_closed` now gets its own 0-retry policy.
+- **Evidence:** `tests/test_failure_text_scope.py` (24 tests; 17 fail on `main`, all pass on the
+  branch). Targeted `pytest` of `test_claude_driver`, `test_retry_transient`,
+  `test_case_quota_resume`, `test_output_truncation`, `test_quota_window_coordinator` green (2
+  `test_case_quota_resume` cases fail identically on `main`: container tzdata lacks `Europe/Kiev`).

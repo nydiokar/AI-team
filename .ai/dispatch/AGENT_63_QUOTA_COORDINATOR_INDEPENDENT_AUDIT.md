@@ -152,3 +152,11 @@ explicitly out per A61 too). Building anything not already claimed by A61's scop
 
 ## Closure (fill on completion)
 (fill when executed)
+
+**Residual note (2026-10-06, cloud-burn issue #4 / PR Yuird/AI-team#18 — status left to the owner, #3):**
+the surviving test residual — no test covered the orchestrator's refusal-ingest
+`_usage_limit_class` → `record_refusal_snapshot` path — is closed by
+`tests/test_failure_text_scope.py` (`test_sdk_429_with_rate_limit_event_records_refusal_snapshot`,
+`test_sdk_rejected_event_without_429_is_usage_limit`, `test_telemetry_store_failure_never_changes_the_class`).
+The doc residual (spec §19.4/§19.5 stale lines) is corrected in the same PR. Other audit targets were
+removed by upstream `5d0b52e` (nydiokar/AI-team#95) and `5c92ce3` (A78), per the 2026-10-06 triage.
