@@ -21,7 +21,10 @@ state/
 *.so
 
 # Distribution / packaging
-.claude/
+.claude/*
+!.claude/skills/
+!.claude/hooks/
+!.claude/settings.json
 .Python
 build/
 develop-eggs/

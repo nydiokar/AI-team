@@ -243,7 +243,9 @@ every flag OFF the system is byte-identical to today.
   "no-false-success", "reuse-before-build") the Manager attaches to a dispatch by reference,
   rather than re-authoring attitude prose each time? This is a quality/optimization lever that
   likely sits **alongside M4** (spec/decomposition layer). *Decision deferred; flagged as
-  potentially pivotal.*
+  potentially pivotal.* **Resolved (2026-10-06):** procedures ship as native Claude Code skills in
+  `.claude/skills/<name>/SKILL.md`, loaded by role sessions via `setting_sources=["user","project"]`;
+  the A76 text-expansion slice (`skills/`, `SKILLS_LIBRARY_ENABLED`) is retired.
 - **O2 · Manager dedicated memory.** No persistent manager memory today (see §4). Rely on
   agent memory + docs + substrate to start; revisit if a long line of work needs continuity.
 - **O3 · Session-per-task token economics.** Measure new-session vs reuse-session cost before

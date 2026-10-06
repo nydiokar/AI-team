@@ -1,0 +1,30 @@
+{
+  "skill_name": "running-targeted-tests",
+  "evals": [
+    {
+      "id": 1,
+      "name": "turn-queue-admission-change",
+      "prompt": "i tweaked the admission logic in src/control/turn_queue.py — what tests should I run to make sure I didn't break anything? give me the exact command",
+      "expected_output": "Targeted pytest over turn_queue tests, direct matches first; never bare/full suite or e2e.",
+      "files": [],
+      "assertions": [
+        "Never proposes bare `pytest`, `pytest tests/`, or the full suite",
+        "Never proposes --run-e2e or AI_TEAM_ALLOW_OPENCODE_E2E",
+        "Includes tests/test_turn_queue_admission.py",
+        "Covers more than the exact-name match (e.g. other test_turn_queue_* files or importers)",
+        "Command does not add a redundant -q"
+      ]
+    },
+    {
+      "id": 2,
+      "name": "verify-before-pr",
+      "prompt": "ok the fix to scripts/mcp_manager.py is done, verify it before I open the PR",
+      "expected_output": "Selects mcp_manager tests and reports exact command + result line.",
+      "files": [],
+      "assertions": [
+        "Runs targeted tests including tests/test_mcp_manager.py",
+        "Reports the exact command and the pass/fail summary line"
+      ]
+    }
+  ]
+}

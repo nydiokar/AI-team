@@ -1,0 +1,17 @@
+{
+  "skill_name": "checking-live-state",
+  "evals": [
+    {
+      "id": 1,
+      "name": "is-flag-live",
+      "prompt": "is HARNESS_FLOW_DRIVE actually on in prod right now, and is the code from yesterday's merges running?",
+      "expected_output": "ops_flag.sh get for the flag; image build time / prod tag vs main for code.",
+      "files": [],
+      "assertions": [
+        "Uses /api/flags (ops_flag.sh get), not /proc or .env",
+        "Compares the running image to main to decide what is live",
+        "Does not restart anything"
+      ]
+    }
+  ]
+}
