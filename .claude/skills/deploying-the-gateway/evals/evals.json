@@ -1,0 +1,32 @@
+{
+  "skill_name": "deploying-the-gateway",
+  "evals": [
+    {
+      "id": 1,
+      "name": "deploy-merged-heartbeat",
+      "prompt": "PR #191 (heartbeat checkpoints) got merged this morning. make it live on the gateway pls and tell me how you'd know it's actually live",
+      "expected_output": "Docker Compose rebuild path with preflight, rollback tag, recreate both services, verification beyond /health, prod tag; no PM2 gateway restart, no worker restart.",
+      "files": [],
+      "assertions": [
+        "Plans `docker compose build` + `up` (rebuild/recreate), not `pm2 restart ai-team-gateway`",
+        "Runs or plans the deploy preflight / checks main is clean and current before building",
+        "Tags a rollback image (ai-team:pre-<sha>) before building",
+        "Recreates both gateway and task-server",
+        "Verification goes beyond /health (logs, schema/flags, or exercising the change)",
+        "Does not restart the PM2 ai-team-worker"
+      ]
+    },
+    {
+      "id": 2,
+      "name": "deploy-with-migration",
+      "prompt": "PR #185 adds migration 43 — once it's merged what exactly do I need to do differently when deploying it vs a normal deploy?",
+      "expected_output": "Mandatory online SQLite backup before recreate; rollback of data is an operator decision.",
+      "files": [],
+      "assertions": [
+        "Requires a DB backup before deploying because migrations apply on startup",
+        "Uses sqlite3 .backup (online-safe) rather than cp of the live DB/WAL",
+        "States DB restore/rollback is an operator decision"
+      ]
+    }
+  ]
+}

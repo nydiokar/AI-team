@@ -1,0 +1,18 @@
+{
+  "skill_name": "orienting-on-project-state",
+  "evals": [
+    {
+      "id": 1,
+      "name": "continue-the-work",
+      "prompt": "continue the work",
+      "expected_output": "Snapshot, reconcile docs vs git/live, pick the highest unblocked item or escalate options.",
+      "files": [],
+      "assertions": [
+        "Grounds in CONTEXT priorities + dispatch audit + git",
+        "Names at least one doc-vs-reality mismatch with evidence",
+        "Respects the Level 3 operator gate",
+        "Ends with a concrete pick or 2-3 options with a recommendation"
+      ]
+    }
+  ]
+}

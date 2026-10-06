@@ -251,8 +251,8 @@ it with a recommendation and wait.
 **Absolute safety floor (holds even if project context fails to load):** never run paid/e2e test
 suites or any command that could take a gateway/global lock to "verify" (e.g. `python main.py
 status`, which kills the live gateway). You DO own closure and deploy: commit, push, open the PR,
-merge it to `main`, and restart the **gateway** (`pm2 restart ai-team-gateway`) to make merged code
-live — these are delegated to you, do not wait for operator sign-off. The one restart that is NOT
+merge it to `main`, and redeploy the **gateway** (Docker Compose rebuild — the `deploying-the-gateway`
+skill; there is no PM2 gateway any more) to make merged code live — these are delegated to you, do not wait for operator sign-off. The one restart that is NOT
 yours: never restart a **worker / node-carrier** process (the `ai-team-worker` daemon or the worker
 on `worker-node`) reflexively — it disrupts live worker sessions; surface that to the operator instead. If
 you cannot see a project `CLAUDE.md`, stop and surface it before running anything paid or destructive.

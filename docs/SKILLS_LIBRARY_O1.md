@@ -1,5 +1,10 @@
 # Skills library (O1) — attach professional attitudes by reference
 
+> **SUPERSEDED (2026-10-06).** Retired with `skills/`, the `dispatch_worker(skills=…)` param and
+> `SKILLS_LIBRARY_ENABLED`. Project procedures now ship as native Claude Code skills in
+> `.claude/skills/<name>/SKILL.md` — progressive disclosure and worker-side resolution (this note's
+> mechanism B) come from the SDK itself. Kept for history only.
+
 **Status:** design + minimal flag-gated slice (this PR). Flag `SKILLS_LIBRARY_ENABLED`
 default **OFF** — activation is a Manager/operator decision, not shipped live here.
 **Answers:** `docs/M3_MANAGER_INVOCATION_SPEC.md` §7 open question **O1**.

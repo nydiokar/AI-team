@@ -23,7 +23,8 @@ MANAGER_TOOL_PROFILE: str = "manager_v1"
 
 # Skill boundaries recorded for later (§Layer 2). M3.1 builds NO generic skill
 # loader — the first loop's procedure is inlined in the role prompt. These names
-# reserve the future `docs/harness/skills/<skill>/SKILL.md` packages.
+# are role metadata only; executable procedures live as native project skills in
+# `.claude/skills/<skill>/SKILL.md` (loaded by role sessions via setting_sources).
 MANAGER_SKILLS: List[str] = [
     "ground-and-frame",
     "open-or-decompose-case",
@@ -62,8 +63,8 @@ WORKER_TOOL_PROFILE: str = "worker_v1"
 
 # A Worker declares NO harness skills yet — its one-task procedure is inlined in
 # the role prompt (worker.md), exactly like the Manager's first loop. This list
-# is intentionally EMPTY rather than aspirational: no `docs/harness/skills/*`
-# package exists for a worker, so none is claimed here.
+# is intentionally EMPTY rather than aspirational; shared procedures reach workers as
+# native project skills in `.claude/skills/`, not through this list.
 WORKER_SKILLS: List[str] = []
 
 # worker.md mirrors manager.md: the concrete task arrives per-dispatch as the

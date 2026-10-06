@@ -173,7 +173,7 @@ Maximum is 60.
 | Cheap-first model/backend escalation ladder | 44 | Too complex; conflicts with the model-selection contract. Kept only as advice text in the scorecard. |
 | Session hygiene (fresh session vs reuse) | 47 | Valid, but secondary to the Governor programme; revisit via the knee analysis. |
 | Telegram intent routing, approval risk scoring, tool-call permission gates | ≤ 39 | Low leverage, or weak against adversarial content (community evidence, §3.3) |
-| Skill suggestion | 31 | `skills/` holds 3 skills; the measured cookbook gain needs a large roster. |
+| Skill suggestion | 31 | `.claude/skills/` holds 7 project skills; the measured cookbook gain needs a large roster. |
 | Best-of-N worker tournament | 34 | N× worker cost; Jev can't judge code correctness. |
 | Session compaction by Jev | 27 | The harness does not own backend context; community results negative or unproven. |
 | Reset-time / date extraction | 24 | Date comparison is a documented Jev weak spot; the provider supplies `resetsAt`. |
