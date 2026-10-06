@@ -108,7 +108,7 @@ know before touching it:
   adjacency (e.g. a session is only "in" a case if `flow_links` says so, not
   because it happened to run a task the case also touched).
 - **The substrate only populates when the gateway runs with
-  `HARNESS_FLOW_DRIVE` on** (see `docs/ENV_FEATURE_FLAGS.md`). With it off,
+  `HARNESS_FLOW_DRIVE` on** (see `docs/backend/ENV_FEATURE_FLAGS.md`). With it off,
   these endpoints return empty lists — which the UI must render as "no work
   tracked yet", not an error state.
 
@@ -140,7 +140,7 @@ not to silently coerce or omit it.
 - [`OVERVIEW.md`](OVERVIEW.md) — layer names, directory map, state-kind summary.
 - [`SCREENS_AND_COMPONENTS.md`](SCREENS_AND_COMPONENTS.md) — which screen uses
   which hooks.
-- [`docs/CONTROL_CONTRACT.md`](../CONTROL_CONTRACT.md) — backend-side contract
+- [`docs/backend/CONTROL_CONTRACT.md`](../backend/CONTROL_CONTRACT.md) — backend-side contract
   (event envelope, entry points, read model) this layer binds to.
 - [`docs/SESSION_STATE_TIMELINE_ARCHITECTURE_REVIEW.md`](../SESSION_STATE_TIMELINE_ARCHITECTURE_REVIEW.md) —
   why the durable timeline / diagnostic-vs-durable split exists.

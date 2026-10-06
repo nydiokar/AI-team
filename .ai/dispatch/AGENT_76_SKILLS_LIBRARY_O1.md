@@ -111,7 +111,7 @@ worker node, which is not true today. Token math + the A-vs-B table + the remote
   rejected early, resolution fails **before** any dispatch.
 - Flag OFF ⇒ the `skills` param is ignored and the `POST /api/instructions` payload is
   **byte-identical** to today — proven by `test_dispatch_worker_flag_off_is_byte_identical`.
-- `docs/SKILLS_LIBRARY_O1.md` (design + token math) and `docs/ENV_FEATURE_FLAGS.md` (flag registered).
+- `docs/SKILLS_LIBRARY_O1.md` (design + token math) and `docs/backend/ENV_FEATURE_FLAGS.md` (flag registered).
 
 ## Closure
 

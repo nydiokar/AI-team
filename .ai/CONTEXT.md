@@ -1,6 +1,6 @@
 # AI-Team Gateway — Hot Context
 
-**Last Updated:** 2026-08-10
+**Last Updated:** 2026-10-05
 **Branch policy:** `main` for docs-only; `feat/<slug>` + PR + self-merge for any `src/` or config
 change. Restart the **gateway** freely when deploying merged code. Never restart a worker/node-carrier
 without surfacing it to the operator first.
@@ -32,6 +32,13 @@ Current work:
 1. **A65 alert-delivery remediation** — final review found that P3 displays alerts in the Cost tab
    but does not deliver them through the existing browser-push seam stipulated by the packet. Reuse
    bounded `PushService` fanout at terminal task outcome; no new kill path or quota integration.
+2. **System-One decision layer (TypeSafe Jev) → Governor programme.** Spec
+   `docs/SYSTEM_ONE_DECISION_LAYER_SPEC.md` (accepted 2026-10-05). Next: **A94** (core + replay +
+   wake scorecard; Level 3; needs a read-only controller DB copy and `TYPESAFE_API_KEY` from the
+   operator). Then A95 (pre-flight). A96 (bounce) is blocked on A94's measured precision. The Governor
+   programme design (`.ai/context/GOVERNOR_OUTER_LOOP_V1.md` + `BOOTSTRAP_GOVERNOR_PROGRAMME_JOBS.md`,
+   bootstrap not yet run) now carries the S1 slots (§37) and three design conflicts (DC-1..3) awaiting
+   an owner ruling.
 
 
 > **Finding active jobs:** until the dispatch-state-kit is installed, read
@@ -46,6 +53,10 @@ Only jobs that are genuinely open. Everything merged/done is in git and the disp
 
 | Job | Packet | Depends on | Status | What it is |
 |---|---|---|---|---|
+| **A94** | `AGENT_94_SYSTEM_ONE_CORE_DELIVERY_SCORECARD.md` | — | ready (Level 3) | S1 core + decision log + replay baseline + advisory wake scorecard. Operator inputs: read-only controller DB copy, `TYPESAFE_API_KEY`. |
+| **A95** | `AGENT_95_SYSTEM_ONE_DISPATCH_PREFLIGHT.md` | A94 | ready after A94 (Level 3) | Soft pre-flight on `dispatch_worker` (Manager can override). |
+| **A96** | `AGENT_96_SYSTEM_ONE_DELIVERY_BOUNCE.md` | A94 + measured precision | blocked | Bounce a clearly-not-ready delivery instead of waking the Manager. |
+| **A97** | `AGENT_97_FAILURE_TEXT_ERROR_CLASS_FIX.md` | — | ready (Level 2) | Error-class keyword matching scans the agent's reply → wrong retry/pause class. Code fix. |
 | **A82** | `AGENT_82_SESSION_TURN_QUEUE.md` | — | active — **R0 merged + deployed 2026-10-02** (PR #182, flags OFF, nothing enrolled); Stage 8 next | Unified durable turn queue now on `main`. **Stage 8 prerequisites (open):** (1) **A84-scope completion consumer** — managed completions skip notify/telemetry/enrichment/session summary (final-review F1; Telegram users would never get the reply) — must land before ANY session is enrolled; (2) R1 operator-gated worker restarts on this host + Horse with `WORKER_MANAGED_TURNS=1`, psutil installed (`.venv/bin/pip install -c constraints.txt -e .`), `MESH_LOCAL_CARRIER_NODE_ID` set in the controller env (not in `compose.yaml`); (3) Stage 8a: born-managed sessions, migration enrolling existing sessions + protocol-0 drain predicate, OpenCode CLI retired (operator decision 2026-10-02), unenroll fixes (F2 hold/pause, F3 retry-pause/producer links), Telegram stop off-loop (F4), task-server enrollment cache TTL (F5), Codex close/forget N-A, refused-invoke close row N-B; (4) 8b: delete legacy session execution. **Rules:** never roll back to pre-A82 main while protocol-1 rows exist (main's `get_pending_tasks` has no protocol filter → double execution); rollback image `ai-team:pre-a82`, DB backup `~/ai-team-data/backups/mesh-pre-a82-20261002.db`. **Deferrals (s)–(v)** and all stage carries: packet §15/§16. Plan: packet + Stage 8 plan in session notes. |
 | **A75** | `AGENT_75_DASHBOARD_TOKEN_NOT_IN_HTML.md` | A71 design | dispatched | Remove the control token from served dashboard HTML (`window` global); keep TokenGate working via a non-page-inspectable flow. Sequenced after A71's credential design. |
 | **A71** | `AGENT_71_MESH_PER_NODE_CREDENTIALS.md` | — | dispatched | Replace the single shared `WORKER_TOKEN` with gateway-issued per-node credentials bound to `node_id` on register/heartbeat/claim/result; refuse cross-node claims; stop spoofed incarnation-bump DoS. Flag-gated default OFF. Worker-side lands on surfaced redeploy (Horse). |
@@ -69,6 +80,26 @@ Only jobs that are genuinely open. Everything merged/done is in git and the disp
 
 ## Recent shift notes
 
+**2026-10-05 — System-One (TypeSafe Jev) decision layer specified and dispatched; tied into the Governor programme.**
+Owner decision after a 3-round analysis (30+ candidates scored on impact / fit / ground truth /
+doability / safety / non-Jev-alternative). The full reasoning record is in
+`docs/SYSTEM_ONE_DECISION_LAYER_SPEC.md` §2.
+- **Bet:** one thin S1 core (httpx client, pure "batteries", one `system_one_decisions` table,
+  fail-open, pinned `jev-1.13.0`) on the two existing choke points: `_render_wake_turn` (both wake
+  producers) and `dispatch_worker`.
+- **Moves:** A94 scorecard in the wake (advisory, A/B by case hash), then A95 soft pre-flight, then A96
+  bounce (blocked until replay precision ≥ 0.90 on ≥ 100 Manager verdicts).
+- **Baseline first:** a replay over a read-only DB copy measures AUROC against historical `review.*`
+  verdicts before anything ships.
+- **Governor programme:** the Governor files in `.ai/context/` were committed as the bootstrap's input
+  and annotated `[S1]`: §10.3 materiality, §15.3/§34 adversary trigger, §17 semantic guards, §26
+  metrics, §37 addendum. Three design conflicts need an owner ruling:
+  - **DC-1:** S1 checks vs "no inference while waiting";
+  - **DC-2:** calibrated vs deterministic guards;
+  - **DC-3:** no project-domain content to the Jev API until ruled.
+- **Rejected on purpose:** Jev for error classification (real bug → A97 code fix), model selection
+  (contract forbids), session hygiene, Telegram intent, tool gates, skill routing (only 3 skills).
+
 **2026-10-02 — A82 Stage 8a READY, MERGE HELD: PR #185 (`feat/a82-stage8a` @ `0b34905`) reviewed ACCEPT + CI green. DO NOT MERGE OR DEPLOY before R1.**
 Merging puts the cutover on `main`; any routine gateway redeploy would then make every session turn 503 until workers run managed turns. Order: (1) R1 — operator restarts `ai-team-worker` (this host, `kanebra-worker`) and the Horse worker after `git pull --ff-only && .venv/bin/pip install -c constraints.txt -e .` with `WORKER_MANAGED_TURNS=1`; set `MESH_LOCAL_CARRIER_NODE_ID=kanebra-worker` in the controller `.env`; (2) verify nodes advertise `managed_backends`; (3) pre-check SQL (packet runbook), backup, merge #185, rebuild controller (migration 43 ≈5 s on the Pi, fsync-bound); (4) verify schema 43, `/health` `turn_queue.coverage_ok=true`, real turns on Claude/Codex/opencode-server. Rollback: `ai-team:pre-a82`-era images run on schema 43; never pre-A82 main with protocol-1 rows. Operator defaults pending confirmation: no-carrier single-box refuses session turns (`_REFUSE_SESSION_TURNS_WITHOUT_MESH`); offline registered carrier queues (`_QUEUE_TURNS_FOR_OFFLINE_CARRIER`). OpenCode CLI retired (operator decision).
 
@@ -85,7 +116,7 @@ so `/api/flags` toggles never reached it. Now: workers read controller state ove
 (`/control/runtime-flags`, `/control/cases/{id}/boot-reconcile`) and never open a mesh.db.
 Controller containers rebuilt on `684b506` (rollback image `ai-team:pre-a88`); route verified (401
 without token, 14 live flags with the worker token). **Not yet live on the worker** — it still runs
-old code until `pm2 restart ai-team-worker` (operator-gated). Then follow `docs/DATABASE_AUTHORITY.md`
+old code until `pm2 restart ai-team-worker` (operator-gated). Then follow `docs/backend/DATABASE_AUTHORITY.md`
 §6 steps 4-5 (verify no `mesh.db` fd, `controller_flags_refreshed` in logs; move the old file aside).
 Pre-retirement report: `scripts/db_authority_report.py` → exit 5 with the 3 classified rows (expected).
 Follow-up **A93**: worker `quota_windows.db` (120 MB) is never pruned; `coordinator_events` unbounded on
@@ -303,7 +334,7 @@ be flipped on/off with **no restart** (the whole point of the registry). The onl
 Deployment-shape-independent: works single-process or split. **Enablement/toggle:** via
 `/api/flags` or `scripts/ops_flag.sh` (controller registry). *(Superseded 2026-10-02 by A88: once the
 worker runs merged code it reads flags from the controller over `GET /control/runtime-flags`, never a
-local mesh.db — see `docs/DATABASE_AUTHORITY.md`. Until that worker restart it still reads its stale
+local mesh.db — see `docs/backend/DATABASE_AUTHORITY.md`. Until that worker restart it still reads its stale
 local copy.)* **§7 deferral (multi-worker):** with N
 claude workers each running a prewarmer, up to N minimal `haiku` turns could fire at a window boundary
 before any observes the new window. Bounded and cheap: warming is idempotent (skip-if-open is
@@ -323,7 +354,7 @@ An activation that opens nothing counts as a failure, and 3 consecutive failures
 rather than retrying: the anchored-window premise is checked every cycle, never assumed. Schedules
 off the provider's own `reset_at`, so ≤ ~5 activations/day, bounded again by
 `QUOTA_PREWARM_MAX_PER_DAY`/`MIN_INTERVAL_SEC`. **Deliberate spec deviation: no quiet hours** — the
-value only exists before the operator starts work (see `ENV_FEATURE_FLAGS.md` §D). Status rides on
+value only exists before the operator starts work (see `docs/backend/ENV_FEATURE_FLAGS.md` §D). Status rides on
 `GET /api/quota-windows` under `prewarm`.
 **(2) The quota-resume gate keyed on stale telemetry.** PR #97's restore check only consulted the
 429's own `resetsAt` when evidence was exactly `no_telemetry`. But this host's observer legitimately
@@ -457,7 +488,7 @@ migration. Executing A72 then A73 next (both provably non-breaking).
 
 **2026-08-05 — Mesh security review shipped (PR #72, `AGENT_67`).**
 Adversarial review of the mesh surfaces completed: private findings in `.security/` (git-ignored —
-never commit/publish), public threat-model in `docs/MESH_SECURITY.md` (hcom-structured). A **P0 was
+never commit/publish), public threat-model in `docs/backend/MESH_SECURITY.md` (hcom-structured). A **P0 was
 verified and fixed live**: the task-server `/files` staging upload used the client filename verbatim
 as a path segment, so a `../../` name escaped the staging root (arbitrary file write on the gateway
 host). PR #72 adds sanitize + containment; gateway restarted post-merge; worker untouched. `.env`
@@ -465,7 +496,7 @@ and `state/mesh.db` chmod `0600`. **Escalated to operator** (R2, not silently pa
 credentials replacing the single shared `WORKER_TOKEN` (self-reported node identity), claim/result
 identity binding, server-side dispatch bounds + rate limits, dashboard token out of served HTML.
 Until the credential model lands, treat `WORKER_TOKEN`/`DASHBOARD_TOKEN` as full-admin — see
-`docs/MESH_SECURITY.md`.
+`docs/backend/MESH_SECURITY.md`.
 
 **2026-08-05 — Close-session race gate merged (PR #70, `AGENT_70`).**
 The close-vs-turn race behind `task_ed5283f1` is fixed at the root: the worker now defers a
@@ -585,7 +616,7 @@ logs/events.ndjson                    system-wide event log
 
 **Config flags:** `MESH_ENABLED` (default `false`), `MESH_SHADOW_WRITE` (default `true`),
 `WORKER_TOKEN`, `MESH_TAILSCALE_IP`, `MESH_TASK_SERVER_PORT`. Feature flags →
-`docs/ENV_FEATURE_FLAGS.md`.
+`docs/backend/ENV_FEATURE_FLAGS.md`.
 
 ---
 
@@ -617,8 +648,8 @@ logs/events.ndjson                    system-wide event log
 | `src/worker/agent.py` | worker daemon (own process on worker nodes) |
 | `scripts/mcp_manager.py` | Manager MCP tool surface (`dispatch_worker`, `open_case`, etc.) |
 | `config/settings.py` | all config incl. `MeshConfig` |
-| `docs/ENV_FEATURE_FLAGS.md` | feature-flag reference |
-| `docs/CONTROL_CONTRACT.md` | M1 — event + inbound-command + backend + read-model contract |
+| `docs/backend/ENV_FEATURE_FLAGS.md` | feature-flag reference |
+| `docs/backend/CONTROL_CONTRACT.md` | M1 — event + inbound-command + backend + read-model contract |
 | `docs/harness/roles/manager.md` | Manager role behavior + dispatch-envelope template |
 | `docs/harness/roles/worker.md` | Worker role behavior |
 | `docs/Task_Harness_v0.7_AUTOMATION.md` | active harness automation spec (M0–M4) |
