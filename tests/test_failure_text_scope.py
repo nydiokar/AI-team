@@ -26,6 +26,7 @@ from src.backends import claude_driver
 from src.backends.claude_driver import ClaudeSDKClientDriver, _SDKSession, classify_error_text
 from src.core.failure_markers import (
     QUOTA_FAILURE_LABEL_MARKERS,
+    mark_reply_mirror,
     RATE_LIMIT_MARKERS,
     USAGE_LIMIT_MARKERS,
 )
@@ -345,10 +346,10 @@ def test_json_lines_in_a_mirrored_reply_are_not_error_events():
     by the text pass, nor by the structured readers (rate_limit_event /
     terminal-result parsers) that feed ``usage_limit`` and the quota store."""
     store = _FakeStore()
-    result = _result(
+    result = mark_reply_mirror(_result(
         output=_JSON_REPLY, raw_stdout=_JSON_REPLY,
         errors=["Backend task failed (exit code 1); see error_detail for stdout/stderr tail"],
-    )
+    ))
     assert _classify(result, store) == "fatal"
     assert store.calls == []
     assert TaskOrchestrator._extract_rate_limit_info(result) is None
@@ -364,7 +365,7 @@ def test_untyped_error_dict_in_a_real_stream_is_not_evidence():
     assert _classify(result) == "fatal"
 
 
-def _dispatch_failed_row(r: dict, row_error_class: str = "") -> TaskResult:
+def _dispatch_failed_row(r: dict, row_error_class: str = "", store=None) -> TaskResult:
     """Run the real ``_dispatch_to_node`` against a fake DB row in the shape
     the worker writes for a failed turn (``src/worker/agent.py`` payload)."""
     row = {"id": "t-mesh", "status": "failed", "result": json.dumps(r),
@@ -373,6 +374,7 @@ def _dispatch_failed_row(r: dict, row_error_class: str = "") -> TaskResult:
     orch = TaskOrchestrator.__new__(TaskOrchestrator)
     orch._nudge_worker_for_dispatch = lambda *a, **k: None
     orch._task_cancel_events = {}
+    orch.quota_coordinator = SimpleNamespace(store=store) if store is not None else None
     task = SimpleNamespace(id="t-mesh", prompt="p", metadata={})
     with patch("src.control.db.get_db", return_value=db):
         return asyncio.run(orch._dispatch_to_node(task, None, SimpleNamespace(node_id="w1")))
@@ -430,3 +432,65 @@ def test_print_resume_stream_used_as_output_is_still_read():
     store = _FakeStore()
     assert _classify(result, store) == "usage_limit"
     assert len(store.calls) == 1
+
+
+# --------------------------------------------------------------------------- #
+# 6. Review round 2 (PR #18): the gateway<->worker seam                       #
+# --------------------------------------------------------------------------- #
+
+def _worker_payload(raw: ExecutionResult) -> dict:
+    """The fields ``src/worker/agent.py`` ships for a failed turn."""
+    from src.worker.agent import _backend_error_detail, _bound_output
+    return {
+        "success": False, "output": _bound_output(raw.output or ""), "errors": list(raw.errors or []),
+        "error_detail": _backend_error_detail(raw),
+        "raw_stdout": _bound_output(raw.raw_stdout or ""), "raw_stderr": _bound_output(raw.raw_stderr or ""),
+        "error_class": raw.error_class or "", "return_code": raw.return_code,
+    }
+
+
+@pytest.mark.parametrize("with_result_line", [False, True])
+def test_mesh_print_resume_stream_as_output_keeps_the_refusal(with_result_line):
+    """print_resume sets ``output = stdout`` when the stream holds no
+    extractable text, and the worker ships ``output`` and ``raw_stdout``
+    byte-identical with no ``parsed_output``. That is a REAL stream: the
+    rejected rate_limit_event must still classify ``usage_limit`` and reach
+    the store (equality alone used to mark it a mirror)."""
+    from src.backends.claude_driver import _parse_print_resume
+    lines = [
+        json.dumps({"type": "system", "subtype": "init", "session_id": "s"}),
+        json.dumps({"type": "rate_limit_event", "rate_limit_info": {
+            "status": "rejected", "rateLimitType": "five_hour", "resetsAt": RESETS_AT}}),
+    ]
+    if with_result_line:
+        lines.append(json.dumps({"type": "result", "subtype": "error_during_execution",
+                                 "is_error": True, "result": ""}))
+    raw = _parse_print_resume("\n".join(lines), "", 1, 1.0)
+    assert raw.output == raw.raw_stdout.strip()
+    store = _FakeStore()
+    result = _dispatch_failed_row(_worker_payload(raw), store=store)
+    assert _classify(result, store) == "usage_limit"
+    assert len(store.calls) == 1
+    assert store.calls[0]["reset_at"] == datetime.fromtimestamp(RESETS_AT, tz=timezone.utc)
+
+
+def test_mesh_error_detail_stdout_tail_is_not_error_text():
+    """Worker stderr empty ⇒ the gateway falls back to ``error_detail`` for
+    ``raw_stderr``. Its ``stdout_tail`` is the print_resume stream with the
+    agent's own words; only the error parts may be read."""
+    stream = "\n".join([
+        json.dumps({"type": "assistant", "message": {"content": [{"type": "text",
+                    "text": "I reworked the quota banner so a usage limit shows the reset time."}]}}),
+        json.dumps({"type": "result", "subtype": "success", "is_error": False, "result": "done"}),
+    ])
+    raw = ExecutionResult(success=False, output="I reworked the quota banner.",
+                          errors=["Tool permission denied: Bash"], raw_stdout=stream,
+                          raw_stderr="", return_code=1)
+    payload = _worker_payload(raw)
+    assert "usage limit" in payload["error_detail"]
+    payload.pop("raw_stderr")  # legacy workers ship none; new ones ship "" — same fallback
+    result = _dispatch_failed_row(payload)
+    assert "usage limit" not in result.raw_stderr
+    assert "exit_code=1" in result.raw_stderr
+    assert _classify(result) == "auth"
+    assert "usage limit" not in TaskOrchestrator._short_failure_reason(result).lower()

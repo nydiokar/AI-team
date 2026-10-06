@@ -71,19 +71,40 @@ def _is_error_event(obj: Any) -> bool:
     return False
 
 
+#: Attribute a gateway result builder sets when it filled ``raw_stdout`` with a
+#: copy of ``output`` because the worker shipped no transcript (legacy worker,
+#: managed-turn, reattach). Decided where the mirror is MADE: equality of the
+#: two fields is not evidence — print_resume legitimately ships
+#: ``output == raw_stdout`` when its stream holds no extractable text.
+REPLY_MIRROR_ATTR = "raw_stdout_is_reply_mirror"
+
+
+def mark_reply_mirror(result: Any, mirrored: bool = True) -> Any:
+    """Record on ``result`` whether its ``raw_stdout`` is a copy of the reply."""
+    setattr(result, REPLY_MIRROR_ATTR, bool(mirrored))
+    return result
+
+
 def stdout_is_reply_mirror(result: Any) -> bool:
-    """True when ``raw_stdout`` is only a copy of the agent's reply — the legacy
-    worker / managed-turn / reattach builders set ``raw_stdout=output``. Its
-    lines are then the agent's words, never stream events, whatever they look
-    like, so no reader may take structure from them. Exception: a backend
-    that parsed the stream itself (``parsed_output`` is its terminal
-    ``result`` event) shipped a real stream — print_resume falls back to
-    ``output = stdout`` when the stream holds no extractable text."""
-    stdout = str(getattr(result, "raw_stdout", "") or "").strip()
-    if not stdout or stdout != str(getattr(result, "output", "") or "").strip():
-        return False
-    parsed = getattr(result, "parsed_output", None)
-    return not (isinstance(parsed, dict) and parsed.get("type") == "result")
+    """True when the builder marked ``raw_stdout`` as only a copy of the
+    agent's reply (``mark_reply_mirror``). Its lines are then the agent's
+    words, never stream events, so no reader may take structure from them."""
+    return bool(getattr(result, REPLY_MIRROR_ATTR, False))
+
+
+def error_detail_without_stdout(detail: Any) -> str:
+    """The worker's ``error_detail`` minus its ``stdout_tail:`` section.
+
+    The worker builds the detail as ``exit_code=`` / ``error_class=`` /
+    ``stderr_tail:`` / ``stdout_tail:`` blocks; the stdout tail of a
+    print_resume turn is the CLI stream including the agent's own text. When
+    the gateway falls back to the detail as ``raw_stderr`` (an error-bearing
+    field) only the error parts may go there."""
+    text = str(detail or "")
+    if text.startswith("stdout_tail:"):
+        return ""
+    cut = text.find("\n\nstdout_tail:")
+    return text if cut < 0 else text[:cut]
 
 
 def error_bearing_stdout_lines(result: Any) -> List[str]:

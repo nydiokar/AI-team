@@ -105,6 +105,8 @@ from src.core.failure_markers import (
     USAGE_LIMIT_MARKERS,
     error_bearing_stdout_lines,
     error_bearing_values,
+    error_detail_without_stdout,
+    mark_reply_mirror,
     stdout_is_reply_mirror,
 )
 
@@ -4734,12 +4736,13 @@ class TaskOrchestrator(ITaskOrchestrator):
                     timestamp=result_dict.get("timestamp", now_iso()) if result_dict else now_iso(),
                     return_code=result_dict.get("return_code", 1) if result_dict else 1,
                     raw_stdout=result_dict.get("output", "") if result_dict else "",
-                    raw_stderr=(result_dict.get("error_detail", "") if result_dict else ""),
+                    raw_stderr=error_detail_without_stdout(result_dict.get("error_detail", "") if result_dict else ""),
                     error_class=str(
                         (result_dict.get("error_class") if result_dict else "")
                         or (row.get("error_class") if row else "") or ""
                     ),
                 )
+                mark_reply_mirror(result)
                 setattr(result, "error_detail", result_dict.get("error_detail", "") if result_dict else "")
                 setattr(result, "usage", result_dict.get("usage") if result_dict else None)
                 setattr(result, "backend_name", session.backend or "claude")
@@ -10494,6 +10497,7 @@ Generated from user description: {description}
                         raw_stderr=r.get("raw_stderr") or "",
                         error_class=str(r.get("error_class") or row.get("error_class") or ""),
                     )
+                    mark_reply_mirror(result, not r.get("raw_stdout") and bool(worker_output))
                     setattr(result, "usage", r.get("usage"))
                     setattr(result, "backend_name", row.get("backend", "claude"))
                     if r.get("error_detail"):
@@ -10546,12 +10550,15 @@ Generated from user description: {description}
                         # which erased the error_during_execution marker and hid
                         # the agent's complete payload from the artifact.
                         raw_stdout=(r.get("raw_stdout") if r else "") or (r.get("output", "") if r else ""),
-                        raw_stderr=(r.get("raw_stderr") if r else "") or error_detail,
+                        # error_detail's stdout_tail is the agent's stream, not
+                        # an error: only its error parts may stand in (A97).
+                        raw_stderr=(r.get("raw_stderr") if r else "") or error_detail_without_stdout(error_detail),
                         # The worker's structured class (its driver's own
                         # signal) — dropping it made _classify_error re-derive
                         # from text on every mesh session turn (A97).
                         error_class=str((r.get("error_class") if r else "") or row.get("error_class") or ""),
                     )
+                    mark_reply_mirror(result, not (r.get("raw_stdout") if r else "") and bool(result.raw_stdout))
                     setattr(result, "error_detail", error_detail)
                     setattr(result, "usage", r.get("usage") if r else None)
                     setattr(result, "backend_name", row.get("backend", "claude"))
@@ -12536,6 +12543,7 @@ Generated from user description: {description}
             usage=res.get("usage") if isinstance(res.get("usage"), dict) else None,
             error_class=str(row.get("error_class") or ""),
         )
+        mark_reply_mirror(result, bool(output))
         if res.get("error_detail"):
             setattr(result, "error_detail", res.get("error_detail"))
         setattr(result, "telemetry_invocation_id", res.get("telemetry_invocation_id") or None)
