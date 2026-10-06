@@ -50,10 +50,12 @@ UPSTREAM_STATUS_RE = re.compile(r"(?<![\w/.])50[34](?![\w/])")
 
 
 def _is_error_event(obj: Any) -> bool:
-    """True for a stream event that IS the failure, not the agent's narration:
-    an ``is_error`` terminal result, a REJECTED rate_limit_event (an
-    ``allowed``/``allowed_warning`` one is not a refusal), an ``error`` event,
-    or a message the CLI synthesised from an API error (top-level ``error``)."""
+    """True for a stream event of a RECOGNISED type that IS the failure, not
+    the agent's narration: an ``is_error`` terminal result, a REJECTED
+    rate_limit_event (an ``allowed``/``allowed_warning`` one is not a refusal),
+    an ``error`` event, or an ``assistant`` message the CLI synthesised from an
+    API error (top-level ``error``). A bare dict with an ``error`` key is not
+    evidence — an agent can write one into its reply."""
     if not isinstance(obj, dict):
         return False
     kind = obj.get("type")
@@ -64,16 +66,36 @@ def _is_error_event(obj: Any) -> bool:
         return isinstance(info, dict) and info.get("status") == "rejected"
     if kind == "error":
         return True
-    return bool(obj.get("error"))
+    if kind == "assistant":
+        return bool(obj.get("error"))
+    return False
 
 
-def error_bearing_stdout_lines(raw_stdout: Any) -> List[str]:
-    """The raw JSON lines of ``raw_stdout`` that carry the failure itself (see
-    ``_is_error_event``). Returned verbatim so structural markers
+def stdout_is_reply_mirror(result: Any) -> bool:
+    """True when ``raw_stdout`` is only a copy of the agent's reply — the legacy
+    worker / managed-turn / reattach builders set ``raw_stdout=output``. Its
+    lines are then the agent's words, never stream events, whatever they look
+    like, so no reader may take structure from them. Exception: a backend
+    that parsed the stream itself (``parsed_output`` is its terminal
+    ``result`` event) shipped a real stream — print_resume falls back to
+    ``output = stdout`` when the stream holds no extractable text."""
+    stdout = str(getattr(result, "raw_stdout", "") or "").strip()
+    if not stdout or stdout != str(getattr(result, "output", "") or "").strip():
+        return False
+    parsed = getattr(result, "parsed_output", None)
+    return not (isinstance(parsed, dict) and parsed.get("type") == "result")
+
+
+def error_bearing_stdout_lines(result: Any) -> List[str]:
+    """The raw JSON lines of ``result.raw_stdout`` that carry the failure itself
+    (see ``_is_error_event``). Returned verbatim so structural markers
     (``"error":"rate_limit"``, ``overageStatus``) still match. Non-JSON lines
-    are not evidence: on the mesh path ``raw_stdout`` mirrors the reply."""
+    are not evidence, and nothing is read when ``raw_stdout`` mirrors the reply
+    (``stdout_is_reply_mirror``)."""
     lines: List[str] = []
-    for line in str(raw_stdout or "").splitlines():
+    if stdout_is_reply_mirror(result):
+        return lines
+    for line in str(getattr(result, "raw_stdout", "") or "").splitlines():
         line = line.strip()
         if not line.startswith("{"):
             continue

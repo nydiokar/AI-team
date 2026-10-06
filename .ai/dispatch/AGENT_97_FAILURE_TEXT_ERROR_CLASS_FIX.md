@@ -94,7 +94,14 @@ structured signals (SDK `subtype`, `api_error_status`, `rate_limit_event`) stay 
   reply prose no longer yields usage_limit/rate_limit/timeout/network; allowed_warning
   rate_limit_events no longer usage_limit; remote 5xx now `upstream_error` via the worker's class;
   `sdk_stream_closed` now gets its own 0-retry policy.
-- **Evidence:** `tests/test_failure_text_scope.py` (24 tests; 17 fail on `main`, all pass on the
-  branch). Targeted `pytest` of `test_claude_driver`, `test_retry_transient`,
+- **Review round 1 (CHANGES REQUESTED on `570b4dc`) — both findings fixed:**
+  (1) where `raw_stdout` only mirrors the reply (legacy worker, managed-turn, reattach builders),
+  no reader takes structure from it (`stdout_is_reply_mirror`, applied to the text pass AND the
+  `rate_limit_event` / terminal-result parsers), and only RECOGNISED event types count;
+  (2) the mesh session path (`_dispatch_to_node` failed + completed builders, and
+  `_reattach_remote_task`) now keeps the worker's `error_class`, so remote `sdk_stream_closed` /
+  `upstream_error` are honoured.
+- **Evidence:** `tests/test_failure_text_scope.py` (32 tests; the original 24 — 17 fail on `main` —
+  plus 8 for round 1, 7 of which fail on `570b4dc`; all pass on the branch). Targeted `pytest` of `test_claude_driver`, `test_retry_transient`,
   `test_case_quota_resume`, `test_output_truncation`, `test_quota_window_coordinator` green (2
   `test_case_quota_resume` cases fail identically on `main`: container tzdata lacks `Europe/Kiev`).

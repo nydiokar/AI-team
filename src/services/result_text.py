@@ -18,6 +18,7 @@ from src.core.failure_markers import (
     QUOTA_FAILURE_LABEL_MARKERS,
     error_bearing_stdout_lines,
     error_bearing_values,
+    stdout_is_reply_mirror,
 )
 
 
@@ -228,7 +229,10 @@ def extract_text_from_payload(payload: Any) -> str:
 
 
 def extract_rate_limit_info(result) -> Optional[Dict[str, Any]]:
-    """Parse the first rejected rate_limit_event from raw_stdout NDJSON, or None."""
+    """Parse the first rejected rate_limit_event from raw_stdout NDJSON, or None.
+    A raw_stdout that only mirrors the reply holds no stream events (A97)."""
+    if stdout_is_reply_mirror(result):
+        return None
     stdout = getattr(result, "raw_stdout", "") or ""
     for line in stdout.splitlines():
         line = line.strip()
@@ -291,7 +295,7 @@ def failure_text(result) -> str:
 
     for value in error_bearing_values(result):
         _append(value)
-    parts.extend(error_bearing_stdout_lines(getattr(result, "raw_stdout", "")))
+    parts.extend(error_bearing_stdout_lines(result))
     if parts:
         return "\n".join(parts)
     _append(getattr(result, "raw_stdout", ""))

@@ -325,3 +325,108 @@ def test_one_shared_failure_label_marker_set():
     for text in ("You've hit your session limit · resets 4:40pm", "Claude usage limit reached"):
         assert result_text.short_failure_reason(_result(errors=[text])).startswith("Claude usage limit reached")
         assert TaskOrchestrator._short_failure_reason(_result(errors=[text])).startswith("Claude usage limit reached")
+
+
+# --------------------------------------------------------------------------- #
+# 5. Review round 1 (PR #18): reply mirrors and the mesh session path          #
+# --------------------------------------------------------------------------- #
+
+_JSON_REPLY = (
+    "I hardened the client's error handling. The API now answers with:\n"
+    '{"error": "You have hit your usage limit"}\n'
+    '{"type": "result", "is_error": true, "api_error_status": 429, "result": "usage limit"}\n'
+    '{"type": "rate_limit_event", "rate_limit_info": {"status": "rejected", "resetsAt": 1791300000}}'
+)
+
+
+def test_json_lines_in_a_mirrored_reply_are_not_error_events():
+    """Legacy worker / managed-turn / reattach builders set ``raw_stdout=output``.
+    JSON the agent wrote in its reply must not be read as stream events — not
+    by the text pass, nor by the structured readers (rate_limit_event /
+    terminal-result parsers) that feed ``usage_limit`` and the quota store."""
+    store = _FakeStore()
+    result = _result(
+        output=_JSON_REPLY, raw_stdout=_JSON_REPLY,
+        errors=["Backend task failed (exit code 1); see error_detail for stdout/stderr tail"],
+    )
+    assert _classify(result, store) == "fatal"
+    assert store.calls == []
+    assert TaskOrchestrator._extract_rate_limit_info(result) is None
+    assert result_text.extract_rate_limit_info(result) is None
+    assert "usage limit" not in result_text.short_failure_reason(result).lower()
+
+
+def test_untyped_error_dict_in_a_real_stream_is_not_evidence():
+    """Even outside a mirror, only RECOGNISED event types count: a bare
+    ``{"error": ...}`` line is not one."""
+    result = _result(errors=["Claude exited with code 1"], output="done",
+                     raw_stdout='{"error": "You have hit your usage limit"}')
+    assert _classify(result) == "fatal"
+
+
+def _dispatch_failed_row(r: dict, row_error_class: str = "") -> TaskResult:
+    """Run the real ``_dispatch_to_node`` against a fake DB row in the shape
+    the worker writes for a failed turn (``src/worker/agent.py`` payload)."""
+    row = {"id": "t-mesh", "status": "failed", "result": json.dumps(r),
+           "error": "worker failed", "backend": "claude", "error_class": row_error_class}
+    db = SimpleNamespace(get_task=lambda task_id: row)
+    orch = TaskOrchestrator.__new__(TaskOrchestrator)
+    orch._nudge_worker_for_dispatch = lambda *a, **k: None
+    orch._task_cancel_events = {}
+    task = SimpleNamespace(id="t-mesh", prompt="p", metadata={})
+    with patch("src.control.db.get_db", return_value=db):
+        return asyncio.run(orch._dispatch_to_node(task, None, SimpleNamespace(node_id="w1")))
+
+
+@pytest.mark.parametrize("err", [
+    "SDK stream ended (normal EOF from SDK stream; missing terminal ResultMessage)",
+    "ProcessError: Command failed with exit code 1 — Cannot write to terminated process",
+    "TimeoutError: read timed out",
+])
+def test_mesh_session_path_keeps_the_workers_structured_class(err):
+    """Session turns run through ``_dispatch_to_node``; it used to drop the
+    worker's ``error_class``, so a worker-side ``sdk_stream_closed`` was
+    re-derived from its text (``fatal`` / ``network`` / ``timeout``)."""
+    result = _dispatch_failed_row({
+        "success": False, "output": "partial work", "errors": [err],
+        "raw_stderr": "error_class=sdk_stream_closed", "error_class": "sdk_stream_closed",
+    })
+    assert result.error_class == "sdk_stream_closed"
+    assert _classify(result) == "sdk_stream_closed"
+
+
+def test_mesh_session_path_falls_back_to_the_row_error_class():
+    result = _dispatch_failed_row(
+        {"success": False, "output": "", "errors": ["API Error: 529 Overloaded"]},
+        row_error_class="upstream_error",
+    )
+    assert _classify(result) == "upstream_error"
+
+
+def test_mesh_legacy_worker_mirror_with_json_reply_is_not_a_pause():
+    """A legacy worker ships no raw_stdout, so the gateway mirrors ``output``
+    into it — the reviewer's scenario, through the real builder."""
+    from src.orchestrator import QUOTA_PAUSE_ERROR_CLASSES
+    result = _dispatch_failed_row({"success": False, "output": _JSON_REPLY, "errors": ["Backend task failed (exit code 1)"]})
+    assert result.raw_stdout == _JSON_REPLY
+    assert _classify(result) not in QUOTA_PAUSE_ERROR_CLASSES
+
+
+def test_print_resume_stream_used_as_output_is_still_read():
+    """print_resume sets ``output = stdout`` when nothing in the stream is
+    extractable, but it also parsed the terminal result into
+    ``parsed_output``: that stdout is a real stream, not a reply mirror."""
+    from src.backends.claude_driver import _parse_print_resume
+    stream = "\n".join([
+        json.dumps({"type": "rate_limit_event", "rate_limit_info": {
+            "status": "rejected", "rateLimitType": "five_hour", "resetsAt": RESETS_AT}}),
+        json.dumps({"type": "result", "subtype": "error_during_execution", "is_error": True,
+                    "errors": ["[ede_diagnostic] result_type=assistant"]}),
+    ])
+    raw = _parse_print_resume(stream, "", 1, 1.0)
+    assert raw.output == stream.strip()
+    result = _result(output=raw.output, errors=raw.errors, raw_stdout=raw.raw_stdout,
+                     parsed_output=raw.parsed_output)
+    store = _FakeStore()
+    assert _classify(result, store) == "usage_limit"
+    assert len(store.calls) == 1

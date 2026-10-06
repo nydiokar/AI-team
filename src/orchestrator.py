@@ -105,6 +105,7 @@ from src.core.failure_markers import (
     USAGE_LIMIT_MARKERS,
     error_bearing_stdout_lines,
     error_bearing_values,
+    stdout_is_reply_mirror,
 )
 
 logger = logging.getLogger(__name__)
@@ -1018,7 +1019,10 @@ class TaskOrchestrator(ITaskOrchestrator):
 
     @classmethod
     def _extract_rate_limit_info(cls, result: TaskResult) -> Optional[Dict[str, Any]]:
-        """Parse the first rejected rate_limit_event from raw_stdout NDJSON, or None."""
+        """Parse the first rejected rate_limit_event from raw_stdout NDJSON, or None.
+        A raw_stdout that only mirrors the reply holds no stream events (A97)."""
+        if stdout_is_reply_mirror(result):
+            return None
         stdout = getattr(result, "raw_stdout", "") or ""
         for line in stdout.splitlines():
             line = line.strip()
@@ -1047,7 +1051,7 @@ class TaskOrchestrator(ITaskOrchestrator):
         no structured signal is present.
         """
         sources = (
-            getattr(result, "raw_stdout", "") or "",
+            "" if stdout_is_reply_mirror(result) else (getattr(result, "raw_stdout", "") or ""),
             getattr(result, "raw_stderr", "") or "",
             getattr(result, "error_detail", "") or "",
         )
@@ -1110,7 +1114,7 @@ class TaskOrchestrator(ITaskOrchestrator):
 
         for value in error_bearing_values(result):
             _append(value)
-        parts.extend(error_bearing_stdout_lines(getattr(result, "raw_stdout", "")))
+        parts.extend(error_bearing_stdout_lines(result))
         if parts:
             return "\n".join(parts)
         _append(getattr(result, "raw_stdout", ""))
@@ -4731,6 +4735,10 @@ class TaskOrchestrator(ITaskOrchestrator):
                     return_code=result_dict.get("return_code", 1) if result_dict else 1,
                     raw_stdout=result_dict.get("output", "") if result_dict else "",
                     raw_stderr=(result_dict.get("error_detail", "") if result_dict else ""),
+                    error_class=str(
+                        (result_dict.get("error_class") if result_dict else "")
+                        or (row.get("error_class") if row else "") or ""
+                    ),
                 )
                 setattr(result, "error_detail", result_dict.get("error_detail", "") if result_dict else "")
                 setattr(result, "usage", result_dict.get("usage") if result_dict else None)
@@ -10484,6 +10492,7 @@ Generated from user description: {description}
                         # raw_stdout, not output) never ends up empty (T2).
                         raw_stdout=r.get("raw_stdout") or worker_output,
                         raw_stderr=r.get("raw_stderr") or "",
+                        error_class=str(r.get("error_class") or row.get("error_class") or ""),
                     )
                     setattr(result, "usage", r.get("usage"))
                     setattr(result, "backend_name", row.get("backend", "claude"))
@@ -10538,6 +10547,10 @@ Generated from user description: {description}
                         # the agent's complete payload from the artifact.
                         raw_stdout=(r.get("raw_stdout") if r else "") or (r.get("output", "") if r else ""),
                         raw_stderr=(r.get("raw_stderr") if r else "") or error_detail,
+                        # The worker's structured class (its driver's own
+                        # signal) — dropping it made _classify_error re-derive
+                        # from text on every mesh session turn (A97).
+                        error_class=str((r.get("error_class") if r else "") or row.get("error_class") or ""),
                     )
                     setattr(result, "error_detail", error_detail)
                     setattr(result, "usage", r.get("usage") if r else None)
