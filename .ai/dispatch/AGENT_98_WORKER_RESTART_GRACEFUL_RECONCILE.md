@@ -1,13 +1,13 @@
 ```yaml
 job_id: AGENT_98_WORKER_RESTART_GRACEFUL_RECONCILE
 created_at: "2026-10-07T09:59:04.000000+00:00"        # CANONICAL — set once at dispatch, never derive again
-status: active              # ready | active | blocked | done | dead
+status: done              # ready | active | blocked | done | dead
 owner: "incident-investigation"
 depends_on: []
 results_ref: DISPATCH_LOG.md#A98             # -> DISPATCH_LOG.md section with the verdict prose
 evidence:
-  tests/test_restart_lost_fork.py,.ai/dispatch/AGENT_98_WORKER_RESTART_GRACEFUL_RECONCILE.md   # this packet (scorecard + plan)
-updated_at: "2026-10-07T10:24:27.460869+00:00"
+  tests/test_restart_lost_fork.py,tests/test_a98_restart_reconcile.py,.ai/dispatch/AGENT_98_WORKER_RESTART_GRACEFUL_RECONCILE.md   # this packet (scorecard + plan)
+updated_at: "2026-10-07T11:05:32.378950+00:00"
 ```
 
 # DISPATCH — A98 · Worker-restart graceful reconcile (the "one restart → big mess" incident)
@@ -174,6 +174,41 @@ logs `event=node_offline`.)*
 
 **Remaining to fully close:** deploy O2/O5/O7 (gateway redeploy for O2/O5; O7 is worker-side — lands on
 the next worker restart, operator-gated) + the live restart drill with a dedicated throwaway worker.
+
+## Closure (2026-10-07)
+
+**All objectives delivered. O1/O2/O5 live on the gateway; O3 pre-existing; O4/O6 satisfied by design;
+O7 code shipped (worker-side, activates on the next operator-gated worker restart).**
+
+- **PRs:** #193 (O1) + #194 (O2/O5/O7) merged to `main`. Gateway + task-server rebuilt/recreated on
+  `ai-team:prod-621acd6` (schema 42, no migration; rollback `ai-team:pre-621acd6`; DB backup
+  `~/ai-team-data/backups/mesh-pre-621acd6-20261007T1055Z.db`). Both healthy, `/health` ok, both nodes
+  online.
+- **Flags persisted + operator-visible** (all `value=0` ⇒ ON behaviour) in `runtime_flags`:
+  `RESTART_LOST_SESSION_FORK_DISABLED`, `RESPAWN_ON_RESTART_ERROR_DISABLED`, `RESTART_NOTIFY_DISABLED`,
+  `WORKER_MEMORY_WATCHDOG_DISABLED`.
+- **Live A/B drill (O1), the headline proof** — throwaway haiku session `0bb2b40a951c` on kanebra-worker,
+  `driver_status` set to `'lost'` to reproduce the exact restart state (safe: one scratch row; the
+  separate-worker variant was aborted after it hit the `.env` node-id override — a duplicate-node
+  footgun — with NO collateral damage, incarnation unchanged):
+  - **O1 ON (default):** turn `task_7e53a1ab` → `action=create_session` → **completed**, reply
+    "RECOVERED"; session recovered `lost→live`, `awaiting_input`.
+  - **O1 OFF (A/B):** turn `task_2e816ff9` → `action=resume_session` → **failed/fatal**, error
+    *"[kanebra-worker] Claude session was lost after a worker restart and cannot be resumed by the
+    continuous driver…"* — the exact incident dead-end.
+  - ⇒ The routing fix is demonstrably what converts the incident's permanent-death into graceful
+    recovery. Boundary (honest): the simulate kept kanebra-worker's in-memory driver alive, so
+    create_session reused the backend session rather than minting a fresh one; the gateway *routing*
+    (the fix) is proven, the fresh-subprocess mint after a real in-memory loss is covered by unit tests
+    + `_get_or_create`'s existing respawn path, not re-proven live (would need a real worker restart,
+    avoided to protect production).
+- **Tests:** 15 targeted (`test_restart_lost_fork.py` 5, `test_a98_restart_reconcile.py` 10) + regression
+  across continuation/respawn/quota/wake/turn-queue/push/control-api/affinity/restart-context — green.
+- **Operator-gated remainder:** O7 (worker memory watchdog) + O1/O2 worker-side benefit run from the
+  image but the **workers run old in-memory code until restarted** — a node-carrier restart is
+  operator-gated (hard rule). Surface a worker restart to activate O7's `event=worker_memory_pressure`
+  trail and have the Horse/kanebra workers on A98 code. The gateway-side fixes (O1/O2/O5) are fully live
+  now regardless of worker code.
 
 ## SCOPE OUT
 - The A82 managed-turn (message-queue) cutover — these sessions are NOT enrolled; this fix targets the
