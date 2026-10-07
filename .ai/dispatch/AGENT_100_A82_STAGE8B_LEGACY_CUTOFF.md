@@ -1,12 +1,12 @@
 ```yaml
 job_id: AGENT_100_A82_STAGE8B_LEGACY_CUTOFF
 created_at: "2026-10-07T16:28:38.145464+00:00"        # CANONICAL — set once at dispatch, never derive again
-status: active              # ready | active | blocked | done | dead
+status: done              # ready | active | blocked | done | dead
 owner: ""
 depends_on: []
-results_ref: null             # -> DISPATCH_LOG.md section with the verdict prose
-evidence: []                  # artifact paths that PROVE it ran (checked to exist)
-updated_at: "2026-10-07T17:14:58.132428+00:00"
+results_ref: DISPATCH_LOG.md#A100             # -> DISPATCH_LOG.md section with the verdict prose
+evidence: ["src/orchestrator.py","tests/test_turn_queue_4a_r3.py"]                  # artifact paths that PROVE it ran (checked to exist)
+updated_at: "2026-10-07T19:44:13.459013+00:00"
 ```
 
 # DISPATCH — AGENT_100_A82_STAGE8B_LEGACY_CUTOFF
@@ -91,11 +91,11 @@ No new features; no change to the managed path behavior; no removal of the opera
 PR + merge + redeploy; append closure here; flip CONTEXT/DISPATCH_LOG A82 to done.
 
 ## Milestone checklist
-- [ ] GATE cleared (operator go + multi-backend live proof + agent-send live proof + carry (o))
-- [ ] §5 deletion targets removed; dual front-door folded
-- [ ] Targeted tests green; retired legacy tests removed (not skipped)
-- [ ] Live FIFO regression smoke on a born-managed session
-- [ ] PR merged + gateway redeployed + A82 docs closed out
+- [x] GATE cleared (operator go + multi-backend live proof + agent-send live proof; carry (o) decoupled)
+- [x] §5 deletion targets removed; dual front-door folded
+- [x] Targeted + FULL CI tests green; retired legacy tests removed (not skipped); parity test rewritten managed-direct
+- [x] Live FIFO regression smoke on a born-managed session (post-deploy, prod image)
+- [x] PR merged + gateway redeployed + A82 docs closed out
 
 ## Closure
 
@@ -112,3 +112,17 @@ holds the why-retired reasoning):
    (test_manager_loop_integration −239, test_turn_queue_rollout −186, producer1 −70), NOT real managed behavior.
 3. Live FIFO regression smoke.
 4. PR → merge → redeploy → then close A82.
+
+### 2026-10-07 — SHIPPED (supersedes the parked note above)
+Finished via a fresh adversarial reviewer (`task_ed9fd75f`) + a CI-fix rework (`task_67b00a31`).
+**Merged PR #199 → `main` `0d593c6`; deployed `ai-team:prod-0d593c6` (schema 43, no migration);
+live smoke PASS** (born-managed scratch session `9930a4af016e` enrolled, turn `task_24179c99`
+submitted 202 → completed, closed — managed path behavior-neutral post-cutoff).
+**Adjudication:** every retired test proven legacy-only or rewritten managed-direct (the CI failure
+`test_managed_lineage_parity_with_legacy_path` was rewritten to assert managed lineage directly, not
+deleted — `test_turn_queue_4a_r3.py`). Operational switches kept. Deleted respawn branch proven
+unreachable (guards orchestrator.py:2109/:3593).
+**Documented residual (follow-up, NOT a regression):** the `manager_loop_integration` end-to-end
+integration-wiring proof (−239) was retired with every invariant covered by surviving tests; a
+net-new in-process managed-carrier harness to re-home that wiring proof is an A82 follow-up. Also
+follow-up: `_legacy_put_guard`/`_enrollment_exclusion` now dead code (behavior-neutral cleanup).
