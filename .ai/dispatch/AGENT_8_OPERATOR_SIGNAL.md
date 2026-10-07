@@ -92,7 +92,7 @@ docs to mark M1/M2 shipped.
 
 ### T1 — Web Push notifications
 
-**Read before editing:** `docs/DEFERRED.md`, `docs/CONTROL_CONTRACT.md`
+**Read before editing:** `docs/DEFERRED.md`, `docs/backend/CONTROL_CONTRACT.md`
 (notification section), `src/services/notification_service.py`,
 `src/control/control_api.py`, `src/control/db.py` (`_get_migrations`,
 `_CURRENT_VERSION`, a `list_*`/insert helper for the pattern), `config/settings.py`,

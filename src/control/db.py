@@ -310,6 +310,12 @@ RUNTIME_FLAG_DEFINITIONS: Dict[str, Dict[str, str]] = {
         "registry_writable": "1",
         "description": "Send paid session-cache heartbeat turns for eligible observed controllers. Default OFF; switch ON to move from observe-only to acting.",
     },
+    "CACHE_HEARTBEAT_CHECKPOINT_ENABLED": {
+        "default": "1",
+        "effect_scope": "live",
+        "registry_writable": "1",
+        "description": "Turn two of the heartbeat beats into deliberate supervision checkpoints instead of blind keep-warm pings: an early assessment beat (is the awaited work still real and on track?) and a late decision beat (continue supervising or conclude). The late beat's CONTINUE is the ONLY way the heartbeat budget renews — there is no automatic renewal. Default ON.",
+    },
     "MANAGER_ADVANCEMENT_GATE": {
         "default": "0",
         "effect_scope": "live",
@@ -339,6 +345,30 @@ RUNTIME_FLAG_DEFINITIONS: Dict[str, Dict[str, str]] = {
         "effect_scope": "live",
         "registry_writable": "1",
         "description": "Disable bounded prior-context injection after a worker restart loses SDK state.",
+    },
+    "RESTART_LOST_SESSION_FORK_DISABLED": {
+        "default": "0",
+        "effect_scope": "live",
+        "registry_writable": "1",
+        "description": "Disable forking a restart-lost SDK session onto a FRESH subprocess (create_session) on its next task. Default (fork ON): a session whose in-memory driver was lost on a worker restart dispatches create_session (role re-boot + A54 boot-reconcile + injected prior-context) instead of resume_session, which the worker refuses into a corpse (A98 O1).",
+    },
+    "RESPAWN_ON_RESTART_ERROR_DISABLED": {
+        "default": "0",
+        "effect_scope": "live",
+        "registry_writable": "1",
+        "description": "Disable crash-respawn of a Manager that a worker restart left in ERROR + driver_status='lost'. Default (respawn ON): such a session is treated as dead (like CLOSED/CANCELLED) and the Wake-Dispatcher respawns a role-full Manager on the SAME Case instead of re-poking a corpse forever (A98 O2). Discriminated by driver_status='lost' so a genuine non-restart ERROR is untouched.",
+    },
+    "RESTART_NOTIFY_DISABLED": {
+        "default": "0",
+        "effect_scope": "live",
+        "registry_writable": "1",
+        "description": "Disable the best-effort operator notification (Web Push + Telegram) fired when a worker/node restart is detected and its sessions are marked lost/re-established. Default ON: the operator is told a restart happened and how many sessions it touched (A98 O5).",
+    },
+    "WORKER_MEMORY_WATCHDOG_DISABLED": {
+        "default": "0",
+        "effect_scope": "live",
+        "registry_writable": "1",
+        "description": "Disable the worker-daemon memory watchdog that samples its own RSS each supervisor cycle and warns (event=worker_memory_pressure) + flags memory_pressure on the heartbeat when the configured threshold is breached. Default ON (A98 O7). Threshold via env WORKER_MEMORY_WATCHDOG_PCT (default 85, percent of total RAM) or WORKER_MEMORY_WATCHDOG_MB (absolute RSS ceiling; 0 = unset).",
     },
     "MANAGER_ROLE_ENABLED": {
         "default": "0",
@@ -681,11 +711,41 @@ def cache_heartbeat_interval_sec() -> int:
 
 
 def cache_heartbeat_max_beats_default() -> int:
-    return _env_int("CACHE_HEARTBEAT_MAX_BEATS_DEFAULT", 6, 1)
+    """Beat budget for ONE backend turn-timeout window.
+
+    Semantically anchored to the guaranteed wake: the worker/turn timeout
+    (``SDK_TURN_TIMEOUT_SEC``, default 36000s = 10h) is the moment the Manager
+    is woken regardless, so the cache must stay warm right up to it — and never
+    past it. The budget is therefore ``ceil(timeout / interval)`` (≈14 at the
+    defaults), floored at 6 so a misconfigured tiny timeout can't drop below the
+    historical budget. An explicit ``CACHE_HEARTBEAT_MAX_BEATS_DEFAULT`` still
+    wins for operators who want a flat number.
+    """
+    explicit = os.environ.get("CACHE_HEARTBEAT_MAX_BEATS_DEFAULT")
+    if explicit:
+        try:
+            return max(1, int(explicit))
+        except (TypeError, ValueError):
+            pass
+    interval = cache_heartbeat_interval_sec()
+    timeout = _env_int("SDK_TURN_TIMEOUT_SEC", 36000, 60)
+    derived = -(-timeout // max(1, interval))  # ceil(timeout / interval)
+    return max(6, derived)
 
 
 def cache_heartbeat_hard_max_beats() -> int:
     return _env_int("CACHE_HEARTBEAT_MAX_BEATS_HARD", 15, 1)
+
+
+def cache_heartbeat_checkpoint_enabled() -> bool:
+    """Whether the two supervision checkpoints replace the dumb keep-warm beats."""
+    return runtime_flag_enabled("CACHE_HEARTBEAT_CHECKPOINT_ENABLED")
+
+
+def cache_heartbeat_awareness_beat() -> int:
+    """Which beat (since the controller was armed) is the early awareness
+    checkpoint. Default 6 ≈ 4.5h of unbroken silence at the 45-min interval."""
+    return _env_int("CACHE_HEARTBEAT_AWARENESS_BEAT", 6, 1)
 
 
 def cache_heartbeat_min_cache_tokens() -> int:
@@ -1120,6 +1180,40 @@ def harness_level3_guard_enabled() -> bool:
 def restart_context_restore_disabled() -> bool:
     """Registry-over-env read of ``RESTART_CONTEXT_RESTORE_DISABLED``."""
     return runtime_flag_enabled("RESTART_CONTEXT_RESTORE_DISABLED")
+
+
+def restart_lost_session_fork_disabled() -> bool:
+    """Registry-over-env read of ``RESTART_LOST_SESSION_FORK_DISABLED`` (A98 O1).
+
+    Default OFF ⇒ the fork is ON: a restart-lost SDK session dispatches
+    ``create_session`` (fresh subprocess) on its next task instead of
+    ``resume_session`` (refused by the worker guard). Set the flag to opt out and
+    restore the legacy resume-into-a-corpse behaviour."""
+    return runtime_flag_enabled("RESTART_LOST_SESSION_FORK_DISABLED")
+
+
+def respawn_on_restart_error_disabled() -> bool:
+    """Registry-over-env read of ``RESPAWN_ON_RESTART_ERROR_DISABLED`` (A98 O2).
+
+    Default OFF ⇒ respawn is ON: a Manager left ERROR+driver_lost by a worker
+    restart is crash-respawn-eligible (treated like CLOSED/CANCELLED)."""
+    return runtime_flag_enabled("RESPAWN_ON_RESTART_ERROR_DISABLED")
+
+
+def restart_notify_disabled() -> bool:
+    """Registry-over-env read of ``RESTART_NOTIFY_DISABLED`` (A98 O5).
+
+    Default OFF ⇒ notification is ON: a detected worker/node restart notifies the
+    operator (best-effort Web Push + Telegram)."""
+    return runtime_flag_enabled("RESTART_NOTIFY_DISABLED")
+
+
+def worker_memory_watchdog_disabled() -> bool:
+    """Registry-over-env read of ``WORKER_MEMORY_WATCHDOG_DISABLED`` (A98 O7).
+
+    Default OFF ⇒ the watchdog is ON: the worker samples its RSS each supervisor
+    cycle and warns + flags heartbeat memory_pressure past the threshold."""
+    return runtime_flag_enabled("WORKER_MEMORY_WATCHDOG_DISABLED")
 
 
 def control_api_docs_enabled() -> bool:
@@ -2074,6 +2168,19 @@ class MeshDB:
                 return int(cur.rowcount or 0)
         except Exception as e:
             logger.warning("event=db_mark_driver_sessions_lost_failed node_id=%s err=%s", node_id, e)
+            return 0
+
+    def count_lost_sessions_for_node(self, node_id: str) -> int:
+        """[A98 O5] How many sessions on ``node_id`` currently carry
+        driver_status='lost' — used to describe a detected restart to the operator.
+        Read-only; never raises."""
+        try:
+            row = self._conn().execute(
+                "SELECT COUNT(*) FROM sessions WHERE machine_id = ? AND driver_status = 'lost'",
+                (node_id,),
+            ).fetchone()
+            return int(row[0]) if row else 0
+        except Exception:
             return 0
 
     def get_session(self, session_id: str) -> Optional[Dict[str, Any]]:
@@ -7012,6 +7119,13 @@ class MeshDB:
         if not durable_relay_enabled():
             return {"ok": False, "reason": "durable_relay_disabled"}
 
+        # [recovery-wait-resolution] Reconcile the ledger from TASK TRUTH first: if a
+        # member task reached a terminal state via a path that never emitted
+        # ``task.finished`` (restart recovery, reapers), backfill the missing fact so
+        # the scan below can resolve the wait. Idempotent; a no-op when every member
+        # already has its event.
+        self.backfill_missing_task_finished(flow_run_id, actor=actor)
+
         pending_markers: Dict[str, Dict[str, Any]] = {}
         resolved_tasks: set = set()
         finished: Dict[str, str] = {}
@@ -7046,6 +7160,107 @@ class MeshDB:
                     "timeout": pl.get("timeout") if isinstance(pl, dict) else None,
                 })
         return {"ok": True, "resolved": resolved_out, "pending": pending_out}
+
+    def backfill_missing_task_finished(
+        self,
+        flow_run_id: str,
+        *,
+        actor: str = "system",
+    ) -> List[str]:
+        """Reconcile the Case ledger from TASK TRUTH: emit any ``task.finished``
+        event that a terminalising path failed to write.
+
+        The wake-dispatcher resolves a wait-group PURELY from ``task.finished``
+        events (``compute_continuation_tick``). But a task can reach a terminal
+        state through a path that updates only the task row / session and never
+        emits that event — restart recovery (``_recover_completed_session``) and
+        the stale-claim / stale-pending reapers all do. When such a task is a
+        member of an unresolved ``worker.wait_pending`` group, the group dangles
+        forever and the Manager waits on a worker that is already done, while the
+        UI (session row) correctly shows it finished. This is the exact divergence
+        that strands a Manager across a gateway restart.
+
+        For every member of an unresolved pending group that has NO
+        ``task.finished`` event yet but whose ``mesh_tasks.status`` IS terminal,
+        append the missing ``task.finished`` (``once`` ⇒ idempotent) with the
+        outcome derived from the task row. Returns the task_ids backfilled.
+
+        Flag-neutral by design: this is a truth-reconciliation of the audit
+        ledger (the single durable fact the wake loop reads), NOT the
+        durable-relay re-arm — so a restart can always re-derive a stranded wait
+        regardless of ``durable_relay_enabled``. Best-effort per task; a bad row
+        is skipped, never raised."""
+        # Covers BOTH wait subsystems that share this ledger: M3.4 wait-GROUPS
+        # (``entity_type='wait_group'`` carrying ``member_task_ids``, read by
+        # ``compute_continuation_tick``) and A46 per-TASK waits
+        # (``entity_type='task'``, read by ``reconcile_worker_waits``).
+        groups: Dict[str, List[str]] = {}
+        resolved_groups: set = set()
+        task_pending: set = set()
+        task_resolved: set = set()
+        already_finished: set = set()
+        for e in self.list_flow_events(flow_run_id):
+            et = e.get("event_type")
+            etype = e.get("entity_type")
+            eid = e.get("entity_id")
+            if etype == "wait_group":
+                if not eid:
+                    continue
+                if et == "worker.wait_pending":
+                    pl = _event_payload(e) or {}
+                    groups[eid] = list(pl.get("member_task_ids") or [])
+                elif et == "worker.wait_resolved":
+                    resolved_groups.add(eid)
+            elif etype == "task":
+                if not eid:
+                    continue
+                if et == "worker.wait_pending":
+                    task_pending.add(eid)
+                elif et == "worker.wait_resolved":
+                    task_resolved.add(eid)
+                elif et == "task.finished":
+                    already_finished.add(eid)
+
+        candidates: set = set()
+        for gid, members in groups.items():
+            if gid in resolved_groups:
+                continue
+            for tid in members:
+                if tid and tid not in already_finished:
+                    candidates.add(tid)
+        for tid in task_pending:
+            if tid not in task_resolved and tid not in already_finished:
+                candidates.add(tid)
+        if not candidates:
+            return []
+
+        backfilled: List[str] = []
+        for tid in candidates:
+            try:
+                row = self.get_task(tid)
+                if not row:
+                    continue
+                status = str(row.get("status") or "").strip().lower()
+                if status == "completed":
+                    outcome = "success"
+                elif status in ("failed", "failed_node_offline", "cancelled"):
+                    outcome = "failed"
+                else:
+                    continue  # genuinely still running — leave the wait pending
+                self.append_flow_event_once(
+                    flow_run_id, "task.finished", actor,
+                    entity_type="task", entity_id=tid,
+                    payload={
+                        "outcome": outcome,
+                        "error_class": (str(row.get("error_class") or "") or None)
+                        if outcome == "failed" else None,
+                        "source": "backfill_from_task_truth",
+                    },
+                )
+                backfilled.append(tid)
+            except Exception:
+                continue
+        return backfilled
 
     # ------------------------------------------------------------------
     # [M3.4] Autonomous Case continuation. A Manager arms a wait-GROUP over a
@@ -10085,12 +10300,15 @@ class MeshDB:
         now = _now()
         read_tokens = max(0, int(cache_read_tokens or 0))
         creation_tokens = max(0, int(cache_creation_tokens or 0))
+        out_s = str(output or "")
         beat_count = int(row.get("beat_count") or 0) + 1
         status = str(row.get("status") or "active")
         circuit: Optional[str] = None
-        if "STOP_CACHE_HEARTBEAT" in str(output or ""):
+        max_cap = min(int(row.get("max_beats") or 0), int(row.get("hard_max_beats") or 0))
+        renew_expires: Optional[str] = None
+        if "STOP_CACHE_HEARTBEAT" in out_s or "CONCLUDE_SUPERVISION" in out_s:
             status = "stopped"
-            circuit = "agent_requested_stop"
+            circuit = "agent_concluded" if "CONCLUDE_SUPERVISION" in out_s else "agent_requested_stop"
         elif error_class in ("usage_limit", "rate_limit", "upstream_error"):
             status = "stopped"
             circuit = f"heartbeat_{error_class}"
@@ -10100,7 +10318,23 @@ class MeshDB:
         elif creation_tokens >= cache_heartbeat_min_cache_tokens() and read_tokens < creation_tokens:
             status = "circuit_open"
             circuit = "cache_miss_rewrite"
-        elif beat_count >= min(int(row.get("max_beats") or 0), int(row.get("hard_max_beats") or 0)):
+        elif (
+            "CONTINUE_SUPERVISION" in out_s
+            and cache_heartbeat_checkpoint_enabled()
+            and beat_count >= max(1, max_cap - 1)
+        ):
+            # Deliberate renewal — the ONLY path that extends the budget. At the
+            # decision checkpoint the Manager chose to keep supervising the work,
+            # so reset the idle-beat budget and push the controller expiry out by
+            # another full window. There is NO automatic renewal on real turns.
+            beat_count = 0
+            ttl = cache_heartbeat_ttl_sec()
+            interval_sec = int(row.get("interval_sec") or cache_heartbeat_interval_sec())
+            renew_expires = (
+                datetime.now(timezone.utc)
+                + timedelta(seconds=(interval_sec * max(1, max_cap)) + ttl)
+            ).isoformat()
+        elif beat_count >= max_cap:
             status = "stopped"
             circuit = "max_beats_reached"
         next_due = self._cache_heartbeat_next_due(now, int(row.get("interval_sec") or 2700))
@@ -10112,15 +10346,30 @@ class MeshDB:
             SET beat_count = ?, last_beat_task_id = ?,
                 last_cache_touch_at = CASE WHEN ? > 0 THEN ? ELSE last_cache_touch_at END,
                 last_cache_read_tokens = ?, last_cache_creation_tokens = ?,
-                next_due_at = ?, status = ?, circuit_reason = COALESCE(?, circuit_reason),
+                next_due_at = ?, status = ?,
+                circuit_reason = CASE WHEN ? THEN NULL ELSE COALESCE(?, circuit_reason) END,
+                expires_at = COALESCE(?, expires_at),
                 updated_at = ?
             WHERE id = ?
             """,
             (
                 beat_count, task_id, read_tokens, now, read_tokens, creation_tokens,
-                next_due, status, circuit, now, heartbeat_id,
+                next_due, status,
+                1 if renew_expires else 0, circuit,
+                renew_expires, now, heartbeat_id,
             ),
         )
+        if renew_expires is not None:
+            # Keep active owners alive across the renewed window so the expiry
+            # sweep (``expire_cache_heartbeat_state``) does not stop the controller.
+            conn.execute(
+                """
+                UPDATE session_cache_heartbeat_owners
+                SET expires_at = ?, updated_at = ?
+                WHERE heartbeat_id = ? AND status = 'active'
+                """,
+                (renew_expires, now, heartbeat_id),
+            )
         if status not in ("active", "observe_only"):
             conn.execute(
                 """

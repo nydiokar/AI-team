@@ -64,7 +64,7 @@ returns to the same Case-owning Manager Session (M3.3 makes that relay crash-dur
 4. `claude_driver.py`: `_manager_role_enabled()`; thread role/system_prompt into `_SDKSession`; `_session_allowed_tools(role)` per-session scoping (legacy A34 process-wide preserved when flag OFF).
 5. `control_api.py` `POST /api/manager` + orchestrator `invoke_manager` seam.
 6. `mcp_manager.py` `get_case`; confirm dispatch-into-same-Case.
-7. `docs/ENV_FEATURE_FLAGS.md` row; acceptance tests (all assertions below); this packet's `## Milestone`.
+7. `docs/backend/ENV_FEATURE_FLAGS.md` row; acceptance tests (all assertions below); this packet's `## Milestone`.
 
 ## Acceptance
 Exactly one Case per Manager objective · one persistent Manager Session with `case_role="manager"` ·
@@ -105,7 +105,7 @@ reviewer is the Manager; 3.2 is durability plumbing only.
    admission branch (J): a `join_case_id` attaches the worker task to the Manager's open Case (task
    link + `task.attached`), verified-open, stashed under `_CASE_ID_META_KEY` ⇒ completion leaves the
    Case OPEN. No child Case.
-7. ✅ `docs/ENV_FEATURE_FLAGS.md` row (`MANAGER_ROLE_ENABLED`); `tests/test_manager_role.py`;
+7. ✅ `docs/backend/ENV_FEATURE_FLAGS.md` row (`MANAGER_ROLE_ENABLED`); `tests/test_manager_role.py`;
    `test_mcp_manager` tool-set assertion updated.
 
 ## Adversarial-review fixes (2026-07-12, post-build)

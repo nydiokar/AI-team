@@ -1,0 +1,32 @@
+{
+  "skill_name": "managing-dispatch-jobs",
+  "evals": [
+    {
+      "id": 1,
+      "name": "open-pm2-drift-job",
+      "prompt": "open a dispatch job for this: our role prompts told agents to `pm2 restart ai-team-gateway` but the gateway moved to docker, so PRs #189-191 merged and never went live. Plan only — show me the commands, the packet skeleton and the log row.",
+      "expected_output": "AGENT_98 via dispatch_state.py --new, packet_template sections, level from rubric, one-line DISPATCH_LOG row at top, docs-only commit to main.",
+      "files": [],
+      "assertions": [
+        "Picks AGENT_98 (next free id)",
+        "Creates the job with scripts/dispatch/dispatch_state.py --new (not pnpm, not hand-written yaml)",
+        "Packet body follows docs/harness/packet_template.md sections",
+        "Adds a single-line row at the top of the DISPATCH_LOG Index",
+        "Assigns a Level with reference to the level rubric"
+      ]
+    },
+    {
+      "id": 2,
+      "name": "close-a97",
+      "prompt": "A97 is merged as PR #200 sha abc1234 — close it out properly",
+      "expected_output": "Closure in packet, --set evidence/results_ref/status, log row status, CONTEXT row removed, audit strict.",
+      "files": [],
+      "assertions": [
+        "Appends Closure to the same packet",
+        "Uses dispatch_state.py --set for status/evidence/results_ref",
+        "Removes the CONTEXT Active Work row",
+        "Runs --audit --strict"
+      ]
+    }
+  ]
+}

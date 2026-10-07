@@ -2514,6 +2514,50 @@ class WorkerAgent:
                     pass
         return total
 
+    def _memory_watchdog_sample(self) -> Optional[dict]:
+        """[A98 O7] Sample this worker process tree's RSS vs a threshold and warn
+        BEFORE the OOM-killer fires (the 2026-10-07 incident had NO such trail — a
+        background TRAIN + a heavy script almost certainly OOM-killed the daemon with
+        zero warning). ON by default; opt-out WORKER_MEMORY_WATCHDOG_DISABLED.
+        Thresholds: WORKER_MEMORY_WATCHDOG_PCT (percent of total RAM, default 85) and
+        WORKER_MEMORY_WATCHDOG_MB (absolute RSS ceiling MB; 0 = unset). Returns a
+        compact dict for the heartbeat, or None if disabled/unavailable. Never raises.
+        """
+        try:
+            from src.control.db import worker_memory_watchdog_disabled
+            if worker_memory_watchdog_disabled():
+                return None
+            import psutil  # hard dep (constraints); guard anyway
+            proc = psutil.Process()
+            rss = proc.memory_info().rss
+            # Include child processes (the claude CLI subprocesses + any heavy script)
+            for child in proc.children(recursive=True):
+                try:
+                    rss += child.memory_info().rss
+                except Exception:
+                    pass
+            total = psutil.virtual_memory().total or 0
+            pct = round(100.0 * rss / total, 1) if total else 0.0
+            rss_mb = int(rss / (1024 * 1024))
+            pct_thr = float(os.environ.get("WORKER_MEMORY_WATCHDOG_PCT", "85") or 85)
+            mb_thr = float(os.environ.get("WORKER_MEMORY_WATCHDOG_MB", "0") or 0)
+            over = (pct >= pct_thr) or (mb_thr > 0 and rss_mb >= mb_thr)
+            if over:
+                last = getattr(self, "_last_mem_warn_at", 0.0)
+                now = time.monotonic()
+                if now - last >= 60.0:  # throttle to once/min
+                    self._last_mem_warn_at = now
+                    logger.warning(
+                        "event=worker_memory_pressure node_id=%s rss_mb=%d pct=%.1f "
+                        "pct_threshold=%.1f mb_threshold=%.0f live_sessions=%d "
+                        "— approaching memory limit; OOM risk (A98 O7)",
+                        self.cfg.node_id, rss_mb, pct, pct_thr, mb_thr,
+                        self._count_live_backend_sessions(),
+                    )
+            return {"rss_mb": rss_mb, "pct": pct, "over_threshold": bool(over)}
+        except Exception:
+            return None
+
     def _live_state(self) -> dict:
         """Snapshot of current operational state for heartbeat reporting.
 
@@ -2522,7 +2566,7 @@ class WorkerAgent:
         max_concurrent when the poll loop fetches a batch larger than the
         semaphore allows.
         """
-        return {
+        state = {
             "v": 1,
             "active_tasks": list(self._active.keys()),
             "active_task_details": dict(self._active_meta),
@@ -2534,6 +2578,10 @@ class WorkerAgent:
             # session keeps its claude process warm between turns).
             "live_sessions": self._count_live_backend_sessions(),
         }
+        mem = self._memory_watchdog_sample()
+        if mem is not None:
+            state["memory"] = mem  # rides on extra="allow" LiveStatePayload (A98 O7)
+        return state
 
     async def _heartbeat_loop(self) -> None:
         _consecutive_failures = 0
@@ -3422,7 +3470,7 @@ def _install_controller_state(http: _HTTP) -> None:
 
     Installed before anything reads a flag, with one bounded first fetch. Until a
     snapshot exists the poll loop claims no work (``_controller_state_ready``) and
-    the refresh loop retries (docs/DATABASE_AUTHORITY.md §3.3)."""
+    the refresh loop retries (docs/backend/DATABASE_AUTHORITY.md §3.3)."""
     from src.control import controller_state
     from src.worker.controller_state_client import RemoteControllerState
 

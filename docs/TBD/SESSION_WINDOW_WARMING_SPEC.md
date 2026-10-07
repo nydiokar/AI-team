@@ -5,7 +5,7 @@ Owner: Nyd
 Date: 2026-06-23
 Source review:
 - `docs/README.md`
-- `docs/CONTROL_CONTRACT.md`
+- `docs/backend/CONTROL_CONTRACT.md`
 - `docs/BACKEND_HOOKS_STRATEGY.md`
 - `src/core/interfaces.py`
 - `src/services/session_service.py`

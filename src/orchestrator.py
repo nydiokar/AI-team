@@ -170,6 +170,66 @@ CACHE_HEARTBEAT_PROMPT = (
     "If you are not actually waiting on useful work, reply exactly STOP_CACHE_HEARTBEAT."
 )
 
+#: Early supervision checkpoint. Not a blind ping — a deliberate step-back that
+#: tells the Manager to assess the work it is waiting on and act if warranted.
+#: May use tools. The CONTINUE/CONCLUDE token drives the controller lifecycle.
+CACHE_HEARTBEAT_AWARENESS_PROMPT = (
+    "[supervision-checkpoint]\n"
+    "This is a periodic checkpoint on the work you are currently waiting on.\n"
+    "Step back and assess it honestly — use your tools if it helps (the latest\n"
+    "worker activity, the case and task state, the repository, the machine):\n"
+    "  - Is the work you are waiting on still genuinely in progress and on track\n"
+    "    toward the goal?\n"
+    "  - Is anything stuck, stalled, drifting from the goal, already finished, or\n"
+    "    lost?\n"
+    "  - Is the thing you are waiting for actually still coming, or are you\n"
+    "    waiting on nothing?\n"
+    "Then decide, and take action if action is warranted (nudge, re-scope, or\n"
+    "re-dispatch). End your reply with exactly one of these tokens on its own line:\n"
+    "  CONTINUE_SUPERVISION  — the work is live and worth continuing to oversee.\n"
+    "  CONCLUDE_SUPERVISION  — the work is done, abandoned, or no longer worth\n"
+    "                          waiting on (including once you have resolved it)."
+)
+
+#: Late decision checkpoint. Deliberately says NOTHING about caches, heartbeats,
+#: timeouts, or any infrastructure — the Manager reasons only about the work's
+#: stage and quality. Its CONTINUE here is the sole trigger that renews the
+#: heartbeat budget; the mapping is invisible to the Manager by design.
+CACHE_HEARTBEAT_DECISION_PROMPT = (
+    "[supervision-checkpoint]\n"
+    "This is a checkpoint on the work you are overseeing. Take stock of where it\n"
+    "stands right now — its stage, what remains, and whether it is meeting the bar\n"
+    "you set. Use your tools if you need to look.\n"
+    "Then make a deliberate call, based only on the state of the work. End your\n"
+    "reply with exactly one of these tokens on its own line:\n"
+    "  CONTINUE_SUPERVISION  — this work still needs your active oversight and you\n"
+    "                          intend to see it through.\n"
+    "  CONCLUDE_SUPERVISION  — it is complete, blocked on something you cannot\n"
+    "                          move, or should be wrapped up, escalated, or\n"
+    "                          abandoned."
+)
+
+
+def _select_cache_heartbeat_prompt(beat_number: int, max_beats: int) -> str:
+    """Pick a beat's prompt. When checkpoints are enabled, two beats become
+    deliberate supervision checkpoints — an early awareness beat and a late
+    decision beat (``max_beats - 1``) — and every other beat stays the blind
+    keep-warm ping. When disabled, every beat is the keep-warm ping (byte
+    identical to the pre-checkpoint behaviour)."""
+    from src.control.db import (
+        cache_heartbeat_awareness_beat,
+        cache_heartbeat_checkpoint_enabled,
+    )
+    if not cache_heartbeat_checkpoint_enabled():
+        return CACHE_HEARTBEAT_PROMPT
+    decision_beat = max(1, int(max_beats or 0) - 1)
+    if beat_number == decision_beat:
+        return CACHE_HEARTBEAT_DECISION_PROMPT
+    awareness_beat = cache_heartbeat_awareness_beat()
+    if awareness_beat < decision_beat and beat_number == awareness_beat:
+        return CACHE_HEARTBEAT_AWARENESS_PROMPT
+    return CACHE_HEARTBEAT_PROMPT
+
 #: [A82 Stage 4d] A managed cache-heartbeat turn is optional work with a
 #: deadline: if it has not STARTED within this many seconds of admission it is
 #: withdrawn (at the head by the scheduler, at claim by the ledger) — never a
@@ -1279,6 +1339,36 @@ class TaskOrchestrator(ITaskOrchestrator):
                 task_id=task_id or session.session_id,
                 chat_id=session.telegram_chat_id,
             )
+            # [recovery-wait-resolution] A wait member we could only mark ERROR
+            # (failed / unknown after restart) must still resolve its Manager's
+            # wait-group — otherwise the Manager hangs on a worker that will never
+            # report. Emit the terminal fact as a failure (idempotent) so the
+            # Manager is woken to react rather than waiting forever.
+            if task_id:
+                self._emit_task_finished(
+                    task_id, success=False,
+                    error_class="restart_interrupted", once=True,
+                )
+
+        # [recovery-wait-resolution] Final safety net: the recovery/reaper paths
+        # that terminalise a task without emitting `task.finished` are the only way
+        # an armed wait can be stranded, and they all run around a restart. Reconcile
+        # EVERY open Case's waits against task truth once here, so the durable task
+        # state alone is sufficient to wake a Manager — independent of which path
+        # finalised the worker. Bounded (open Cases only) and idempotent.
+        if db is not None:
+            try:
+                for case in db.list_open_cases():
+                    cid = case.get("flow_run_id")
+                    if cid:
+                        backfilled = db.backfill_missing_task_finished(cid)
+                        if backfilled:
+                            self._emit_event(
+                                "recovery_wait_backfill", None,
+                                {"case_id": cid, "task_ids": backfilled},
+                            )
+            except Exception as e:
+                logger.warning("event=recovery_wait_backfill_failed err=%s", e)
 
     async def _recover_completed_session(self, session: Any, task_row: Dict[str, Any]) -> None:
         """Restore a session whose task completed in DB while the gateway was down."""
@@ -1343,6 +1433,14 @@ class TaskOrchestrator(ITaskOrchestrator):
             None,
             {"session_id": session.session_id, "task_id": task_row["id"], "backend": session.backend},
         )
+        # [recovery-wait-resolution] This path finalises a task that completed
+        # across a gateway restart, but a Manager's wait-group resolves ONLY from
+        # the durable `task.finished` ledger fact — which the live result path
+        # emits and this path historically did NOT. Emit it (idempotent) so a
+        # Manager waiting on this worker is actually woken; without it the wait
+        # dangles forever while the UI (session row, updated above) correctly
+        # shows the worker done — the exact divergence that strands the Manager.
+        self._emit_task_finished(task_row.get("id"), success=True, once=True)
 
         await self.notifier.notify_task_outcome(
             task_row["id"],
@@ -1693,7 +1791,7 @@ class TaskOrchestrator(ITaskOrchestrator):
             try:
                 beat_number = int(hb.get("beat_count") or 0) + 1
                 wake_task_id = await self.submit_instruction(
-                    CACHE_HEARTBEAT_PROMPT,
+                    _select_cache_heartbeat_prompt(beat_number, int(hb.get("max_beats") or 0)),
                     session_id=session_id,
                     cwd=getattr(session, "repo_path", None),
                     source="cache_heartbeat",
@@ -1759,7 +1857,7 @@ class TaskOrchestrator(ITaskOrchestrator):
         ).isoformat()
         try:
             admission = await self.submit_instruction(
-                CACHE_HEARTBEAT_PROMPT,
+                _select_cache_heartbeat_prompt(beat_number, int(hb.get("max_beats") or 0)),
                 session_id=session_id,
                 cwd=getattr(session, "repo_path", None),
                 source="cache_heartbeat",
@@ -2032,9 +2130,23 @@ class TaskOrchestrator(ITaskOrchestrator):
         # Manager). Escalate ONCE instead of returning 0 in silence. A transient
         # non-waiting state (IDLE just-restored, BUSY mid-turn) is NOT a strand — it
         # resolves on its own — so only CLOSED/CANCELLED/missing escalates.
+        #
+        # [A98 O2] A worker restart can land the Manager in ERROR with
+        # driver_status='lost' (the fresh-fork create_session itself failed, or the
+        # session was marked ERROR by a terminal 'session_lost' turn before O1 could
+        # fork it). That is a dead session too — the restart killed it — but ERROR is
+        # NOT CLOSED/CANCELLED, so pre-A98 it fell through to a plain wake that the
+        # worker refuses forever (the incident's 02:51 + 07:57 identical re-pokes).
+        # Treat ERROR+driver_lost as crash-respawn-eligible (discriminated by
+        # driver_status='lost' so a genuine non-restart ERROR is untouched).
+        # Class-referenced (not self.) so duck-typed fakes that borrow
+        # _continue_case_once don't need to re-declare these two staticmethods.
+        _restart_errored = TaskOrchestrator._is_restart_dead_session(
+            session, TaskOrchestrator._respawn_on_restart_error_enabled()
+        )
         if session is None or session.status in (
             SessionStatus.CLOSED, SessionStatus.CANCELLED,
-        ):
+        ) or _restart_errored:
             # [A55 / M3.4 Job 3] CRASH-RESPAWN. The bound Manager session is dead
             # (gone/closed) but the Case is genuinely open (the 'blocked' guard
             # above already excluded operator-halted Cases) and SATISFIED — its
@@ -4571,6 +4683,10 @@ class TaskOrchestrator(ITaskOrchestrator):
                 except Exception as e:
                     logger.debug("event=stale_busy_reconcile_failed err=%s", e)
                 try:
+                    await self._detect_node_restarts_once()
+                except Exception as e:
+                    logger.debug("event=detect_node_restarts_failed err=%s", e)
+                try:
                     await self._reap_idle_warm_workers_once()
                 except Exception as e:
                     logger.debug("event=idle_warm_worker_reap_failed err=%s", e)
@@ -4578,6 +4694,58 @@ class TaskOrchestrator(ITaskOrchestrator):
         except asyncio.CancelledError:
             logger.info("event=stale_busy_reconciler_stopped")
             raise
+
+    async def _detect_node_restarts_once(self) -> None:
+        """[A98 O5] Observe node incarnation flips and notify the operator ONCE per
+        restart. The session mark-lost + claim release already happen in
+        NodeRegistry.register (O3); O1/O2 then re-establish each session. This adds
+        the coherent operator-facing signal that was MISSING in the 2026-10-07
+        incident — the operator got no Telegram/push when Horse restarted.
+
+        First observation of a node seeds the baseline (no notify); only a changed
+        incarnation on an already-seen node fires. Best-effort; never raises.
+        """
+        from src.control.db import restart_notify_disabled
+        if restart_notify_disabled():
+            return
+        db = get_db()
+        if db is None:
+            return
+        rows = await asyncio.to_thread(db.list_nodes)
+        seen = getattr(self, "_seen_incarnations", None)
+        if seen is None:
+            seen = {}
+            self._seen_incarnations = seen
+        for row in rows or []:
+            node_id = row.get("node_id")
+            inc = row.get("incarnation_id")
+            if not node_id or not inc:
+                continue
+            prev = seen.get(node_id)
+            seen[node_id] = inc
+            if prev is None or prev == inc:
+                continue  # first sighting (baseline) or unchanged
+            # Incarnation flipped since we last looked ⇒ the worker/node restarted.
+            try:
+                lost = await asyncio.to_thread(
+                    db.count_lost_sessions_for_node, node_id
+                )
+            except Exception:
+                lost = 0
+            logger.warning(
+                "event=node_restart_detected node_id=%s old_incarnation=%s "
+                "new_incarnation=%s lost_sessions=%d",
+                node_id, prev, inc, lost,
+            )
+            notifier = getattr(self, "notifier", None)
+            if notifier is not None:
+                with contextlib.suppress(Exception):
+                    await notifier.notify_restart(
+                        node_id=node_id,
+                        lost_sessions=lost,
+                        old_incarnation=prev,
+                        new_incarnation=inc,
+                    )
 
     def _repair_managed_stale_busy(self, session: Any, row: Dict[str, Any]) -> bool:
         """[A82 Stage 6] A BUSY session whose last turn is MANAGED: an open
@@ -7430,27 +7598,63 @@ class TaskOrchestrator(ITaskOrchestrator):
         (no-op when OFF ⇒ byte-identical) and best-effort/isolated — a write
         failure logs and returns; it can NEVER raise into task execution.
         """
+        meta = getattr(task, "metadata", None) or {}
+        # Birth case (owns a flow_run) OR the shared Case an ordinary turn
+        # attached to — either way the task ran under this Case.
+        flow_run_id = meta.get(self._FLOW_RUN_META_KEY) or meta.get(self._CASE_ID_META_KEY)
+        self._emit_task_finished(
+            getattr(task, "id", None),
+            success=success,
+            error_class=error_class,
+            flow_run_id=flow_run_id,
+        )
+
+    def _emit_task_finished(
+        self,
+        task_id: Optional[str],
+        *,
+        success: bool,
+        error_class: str = "",
+        flow_run_id: Optional[str] = None,
+        once: bool = False,
+    ) -> None:
+        """Emit the SINGLE durable terminal fact (``task.finished``) for a task.
+
+        This is the one signal the wake-dispatcher reads to resolve a Manager's
+        wait-group (``compute_continuation_tick``). EVERY path that terminalises a
+        task must funnel through here so the ledger fact can never diverge from the
+        task's real outcome: the live result path (``_flow_terminal_outcome``),
+        restart recovery (``_recover_completed_session``) and the reattach path all
+        call it. The Case is resolved from an explicit ``flow_run_id`` hint (the
+        live path carries it in task metadata) or, failing that, from the durable
+        task→Case lineage (``existing_task_lineage``) — so a caller that holds only
+        a task id (recovery) still writes to the correct Case instead of silently
+        dropping the fact. Flag-guarded, best-effort/isolated — a write failure
+        logs and returns; it can NEVER raise into task handling. ``once=True`` makes
+        the write idempotent (used by the reconciliation callers)."""
         try:
-            if not self._harness_flow_drive_enabled():
+            if not task_id or not self._harness_flow_drive_enabled():
                 return
-            meta = getattr(task, "metadata", None) or {}
-            # Birth case (owns a flow_run) OR the shared Case an ordinary turn
-            # attached to — either way the task ran under this Case.
-            flow_run_id = meta.get(self._FLOW_RUN_META_KEY) or meta.get(self._CASE_ID_META_KEY)
-            if not flow_run_id:
+            case = flow_run_id
+            if not case:
+                from src.control.db import get_db
+                db = get_db()
+                lineage = db.existing_task_lineage(task_id) if db is not None else None
+                case = lineage.get("flow_run_id") if lineage else None
+            if not case:
                 return
             self._record_flow_event(
-                flow_run_id, "task.finished", "system",
-                entity_type="task", entity_id=getattr(task, "id", None),
+                case, "task.finished", "system",
+                entity_type="task", entity_id=task_id,
                 payload={
                     "outcome": "success" if success else "failed",
                     "error_class": (error_class or None) if not success else None,
                 },
+                once=once,
             )
         except Exception as e:
             logger.warning(
-                "event=flow_terminal_outcome_failed task_id=%s err=%s",
-                getattr(task, "id", "?"), e,
+                "event=emit_task_finished_failed task_id=%s err=%s", task_id, e,
             )
 
     # ===========================================================================
@@ -7648,6 +7852,33 @@ class TaskOrchestrator(ITaskOrchestrator):
         # ON by default. Set RESTART_CONTEXT_RESTORE_DISABLED=true to opt out.
         from src.control.db import restart_context_restore_disabled
         return not restart_context_restore_disabled()
+
+    @staticmethod
+    def _restart_lost_fork_enabled() -> bool:
+        # [A98 O1] ON by default. Set RESTART_LOST_SESSION_FORK_DISABLED=true to opt
+        # out and restore the legacy resume-into-a-corpse behaviour.
+        from src.control.db import restart_lost_session_fork_disabled
+        return not restart_lost_session_fork_disabled()
+
+    @staticmethod
+    def _respawn_on_restart_error_enabled() -> bool:
+        # [A98 O2] ON by default. Set RESPAWN_ON_RESTART_ERROR_DISABLED=true to opt
+        # out (then an ERROR+driver_lost Manager strands instead of respawning).
+        from src.control.db import respawn_on_restart_error_disabled
+        return not respawn_on_restart_error_disabled()
+
+    @staticmethod
+    def _is_restart_dead_session(session: Any, respawn_enabled: bool) -> bool:
+        """[A98 O2] True when a worker restart left this Manager session ERROR +
+        driver_status='lost' — a dead session that crash-respawn should own (like
+        CLOSED/CANCELLED), discriminated by driver_status='lost' so a genuine
+        non-restart ERROR is untouched. ``respawn_enabled`` gates the behaviour."""
+        return bool(
+            session is not None
+            and getattr(session, "status", None) == SessionStatus.ERROR
+            and getattr(session, "driver_status", "") == "lost"
+            and respawn_enabled
+        )
 
     async def _maybe_inject_restart_recovery_context(self, task: "Task") -> None:
         """Prepend recent completed turns when a session's driver was lost on restart.
@@ -12568,11 +12799,31 @@ Generated from user description: {description}
     ) -> Tuple[str, Dict[str, Any]]:
         """The carrier-executable ``(action, payload)`` for ``task`` — shared by the
         legacy shadow-write (``_mesh_enqueue_task``) and the A82 managed activation
-        preparation, so both paths dispatch the identical shape. Pure."""
+        preparation, so both paths dispatch the identical shape. Pure except for one
+        registry flag read (A98 O1) gating the restart-lost fresh-fork branch, which
+        applies only to non-enrolled (legacy) sessions."""
         action_override = (task.metadata or {}).get("task_type", "")
         if action_override == "fetch_staged_file":
             action = "fetch_staged_file"
         elif session_id and session and not session.backend_session_id:
+            action = "create_session"
+        elif (
+            session_id
+            and session
+            and getattr(session, "driver_status", "") == "lost"
+            and not getattr(session, "turn_queue_enrolled", 0)
+            and self._restart_lost_fork_enabled()
+        ):
+            # [A98 O1] A worker restart orphaned this session's in-memory SDK
+            # driver (driver_status='lost'). It HAS a backend_session_id, so the
+            # legacy branch below would emit resume_session — which the worker
+            # refuses ("session was lost ... cannot be resumed by the continuous
+            # driver") and the Wake-Dispatcher then re-injects restart-context
+            # into that corpse forever. Instead dispatch a FRESH create_session
+            # (role re-boot + A54 boot-reconcile + the <prior_context> block
+            # _maybe_inject_restart_recovery_context already prepends on exactly
+            # this driver_status='lost' condition), which is the coherent
+            # fork-and-continue the restart-recovery design always intended.
             action = "create_session"
         elif session_id:
             action = "resume_session"

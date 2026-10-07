@@ -41,7 +41,7 @@ hygiene gap, and that the clean fix is best done together with the credential wo
    dispatch/control calls authorized).
 3. Tests (plain `pytest`, touched modules only): served HTML contains no token literal; dashboard
    bootstrap still yields a working authenticated session.
-4. Docs: update `docs/MESH_SECURITY.md` storage/trust notes to record the token is no longer in
+4. Docs: update `docs/backend/MESH_SECURITY.md` storage/trust notes to record the token is no longer in
    served HTML.
 
 ## Constraints / hard rules

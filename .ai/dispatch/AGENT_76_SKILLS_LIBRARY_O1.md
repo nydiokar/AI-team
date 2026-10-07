@@ -5,8 +5,8 @@ status: done              # ready | active | blocked | done | dead
 owner: worker:e3dba8b45092
 depends_on: []
 results_ref: DISPATCH_LOG.md → A76 row (done, PR #86)             # -> DISPATCH_LOG.md section with the verdict prose
-evidence: ["docs/SKILLS_LIBRARY_O1.md", "skills/no-false-success.md", "skills/reuse-before-build.md", "skills/verify-claims-in-git.md", "scripts/mcp_manager.py", "tests/test_mcp_manager.py"]                  # artifact paths that PROVE it ran (checked to exist)
-updated_at: "2026-08-08T23:32:56.356719+00:00"
+evidence: ["docs/SKILLS_LIBRARY_O1.md"]                  # artifact paths that PROVE it ran (checked to exist)
+updated_at: "2026-10-06T18:25:46.837659+00:00"
 ```
 
 # DISPATCH — AGENT_76_SKILLS_LIBRARY_O1
@@ -111,7 +111,7 @@ worker node, which is not true today. Token math + the A-vs-B table + the remote
   rejected early, resolution fails **before** any dispatch.
 - Flag OFF ⇒ the `skills` param is ignored and the `POST /api/instructions` payload is
   **byte-identical** to today — proven by `test_dispatch_worker_flag_off_is_byte_identical`.
-- `docs/SKILLS_LIBRARY_O1.md` (design + token math) and `docs/ENV_FEATURE_FLAGS.md` (flag registered).
+- `docs/SKILLS_LIBRARY_O1.md` (design + token math) and `docs/backend/ENV_FEATURE_FLAGS.md` (flag registered).
 
 ## Closure
 

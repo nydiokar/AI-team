@@ -20,7 +20,7 @@ in `src/control/control_api.py`, and `scripts/ops_flag.sh` operator CLI, all liv
 ## Why (intent)
 The operator asked to get "all controllable flags" into the registry so they stop being tracked
 by hand across `.env`. Today `/api/flags` covers **23 of ~97** documented env keys
-(`docs/ENV_FEATURE_FLAGS.md`) — all of them booleans. The registry's storage/type model
+(`docs/backend/ENV_FEATURE_FLAGS.md`) — all of them booleans. The registry's storage/type model
 (`_truthy_flag` coercion, `"1"/"0"` raw values) is boolean-only by construction, so the other ~74
 keys — mostly numeric tuning knobs and a few strings — cannot be added as-is. The two the operator
 named explicitly while exploring this: **`CLAUDE_SDK_MAX_TURNS`** and **`CLAUDE_SDK_MAX_BUDGET_USD`**
@@ -64,7 +64,7 @@ read-only via `GET /health` but with no write path at all, registry or otherwise
    PUT it back" loop must keep working for non-bool flags without change (verify, don't assume).
 5. **Do NOT bulk-migrate the other ~72 documented env keys in this job.** Land the type-extension
    machinery + the two governor knobs as the proven case. A follow-up job (reference this one) can
-   walk the rest of `docs/ENV_FEATURE_FLAGS.md` category-by-category once the pattern is validated
+   walk the rest of `docs/backend/ENV_FEATURE_FLAGS.md` category-by-category once the pattern is validated
    live — many of those 72 are bootstrap/worker-side and architecturally excluded from ever being
    registry-writable (same reasoning as the 11 non-writable booleans today); don't assume they all
    qualify.
@@ -83,7 +83,7 @@ every existing boolean entry — this is additive type-model work, not a rewrite
   (`/health` read-only surface).
 - Operator CLI: `scripts/ops_flag.sh` (this session's new tool — `list`/`explain`/`get`/`on`/`off`/
   `unset`/`migrate`).
-- Reference inventory: `docs/ENV_FEATURE_FLAGS.md` — the full ~97-key surface, categorized; use this
+- Reference inventory: `docs/backend/ENV_FEATURE_FLAGS.md` — the full ~97-key surface, categorized; use this
   to scope what's plausibly registry-writable later, not to bulk-migrate now.
 - Existing tests: `tests/test_control_api.py` (flag routes, incl. the `flag_not_registry_writable`
   409 path — must stay green), `tests/test_sdk_governor.py` (governor knob behavior — must stay
