@@ -274,13 +274,23 @@ export const api = {
     );
   },
 
-  /** Operator resolution of a held (recovery_required) turn; never replays it. */
+  /**
+   * Operator resolution of a held/stuck turn. A started turn is resolved
+   * `failed`/`cancelled` and is never replayed; a never-started `claimed` turn
+   * is `requeue`d (token-fenced release). `acknowledge` sends the
+   * `acknowledge_uncertain` flag the backend requires for a started turn — it is
+   * false for a safe requeue (no outcome to acknowledge).
+   */
   resolveTurnRecovery(
-    token: string, turnId: string, decision: "failed" | "cancelled", note = "",
+    token: string,
+    turnId: string,
+    decision: "failed" | "cancelled" | "requeue",
+    note = "",
+    acknowledge = true,
   ): Promise<TurnRecoveryResolution> {
     return turnMutation<TurnRecoveryResolution>(
       `/api/turn-requests/${encodeURIComponent(turnId)}/resolve-recovery`, token, "POST",
-      { decision, acknowledge_uncertain: true, note },
+      { decision, acknowledge_uncertain: acknowledge, note },
     );
   },
 

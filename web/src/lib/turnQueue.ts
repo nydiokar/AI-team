@@ -86,20 +86,131 @@ export function isEditableTurn(turn: {
   );
 }
 
-/** Who asked — server-derived source, never client-claimed. */
+/**
+ * Who asked — server-derived source, never client-claimed (D5). Always names a
+ * principal AND, when the turn is not a plain operator instruction, what kind of
+ * turn it is, so the operator never sees a bare "System" / "Continuation" with no
+ * context. Shapes:
+ *   human/operator instruction      → "You"
+ *   human/operator compaction       → "You · Compaction"
+ *   agent instruction (+session id) → "Agent 1f9bce3f"
+ *   system continuation             → "System · Continuation"
+ */
 export function turnSourceLabel(turn: {
   turn_source: string | null;
   turn_kind: string | null;
   sender_session_id: string | null;
 }): string {
-  if (turn.turn_source === "agent") {
+  const who = turnPrincipalLabel(turn);
+  const kind = turn.turn_kind;
+  if (kind && kind !== "instruction") return `${who} · ${humanize(kind)}`;
+  return who;
+}
+
+/** The principal only (no turn-kind qualifier) — used where space is tightest. */
+export function turnPrincipalLabel(turn: {
+  turn_source: string | null;
+  sender_session_id: string | null;
+}): string {
+  const src = (turn.turn_source ?? "").trim();
+  if (src === "agent") {
     return turn.sender_session_id ? `Agent ${turn.sender_session_id.slice(0, 8)}` : "Agent";
   }
-  if (turn.turn_source === "human" || turn.turn_source === "operator") {
-    return turn.turn_kind === "compaction" ? "Compaction" : "You";
+  if (src === "human" || src === "operator") return "You";
+  if (src === "system" || src === "") return "System";
+  return humanize(src);
+}
+
+/**
+ * The distinct senders behind a set of turns, for the collapsed one-line
+ * indicator (D3): dedupes by principal, keeps first-seen order, and caps the
+ * visible names, summarising the rest as "+N". Empty list ⇒ "".
+ */
+export function senderSummary(
+  turns: readonly {
+    turn_source: string | null;
+    sender_session_id: string | null;
+  }[],
+  max = 2,
+): string {
+  const seen: string[] = [];
+  for (const t of turns) {
+    const who = turnPrincipalLabel(t);
+    if (!seen.includes(who)) seen.push(who);
   }
-  if (turn.turn_kind && turn.turn_kind !== "instruction") return humanize(turn.turn_kind);
-  return "System";
+  if (seen.length === 0) return "";
+  if (seen.length <= max) return seen.join(", ");
+  return `${seen.slice(0, max).join(", ")} +${seen.length - max}`;
+}
+
+/** First 1–2 words of a preview, for a super-thin row (D4). Never the full text. */
+export function previewWords(preview: string | null | undefined, words = 2): string {
+  const parts = (preview ?? "").trim().split(/\s+/).filter(Boolean);
+  if (parts.length === 0) return "";
+  const head = parts.slice(0, words).join(" ");
+  return parts.length > words ? `${head}…` : head;
+}
+
+/** Ids of the turns that are genuinely STILL WAITING (D1/D6). An active or
+ *  finished turn is NOT waiting — it belongs to the chat, not the queue. */
+export function waitingTurnIds(
+  turns: readonly { id: string; status: string }[],
+): string[] {
+  return turns.filter((t) => t.status === "queued").map((t) => t.id);
+}
+
+/** A legal operator resolution for a held/stuck turn (F1). `requiresAck` mirrors
+ *  the backend contract (`turn_requests.py`): a never-started `claimed` turn is
+ *  token-fenced and only requeue-able (no acknowledgement); a started/held turn
+ *  can only be failed/cancelled and must be acknowledged as uncertain. */
+export type RecoveryDecision = "requeue" | "cancelled" | "failed";
+
+export interface RecoveryOption {
+  decision: RecoveryDecision;
+  label: string;
+  description: string;
+  tone: "safe" | "neutral" | "danger";
+  requiresAck: boolean;
+}
+
+/**
+ * The legal resolutions for a turn's status, in operator-preference order
+ * (safest first). Mirrors `src/control/routes/turn_requests.py`:
+ *   claimed (never started)        → requeue only (no acknowledgement)
+ *   running / recovery_required    → cancelled | failed (acknowledgement required)
+ * Any other status ⇒ no resolution is offered.
+ */
+export function recoveryOptions(status: string): RecoveryOption[] {
+  if (status === "claimed") {
+    return [
+      {
+        decision: "requeue",
+        label: "Requeue",
+        description: "Never started — release it back to the queue to run again (safe).",
+        tone: "safe",
+        requiresAck: false,
+      },
+    ];
+  }
+  if (status === "running" || status === "recovery_required") {
+    return [
+      {
+        decision: "cancelled",
+        label: "Cancel",
+        description: "Drop it — no result recorded.",
+        tone: "neutral",
+        requiresAck: true,
+      },
+      {
+        decision: "failed",
+        label: "Mark failed",
+        description: "Mark it failed — it will not re-run.",
+        tone: "danger",
+        requiresAck: true,
+      },
+    ];
+  }
+  return [];
 }
 
 const BLOCKED_REASON_LABEL: Record<string, string> = {
