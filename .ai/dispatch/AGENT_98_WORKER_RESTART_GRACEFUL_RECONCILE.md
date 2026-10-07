@@ -6,8 +6,8 @@ owner: "incident-investigation"
 depends_on: []
 results_ref: DISPATCH_LOG.md#A98             # -> DISPATCH_LOG.md section with the verdict prose
 evidence:
-  - .ai/dispatch/AGENT_98_WORKER_RESTART_GRACEFUL_RECONCILE.md   # this packet (scorecard + plan)
-updated_at: "2026-10-07T09:59:04.000000+00:00"
+  tests/test_restart_lost_fork.py,.ai/dispatch/AGENT_98_WORKER_RESTART_GRACEFUL_RECONCILE.md   # this packet (scorecard + plan)
+updated_at: "2026-10-07T10:24:27.460869+00:00"
 ```
 
 # DISPATCH — A98 · Worker-restart graceful reconcile (the "one restart → big mess" incident)
@@ -105,6 +105,26 @@ corpse, spent real money, told no one."
   if present and fresh, else fork/respawn from brief. Confirm the freshness threshold with cost in mind.
 - Whether an ungated worker should keep executing when its Manager is dead (O-safety) — likely pause or
   flag deliverables as un-reviewed; needs an owner ruling.
+
+## Milestone
+
+**O1 — SHIPPED + LIVE (2026-10-07).** PR #193 merged to `main` (`c73c51f`); gateway + task-server
+rebuilt and recreated on `ai-team:prod-c73c51f` (schema 42, no migration; rollback `ai-team:pre-c73c51f`;
+DB backup `~/ai-team-data/backups/mesh-pre-c73c51f-20261007T1016Z.db`). Verified live: both containers
+healthy, `/health` ok, both nodes (kanebra-worker, Horse) recovered online, `RESTART_LOST_SESSION_FORK_DISABLED`
+registered in the running image and `restart_lost_session_fork_disabled()` resolves `False` (fork ON) in
+the live process. 5 targeted tests + adjacent suites green. **Gateway-only — no worker restart needed.**
+
+**O1 live end-to-end drill — PENDING (operator decision).** Both online workers are production
+(policy forbids restarting kanebra-worker/Horse). A clean drill needs a dedicated throwaway worker
+(`worker_main.py` with a distinct `WORKER_NODE_ID`, pinned so it claims only the drill session):
+create a haiku session pinned to it → run one turn (establish `backend_session_id`) → restart that
+worker → confirm the next task dispatches `create_session` (not `resume_session`), forks fresh with
+injected `<prior_context>`, and continues. Deferred to avoid spawning a stray worker on the shared tree
+without a go-ahead.
+
+**Next: O2** — route `session_lost` / `ERROR`+`driver_lost` to A55 crash-respawn (handles the
+die-at-idle case where no next task ever comes, which O1 does not cover).
 
 ## SCOPE OUT
 - The A82 managed-turn (message-queue) cutover — these sessions are NOT enrolled; this fix targets the
