@@ -65,11 +65,16 @@ corpse, spent real money, told no one."
 
 ## OBJECTIVES (priority order; each its own PR, each ON BY DEFAULT)
 
-- **O1 — Auto fallback-resume on `driver_status=="lost"` (worker-side; keystone, smallest).**
-  In `claude_code.py:resume_session`, instead of refusing, automatically attempt the `print_resume`
-  fallback (resume `backend_session_id` from the on-disk CLI store). On by default; opt-out flag
-  `RESTART_FALLBACK_RESUME_DISABLED`. This alone would have let BOTH sessions come back on one resume.
-  Guard against the cache-unhealthy latch so it does not resume-storm.
+- **O1 — Fork a restart-lost session onto a FRESH `create_session` (gateway-side; keystone). ✅ SHIPPED.**
+  *Chosen approach (cleaner than the worker-side fallback-resume variant and gateway-only).* In
+  `_mesh_dispatch_payload`, a non-enrolled session with `driver_status=="lost"` now dispatches
+  `create_session` (fresh subprocess → role re-boot + A54 boot-reconcile + the already-built
+  `<prior_context>` injection) instead of `resume_session`, which the worker guard
+  (`claude_code.py:309`) refuses into a corpse. This sidesteps the refuse-guard entirely and matches
+  the documented restart-recovery design intent (`orchestrator.py:7742`). On by default; opt-out
+  `RESTART_LOST_SESSION_FORK_DISABLED`. This alone would have recovered BOTH sessions in the incident.
+  *(The worker-side auto-`print_resume` fallback is left as a possible defense-in-depth follow-up; not
+  needed once O1 routes around the guard.)*
 - **O2 — Route `session_lost` to re-establish (gateway-side).** Treat `ERROR` + `driver_status=="lost"`
   as a dead session eligible for A55 crash-respawn/re-establish; a `session_lost` fatal result must
   trigger the re-establish path, not log+drop. Uses existing `CASE_CONTINUATION_ENABLED`.
