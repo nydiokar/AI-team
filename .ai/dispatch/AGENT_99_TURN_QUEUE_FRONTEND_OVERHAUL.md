@@ -1,12 +1,12 @@
 ```yaml
 job_id: AGENT_99_TURN_QUEUE_FRONTEND_OVERHAUL
 created_at: "2026-10-07T15:59:39.560284+00:00"        # CANONICAL — set once at dispatch, never derive again
-status: done              # ready | active | blocked | done | dead
-owner: worker:b0a1a898f6ab
+status: blocked              # ready | active | blocked | done | dead
+owner: 
 depends_on: []
 results_ref: null             # -> DISPATCH_LOG.md section with the verdict prose
-evidence: .ai/dispatch/A99_TURN_QUEUE_UI_PROPOSAL.md                  # artifact paths that PROVE it ran (checked to exist)
-updated_at: "2026-10-07T16:14:51.205599+00:00"
+evidence: [".ai/dispatch/A99_TURN_QUEUE_UI_PROPOSAL.md"]                  # artifact paths that PROVE it ran (checked to exist)
+updated_at: "2026-10-07T16:20:00.628356+00:00"
 ```
 
 # DISPATCH — AGENT_99_TURN_QUEUE_FRONTEND_OVERHAUL
@@ -103,13 +103,26 @@ Commit `.ai/dispatch/A99_TURN_QUEUE_UI_PROPOSAL.md` to `main` (docs-only). Repor
 functional defects found, the proposed IA in one paragraph, and the Phase-2 plan headline.
 
 ## Milestone checklist
-- [ ] `frontend` skill invoked and applied
-- [ ] User journey walked against the live gateway, per-step current behavior recorded
-- [ ] Functional / UX / UI defect inventory (grounded, with repro/file:line)
-- [ ] Full ground-up redesign (IA, states, component tree, wireframes, a11y, API binding)
-- [ ] Backend/DTO dependencies listed explicitly
-- [ ] Phase-2 implementation plan the operator can approve
-- [ ] Proposal doc committed to `main`
+- [x] `frontend` skill invoked and applied
+- [x] User journey walked against the live gateway, per-step current behavior recorded
+- [x] Functional / UX / UI defect inventory (grounded, with repro/file:line)
+- [x] Full ground-up redesign (IA, states, component tree, wireframes, a11y, API binding)
+- [x] Backend/DTO dependencies listed explicitly
+- [x] Phase-2 implementation plan the operator can approve
+- [x] Proposal doc committed to `main`
+- [ ] **Phase 2 — build the approved redesign** (operator-gated; NOT started)
 
 ## Closure
-_(append the closure summary here on completion — do not create a sibling file)_
+
+### Phase 1 — SHIPPED (2026-10-07)
+**What changed:** `.ai/dispatch/A99_TURN_QUEUE_UI_PROPOSAL.md` (new, `main @ 9b5520f`) — a grounded,
+ground-up redesign proposal (user-journey walkthrough, 18-item functional/UX/UI/a11y defect inventory
+with live-observed behavior + file:line, full "Turn Rail" IA + state model + component tree + per-state
+wireframes + API binding reusing the existing `turn-requests` routes, backend/DTO dependency list, and a
+9-step Phase-2 plan).
+**Verification:** Manager review 12/12, Gate 0 pass; defect F1 spot-checked against code
+(`turn_requests.py:39` accepts `requeue`; `apiClient.ts:279` omits it — confirmed). Grounded on a live
+PAUSED scratch session (zero paid execution).
+**What follows / continuation plan:** Phase 2 (build on `feat/a99-turn-queue-ui`) is **gated on operator
+approval of the proposal**. On approval, dispatch the Phase-2 build worker against the 9-step plan in the
+proposal §5. Status set `blocked` (awaiting operator Phase-2 go/no-go), not `done`.
