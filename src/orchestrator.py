@@ -3916,24 +3916,18 @@ class TaskOrchestrator(ITaskOrchestrator):
         viable (continuation off, no placement node, reconstruction/spawn failed) — the
         caller then falls through to the visible-strand escalation as before A55.
 
-        SINGLE-FLIGHT: reuses the continuation lease mechanism verbatim — a deterministic
-        ``respawn:{case}:{gen}`` row pinned to ``CONTINUATION_MACHINE_SENTINEL`` (invisible
-        to every worker claim scan) claimed via the atomic ``claim_task``. Two racing ticks
-        enqueue the SAME id (UNIQUE collapses to one row); ``claim_task`` (an
-        ``UPDATE … WHERE status='pending'`` + ``changes()>0``) elects a single winner. NO
-        second lock model. A crash between claim and spawn leaves the row ``claimed`` by a
-        dead incarnation → reaped to ``pending`` by the SAME reaper → re-claimed and retried
-        by a later tick (at-least-once, no permanent stall).
+        SINGLE-FLIGHT: delegated to ``_respawn_manager_managed`` (producer 7),
+        which converges every racing tick / process on the durable respawn token
+        ``respawn:{case}:{gen}`` so exactly one new session and one first turn are
+        produced. (The legacy in-memory single-flight lease branch that used to
+        live here was deleted at the A82 Stage-8b convergence cutoff.)
 
         ANTI-GOAL: this NEVER calls ``open_case`` and NEVER mints a new ``flow_run_id`` — it
         binds the fresh session to the passed ``case_id`` via a manager ``flow_link`` and
         reconstructs the objective/waits from the DB (``get_case_brief`` /
         ``boot_reconcile_case``). The objective-lock is preserved end to end.
         """
-        from src.control.db import (
-            case_continuation_enabled, CONTINUATION_MACHINE_SENTINEL,
-            RESPAWN_ACTION, respawn_task_id,
-        )
+        from src.control.db import case_continuation_enabled
         # Defensive re-gate (this path is only reached with continuation ON, but keep
         # the respawn itself explicitly flag-guarded so it can never fire otherwise).
         if not case_continuation_enabled():
@@ -3953,118 +3947,17 @@ class TaskOrchestrator(ITaskOrchestrator):
         objective = str(brief.get("objective") or "").strip()
         if not objective:
             return False
-        # [A82 Stage 4e] A dead Manager is replaced on the managed path
-        # (producer 7). [Stage 8a] Whatever the dead session's marker: the
-        # replacement is born managed, so its first turn must be a managed
-        # turn (the legacy branch below would be refused at admission).
-        if dead_session_id:
-            return await self._respawn_manager_managed(
-                db, case_id, generation, dead_session_id, objective,
-            )
-
-        # SINGLE-FLIGHT CLAIM (atomic, one winner) — BEFORE any spawn side-effect.
-        respawn_id = respawn_task_id(case_id, generation)
-        db.enqueue_task(
-            respawn_id,
-            session_id=None,
-            machine_id=CONTINUATION_MACHINE_SENTINEL,
-            backend="claude",
-            action=RESPAWN_ACTION,
-            payload={"case_id": case_id, "generation": generation,
-                     "dead_session_id": dead_session_id},
-        )
-        if not db.claim_task(respawn_id, socket.gethostname()):
-            # Lost the race — a concurrent tick owns the respawn. Report "owned" so the
-            # caller does NOT double-respawn or escalate a strand that is being healed.
-            return True
-
-        # --- We are the single respawn owner. Everything below runs at most once. ---
-        try:
-            # NODE PLACEMENT: reuse the dead Manager's recorded node if we can read it,
-            # else the gateway host (__local__). Remote-node MCP reachability is a known
-            # deferred item — if the recorded node is remote we still pin it (the mesh
-            # dispatch path owns reachability); a __local__/absent pin lands in-gateway.
-            node_id = "__local__"
-            repo_path = os.getcwd()
-            backend = "claude"
-            if dead_session_id:
-                dead_row = db.get_session(dead_session_id)
-                if dead_row is not None:
-                    node_id = str(dead_row.get("machine_id") or "") or "__local__"
-                    repo_path = str(dead_row.get("repo_path") or "") or repo_path
-                    backend = str(dead_row.get("backend") or "") or backend
-
-            from src.core.interfaces import SessionOrigin
-            result = self.session_service.create_session(
-                backend=backend, repo_path=repo_path, node_id=node_id,
-                origin=SessionOrigin(channel="web", kind="user"), bind_chat=False,
-            )
-            if not getattr(result, "ok", False) or getattr(result, "session", None) is None:
-                # Spawn failed AFTER the claim — release the lease so a later tick can
-                # retry cleanly rather than stranding the row 'claimed' (recovery).
-                db.release_task(respawn_id, socket.gethostname())
-                return False
-            new_session = result.session
-            new_sid = new_session.session_id
-
-            # Bind the fresh session to the SAME Case as its Manager — the anti-goal
-            # boundary. NO open_case, NO new flow_run_id: just a manager flow_link on the
-            # existing Case + the durable session affiliation the wake target is read from.
-            db.create_flow_link(
-                case_id, "session", new_sid, "manager", created_by="system",
-            )
-            self._set_session_case_affiliation(new_sid, case_id, role="manager")
-            db.append_flow_event(
-                case_id, "case.manager_respawned", "system",
-                entity_type="session", entity_id=new_sid,
-                payload={"reason": "manager_session_dead",
-                         "dead_session_id": dead_session_id,
-                         "generation": generation, "node_id": node_id},
-            )
-
-            # Re-arm the Case's outstanding waits/groups from the ledger (A54, idempotent).
-            try:
-                db.boot_reconcile_case(case_id, actor="manager")
-            except Exception as e:
-                logger.debug("event=respawn_reconcile_failed case=%s err=%s", case_id, e)
-
-            # Resume turn — a role-full Manager first assignment that RESUMES this Case
-            # (get_case_brief + reconcile_waits), NOT a new objective. Delivering the turn
-            # flips the new session BUSY→AWAITING_INPUT so the next tick wakes it normally.
-            resume = self._render_respawn_turn(case_id, objective, dead_session_id)
-            try:
-                await self.submit_instruction(
-                    description=resume,
-                    session_id=new_sid,
-                    cwd=new_session.repo_path,
-                    source="manager_respawn",
-                )
-            except Exception as e:
-                # The session + binding are already durable; a failed first-turn deliver
-                # leaves a bound Manager the next tick can still drive. Keep the claim
-                # COMPLETED (we did respawn) and surface the deliver failure.
-                logger.warning("event=respawn_deliver_failed case=%s err=%s", case_id, e)
-
-            db.complete_task(respawn_id, result={"session_id": new_sid, "node_id": node_id})
-            self._emit_event(
-                "case_manager_respawned", None,
-                {"case_id": case_id, "new_session_id": new_sid,
-                 "dead_session_id": dead_session_id, "generation": generation},
-            )
-            logger.info(
-                "event=case_manager_respawned case=%s new_session=%s dead_session=%s node=%s",
-                case_id, new_sid, dead_session_id, node_id,
-            )
-            return True
-        except Exception as e:
-            # Any failure after the claim releases the lease for a clean retry — the
-            # respawn must never permanently stall a Case on a transient error.
-            logger.warning("event=respawn_failed case=%s err=%s", case_id, e)
-            try:
-                db.release_task(respawn_id, socket.gethostname())
-            except Exception:
-                pass
+        # [A82 Stage 4e → 8b] A dead Manager is replaced on the managed path
+        # (producer 7). The legacy single-flight respawn branch that used to
+        # follow was deleted at the A82 Stage-8b convergence cutoff: every caller
+        # passes a bound dead_session_id, so a born-managed replacement always
+        # routes to the managed respawn. With no dead session id there is nothing
+        # to respawn — let the caller escalate a visible strand.
+        if not dead_session_id:
             return False
+        return await self._respawn_manager_managed(
+            db, case_id, generation, dead_session_id, objective,
+        )
 
     async def _respawn_manager_managed(
         self, db, case_id: str, generation: int, dead_session_id: str, objective: str,
@@ -11150,30 +11043,16 @@ Generated from user description: {description}
             enrolling.discard(sid)
 
     async def unenroll_session_turn_queue(self, session_id: str) -> bool:
-        """[A82 Stage 7] Rollback exit (design §10 step 8): remove enrollment only
-        when the session holds no waiting/active/recovery managed obligation
-        (typed ``managed_obligation_remaining`` otherwise). NOT flag-gated —
-        disabling enrollment must never trap accepted work or block the exit."""
-        from src.control.db import get_db
-        from src.control.turn_queue import BackingStoreError
+        """[A82 Stage 7 → 8b] The rollback (unenroll) exit is retired. Legacy
+        session execution was deleted at the Stage-8b convergence cutoff, so an
+        unenrolled session would have no pathway left (its turns could only
+        fail): enrollment is the only mode. Always refuses with a typed 409."""
+        from src.control.turn_queue import LegacyExecutionRetiredError
 
         sid = (session_id or "").strip()
-        if self._LEGACY_SESSION_EXECUTION_RETIRED:
-            # [A82 Stage 8a, review F2] An unenrolled session would have no
-            # pathway left (its turns could only fail): enrollment is the only mode.
-            from src.control.turn_queue import LegacyExecutionRetiredError
-
-            raise LegacyExecutionRetiredError(
-                "unenroll is retired: legacy session execution no longer exists", session_id=sid,
-            )
-        db = get_db()
-        if db is None:
-            raise BackingStoreError("unenrollment needs the canonical mesh DB", session_id=sid)
-        removed: bool = bool(await asyncio.to_thread(db.unenroll_session_drained, sid))
-        self._enrollment_exclusion()[1].discard(sid)
-        if removed:
-            logger.info("event=turn_queue_session_unenrolled session_id=%s", sid)
-        return removed
+        raise LegacyExecutionRetiredError(
+            "unenroll is retired: legacy session execution no longer exists", session_id=sid,
+        )
 
     async def _session_turn_queue_enrolled(self, session_id: str) -> bool:
         """Durable enrollment marker from the canonical DB (never a flag). No
@@ -12272,18 +12151,12 @@ Generated from user description: {description}
     # (an enrolled session is admitted to its managed carrier).
     _REFUSE_SESSION_TURNS_WITHOUT_MESH = True
 
-    # [A82 Stage 8a, review F2] The cutover invariant (not an operator switch;
-    # Stage 8b deletes the legacy session path it guards): session turns run
-    # only on the managed queue, so a NON-enrolled session turn is refused and
-    # the operator unenroll exit is refused. The offline test harness flips it
-    # (with MESH_ENABLED forced off) to keep exercising the legacy branches
-    # that remain until 8b — never a production shape.
-    _LEGACY_SESSION_EXECUTION_RETIRED = True
-
     def refuse_unenrolled_session_turn(self, session_id: str, *, enrolled: bool) -> None:
         """Raise ``LegacyExecutionRetiredError`` (409) for a session turn whose
-        session is not enrolled (see ``_LEGACY_SESSION_EXECUTION_RETIRED``)."""
-        if self._LEGACY_SESSION_EXECUTION_RETIRED and not enrolled:
+        session is not enrolled. Legacy session execution was deleted at the A82
+        Stage-8b convergence cutoff: session turns run only on the managed queue,
+        so a non-enrolled session turn has no pathway and is refused."""
+        if not enrolled:
             from src.control.turn_queue import LegacyExecutionRetiredError
 
             raise LegacyExecutionRetiredError(

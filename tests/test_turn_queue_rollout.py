@@ -68,9 +68,9 @@ def test_ROLL01_flag_off_refuses_new_enrollment(tmp_path: Any, monkeypatch: Any)
     err = _refused(_enroll, o)
     assert err.code == "enrollment_disabled" and err.status_code == 409
     assert not _enrolled(db)
-    # Mesh-off / legacy behaviour unchanged: the session still takes the legacy path.
-    tid = _submit(o, operation_id="legacy-1")
-    assert type(tid) is str and o.task_queue.qsize() == 1 and _managed_rows(db) == []
+    # [A82 Stage 8b] The legacy-path tail (a non-enrolled session turn queues)
+    # was removed with the legacy execution path: such a turn is now refused
+    # (test_turn_queue_stage8a.py::test_S8_11b).
 
 
 def test_ROLL01b_flag_off_with_accepted_rows_survives_restart(tmp_path: Any, monkeypatch: Any) -> None:
@@ -123,8 +123,8 @@ def test_ROLL02_no_canonical_db_refuses_enrollment(tmp_path: Any, monkeypatch: A
     monkeypatch.setattr(db_mod, "get_db", lambda: None)
     err = _refused(_enroll, o)
     assert err.status_code == 503
-    tid = _submit(o)
-    assert type(tid) is str and o.task_queue.qsize() == 1
+    # [A82 Stage 8b] The legacy-path tail (the session still queues when the mesh
+    # DB is absent) was removed with the legacy execution path.
 
 
 # --------------------------------------------------------------------------- #
@@ -171,14 +171,11 @@ def test_ROLL03e_closed_session_refused(tmp_path: Any, monkeypatch: Any, flag_on
     assert err.code == "session_closed" and not _enrolled(db)
 
 
-def test_ROLL03f_legacy_in_memory_work_refused(tmp_path: Any, monkeypatch: Any, flag_on: None) -> None:
-    db, o = _setup(tmp_path, monkeypatch, enroll=False)
-    tid = _submit(o, operation_id="legacy-1")  # legacy queued in the gateway
-    assert type(tid) is str and o.task_queue.qsize() == 1
-    err = _refused(_enroll, o)
-    assert err.code == "legacy_work_in_flight" and not _enrolled(db)
-
-
+# test_ROLL03f_legacy_in_memory_work_refused RETIRED at the A82 Stage-8b
+# convergence cutoff: a session can no longer hold legacy in-memory work (a
+# non-enrolled session turn is refused before any legacy put), so the
+# in-memory `legacy_work_in_flight` guard can never fire. The durable
+# pre-cutover-row equivalent is still covered by test_ROLL03g below.
 @pytest.mark.parametrize("status", ["pending", "claimed"])
 def test_ROLL03g_durable_legacy_row_refused(tmp_path: Any, monkeypatch: Any, flag_on: None,
                                             status: str) -> None:
@@ -196,141 +193,15 @@ def test_ROLL03g_durable_legacy_row_refused(tmp_path: Any, monkeypatch: Any, fla
 
 
 # --------------------------------------------------------------------------- #
-# ROLL04 — admission exclusion closes the cutover race (both interleavings)
+# ROLL04 (admission-exclusion cutover race, both interleavings) and ROLL05
+# (unenroll-only-after-drain) RETIRED at the A82 Stage-8b convergence cutoff.
+# The legacy-arrival race can no longer occur — a non-enrolled session turn is
+# refused unconditionally before any legacy put (so the `enrollment_in_progress`
+# / `legacy_work_in_flight` fences are never reached), and the drain-gated
+# unenroll exit was deleted (unenroll now always refuses; proven by
+# test_turn_queue_stage8a.py::test_S8_11 / test_S8_11b). The mixed-version
+# rollback shape below (ROLL05b) is unaffected and still covered.
 # --------------------------------------------------------------------------- #
-def test_ROLL04_legacy_arrival_during_enrollment_is_refused(
-        tmp_path: Any, monkeypatch: Any, flag_on: None) -> None:
-    """Enrollment is committing (its DB txn in a worker thread); a legacy
-    submit for the same session arrives on the gateway loop. It must not be
-    put on the legacy queue (it would execute beside the managed queue)."""
-    db, o = _setup(tmp_path, monkeypatch, enroll=False)
-    gate = threading.Event()
-    entered = threading.Event()
-    real = db.enroll_session_checked
-
-    def _slow(sid: str) -> bool:
-        entered.set()
-        assert gate.wait(5)
-        return real(sid)
-
-    monkeypatch.setattr(db, "enroll_session_checked", _slow)
-
-    async def scenario() -> Dict[str, Any]:
-        enroll = asyncio.create_task(o.enroll_session_turn_queue("sess-1"))
-        while not entered.is_set():
-            await asyncio.sleep(0.01)
-        out: Dict[str, Any] = {}
-        try:
-            out["legacy"] = await o.submit_instruction(
-                description="racing legacy", session_id="sess-1", cwd="/tmp/repo",
-                source="web_session")
-        except tq.TurnQueueError as err:
-            out["legacy_err"] = err
-        gate.set()
-        out["enrolled"] = await enroll
-        return out
-
-    out = asyncio.run(scenario())
-    assert out["enrolled"] is True and _enrolled(db)
-    assert "legacy" not in out, "a legacy turn was queued beside the enrollment"
-    assert out["legacy_err"].code == "enrollment_in_progress" and out["legacy_err"].status_code == 409
-    assert o.task_queue.qsize() == 0 and not o.active_tasks
-
-
-def test_ROLL04b_legacy_marker_read_before_enrollment_cannot_land(
-        tmp_path: Any, monkeypatch: Any, flag_on: None) -> None:
-    """A legacy admission read the marker (False) BEFORE the enrollment
-    committed, then resumes: its legacy put must be refused — never a legacy
-    turn queued for a session that is now enrolled (exactly one side wins)."""
-    db, o = _setup(tmp_path, monkeypatch, enroll=False)
-    release = asyncio.Event()
-    reading = asyncio.Event()
-
-    async def _slow_marker(_sid: str) -> bool:
-        reading.set()
-        await release.wait()
-        return False  # the stale pre-enrollment read
-
-    monkeypatch.setattr(o, "_session_turn_queue_enrolled", _slow_marker)
-
-    async def scenario() -> Dict[str, Any]:
-        legacy = asyncio.create_task(o.submit_instruction(
-            description="legacy first", session_id="sess-1", cwd="/tmp/repo", source="web_session"))
-        await reading.wait()
-        out: Dict[str, Any] = {"enrolled": await o.enroll_session_turn_queue("sess-1")}
-        release.set()
-        try:
-            out["legacy"] = await legacy
-        except tq.TurnQueueError as err:
-            out["legacy_err"] = err
-        return out
-
-    out = asyncio.run(scenario())
-    assert out["enrolled"] is True and _enrolled(db)
-    assert "legacy" not in out and out["legacy_err"].code == "enrollment_in_progress"
-    assert o.task_queue.qsize() == 0 and not o.active_tasks
-
-
-def test_ROLL04c_enrollment_refused_while_a_legacy_put_is_parked(
-        tmp_path: Any, monkeypatch: Any, flag_on: None) -> None:
-    """A legacy admission parked in the throttled (queue-full) put is visible
-    to enrollment, which refuses instead of committing underneath it."""
-    db, o = _setup(tmp_path, monkeypatch, enroll=False)
-    o.task_queue = SessionTaskQueue(1, lambda _t: "")
-    from types import SimpleNamespace
-
-    o.task_queue.put_nowait(SimpleNamespace(id="filler", metadata={}))  # full
-
-    async def scenario() -> Dict[str, Any]:
-        legacy = asyncio.create_task(o.submit_instruction(
-            description="parked", session_id="sess-1", cwd="/tmp/repo", source="web_session"))
-        for _ in range(50):
-            await asyncio.sleep(0.01)
-            if o._enrollment_exclusion()[2].get("sess-1"):
-                break
-        out: Dict[str, Any] = {}
-        try:
-            out["enrolled"] = await o.enroll_session_turn_queue("sess-1")
-        except tq.TurnQueueError as err:
-            out["enroll_err"] = err
-        o.task_queue.get_nowait()  # room frees: the parked put lands
-        out["legacy"] = await legacy
-        return out
-
-    out = asyncio.run(scenario())
-    assert "enrolled" not in out and out["enroll_err"].code == "legacy_work_in_flight"
-    assert type(out["legacy"]) is str and not _enrolled(db)
-    assert o._enrollment_exclusion()[2] == {}
-
-
-# --------------------------------------------------------------------------- #
-# ROLL05 — drain / remove enrollment only without obligations; no downgrade
-# path hands managed rows to a legacy poller.
-# --------------------------------------------------------------------------- #
-def test_ROLL05_unenroll_only_after_drain(tmp_path: Any, monkeypatch: Any) -> None:
-    monkeypatch.delenv(FLAG, raising=False)  # rollback works with the flag OFF
-    db, o = _setup(tmp_path, monkeypatch)
-    _wire(o)
-    t1 = str(_submit(o, operation_id="a"))
-    err = _refused(_unenroll, o)  # queued
-    assert err.code == "managed_obligation_remaining" and _enrolled(db)
-    _pass(db, o)
-    err = _refused(_unenroll, o)  # pending
-    assert err.code == "managed_obligation_remaining"
-    tok = _run(db, t1)
-    assert _refused(_unenroll, o).code == "managed_obligation_remaining"  # running
-    assert db.enter_recovery(t1, tok, reason="deadline")
-    assert _refused(_unenroll, o).code == "managed_obligation_remaining"  # recovery_required
-    db.resolve_recovery(t1, tok, {"source": "operator", "task_id": t1, "quiescent": True,
-                                  "terminal": True, "terminal_status": "cancelled",
-                                  "acknowledged_uncertain": True}, resolved_status="cancelled")
-    assert _unenroll(o) is True and not _enrolled(db)
-    assert _unenroll(o) is False  # idempotent
-    # Back on the legacy path, exactly as before enrollment.
-    tid = _submit(o, operation_id="after")
-    assert type(tid) is str and o.task_queue.qsize() == 1
-
-
 def test_ROLL05b_legacy_poller_never_receives_managed_rows(tmp_path: Any, monkeypatch: Any) -> None:
     """Mixed version / rollback shape: an OLD worker (no managed capability)
     polls the legacy routes. Managed rows are never handed to it (no double
@@ -409,21 +280,16 @@ def test_ROLL06_enroll_unenroll_routes(tmp_path: Any, monkeypatch: Any) -> None:
     assert r.status_code == 404
     r = c.post("/api/sessions/sess-1/turn-requests/enroll", headers=h)
     assert r.status_code == 200 and r.json()["changed"] is True and _enrolled(db)
-    _submit(o, operation_id="q")
-    r = c.post("/api/sessions/sess-1/turn-requests/unenroll", headers=h)
-    assert r.status_code == 409 and r.json()["detail"]["reason"] == "managed_obligation_remaining"
+    # [A82 Stage 8b] The unenroll leg (drain-gated `managed_obligation_remaining`)
+    # was removed — the unenroll exit is retired and always refuses
+    # (test_turn_queue_stage8a.py::test_S8_11).
     r = c.post("/api/sessions/sess-1/turn-requests/enroll", headers=h,
                content=b"x" * (17 * 1024), )
     assert r.status_code == 413  # capped before any read/parse
 
 
-def test_ROLL06b_web_legacy_refusal_during_enrollment_is_not_stranded_busy(
-        tmp_path: Any, monkeypatch: Any) -> None:
-    db, o = _setup(tmp_path, monkeypatch, enroll=False)
-    _wire(o)
-    c = _api(o, monkeypatch)
-    o._enrollment_exclusion()[0].add("sess-1")  # an enrollment is committing
-    r = c.post("/api/instructions", headers={"Authorization": "Bearer tok"},
-               json={"description": "hi", "session_id": "sess-1"})
-    assert r.status_code == 409 and r.json()["detail"]["reason"] == "enrollment_in_progress"
-    assert _sess().status != SessionStatus.BUSY and o.task_queue.qsize() == 0
+# test_ROLL06b_web_legacy_refusal_during_enrollment_is_not_stranded_busy RETIRED
+# at the A82 Stage-8b convergence cutoff: the legacy BUSY branch it guarded was
+# deleted, so a refused non-enrolled web turn can never strand a session BUSY.
+# The non-enrolled-web-turn refusal + unchanged session status is now proven by
+# test_turn_queue_stage8a.py::test_S8_11b.

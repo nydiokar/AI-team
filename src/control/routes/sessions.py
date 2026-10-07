@@ -229,16 +229,13 @@ def build_router(
             }
         )
 
-    # REVISIT (2026-10-05, A82 Stage 8b): two admission routes for one session turn. Here,
-    # an enrolled session already goes through core._submit_managed_instruction - the same
-    # path as POST /api/sessions/{id}/turn-requests. When 8b deletes the legacy (BUSY)
-    # branch, fold the session branch onto that admission path; keep this route and its
-    # 200 {ok, task_id, session} envelope (A82 packet, Stage 6 "Routes as built"), adding
-    # receipt fields only additively. Neither route is a superset today: only this one carries
-    # target_files / case_id / upload_attachment and the PRINCIPAL_HEADER automation label
-    # (dispatch_worker); only turn-requests has the agent-sender scope and the 202 receipt.
-    # Its idempotency is the durable operation_id; this route also keeps the in-process
-    # idem cache, which becomes redundant for the managed branch.
+    # [A82 Stage 8b] Single admission authority: an enrolled session turn goes
+    # through core._submit_managed_instruction (the SAME authority as POST
+    # /api/sessions/{id}/turn-requests). This route keeps its own
+    # 200 {ok, task_id, session} envelope and the fields only it carries
+    # (target_files / case_id / upload_attachment + the PRINCIPAL_HEADER
+    # automation label). The legacy (BUSY) non-enrolled execution branch was
+    # deleted at the convergence cutoff — a non-enrolled session turn is refused.
     @router.post("/api/instructions")
     async def api_instructions(
         body: InstructionBody,
@@ -276,40 +273,17 @@ def build_router(
                             "session": await asyncio.to_thread(core._session_payload, session, with_queue=True)}
                     idem_put("instructions", idempotency_key, resp)
                     return JSONResponse(resp)
-                # [A82 Stage 8a, review F2] No pathway for a non-enrolled session
-                # turn after the cutover: refuse BEFORE the optimistic BUSY write.
-                refuse = getattr(orchestrator, "refuse_unenrolled_session_turn", None)
-                if callable(refuse):
-                    try:
-                        refuse(session.session_id, enrolled=False)
-                    except TurnQueueError as err:
-                        raise core._turn_queue_http(err)
-                # Status write (BUSY + last_user_message) lives on the service.
-                orchestrator.session_service.mark_busy(
-                    session.session_id, last_user_message=body.description)
-                session = orchestrator.session_service.store.get(session.session_id)
+                # [A82 Stage 8b] Legacy session execution is retired at the
+                # convergence cutoff: a non-enrolled session turn has no pathway
+                # (its turns could only fail), so refuse with a typed 409 before
+                # any side effect. The old optimistic-BUSY legacy branch that used
+                # to follow was deleted here — in production it was already
+                # unreachable (this refusal always fired first).
                 try:
-                    task_id = await orchestrator.submit_instruction(
-                        description=body.description,
-                        session_id=session.session_id,
-                        cwd=session.repo_path or body.cwd,
-                        target_files=body.target_files,
-                        source="web_session",
-                        parent_flow_run_id=body.parent_flow_run_id,
-                        join_case_id=body.case_id,
-                        extra_metadata=core._instruction_extra_metadata(body),
-                        **core._enrollment_kw(orchestrator, False),
-                    )
-                except HarnessAdmissionBlocked as blocked:
-                    # No task ran — return the session to IDLE so it stays usable.
-                    orchestrator.session_service.mark_idle(session.session_id)
-                    raise core._harness_blocked_http(blocked)
+                    orchestrator.refuse_unenrolled_session_turn(
+                        session.session_id, enrolled=False)
                 except TurnQueueError as err:
-                    # [A82 Stage 7] e.g. enrollment_in_progress: nothing queued.
-                    orchestrator.session_service.mark_idle(session.session_id)
                     raise core._turn_queue_http(err)
-                session.last_task_id = task_id
-                orchestrator.session_service.store.save(session)
             else:
                 try:
                     task_id = await orchestrator.submit_instruction(

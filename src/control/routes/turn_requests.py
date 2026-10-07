@@ -112,8 +112,6 @@ def build_router(
         await require_auth(creds)
         return None
 
-    # REVISIT (2026-10-05, A82 Stage 8b): overlaps POST /api/instructions for enrolled
-    # sessions - fold plan at that route in routes/sessions.py.
     @router.post("/api/sessions/{session_id}/turn-requests")
     async def api_create_turn_request(
         session_id: str, request: Request,

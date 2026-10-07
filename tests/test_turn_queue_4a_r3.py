@@ -298,11 +298,42 @@ def test_requeue_reads_before_taking_the_write_lock(tmp_path, monkeypatch):
     assert called == []
 
 
+# The exact lineage the SHARED `_record_flow_run_start` procedure writes on the
+# managed path for each request shape (links by type/role/creator + membership
+# flag, events with payloads, session affiliation). Frozen from the live managed
+# procedure. Pre-A82-Stage-8b this was asserted indirectly as "== legacy path";
+# the legacy session-execution path was deleted at the cutoff (it now refuses
+# with LegacyExecutionRetiredError), so the managed lineage is asserted DIRECTLY.
+_MANAGED_LINEAGE = {
+    "join": (
+        [("session", "worker", "manager", False), ("task", "task", "manager", True)],
+        [("task.attached", "task", '{"membership": "worker"}')],
+        True, "worker",
+    ),
+    "attach": (
+        [("session", "manager", "manager", False), ("task", "task", "system", True)],
+        [("task.attached", "task", "")],
+        True, "manager",
+    ),
+    "birth": (
+        [("flow", "child_flow", "", False), ("session", "worker", "system", False),
+         ("task", "root_task", "system", True)],
+        [("flow.created", "task", ""),
+         ("session.attached", "session", '{"role": "worker"}'),
+         ("task.dispatched", "flow",
+          '{"dispatched_by": null, "dispatch_file": null, "child_task_id": "TID"}')],
+        True, "worker",
+    ),
+}
+
+
 @pytest.mark.parametrize("shape", ["join", "attach", "birth"])
-def test_managed_lineage_parity_with_legacy_path(tmp_path, monkeypatch, shape):
-    """The managed procedure writes EXACTLY what the legacy
-    `_record_flow_run_start` writes for the same request (links by
-    type/role/creator, events with payloads, session affiliation)."""
+def test_managed_lineage_is_exactly_the_recorded_procedure(tmp_path, monkeypatch, shape):
+    """The managed procedure writes EXACTLY the expected lineage for the same
+    request (links by type/role/creator, events with payloads, session
+    affiliation). [A82 Stage 8b] The legacy session-execution path this used to
+    be compared against was deleted at the convergence cutoff; the managed
+    lineage is now asserted directly against the frozen expectation."""
     monkeypatch.setenv("HARNESS_FLOW_DRIVE", "1")
 
     def run(sub, enroll):
@@ -328,9 +359,12 @@ def test_managed_lineage_parity_with_legacy_path(tmp_path, monkeypatch, shape):
         s = db.get_session("sess-1")
         return links, evs, bool(s["current_case_id"]), s["case_role"]
 
-    legacy = run("legacy", False)
     managed = run("managed", True)
-    assert legacy == managed
+    links, evs, affiliated, role = managed
+    exp_links, exp_evs, exp_affiliated, exp_role = _MANAGED_LINEAGE[shape]
+    assert links == exp_links
+    assert evs == exp_evs
+    assert affiliated is exp_affiliated and role == exp_role
 
 
 def _crash_before_finalize(db, monkeypatch):
