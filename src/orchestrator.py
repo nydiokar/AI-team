@@ -2034,13 +2034,24 @@ class TaskOrchestrator(ITaskOrchestrator):
         # — skip the 500-row read + recompute. The pause checks above still run every
         # tick because they are time-based (a backoff can elapse with no new event).
         skip_cache = getattr(self, "_continuation_skip_cache", None)
-        if (
-            skip_cache is not None
-            and cur_max_event_id is not None
-            and skip_cache.get(case_id) == cur_max_event_id
-        ):
-            return 0
-        tick = await asyncio.to_thread(db.compute_continuation_tick, case_id)
+        # [A84 carry (o)] Old-vs-new continuation ownership is the IMMUTABLE
+        # per-Case marker (R3), read once per tick — NEVER the live flag. An
+        # 'outbox' Case drains its durable completion outbox; every other Case
+        # keeps the legacy wait-group tick, byte-identical. The event-driven
+        # skip-cache is a flow_events watermark, but an outbox row lands in
+        # complete_turn's txn (not as a flow_event), so an outbox Case bypasses
+        # the cache and takes the cheap, index-served pending read every tick.
+        mode = await asyncio.to_thread(db.case_continuation_mode, case_id)
+        if mode == "outbox":
+            tick = await asyncio.to_thread(self._compute_outbox_tick, db, case_id)
+        else:
+            if (
+                skip_cache is not None
+                and cur_max_event_id is not None
+                and skip_cache.get(case_id) == cur_max_event_id
+            ):
+                return 0
+            tick = await asyncio.to_thread(db.compute_continuation_tick, case_id)
         # [continuation-review-watermark] Retire one-shot groups the Manager already
         # drained by reviewing their members out-of-band (a tagged review.*, e.g.
         # during an operator poke that interleaved before the wake could fire). These
@@ -2065,7 +2076,10 @@ class TaskOrchestrator(ITaskOrchestrator):
             # next tick can skip the recompute until a new event lands. Only when we
             # wrote nothing this tick (draining a retire_only group appends events,
             # so cur_max_event_id is already stale — let it recompute once more).
-            if skip_cache is not None and cur_max_event_id is not None and not retired_groups:
+            if (
+                skip_cache is not None and cur_max_event_id is not None
+                and not retired_groups and mode != "outbox"
+            ):
                 skip_cache[case_id] = cur_max_event_id
             return 0
         # A satisfied Case is about to act (dispatch a wake); never let a stale idle
@@ -2301,6 +2315,51 @@ class TaskOrchestrator(ITaskOrchestrator):
              "turn_id": str(admission)},
         )
         return 1
+
+    def _compute_outbox_tick(self, db, case_id: str) -> Dict[str, Any]:
+        """[A84 carry (o)] The continuation tick for an 'outbox'-mode Case, shaped
+        exactly like ``compute_continuation_tick`` so every downstream guard of
+        ``_continue_case_once`` (round cap, late-manager binding, crash-respawn,
+        the deterministic cont-id + atomic single-flight claim, enrolled vs legacy
+        wake) runs UNCHANGED.
+
+        Satisfaction = any undelivered outbox row. All undelivered children are
+        presented in ONE coalesced wake (``pending_case_outbox`` is index-served
+        and ``limit``-bounded — §7 request-size). The generation is the existing
+        continuation watermark + 1, so the SAME deterministic cont-id dedup that
+        collapses racing ticks and serialises rounds applies verbatim: a second
+        tick before the round finalizes computes the same generation ⇒ same id ⇒
+        loses the atomic claim; a child that arrives mid-round is presented only
+        on the next round (after the delivered-mark lands at finalize).
+
+        Out-of-band review suppression: a child the Manager already reviewed is
+        discharged to ``delivered(reason='reviewed_in_turn')`` with NO wake — the
+        obligation is met, so it must neither wake nor strand. This runs the
+        delivered-mark eagerly (idempotent, delivered_at-guarded), matching the
+        legacy ``retire_only`` review-drain.
+        """
+        pending = db.pending_case_outbox(case_id)
+        reviewed = db.reviewed_task_ids(case_id)
+        present: List[str] = []
+        suppressed: List[str] = []
+        for row in pending:
+            tid = str(row["child_task_id"])
+            (suppressed if tid in reviewed else present).append(tid)
+        if suppressed:
+            db.mark_case_outbox_delivered(case_id, suppressed, "reviewed_in_turn")
+            self._emit_event(
+                "case_outbox_review_suppressed", None,
+                {"case_id": case_id, "child_task_ids": suppressed},
+            )
+        _consumed, completed_rounds, _high = db.continuation_watermark(case_id)
+        return {
+            "satisfied": bool(present),
+            "presented_task_ids": present,
+            "satisfied_groups": [],
+            "retire_only_groups": [],
+            "generation_next": completed_rounds + 1,
+            "completed_rounds": completed_rounds,
+        }
 
     async def _withdraw_rebound_continuation(
         self, db, case_id: str, generation: int, manager_sid: str,
