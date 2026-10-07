@@ -1,12 +1,12 @@
 ```yaml
 job_id: AGENT_101_SESSION_BLOCKING_STATE_SURFACING
 created_at: "2026-10-07T18:59:46.815411+00:00"        # CANONICAL — set once at dispatch, never derive again
-status: ready              # ready | active | blocked | done | dead
+status: active              # ready | active | blocked | done | dead
 owner: ""
 depends_on: []
 results_ref: null             # -> DISPATCH_LOG.md section with the verdict prose
 evidence: [".ai/dispatch/A101_SESSION_BLOCKING_STATE_DIAGNOSIS.md"]                  # artifact paths that PROVE it ran (checked to exist)
-updated_at: "2026-10-07T19:00:47.061599+00:00"
+updated_at: "2026-10-07T19:34:00.249435+00:00"
 ```
 
 # DISPATCH — AGENT_101_SESSION_BLOCKING_STATE_SURFACING
@@ -42,6 +42,25 @@ show a first-class, concise banner co-located with the composer: what state, who
 on, and the action (e.g. "Paused — daily quota reached · [Resume]" wired to the existing
 `resume_case`/`set_turn_queue_paused` route). The operator must never again have to leave the session
 window to discover a held message. Honor invariants #11/#12 (reuse turn-requests read + SSE).
+
+## OPERATOR DIRECTIVES (2026-10-07) — authoritative; this is a SURFACING MOVE, not a behavior change
+- **O1 — Investigate first.** Before changing anything, investigate how the CURRENT resume/Case-decision
+  flow behaves in the Work/Case view: what exactly it asks, what options it offers (resume in the SAME
+  session vs a NEW session, escalate, etc.), how the operator's choice is applied, and how reliable it
+  has been. Document it. We replicate it faithfully; we do not redesign the decision.
+- **O2 — Move the surfacing into the SESSION, per-session.** The same resume/decision must appear IN the
+  session window (co-located with the composer, per the diagnosis), and be **removed from the Work tab**
+  (the Work tab is the wrong place for a per-session decision). Same options, same outcome — ONLY the
+  location and timing of surfacing change.
+- **O3 — Do NOT change anything materially.** No change to the decision logic, the options, or what each
+  choice does. If moving it requires touching the decision backend at all, keep behavior byte-for-byte
+  equivalent and say exactly what you touched and why.
+- **O4 — Push on surface.** When a decision is surfaced, send the operator a PUSH (via the existing
+  Telegram/notify path) so they know a choice is required. Investigate the existing notify mechanism;
+  reuse it, don't invent one.
+- **O5 — NO auto-decide (yet).** Do NOT make the system auto-resume / auto-choose on its own. Keep it a
+  manual operator choice. The auto-resume policy (`CASE_QUOTA_RESUME_AUTO`) stays OFF/deferred until we
+  understand the current behavior (O1). Surface the policy question; do not flip it.
 
 ## ACCEPTANCE — done only when all true
 * The turn-queue read-model returns a populated `blocked`/`pause_reason` for EACH of the 6 hidden
