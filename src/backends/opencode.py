@@ -1665,7 +1665,8 @@ class OpenCodeServerBackend(CodingBackend):
                     if exists:
                         idle_polls += 1
                         if idle_polls >= self._MANAGED_IDLE_GRACE_POLLS:
-                            return {}
+                            # Idle long enough: the latest correlated step is all there is.
+                            return self._find_correlated_response(history, mid, terminal_only=False)
                     elif exists is False and time.monotonic() - entry.submitted_at > self._MANAGED_ABSENT_GRACE_SEC:
                         raise RecoveryRequiredError("OpenCode never recorded the managed prompt")
             time.sleep(self._MANAGED_POLL_SEC)
@@ -2224,8 +2225,13 @@ class OpenCodeServerBackend(CodingBackend):
             # Status and history reconciliation remain the source of truth for
             # completion; activity transport cannot produce a successful result.
             pass
-    def _find_correlated_response(self, history: Any, message_id: str) -> Dict[str, Any]:
-        """Select only the assistant result explicitly parented to this request."""
+    def _find_correlated_response(self, history: Any, message_id: str, *,
+                                  terminal_only: bool = True) -> Dict[str, Any]:
+        """Select only the assistant result explicitly parented to this request.
+
+        ``terminal_only``: skip a reply still being generated (no
+        ``time.completed``) or a finished intermediate ``tool-calls`` step —
+        ``/session/status`` can read idle while either is the latest message."""
         if not isinstance(history, list):
             return {}
         for item in reversed(history[-100:]):
@@ -2234,6 +2240,13 @@ class OpenCodeServerBackend(CodingBackend):
             info = item.get("info") or {}
             if (info.get("role") == "assistant" and
                     (info.get("parentID") or info.get("parentId")) == message_id):
+                if terminal_only and not info.get("error"):
+                    steps = [p.get("reason") for p in item.get("parts") or []
+                             if isinstance(p, dict) and p.get("type") == "step-finish"]
+                    done = (info.get("time") or {}).get("completed") or steps
+                    finish = info.get("finish") or (steps[-1] if steps else "")
+                    if not done or finish == "tool-calls":
+                        return {}
                 return item
         return {}
 
