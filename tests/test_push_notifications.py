@@ -387,6 +387,57 @@ def test_push_deep_links_to_the_case(monkeypatch):
     assert "resume" in built["title"].lower()
 
 
+def test_a101_push_and_telegram_deep_link_to_the_session(monkeypatch):
+    """[A101] The resume decision moved into the session window, so the push +
+    Telegram now deep-link to /sessions/{id} when the pause carries a session —
+    the operator lands where the decision lives, not the retired Work surface."""
+    tg = _FakeTelegram()
+    svc, pushes = _notifier_with(monkeypatch, tg)
+
+    asyncio.run(svc.notify_case_resume_proposal(
+        case_id="case-xyz", mode="in_place", estimate_usd=1.0, estimate_known=True,
+        chat_id=42, session_id="sess-9",
+    ))
+
+    # session_id is threaded to the push builder (which turns it into /sessions/..).
+    assert pushes[0]["session_id"] == "sess-9"
+    text = tg.sent[0]["text"]
+    assert "/sessions/sess-9" in text
+    assert "/work/case-xyz" not in text
+
+
+def test_a101_push_builds_session_url(monkeypatch):
+    """The real push builder turns a session_id into a /sessions/{id} deep link."""
+    from src.services import notification_service as ns
+
+    built: dict = {}
+
+    def _fake_build(**kw):
+        built.update(kw)
+        return {"title": kw.get("title"), "body": kw.get("body"), "url": kw.get("url")}
+
+    monkeypatch.setattr(ns, "NotificationService", ns.NotificationService)
+    import src.services.push_service as ps
+    monkeypatch.setattr(ps, "build_task_payload", _fake_build)
+
+    class _AvailablePush:
+        def __init__(self, *a, **k):
+            pass
+
+        def available(self):
+            return (True, "")  # payload gets built; fanout no-ops (no running loop)
+
+        async def fanout(self, payload):
+            return None
+
+    monkeypatch.setattr(ps, "PushService", _AvailablePush)
+
+    svc = ns.NotificationService(orchestrator=_OrchStub(None))
+    svc._maybe_push_case_resume(case_id="case-xyz", title="t", body="b", session_id="sess-9")
+    assert built["url"] == "/sessions/sess-9"
+    assert built["session_id"] == "sess-9"
+
+
 def test_auto_resume_notification_is_framed_as_already_done(monkeypatch):
     tg = _FakeTelegram()
     svc, pushes = _notifier_with(monkeypatch, tg)

@@ -43,6 +43,7 @@ import {
   blockedReasonLabel,
   effectsFailedLabel,
   isEditableTurn,
+  pauseReasonLabel,
   previewWords,
   recoveryOptions,
   senderSummary,
@@ -97,8 +98,12 @@ export function TurnQueuePanel({
   const waitingCount = waiting.length;
 
   // An operator-stop hold blocks activation like a pause; Resume releases both.
-  const held = page.paused || page.hold != null;
-  const holdReason = blockedReasonLabel(page.hold);
+  // [A101] `blocked`/`pause_reason` also surface the gate holds the overlay used
+  // to hide (quota, transient, retry, rebind, carrier, backoff, legacy, lineage),
+  // so a waiting message is never "N waiting" with no reason.
+  const held = page.paused || page.hold != null || Boolean(page.blocked);
+  const holdReason =
+    page.hold != null ? blockedReasonLabel(page.hold) : pauseReasonLabel(page.pause_reason);
   const effectsFailed = effectsFailedLabel(page.effects_failed);
 
   // The single active slot can need a human: a held (recovery_required) turn, or

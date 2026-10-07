@@ -185,6 +185,15 @@ export interface TurnRequestPage {
   /** [A82 Stage 8a] Finished turns whose post-commit effects ended `failed`. */
   effects_failed?: number;
   effects_failed_turn_id?: string | null;
+  /** [A101] Read-only projection of why the head managed turn is held — a pure
+   * mirror of the scheduler gates (no behaviour). Lets the session window show
+   * the hold reason + the (unchanged) quota resume decision by the composer. */
+  blocked?: boolean;
+  /** quota | transient | retry | manager_rebound | carrier_offline | backoff |
+   * legacy_draining | lineage | operator_pause | operator_hold | null. */
+  pause_reason?: string | null;
+  /** The Case a quota pause can be resumed on (only set for `pause_reason:"quota"`). */
+  resume_case_id?: string | null;
 }
 
 export interface TurnRequestDetail extends TurnRequestSummary {
