@@ -89,4 +89,23 @@ PR + merge + redeploy; close out here; note the resume-auto policy decision for 
 - [ ] PR merged + gateway redeployed
 
 ## Closure
-_(append on completion)_
+**2026-10-07 — worker delivered, PR #200 open (NOT merged — Manager owns merge/deploy).**
+Surfacing MOVE per O1–O5, behaviour-neutral:
+- **O1** findings committed: `.ai/dispatch/A101_O1_FINDINGS_RESUME_DECISION.md` (the exact
+  Decline / In place / Fresh Manager decision + how `resume_case` applies it + reliability).
+- **Backend** (no scheduler change): factored `_MANAGED_RETRY_GATE_SQL` into reusable
+  quota/transient/retry `EXISTS` fragments, recomposed byte-equivalent (gate tests prove it);
+  `_session_block_state` mirrors the gate and `GET /api/sessions/{id}/turn-requests` now carries
+  `blocked`/`pause_reason`/`resume_case_id` for all 6 hidden holds + operator pause/hold.
+- **Frontend** (O2): `SessionDetailScreen` mounts the IDENTICAL `CaseResumePanel` gated by
+  `resume_case_id`; `TurnQueuePanel` labels the other holds; removed `PausedCaseInbox` /
+  `CaseResumePanel` from the Work tab. Invariants #11/#12 preserved.
+- **O4** push: reused `notify_case_resume_proposal`; re-pointed deep link `/work/{case}` →
+  `/sessions/{session}`. **O5**: no auto-decide; `CASE_QUOTA_RESUME_AUTO` stays OFF.
+- **Tests**: `tests/test_a101_block_state.py` (per-state vs real gate + HTTP integration),
+  push deep-link tests, Vitest mapping/render. Full CI `pytest -q` green locally (post-rebase on
+  A82 Stage-8b); `pnpm typecheck` + 205 Vitest green. Live zero-paid proof: incident shape
+  `{queued:1,paused:false,hold:null}` → `{blocked:true,pause_reason:"quota",resume_case_id:…}`,
+  clears to `blocked:false` on resume.
+- **Deferred for the operator**: whether quota resume should ever be AUTOMATIC
+  (`CASE_QUOTA_RESUME_AUTO`) stays a policy call — surfaced + one-click, not flipped.
