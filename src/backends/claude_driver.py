@@ -375,8 +375,12 @@ def _replay_user_messages_enabled() -> bool:
     """[A82 Stage 3 rework 4] Managed correlation needs the CLI's replayed
     user-message echoes. Enabled only when this process runs the managed
     carrier (``WORKER_MANAGED_TURNS``), so a legacy-only worker's CLI stream is
-    byte-identical to before (and the legacy reader ignores echoes anyway)."""
-    return os.getenv("WORKER_MANAGED_TURNS", "").strip().lower() in ("1", "true", "yes", "on")
+    byte-identical to before (and the legacy reader ignores echoes anyway).
+
+    [Stage 8a cutover] Default-ON: empty/unset enables managed turns; only an
+    explicit false value (0/false/no/off) opts a worker back out — mirrors
+    ``WorkerConfig.from_env`` so the two sites cannot split-brain."""
+    return os.getenv("WORKER_MANAGED_TURNS", "").strip().lower() not in ("0", "false", "no", "off")
 
 
 @dataclass

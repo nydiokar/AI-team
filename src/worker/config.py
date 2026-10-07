@@ -74,7 +74,9 @@ class WorkerConfig:
         else:
             quota_observe_enabled = coordinator_on and ("claude" in backends)
         quota_observe_interval_sec = int(os.getenv("QUOTA_OBSERVE_INTERVAL_SEC") or 300)
-        managed_turns = os.getenv("WORKER_MANAGED_TURNS", "").strip().lower() in _TRUE
+        # [Stage 8a cutover] Default-ON: empty/unset enables managed turns; only an
+        # explicit false value (0/false/no/off) opts a worker back out.
+        managed_turns = os.getenv("WORKER_MANAGED_TURNS", "").strip().lower() not in _FALSE
 
         return cls(
             node_id=node_id,
