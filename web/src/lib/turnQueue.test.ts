@@ -9,6 +9,7 @@ import {
   blockedReasonLabel,
   effectsFailedLabel,
   isEditableTurn,
+  pauseReasonLabel,
   previewWords,
   queueOpState,
   queueOwnedIds,
@@ -60,6 +61,27 @@ const queue = (active_status: string | null, queued = 0) => ({
   active_status,
   paused: false,
   hold: null,
+});
+
+describe("[A101] pauseReasonLabel — projected hold reasons get human copy", () => {
+  it("maps each gate hold to a bounded label", () => {
+    expect(pauseReasonLabel("quota")).toContain("quota");
+    expect(pauseReasonLabel("transient")).toContain("retrying automatically");
+    expect(pauseReasonLabel("retry")).toContain("retry");
+    expect(pauseReasonLabel("manager_rebound")).toContain("new Manager");
+    expect(pauseReasonLabel("carrier_offline")).toContain("offline");
+    expect(pauseReasonLabel("backoff")).toContain("backing off");
+    expect(pauseReasonLabel("legacy_draining")).toContain("finishing");
+    expect(pauseReasonLabel("lineage")).toContain("lineage");
+    expect(pauseReasonLabel("operator_pause")).toBe("Queue paused");
+  });
+
+  it("returns null for absent or unknown reasons (caller falls back)", () => {
+    expect(pauseReasonLabel(null)).toBeNull();
+    expect(pauseReasonLabel(undefined)).toBeNull();
+    expect(pauseReasonLabel("")).toBeNull();
+    expect(pauseReasonLabel("martian")).toBeNull();
+  });
 });
 
 describe("UI01 queue card labels — same id moves Waiting → Starting → Working", () => {

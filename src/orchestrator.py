@@ -3166,6 +3166,7 @@ class TaskOrchestrator(ITaskOrchestrator):
                             reset_at=pause.get("reset_at"),
                             objective=str((db.get_case_brief(case_id) or {}).get("objective") or ""),
                             auto=True,
+                            session_id=pause.get("session_id"),
                         )
                 except Exception as e:
                     logger.warning("event=case_resume_notify_failed case=%s err=%s", case_id, e)
@@ -3208,6 +3209,7 @@ class TaskOrchestrator(ITaskOrchestrator):
                         estimate_known=bool(estimate.get("known")),
                         reset_at=pause.get("reset_at"),
                         objective=str(brief.get("objective") or ""),
+                        session_id=pause.get("session_id"),
                     )
             except Exception as e:
                 logger.warning("event=case_resume_notify_failed case=%s err=%s", case_id, e)

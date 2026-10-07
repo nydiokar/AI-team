@@ -278,6 +278,34 @@ describe("TurnQueuePanel — pause (D9), recovery incl. requeue (F1), errors", (
     expect([...container.querySelectorAll("button")].some((b) => b.textContent?.trim() === "Pause")).toBe(false);
   });
 
+  it("[A101] a quota hold with no waiting row still surfaces a reason (not silent)", async () => {
+    // The incident shape: paused=false, hold=null, but the head is held by a
+    // quota pause. Before A101 this rendered nothing; now `blocked`/`pause_reason`
+    // make it discoverable in the collapsed bar and labelled when expanded.
+    render(
+      <TurnQueuePanel
+        sessionId="s1"
+        page={page([], { blocked: true, pause_reason: "quota", resume_case_id: "case-1" })}
+        ownedIds={owned()}
+      />,
+    );
+    expect(button("Show turn queue").textContent).toContain("paused");
+    await expand();
+    expect(container.textContent).toContain("daily quota reached");
+  });
+
+  it("[A101] a transient hold is labelled as auto-retrying", async () => {
+    render(
+      <TurnQueuePanel
+        sessionId="s1"
+        page={page([], { blocked: true, pause_reason: "transient" })}
+        ownedIds={owned()}
+      />,
+    );
+    await expand();
+    expect(container.textContent).toContain("retrying automatically");
+  });
+
   it("[Stage 8a] failed post-commit effects surface with a drill-down", async () => {
     apiMock.turnRequest.mockResolvedValueOnce(detail("t9", { effects_error: "history write timed out" }));
     render(
