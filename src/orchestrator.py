@@ -2449,7 +2449,63 @@ class TaskOrchestrator(ITaskOrchestrator):
                 done += 1
             except Exception as e:  # noqa: BLE001 — mark stays pending; next tick
                 logger.warning("event=managed_pause_record_failed task_id=%s err=%s", tid, e)
+        # [A84 TASK 6] Bounded lost-carrier backstop, folded into this SAME per-tick
+        # reconcile — no new timer, no unbounded event-loop scan. Error-contained so
+        # a scan/synth fault never starves the recovery bookkeeping above.
+        try:
+            await self._reap_lost_carriers(db)
+        except Exception as e:  # noqa: BLE001 — next tick retries
+            logger.warning("event=lost_carrier_reap_failed err=%s", e)
         return done
+
+    async def _reap_lost_carriers(self, db) -> int:
+        """[A84 TASK 6 — lost-carrier reaper] Detect managed (protocol-1) Case
+        worker children of an open outbox-mode Case whose carrier is provably
+        gone/stale (the existing claim-lease / node-truth predicate), and
+        synthesize their terminal outcome through the SAME atomic outbox seam
+        (``complete_turn``'s ``_record_case_child_outbox``), so a LOST carrier
+        still wakes its Case Manager exactly once instead of stranding it forever.
+
+        Gated by ``CASE_COMPLETION_OUTBOX_ENABLED`` ⇒ INERT until the outbox is
+        enabled (byte-identical to pre-A84 behaviour when OFF). Bounded: one
+        index-light ``LIMIT``-capped scan per tick, each synthesis idempotent and
+        fenced against a late real result (PK + terminal-status guard). Per-item
+        error containment — one bad row never starves the batch. Returns the count
+        of carriers reaped THIS tick."""
+        from src.control.db import case_completion_outbox_enabled
+
+        if not case_completion_outbox_enabled():
+            return 0
+        try:
+            stale = await asyncio.to_thread(db.list_stale_managed_children)
+        except Exception as e:  # noqa: BLE001 — next tick retries
+            logger.warning("event=lost_carrier_scan_failed err=%s", e)
+            return 0
+        reaped = 0
+        for row in stale:
+            tid = str(row.get("id") or "")
+            if not tid:
+                continue
+            reason = str(row.get("_stale_reason") or "stale")
+            try:
+                outcome = await asyncio.to_thread(
+                    db.synthesize_managed_terminal, tid, reason=reason,
+                )
+            except Exception as e:  # noqa: BLE001 — row stays live; next tick retries
+                logger.warning("event=lost_carrier_synth_failed task_id=%s err=%s", tid, e)
+                continue
+            if outcome == "synthesized":
+                reaped += 1
+                logger.info(
+                    "event=lost_carrier_reaped task_id=%s case_id=%s reason=%s",
+                    tid, row.get("flow_run_id"), reason,
+                )
+                self._emit_event(
+                    "case_worker_carrier_reaped", None,
+                    {"task_id": tid, "case_id": row.get("flow_run_id"),
+                     "reason": reason},
+                )
+        return reaped
 
     async def _reconcile_continuation_finalizers(self, db) -> int:
         """[A82 Stage 4c] Durable, restart-safe finalization of managed wake turns

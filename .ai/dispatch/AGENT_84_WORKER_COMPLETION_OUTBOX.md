@@ -58,7 +58,7 @@ No durable-workflow-engine adoption, generic peer inbox, worker redeploy, paid/l
 - [ ] Atomic outbox migration/API and Case binding proven by rollback/idempotency tests
 - [ ] New-Case continuation consumes and coalesces pending outbox rows
 - [ ] Legacy/new Case cutover and boot reconciliation proven without stranding/duplicate wakes
-- [ ] Bounded lost-worker reaper and late-result fencing proven, or explicit evidence-backed block recorded
+- [x] Bounded lost-worker reaper and late-result fencing proven (2026-10-07, `feat/a84-reaper`) — synth/fence/idempotency on real SQLite + live FREE-backend e2e (`.ai/dispatch/A84_OUTBOX_E2E.md`)
 - [ ] Manager tools/prompts/read models migrated only after caller compatibility review
 - [ ] Scoped regressions and service-boundary checklist pass; A87 accepts behavioral outcome
 
@@ -309,6 +309,37 @@ test_flow_schema_extension, test_control_api, test_turn_queue_db/stage8a,
 test_flow_links_events, test_wake_dispatcher_eventdriven, test_session_cache_heartbeat,
 test_heartbeat_checkpoint, test_codex_managed_carrier_integration. Full CI `pytest -q`
 runs on the PR (e2e deselected by default).
+
+### A84 reaper slice (TASK 6) + live e2e — 2026-10-07, branch `feat/a84-reaper`
+
+Closes the R2-open reaper + the live full-path proof. **No flag flipped, no deploy, no
+worker restart, no Manager-facing wake semantics changed; TASK 7 still deferred to A87.**
+
+**Built (gated by `CASE_COMPLETION_OUTBOX_ENABLED`, inert when OFF):**
+- `src/control/db.py`: `_claim_staleness_reason` (shared node-truth predicate, extracted —
+  `list_stale_claims` behaviour unchanged), `list_stale_managed_children(limit=25)`
+  (protocol-1 stale scan, outbox-mode + open-Case only, ids+reason only), and
+  `synthesize_managed_terminal` (atomic terminal→`failed`/`carrier_lost` + outbox row via the
+  SAME `_record_case_child_outbox` seam; `effects_state='pending'`; claim_token untouched so a
+  late real result is an idempotent-replay no-op).
+- `src/orchestrator.py`: `_reap_lost_carriers` folded into the per-tick
+  `_reconcile_managed_recovery` (no new timer, bounded scan, per-item error containment, emits
+  `case_worker_carrier_reaped`).
+
+**Tests:** `tests/test_completion_outbox_reaper.py` (13, real SQLite) — detection/synth/fence/
+idempotency/flag-gate all green; targeted regression 147 + 157 passed (incl. the protocol-0
+claim reaper, carrier recovery, continuation, respawn, control-api). Full `pytest -q` on PR CI.
+
+**Live e2e (operator-authorized FREE backend):** `scripts/a84_outbox_e2e.py` drove a REAL
+`opencode/big-pickle` worker turn (86.1 s, native `ses_ee788d42fffep56576NzCEkv1r`, reply
+`PICKLE_OK`) in an isolated harness (real task-server + MeshDB + WorkerAgent + backend).
+LEG 1: real completion → one outbox row → ONE Manager wake (not wait-group) → ACK → re-tick
+no-op. LEG 2: real-route claim → simulated carrier death → reaper synth (`node_offline`) →
+one outbox row → one wake → late real result fenced. **Cost ≈ $0.** Evidence:
+`.ai/dispatch/A84_OUTBOX_E2E.md`.
+
+**Status:** reaper COMPLETE + proven live ⇒ the outbox is operational once the flag is ON.
+Remaining A84 open item is TASK 7 only (A87).
 
 ## Closure (fill on completion)
 
