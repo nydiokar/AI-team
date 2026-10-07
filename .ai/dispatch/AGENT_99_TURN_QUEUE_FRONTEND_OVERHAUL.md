@@ -1,12 +1,12 @@
 ```yaml
 job_id: AGENT_99_TURN_QUEUE_FRONTEND_OVERHAUL
 created_at: "2026-10-07T15:59:39.560284+00:00"        # CANONICAL — set once at dispatch, never derive again
-status: active              # ready | active | blocked | done | dead
+status: done              # ready | active | blocked | done | dead
 owner: worker:b0a1a898f6ab
 depends_on: []
 results_ref: null             # -> DISPATCH_LOG.md section with the verdict prose
-evidence: []                  # artifact paths that PROVE it ran (checked to exist)
-updated_at: "2026-10-07T16:03:20.230758+00:00"
+evidence: .ai/dispatch/A99_TURN_QUEUE_UI_PROPOSAL.md                  # artifact paths that PROVE it ran (checked to exist)
+updated_at: "2026-10-07T16:14:51.205599+00:00"
 ```
 
 # DISPATCH — AGENT_99_TURN_QUEUE_FRONTEND_OVERHAUL
