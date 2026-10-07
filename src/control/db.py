@@ -268,6 +268,12 @@ RUNTIME_FLAG_DEFINITIONS: Dict[str, Dict[str, str]] = {
         "registry_writable": "1",
         "description": "Wake-Dispatcher autonomous Case continuation.",
     },
+    "CASE_COMPLETION_OUTBOX_ENABLED": {
+        "default": "0",
+        "effect_scope": "birth",
+        "registry_writable": "1",
+        "description": "A84 carry (o): born-marker for the durable Case completion outbox. Read ONCE at open_case and stamped into the immutable flow_runs.continuation_mode; a Case born with it ON routes continuation through the outbox drain, else the legacy wait-group path. Never read at drain time (ownership is the persisted per-Case marker, not this flag).",
+    },
     "SPEC_AUTHORING_ENABLED": {
         "default": "0",
         "effect_scope": "live",
@@ -601,6 +607,31 @@ def case_continuation_enabled() -> bool:
     byte-identical to pre-M3.4 behavior.
     """
     return runtime_flag_enabled("CASE_CONTINUATION_ENABLED")
+
+
+def case_completion_outbox_enabled() -> bool:
+    """[A84 carry (o)] Whether a NEWLY opened Case is born in durable
+    completion-outbox mode.
+
+    Canonical read of ``CASE_COMPLETION_OUTBOX_ENABLED`` (truthy: 1/true/yes/on);
+    default OFF. Mirrors ``case_continuation_enabled()``. This flag is a **birth
+    marker only**: it is read ONCE, at :func:`open_case`, and stamped into the
+    Case's immutable ``flow_runs.continuation_mode`` column. It is NEVER consulted
+    at drain time — the Wake-Dispatcher routes a Case by its persisted
+    ``continuation_mode`` (R3: old/new ownership is keyed to the immutable per-Case
+    marker, not to this mutable runtime flag). When OFF: a new Case is born with a
+    NULL ``continuation_mode`` ⇒ it stays on the legacy wait-group continuation
+    path ⇒ byte-identical to pre-A84-carry behaviour. Flipping the flag only
+    affects Cases opened afterwards, so an in-flight Case is never stranded between
+    the two paths.
+
+    DEPENDENCY: the outbox drain IS the new Case-continuation mechanism, so it
+    runs inside the Wake-Dispatcher's continuation branch. Enabling this flag
+    therefore requires ``CASE_CONTINUATION_ENABLED`` ON as well (it is, in prod);
+    otherwise the tick short-circuits and born-outbox Cases would not drain.
+    Enable them together at cutover.
+    """
+    return runtime_flag_enabled("CASE_COMPLETION_OUTBOX_ENABLED")
 
 
 def case_respawn_requires_approval() -> bool:
@@ -5331,6 +5362,58 @@ class MeshDB:
         except Exception as e:
             raise _turn_backing_error("release_turn", task_id=task_id, err=e)
 
+    def _record_case_child_outbox(
+        self,
+        conn: sqlite3.Connection,
+        task_id: str,
+        flow_run_id: Optional[str],
+        status: str,
+        now: str,
+    ) -> None:
+        """[A84 carry (o)] Write the Case-scoped completion-outbox row for a
+        terminal managed Case **worker child**, in the CALLER's open transaction.
+
+        This is the load-bearing half of the exactly-once invariant: it shares the
+        exact ``with self._write()`` txn that flips the task terminal, so the two
+        writes commit together or roll back together. Never opens its own txn.
+
+        Three conditions gate the write (all derived in-txn, no live-flag read):
+          1. the task carries a Case scope (``flow_run_id`` set);
+          2. that Case is born in 'outbox' continuation mode (the immutable R3
+             marker) — a NULL/legacy Case writes NOTHING here, so legacy Cases are
+             byte-identical;
+          3. the task is a dispatched worker **child** of the Case, proven by a
+             positive ``flow_links`` task membership row (entity_type='task'). The
+             Manager's own turns and control/continuation tokens carry no such link
+             and so never produce an outbox row (they ARE the awaiter).
+
+        ``INSERT OR IGNORE`` on the ``child_task_id`` PRIMARY KEY makes a duplicate
+        terminal report a no-op (at most one row); the terminal UPDATE in the same
+        txn guarantees at least one row when it commits ⇒ exactly one, or neither.
+        A DB-level failure here propagates and rolls the whole terminal txn back.
+        """
+        if not flow_run_id:
+            return
+        mode_row = conn.execute(
+            "SELECT continuation_mode FROM flow_runs WHERE flow_run_id = ?",
+            (flow_run_id,),
+        ).fetchone()
+        if mode_row is None or (mode_row["continuation_mode"] or "") != "outbox":
+            return
+        child = conn.execute(
+            "SELECT 1 FROM flow_links WHERE flow_run_id = ? AND entity_type = 'task' "
+            "AND entity_id = ? LIMIT 1",
+            (flow_run_id, task_id),
+        ).fetchone()
+        if child is None:
+            return
+        outcome = "success" if status == "completed" else status
+        conn.execute(
+            "INSERT OR IGNORE INTO completion_outbox "
+            "(child_task_id, case_id, outcome, created_at) VALUES (?, ?, ?, ?)",
+            (task_id, flow_run_id, outcome, now),
+        )
+
     def complete_turn(
         self,
         task_id: str,
@@ -5460,6 +5543,11 @@ class MeshDB:
                         (row["session_id"], task_id, now, int(status == "completed"),
                          result.get("execution_time"), error or ""),
                     )
+                # [A84 carry (o)] In this SAME txn: the durable Case completion
+                # outbox row for a managed worker child of an outbox-mode Case.
+                self._record_case_child_outbox(
+                    conn, task_id, row["flow_run_id"], status, now,
+                )
                 # ATOMICALLY commit the native session id + active identity onto
                 # the session row — field-scoped so a stale full-session save
                 # cannot revert it (design §6 / OWN08). Only touch columns this
@@ -5611,8 +5699,8 @@ class MeshDB:
         try:
             with self._write() as conn:
                 row = conn.execute(
-                    "SELECT id, status, queue_protocol, claim_token, cancel_token "
-                    "FROM mesh_tasks WHERE id = ?",
+                    "SELECT id, status, queue_protocol, claim_token, cancel_token, "
+                    "flow_run_id FROM mesh_tasks WHERE id = ?",
                     (task_id,),
                 ).fetchone()
                 if row is None or row["queue_protocol"] != 1:
@@ -5654,6 +5742,10 @@ class MeshDB:
                     raise OwnershipConflictError(
                         "recovery resolution lost the state race", task_id=task_id,
                     )
+                # [A84 carry (o)] Same-txn durable Case completion outbox row.
+                self._record_case_child_outbox(
+                    conn, task_id, row["flow_run_id"], resolved_status, now,
+                )
                 return RecoveryResolution(
                     task_id=task_id, resolved_status=resolved_status,
                 )
@@ -6145,6 +6237,8 @@ class MeshDB:
         task_id: str,
         current_stage: str,
         objective_lock: Optional[str] = None,
+        *,
+        continuation_mode: Optional[str] = None,
         **fields: Optional[str],
     ) -> str:
         """Insert a new flow_runs row. Returns the generated flow_run_id.
@@ -6153,6 +6247,11 @@ class MeshDB:
         unchanged. Any of the §11/lineage columns in _FLOW_EXTRA_FIELDS may be
         passed as keyword args; absent ones stay NULL. updated_at is left NULL
         on create (it marks a later update).
+
+        [A84 carry (o)] ``continuation_mode`` is the IMMUTABLE per-Case cutover
+        marker ('outbox' | None). It is a dedicated create-only parameter — NOT a
+        member of ``_FLOW_EXTRA_FIELDS`` — precisely so ``update_flow_run`` can
+        never mutate it after birth (R3).
         """
         unknown = set(fields) - set(self._FLOW_EXTRA_FIELDS)
         if unknown:
@@ -6161,6 +6260,9 @@ class MeshDB:
         flow_run_id = uuid.uuid4().hex
         cols = ["flow_run_id", "task_id", "current_stage", "objective_lock", "created_at"]
         vals = [flow_run_id, task_id, current_stage, objective_lock, _now()]
+        if continuation_mode is not None:
+            cols.append("continuation_mode")
+            vals.append(continuation_mode)
         for name in self._FLOW_EXTRA_FIELDS:
             if name in fields:
                 cols.append(name)
@@ -6517,10 +6619,16 @@ class MeshDB:
         objective, not a task.
         """
         stored_criteria = _compose_completion_criteria(completion_criteria, round_cap)
+        # [A84 carry (o)] Stamp the immutable continuation mode ONCE, at birth,
+        # from the dedicated flag. A Case born under CASE_COMPLETION_OUTBOX_ENABLED
+        # is permanently an 'outbox' Case; every other Case stays NULL (legacy
+        # wait-group path). The drain never re-reads the flag — see R3.
+        birth_mode = "outbox" if case_completion_outbox_enabled() else None
         flow_run_id = self.create_flow_run(
             None,
             "objective_lock",
             objective_lock=objective,
+            continuation_mode=birth_mode,
             completion_criteria=stored_criteria,
         )
         self.create_flow_link(
@@ -7630,6 +7738,12 @@ class MeshDB:
                         now, now, continuation_id,
                     ),
                 )
+                # [A84 carry (o)] Mark the drained outbox rows delivered in the
+                # SAME txn as the transport ACK (crash-safe: a crash before this
+                # leaves them pending ⇒ redelivered, never stranded).
+                self._mark_outbox_delivered_conn(
+                    conn, flow_run_id, list(consumed_task_ids or []), "wake", now,
+                )
         except Exception as e:
             logger.warning(
                 "event=db_continuation_consume_failed id=%s err=%s", continuation_id, e,
@@ -7787,6 +7901,12 @@ class MeshDB:
                     (result, now, now, token_id, turn_id),
                 )
                 won = conn.execute("SELECT changes()").fetchone()[0] > 0
+                if won:
+                    # [A84 carry (o)] Drain the outbox rows this coalesced wake
+                    # delivered, in the SAME finalize txn (managed-path ACK).
+                    self._mark_outbox_delivered_conn(
+                        conn, case_id, presented, "wake", now,
+                    )
             return dict(item, outcome="consumed") if won else None
         rearmed = dict(payload)
         rearmed.pop("turn_id", None)
@@ -7910,6 +8030,111 @@ class MeshDB:
     # (Manager respawn): durable pause marks, the A/B/R rule, supersede,
     # the retry / respawn token finalizer and the respawn binding.
     # ------------------------------------------------------------------ #
+    # ------------------------------------------------------------------ #
+    # [A84 carry (o)] Case completion-outbox read / drain surface.
+    # ------------------------------------------------------------------ #
+    def case_continuation_mode(self, case_id: str) -> Optional[str]:
+        """The IMMUTABLE per-Case continuation cutover marker: 'outbox' | None.
+
+        This is the ONLY authority for old-vs-new continuation ownership (R3):
+        read the persisted birth marker, never the live flag. A Case born before
+        this column existed, or born with the flag OFF, reads None ⇒ legacy
+        wait-group path. Read-only; swallows a lookup glitch to None (a glitch
+        must never silently reroute a Case onto the new path)."""
+        try:
+            row = self._conn().execute(
+                "SELECT continuation_mode FROM flow_runs WHERE flow_run_id = ?",
+                (case_id,),
+            ).fetchone()
+        except Exception:
+            return None
+        if row is None:
+            return None
+        mode = row["continuation_mode"]
+        return str(mode) if mode else None
+
+    def pending_case_outbox(self, case_id: str, limit: int = 256) -> List[Dict[str, Any]]:
+        """Undelivered completion-outbox rows for a Case, oldest first.
+
+        Served by ``idx_completion_outbox_pending`` (partial, WHERE delivered_at
+        IS NULL) ⇒ bounded, index-only, no table scan. ``limit`` caps the coalesce
+        fan-in of a single wake (§7 request-size bound)."""
+        rows = self._conn().execute(
+            "SELECT child_task_id, case_id, outcome, created_at "
+            "FROM completion_outbox "
+            "WHERE case_id = ? AND delivered_at IS NULL "
+            "ORDER BY created_at ASC, child_task_id ASC LIMIT ?",
+            (case_id, int(limit)),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def mark_case_outbox_delivered(
+        self,
+        case_id: str,
+        child_task_ids: List[str],
+        reason: str,
+        *,
+        now: Optional[str] = None,
+    ) -> int:
+        """Idempotently mark the given outbox rows delivered (``delivered_at`` set
+        ONLY while still NULL ⇒ a redelivery/crash-replay never re-stamps a row,
+        and the returned count reflects rows this call actually transitioned).
+
+        ``reason`` records WHY the row left the queue — 'wake' (coalesced into a
+        delivered Manager continuation), 'reviewed_in_turn' (the child was already
+        reviewed out-of-band, so no wake is owed), or 'superseded'. Returns the
+        number of rows transitioned. Raises on backing error (the continuation ACK
+        must not be silently lost)."""
+        if not child_task_ids:
+            return 0
+        stamp = now or _now()
+        changed = 0
+        with self._managed_write("mark_case_outbox_delivered") as conn:
+            for tid in child_task_ids:
+                conn.execute(
+                    "UPDATE completion_outbox SET delivered_at = ?, delivery_reason = ? "
+                    "WHERE child_task_id = ? AND case_id = ? AND delivered_at IS NULL",
+                    (stamp, reason, tid, case_id),
+                )
+                changed += conn.execute("SELECT changes()").fetchone()[0]
+        return changed
+
+    def reviewed_task_ids(self, case_id: str) -> set:
+        """Task ids the Manager has already adjudicated via a ``review.*`` event
+        TAGGED to that task (entity_type='task'). Mirrors the review-watermark
+        scan in :func:`compute_continuation_tick` so the outbox drain discharges
+        a reviewed child with no wake, identically to the legacy retire_only
+        path. Read-only; swallows a glitch to an empty set (so a lookup error
+        never silently suppresses a real completion wake)."""
+        out: set = set()
+        try:
+            for e in self.list_flow_events(case_id):
+                if (
+                    e.get("event_type") in _REVIEW_EVENT_TYPES
+                    and e.get("entity_type") == "task"
+                ):
+                    tid = e.get("entity_id")
+                    if tid:
+                        out.add(str(tid))
+        except Exception:
+            return set()
+        return out
+
+    def _mark_outbox_delivered_conn(
+        self, conn: sqlite3.Connection, case_id: str,
+        child_task_ids: List[str], reason: str, now: str,
+    ) -> None:
+        """[A84 carry (o)] Mark outbox rows delivered within the CALLER's open
+        txn (the crash-safe continuation-consumption ACK). ``delivered_at`` is set
+        only while still NULL ⇒ idempotent across redelivery/crash-replay. A
+        legacy Case has no outbox rows, so this is a 0-row no-op for it."""
+        for tid in child_task_ids:
+            conn.execute(
+                "UPDATE completion_outbox SET delivered_at = ?, delivery_reason = ? "
+                "WHERE child_task_id = ? AND case_id = ? AND delivered_at IS NULL",
+                (now, reason, tid, case_id),
+            )
+
     def pending_retry_pauses(self, limit: int = 25) -> List[Dict[str, Any]]:
         """Failed managed Case turns marked (in their completion txn) for the
         Case-pause recorder. Bounded; served by the partial index."""
@@ -11005,6 +11230,39 @@ def _get_migrations() -> List[tuple]:
                # activates while its session still has one). Control rows and
                # one-offs are untouched. The second index serves the operator
                # surface for managed turns whose post-commit effects failed.
+        (44, """
+            CREATE TABLE IF NOT EXISTS completion_outbox (
+                child_task_id   TEXT PRIMARY KEY,
+                case_id         TEXT NOT NULL,
+                outcome         TEXT NOT NULL,
+                created_at      TEXT NOT NULL,
+                delivered_at    TEXT,
+                delivery_reason TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_completion_outbox_pending
+                ON completion_outbox(case_id)
+                WHERE delivered_at IS NULL;
+            ALTER TABLE flow_runs ADD COLUMN continuation_mode TEXT
+        """),  # A84 carry (o): the durable, Case-scoped worker-completion outbox.
+               # ``completion_outbox`` holds EXACTLY ONE row per terminal managed
+               # Case worker child (``child_task_id`` PK ⇒ a duplicate terminal
+               # report can never create a second row), written in the SAME
+               # terminal txn as the task's status flip (complete_turn /
+               # resolve_recovery) so the invariant holds atomically: a managed
+               # outbox-mode Case child recorded terminal has one outbox row, or
+               # neither write commits. ``delivered_at`` NULL = pending; it is set
+               # only at the crash-safe continuation-ACK point (the Wake-Dispatcher
+               # finalizer), so a crash before the wake returns redelivers rather
+               # than strands. The partial index serves the per-Case pending drain
+               # without a table scan. ``flow_runs.continuation_mode`` is the
+               # IMMUTABLE per-Case cutover marker (R3): 'outbox' (born under the
+               # CASE_COMPLETION_OUTBOX_ENABLED flag) routes the Case's
+               # continuation through the outbox drain; NULL (every pre-existing
+               # row + every Case born with the flag OFF) keeps the legacy
+               # wait-group path. It is write-once at open_case and never updated,
+               # so the old-vs-new ownership predicate is a persisted fact, not a
+               # live-flag read. Additive + NULLable ⇒ legacy/control tasks and
+               # pre-A84 Cases are byte-identical.
     ]
 
 

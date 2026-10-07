@@ -222,6 +222,13 @@ def _rewind_to_42(path: str) -> None:
     conn.execute("DELETE FROM schema_version WHERE version >= 43")
     conn.execute("DROP INDEX IF EXISTS idx_mesh_tasks_legacy_exec_live")
     conn.execute("DROP INDEX IF EXISTS idx_mesh_tasks_effects_failed")
+    # A84 carry (o): migration 44 artifacts did not exist at schema 42 — strip
+    # them so a reopen re-applies 43 (and 44) cleanly from a faithful baseline.
+    conn.execute("DROP TABLE IF EXISTS completion_outbox")
+    try:
+        conn.execute("ALTER TABLE flow_runs DROP COLUMN continuation_mode")
+    except sqlite3.OperationalError:
+        pass
     conn.execute("UPDATE sessions SET turn_queue_enrolled = 0")
     conn.commit()
     conn.close()
@@ -252,8 +259,11 @@ def test_S8_04_migration_43_cutover(tmp_path):
     _seed_pre_cutover(db)
     db.close()
     _rewind_to_42(path)
-    db = MeshDB(path)  # applies 43
-    assert db._conn().execute("SELECT MAX(version) FROM schema_version").fetchone()[0] == 43
+    db = MeshDB(path)  # applies 43 (and every later migration, e.g. 44)
+    assert db._conn().execute(
+        "SELECT MAX(version) FROM schema_version").fetchone()[0] == db_mod._CURRENT_VERSION
+    assert db._conn().execute(
+        "SELECT MAX(version) FROM schema_version").fetchone()[0] >= 43
     marks = dict(db._conn().execute("SELECT session_id, turn_queue_enrolled FROM sessions").fetchall())
     assert marks == {"s-idle": 1, "s-busy": 1, "s-closed": 1}
     for tid in ("pend-resume", "pend-create", "pend-compact"):
