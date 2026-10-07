@@ -1,12 +1,12 @@
 ```yaml
 job_id: AGENT_100_A82_STAGE8B_LEGACY_CUTOFF
 created_at: "2026-10-07T16:28:38.145464+00:00"        # CANONICAL — set once at dispatch, never derive again
-status: blocked              # ready | active | blocked | done | dead
+status: active              # ready | active | blocked | done | dead
 owner: ""
 depends_on: []
 results_ref: null             # -> DISPATCH_LOG.md section with the verdict prose
 evidence: []                  # artifact paths that PROVE it ran (checked to exist)
-updated_at: "2026-10-07T16:29:17.379284+00:00"
+updated_at: "2026-10-07T17:14:58.132428+00:00"
 ```
 
 # DISPATCH — AGENT_100_A82_STAGE8B_LEGACY_CUTOFF
@@ -50,8 +50,10 @@ managed path is the sole survivor. Concrete targets (verified present on `main`)
    switches `_REFUSE_SESSION_TURNS_WITHOUT_MESH` (`:12273`) and `_QUEUE_TURNS_FOR_OFFLINE_CARRIER`
    (`:12313`) — they are not legacy-exec.
 
-## GATE — do not execute until ALL true (RESERVED to operator)
-* **Operator go** on the delete-now-vs-later fork (deleting removes the fallback). ← STILL PENDING.
+## GATE — CLEARED 2026-10-07 (operator authorized execution)
+* **Operator go** on the delete-now-vs-later fork — **GIVEN 2026-10-07** ("if the cutoff is to be
+  done now just do it, in case you are sure"). Deletion is git/GitHub-reversible; Manager is sure
+  (preconditions below met; legacy path unreachable in prod behind `_LEGACY_SESSION_EXECUTION_RETIRED`).
 * ~~A Codex AND an opencode-server managed turn proven live~~ — **MET 2026-10-07**
   (`A82_MULTIBACKEND_VALIDATION.md`: Codex `task_a0e13623` + opencode-server `task_b6557da4` both
   completed managed live. The cert §4(ii) "Codex has no managed methods" warning was STALE/WRONG —
@@ -60,9 +62,13 @@ managed path is the sole survivor. Concrete targets (verified present on `main`)
   `turn_source=agent`, FIFO seq 2, no clobber). *Note: opencode-server cannot source agent sends by
   design — `opencode.py:1297` `provision_sender_capability` returns False (shared per-process MCP);
   documented limitation, not a gap.*
-* A84 carry (o) Case-outbox resolved OR explicitly accepted as out-of-scope. ← still open (tracked under A84).
+* A84 carry (o) Case-outbox — **DECOUPLED / accepted out-of-scope for the cutoff** (operator: don't
+  wait on it). It is orthogonal durability work (completion *delivery*), not the legacy *execution*
+  code this packet deletes. Tracked separately under A84; A84 slice-2 builds on this post-cutoff base.
 
-**Gate status: 2 of the 3 technical preconditions MET; remaining = operator go + A84 carry (o).**
+**Gate status: CLEARED — executing. Agent MUST respect in-code `REVISIT`/TODO/docstring notes and
+the packet's test-retirement guidance (keep tests that encode real managed behavior; retire only the
+pure-legacy ones). Prove no behavior change before merge.**
 
 ## ACCEPTANCE — done only when all true
 * The §5 targets are deleted; `grep` shows no remaining `_LEGACY_SESSION_EXECUTION_RETIRED` /
