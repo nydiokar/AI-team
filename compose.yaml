@@ -34,6 +34,9 @@ services:
     build:
       context: .
       target: runtime
+      args:
+        # Baked into the image so /health reports the commit it was built from.
+        AI_TEAM_GIT_SHA: ${AI_TEAM_GIT_SHA:-unknown}
 
     command: ["python", "server_main.py"]
 
@@ -74,6 +77,9 @@ services:
     build:
       context: .
       target: runtime
+      args:
+        # Baked into the image so /health reports the commit it was built from.
+        AI_TEAM_GIT_SHA: ${AI_TEAM_GIT_SHA:-unknown}
 
     command: ["python", "main.py"]
 
