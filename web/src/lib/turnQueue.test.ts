@@ -9,13 +9,18 @@ import {
   blockedReasonLabel,
   effectsFailedLabel,
   isEditableTurn,
+  previewWords,
   queueOpState,
   queueOwnedIds,
+  recoveryOptions,
+  senderSummary,
   sessionTurnQueueKey,
   toSessionTurnQueue,
   transcriptFinishedIds,
   turnCardLabel,
+  turnPrincipalLabel,
   turnSourceLabel,
+  waitingTurnIds,
   TURN_QUEUE_REFETCH_MS,
   TURN_TERMINAL_STATUSES,
 } from "./turnQueue";
@@ -79,12 +84,85 @@ describe("UI01 queue card labels — same id moves Waiting → Starting → Work
   it("labels server-derived source and bounded blocked reasons", () => {
     expect(turnSourceLabel({ turn_source: "human", turn_kind: "instruction", sender_session_id: null })).toBe("You");
     expect(turnSourceLabel({ turn_source: "agent", turn_kind: "instruction", sender_session_id: "abcdef123456" })).toBe("Agent abcdef12");
-    expect(turnSourceLabel({ turn_source: "system", turn_kind: "continuation", sender_session_id: null })).toBe("Continuation");
     expect(blockedReasonLabel("managed_result_oversize: artifact=/x; node=n")).toBe(
       "Result too large — held for operator review",
     );
     expect(blockedReasonLabel(null)).toBeNull();
     expect(blockedReasonLabel("weird_reason: x")).toBe("Weird reason");
+  });
+
+  // [A99 D5] Sender identity is required and must never be a bare
+  // "system"/"continuation": always a principal, plus what the turn is when it
+  // is not a plain operator instruction.
+  it("names a principal AND the turn kind — never a bare system/continuation", () => {
+    const S = (turn_source: string | null, turn_kind: string | null, sender: string | null = null) =>
+      turnSourceLabel({ turn_source, turn_kind, sender_session_id: sender });
+    expect(S("operator", "instruction")).toBe("You");
+    expect(S("human", "compaction")).toBe("You · Compaction");
+    expect(S("agent", "instruction", "1f9bce3f5a87")).toBe("Agent 1f9bce3f");
+    expect(S("agent", "retry", "1f9bce3f5a87")).toBe("Agent 1f9bce3f · Retry");
+    expect(S("system", "continuation")).toBe("System · Continuation");
+    expect(S(null, null)).toBe("System");
+    // The principal alone (tight spaces) drops the kind qualifier.
+    expect(turnPrincipalLabel({ turn_source: "system", sender_session_id: null })).toBe("System");
+    expect(turnPrincipalLabel({ turn_source: "agent", sender_session_id: "abcdef12ff" })).toBe("Agent abcdef12");
+  });
+});
+
+describe("[A99] queue adapters — waiting-only, senders, preview, recovery", () => {
+  const t = (id: string, status: string, over: Record<string, unknown> = {}) => ({
+    id, status, turn_source: "human", sender_session_id: null, preview: "", ...over,
+  });
+
+  it("waitingTurnIds keeps only queued turns (active/finished belong to chat)", () => {
+    const ids = waitingTurnIds([
+      t("a", "queued"), t("b", "running"), t("c", "queued"),
+      t("d", "recovery_required"), t("e", "completed"), t("f", "pending"),
+    ]);
+    expect(ids).toEqual(["a", "c"]);
+  });
+
+  it("senderSummary dedupes principals, keeps order, and caps with +N", () => {
+    expect(senderSummary([])).toBe("");
+    expect(senderSummary([t("a", "queued")])).toBe("You");
+    expect(
+      senderSummary([
+        t("a", "queued"),
+        t("b", "queued", { turn_source: "agent", sender_session_id: "1f9bce3f5a" }),
+        t("c", "queued"),
+      ]),
+    ).toBe("You, Agent 1f9bce3f");
+    expect(
+      senderSummary([
+        t("a", "queued"),
+        t("b", "queued", { turn_source: "agent", sender_session_id: "aaaaaaaa11" }),
+        t("c", "queued", { turn_source: "agent", sender_session_id: "bbbbbbbb22" }),
+      ]),
+    ).toBe("You, Agent aaaaaaaa +1");
+  });
+
+  it("previewWords returns a 1–2 word teaser, never the whole prompt", () => {
+    expect(previewWords("Refactor the admission path and add a test")).toBe("Refactor the…");
+    expect(previewWords("Deploy", 2)).toBe("Deploy");
+    expect(previewWords("one two three", 1)).toBe("one…");
+    expect(previewWords("")).toBe("");
+    expect(previewWords(null)).toBe("");
+  });
+
+  it("recoveryOptions mirrors the backend: claimed⇒requeue(no ack), running/held⇒cancel|fail(ack)", () => {
+    const claimed = recoveryOptions("claimed");
+    expect(claimed.map((o) => o.decision)).toEqual(["requeue"]);
+    expect(claimed[0].requiresAck).toBe(false);
+
+    for (const s of ["running", "recovery_required"]) {
+      const opts = recoveryOptions(s);
+      expect(opts.map((o) => o.decision)).toEqual(["cancelled", "failed"]);
+      expect(opts.every((o) => o.requiresAck)).toBe(true);
+      // requeue is never offered after a turn has started (double-execution risk).
+      expect(opts.some((o) => o.decision === "requeue")).toBe(false);
+    }
+    expect(recoveryOptions("queued")).toEqual([]);
+    expect(recoveryOptions("completed")).toEqual([]);
   });
 });
 
