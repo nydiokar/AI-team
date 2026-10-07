@@ -98,4 +98,17 @@ PR + merge + redeploy; append closure here; flip CONTEXT/DISPATCH_LOG A82 to don
 - [ ] PR merged + gateway redeployed + A82 docs closed out
 
 ## Closure
-_(append the closure summary here on completion — do not create a sibling file)_
+
+### 2026-10-07 — WIP PARKED (quota-stopped mid-task), NOT merged
+The opus cutoff worker (`task_98ec6da1`) made the full deletion edits but was **quota-stopped before
+commit/test/PR**. Manager preserved + rebased the WIP onto `main` and pushed it:
+**branch `feat/a82-stage8b` @ `8160de5`** (net −582: 103 ins / 685 del across `orchestrator.py` −183,
+`control_api.py`, `routes/sessions.py`+`turn_requests.py`, 7 test files).
+Coherence verified: `_LEGACY_SESSION_EXECUTION_RETIRED` fully removed; all changed `.py` parse;
+operational switches kept. **UNVERIFIED — do NOT merge yet.** Finish pass needed (worker kept WARM,
+holds the why-retired reasoning):
+1. Run targeted tests against the branch code (worktree has no venv — run from a checkout with the venv).
+2. **Adversarially review the ~685 lines of retired tests** — confirm only pure-legacy coverage cut
+   (test_manager_loop_integration −239, test_turn_queue_rollout −186, producer1 −70), NOT real managed behavior.
+3. Live FIFO regression smoke.
+4. PR → merge → redeploy → then close A82.
