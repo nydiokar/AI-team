@@ -527,8 +527,10 @@ def _discover_node_models(backends: List[str], instances: Optional[Dict[str, Any
                 for row in rows
                 if isinstance((name := row.get("model") or row.get("id")), str) and name.strip()
             ]
-        except Exception:
-            logger.warning("event=node_model_discovery_failed backend=codex", exc_info=True)
+        except Exception as exc:
+            # A missing binary is an install/PATH condition, not a bug: one line, no traceback.
+            logger.warning("event=node_model_discovery_failed backend=codex error=%s", exc,
+                           exc_info=not isinstance(exc, FileNotFoundError))
             discovered["codex"] = []
     for static_backend in ("claude", "opencode", "opencode-server"):
         if static_backend in backends:

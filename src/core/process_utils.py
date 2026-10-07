@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import ntpath
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -66,6 +67,21 @@ def ensure_node_on_path(env: Optional[dict] = None) -> dict:
     env["Path"] = path
 
     return env
+
+
+def resolve_codex_executable(env: dict) -> Optional[str]:
+    """Locate the codex binary: ``env`` PATH first, then the standalone installer's default
+    (``%LOCALAPPDATA%\\Programs\\OpenAI\\Codex\\bin\\codex.exe``). The installer only edits the
+    user PATH, which a long-lived PM2 process never re-reads — so the fallback is what keeps a
+    switch from the npm package to the standalone install from breaking a running carrier."""
+    found = shutil.which("codex", path=env.get("PATH") or env.get("Path"))
+    if found or sys.platform != "win32":
+        return found
+    local_appdata = env.get("LOCALAPPDATA", "")
+    if not local_appdata:
+        return None
+    candidate = ntpath.join(local_appdata, "Programs", "OpenAI", "Codex", "bin", "codex.exe")
+    return candidate if os.path.isfile(candidate) else None
 
 
 def pid_exists(pid: int) -> bool:

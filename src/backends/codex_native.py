@@ -11,7 +11,6 @@ import json
 import logging
 import os
 import queue
-import shutil
 import subprocess
 import tempfile
 import threading
@@ -30,7 +29,8 @@ from src.backends.codex_app_server import (
 from src.backends.codex_ownership import CodexOwnership
 from src.control.telemetry_sink import NullTelemetrySink
 from src.core.interfaces import CodingBackend, ExecutionResult, Session
-from src.core.process_utils import ensure_node_on_path, process_gone_proof, process_identity
+from src.core.process_utils import (ensure_node_on_path, process_gone_proof, process_identity,
+                                     resolve_codex_executable)
 from src.core.telemetry import EMITTER_PROCESS_INSTANCE_ID, TelemetryContext
 from src.core.telemetry_adapters.codex import CodexTelemetryAdapter
 
@@ -274,7 +274,10 @@ class CodexBackend(CodingBackend):
             env = ensure_node_on_path()
             for key in ("SESSION_ID", "AI_TEAM_SESSION_ID", "AI_TEAM_TURN_ID", "AI_TEAM_INVOCATION_ID"):
                 env.pop(key, None)
-            executable = shutil.which("codex", path=env.get("PATH")) or "codex"
+            executable = resolve_codex_executable(env)
+            if executable is None:
+                raise FileNotFoundError("codex_executable_not_found: not on the carrier PATH nor at the "
+                                        "standalone install location")
             client = CodexAppServerClient(executable, env)
             client.start()
             self._client = client
@@ -372,7 +375,7 @@ class CodexBackend(CodingBackend):
         that binary's protocol (``thread/read`` + ``clientUserMessageId``),
         probed offline once per binary ([A82 step 4 rework, m5])."""
         env = ensure_node_on_path()
-        executable = shutil.which("codex", path=env.get("PATH"))
+        executable = resolve_codex_executable(env)
         return executable is not None and _managed_protocol_supported(executable, env)
 
     def set_proactive_sink(self, sink: Callable[[str, LateManagedOutcome], Any]) -> None:
