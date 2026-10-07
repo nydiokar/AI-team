@@ -1,10 +1,10 @@
 # A82 Stage-8a Live End-to-End Validation
 
-**Verdict:** PASS  
-**Probe date:** 2026-10-07T15:20–15:21 UTC  
-**Carrier node:** `kanebra`  
-**Schema version:** 43 (confirmed in image `ai-team:prod-cdef7ec`, main @ `9dade9c`)  
-**Gateway:** http://127.0.0.1:9003 (mesh_degraded=False, MESH_ENABLED=True)  
+**Verdict:** PASS (all 4 properties)
+**Probe date:** 2026-10-07T15:20–15:21 UTC (second run; supersedes prior attempt — see §Prior Attempt)
+**Carrier node:** `kanebra`
+**Schema version:** 43 (image `ai-team:prod-cdef7ec`, main @ `9dade9c`)
+**Gateway:** http://127.0.0.1:9003 (mesh_degraded=False, MESH_ENABLED=True)
 **Executed by:** worker session on kanebra (this session = task_577826f8, action=create_session)
 
 ---
@@ -287,7 +287,7 @@ Turn 1 owns active slot (`active_turn_id`). Turn 2 is queued at position 2. Turn
 task_7a1fb926  action=resume_session  status=completed  started=2026-10-07T15:21:17.136564
 task_05f1a9e3  action=create_session  status=completed  started=2026-10-07T15:21:10.109966
 ```
-Turn 1 used `create_session` (first turn, new backend session).  
+Turn 1 used `create_session` (first turn, new backend session).
 Turn 2 used `resume_session` (FIFO head-only activation on the SAME session). ✅
 
 ### 10. Session Final State After Both Turns Complete
@@ -308,8 +308,8 @@ Turn 2 used `resume_session` (FIFO head-only activation on the SAME session). �
   }
 }
 ```
-`last_summary: "FIFO-CONFIRMED-T2"` — the session executed Turn 2's instruction.  
-`last_task_id: task_7a1fb926` — the last executed turn was Turn 2 (FIFO confirmed).  
+`last_summary: "FIFO-CONFIRMED-T2"` — the session executed Turn 2's instruction.
+`last_task_id: task_7a1fb926` — the last executed turn was Turn 2 (FIFO confirmed).
 `backend_session_id` shared across both turns — same Claude session reused.
 
 ---
@@ -328,8 +328,8 @@ Turn 2 used `resume_session` (FIFO head-only activation on the SAME session). �
 15:21:18.598  Turn2 completed                     ~1.5s execution
 ```
 
-FIFO invariant: Turn2.activated_at (15:21:16) > Turn1.completed_at (15:21:13) ✅  
-Head-only: Turn2 was NOT activated while Turn1 held the active slot ✅  
+FIFO invariant: Turn2.activated_at (15:21:16) > Turn1.completed_at (15:21:13) ✅
+Head-only: Turn2 was NOT activated while Turn1 held the active slot ✅
 Resume: Turn2 action=`resume_session`, not `create_session` ✅
 
 ---
@@ -342,4 +342,19 @@ Resume: Turn2 action=`resume_session`, not `create_session` ✅
 - `WORKER_MANAGED_TURNS=1` on kanebra worker — kanebra registers `managed_backends=["claude","codex","opencode-server"]`.
 - `coverage_ok: false` at time of test — pre-existing unrelated issue: one session
   pinned to `kanebra-worker` (legacy worker, no managed_backends); unrelated to this proof.
-- Session `13c4a3019ba7` fully closed at 15:21:47 UTC (status=closed, no carrier slot held).
+- Session `13c4a3019ba7` fully closed at 2026-10-07T15:21:47 UTC (status=closed, no carrier slot held).
+
+---
+
+## Prior Attempt (2026-10-07 13:56–14:00 UTC, session `669862de646e`)
+
+A first run proved Properties 1–3 (202 acceptance, distinct IDs, FIFO ordering and serial
+delivery to the same gateway session) but could NOT prove Property 4 (native backend resume)
+because both turns failed with `Control request timeout: initialize` on the kanebra carrier
+— the Claude backend never completed `initialize`, leaving `backend_session_id=''` and no
+native session to resume. That was a carrier/backend failure, not a queue defect; the queue
+committed honest `failed` terminals. Turns: `task_e6e6ded3` (seq 1), `task_bfe493f0` (seq 2).
+
+The second run (this document's primary section) used the same carrier with a different
+`repo_path` (`/home/cifran/dev/AI-team`); both turns completed successfully, and
+`resume_session` was directly observed. All 4 properties are now proven.
