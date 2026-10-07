@@ -23,7 +23,7 @@ Not needed for: `.ai/**`, `docs/**`, `tests/**`, `.claude/**`, other `*.md`.
 - [ ] 4. Build
 - [ ] 5. Recreate
 - [ ] 6. Verify (loop until healthy or roll back)
-- [ ] 7. Tag prod-<sha>, report
+- [ ] 7. Tag prod-<sha> + push deploy/<stamp>-<sha> git tag, report
 ```
 
 **1. Preflight** (read-only; prints the exact commands for this deploy with SHA/timestamps filled):
@@ -44,7 +44,7 @@ your only rollback for data. Use SQLite's online backup (safe while the DB is in
 **3–5. Tag, build, recreate** — run the preflight's commands in order:
 ```bash
 docker tag ai-team:local ai-team:pre-<sha>
-docker compose build gateway                       # builds the shared image; slow on this Pi — run in background, allow ~20 min
+AI_TEAM_GIT_SHA=<sha> docker compose build gateway   # builds the shared image; slow on this Pi — run in background, allow ~20 min
 docker compose up -d --no-build gateway task-server
 ```
 Recreate **both**: they share the image and the DB schema, and a task-server left on old code
@@ -57,7 +57,7 @@ docker compose ps                                              # both (healthy);
 .claude/skills/checking-live-state/scripts/live_status.sh <FLAGS_THIS_CHANGE_DEPENDS_ON>
 docker logs --since 5m ai-team-gateway-1 2>&1 | grep -E "embedded_control_server_started|started successfully|db_migration_applied|Traceback|ERROR" | tail -20
 ```
-Expect: both healthy, `/health` ok, `schema_version` = HEAD's max migration, `nodes_online`
+Expect: both healthy, `/health` ok with `build.git_sha` = the deployed SHA, `schema_version` = HEAD's max migration, `nodes_online`
 recovered to its pre-deploy value within ~1 min, no Traceback. Then exercise the change itself
 through the surface where its goal is observed (API call, UI path, worker dispatch) — healthy
 containers prove the process started, not that your change works.
@@ -66,7 +66,10 @@ If a container restart-loops or verification fails → **Rollback** below, then 
 A known loop cause is a stale `~/ai-team-data/controller/logs/gateway.lock` (exit 143).
 
 **7. Record identity**: `docker tag ai-team:local ai-team:prod-<sha>` — this tag is how
-`checking-live-state` knows which commit is live. Report: SHA deployed, migrations applied
+`checking-live-state` knows which commit is live. Then push the annotated git tag the preflight
+printed (`deploy/<UTC stamp>-<sha>`): it is the off-host deploy history (`git tag -l 'deploy/*'`
+on GitHub) and survives this host's disk; the Docker tags do not. Only after verification passes —
+a rolled-back deploy gets no `deploy/` tag. Report: SHA deployed, migrations applied
 (from → to), backup path, verification evidence, rollback tag.
 
 ## Rollback
