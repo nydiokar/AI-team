@@ -96,6 +96,39 @@ host. Horse suffices as the managed carrier for cutover.
       Optionally repoint MESH_LOCAL_CARRIER_NODE_ID=kanebra-worker + recreate gateway.
 - [ ] S8 Close Case with continuation plan (Stage 8b: delete legacy execution code + its tests).
 
+## PROGRESS 2026-10-07 (post-cutover, verified live)
+- GATEWAY CUTOVER DONE: image `ai-team:prod-cdef7ec` (f48cf9787035), gateway+task-server recreated,
+  **schema_version=43** (migration 43 applied cleanly), mesh_degraded=False, both healthy. DB backup
+  at `/home/cifran/ai-team-data/backups/mesh-pre-cdef7ec-20261007T1333Z.db`. Rollback tag
+  `ai-team:pre-cdef7ec` (code rollback safe; DB restore = operator decision only).
+- CARRIER RENAME: `MESH_LOCAL_CARRIER_NODE_ID=kanebra` (operator-set) but the old worker registers
+  as `kanebra-worker`. Brought up a NEW local managed carrier registered as node **`kanebra`** (new
+  code, pm2 app `ai-team-worker-kanebra`, polling ON) — it IS managed online. NOTE: its nudge
+  listener failed to bind (port 9012 env didn't apply; it tried 9001, already used by the old
+  worker) so it is POLL-ONLY (still claims managed turns; acceptable, but a clean fix is to give it
+  its own free port). Both `Horse` and `kanebra` are managed carriers.
+- COVERAGE: `coverage_ok=false` REMAINS — but only because 3 stale sessions are pinned to the OLD
+  `kanebra-worker` (incl. THIS manager session). New/unpinned work routes fine to managed carriers.
+  This is transitional, not a functional outage for new work.
+- VALIDATION (O5): dispatched to Horse worker task_b7ba302c (session 9526c9e78953). It drives a live
+  two-turn scratch session and commits PASS/FAIL evidence to `.ai/dispatch/A82_STAGE8A_VALIDATION.md`.
+  CHECK THAT FILE + `gh pr`/git log for the result.
+
+## REMAINING (the only destructive step left)
+Retire the OLD `kanebra-worker` to reach the clean single-node end state + clear coverage. This KILLS
+this manager session (the 3 pinned sessions are on it). Two clean options:
+  (A) Rename-in-place: `pm2 delete ai-team-worker-kanebra` (drop the transitional carrier) then
+      `pm2 delete ai-team-worker; WORKER_NODE_ID=kanebra pm2 start worker_main.py --name ai-team-worker
+      --interpreter /home/cifran/dev/AI-team/.venv/bin/python --time ...` so the ONE local worker is
+      node `kanebra`, new code, port 9001 (no collision), matching MESH_LOCAL_CARRIER_NODE_ID. OR
+  (B) Keep the transitional `kanebra` carrier and just `pm2 delete ai-team-worker` (frees 9001),
+      then restart `ai-team-worker-kanebra` so its nudge listener binds 9001.
+  Prefer (A) — single clean node. Verify after: node `kanebra` online managed + canary=false +
+  `coverage_ok=true` (the 3 old pinned sessions drop once kanebra-worker is gone). Then the Case can
+  close. Because this kills the acting manager, run it detached or hand to operator/continuation.
+  WORKER_API_PORT override via inline `VAR=x pm2 start` did NOT apply cleanly here — set the port in
+  the pm2 env explicitly or an ecosystem entry if a distinct port is wanted.
+
 ## If you are the continuing Manager
 Re-read this file + `.ai/dispatch/AGENT_82_SESSION_TURN_QUEUE.md` + git log. Run the
 checking-live-state skill to see which steps already took effect (image sha, schema_version,
