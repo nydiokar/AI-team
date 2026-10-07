@@ -152,10 +152,6 @@ def _session_turns_route_without_mesh(monkeypatch):
     from src.orchestrator import TaskOrchestrator
 
     monkeypatch.setattr(TaskOrchestrator, "_REFUSE_SESSION_TURNS_WITHOUT_MESH", False)
-    # Likewise the cutover invariant (non-enrolled session turns / unenroll
-    # refused): off here so the legacy session branches that remain until
-    # Stage 8b stay exercised; asserted on in test_turn_queue_stage8a.py (S8-11).
-    monkeypatch.setattr(TaskOrchestrator, "_LEGACY_SESSION_EXECUTION_RETIRED", False)
     yield
 
 

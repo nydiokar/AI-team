@@ -160,18 +160,6 @@ async def _session_turn_queue_enrolled(session_id: str) -> bool:
         raise _turn_queue_http(err)
 
 
-def _enrollment_kw(orchestrator: Any, enrolled: bool) -> Dict[str, Any]:
-    """[A82 Stage 4a rework] Pass the route's single enrollment decision on
-    (one marker read per request) — only when enrollment can exist, so the
-    no-enrollment legacy call is byte-identical to before."""
-    from src.control.db import get_db
-
-    db = get_db()
-    if db is None or db.any_session_enrolled() is False:
-        return {}
-    return {"turn_queue_enrolled": enrolled}
-
-
 def _turn_queue_http(err: Exception) -> HTTPException:
     """[A82 Stage 4a] Map a typed managed-queue outcome to a structured HTTP
     error (design §6 table); 429 carries Retry-After."""

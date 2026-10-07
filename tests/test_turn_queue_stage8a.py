@@ -730,7 +730,6 @@ def test_S8_10b_spawn_failure_is_not_owned_and_a_later_tick_converges(tmp_path, 
 def test_S8_11_operator_unenroll_is_refused_after_the_cutover_F2(tmp_path, monkeypatch):
     db, o = _setup(tmp_path, monkeypatch)
     _wire(o)
-    monkeypatch.setattr(TaskOrchestrator, "_LEGACY_SESSION_EXECUTION_RETIRED", True)
     r = _api(monkeypatch, o).post("/api/sessions/sess-1/turn-requests/unenroll",
                                   headers={"Authorization": "Bearer tok"})
     assert r.status_code == 409 and r.json()["detail"]["reason"] == "legacy_execution_retired"
@@ -740,7 +739,6 @@ def test_S8_11_operator_unenroll_is_refused_after_the_cutover_F2(tmp_path, monke
 def test_S8_11b_a_non_enrolled_session_turn_is_refused_up_front_F2(tmp_path, monkeypatch):
     db, o = _setup(tmp_path, monkeypatch)
     _wire(o)
-    monkeypatch.setattr(TaskOrchestrator, "_LEGACY_SESSION_EXECUTION_RETIRED", True)
     db.unenroll_session_drained("sess-1")  # forced (raw DB): the route refuses it
     db.refresh_enrollment_presence()
     db._conn().execute("UPDATE sessions SET status = 'awaiting_input' WHERE session_id = 'sess-1'")
