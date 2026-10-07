@@ -2135,8 +2135,10 @@ class TaskOrchestrator(ITaskOrchestrator):
         # worker refuses forever (the incident's 02:51 + 07:57 identical re-pokes).
         # Treat ERROR+driver_lost as crash-respawn-eligible (discriminated by
         # driver_status='lost' so a genuine non-restart ERROR is untouched).
-        _restart_errored = self._is_restart_dead_session(
-            session, self._respawn_on_restart_error_enabled()
+        # Class-referenced (not self.) so duck-typed fakes that borrow
+        # _continue_case_once don't need to re-declare these two staticmethods.
+        _restart_errored = TaskOrchestrator._is_restart_dead_session(
+            session, TaskOrchestrator._respawn_on_restart_error_enabled()
         )
         if session is None or session.status in (
             SessionStatus.CLOSED, SessionStatus.CANCELLED,
