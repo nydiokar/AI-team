@@ -9,8 +9,9 @@
  */
 import { AnimatePresence, motion } from "framer-motion";
 import { useState } from "react";
-import { TriangleAlert, CheckCircle2, ChevronDown } from "lucide-react";
+import { TriangleAlert, CheckCircle2, ChevronDown, X } from "lucide-react";
 import { useSystemAlerts } from "../../hooks/useSystemAlerts";
+import { useDismissedAlertsStore } from "../../stores/dismissedAlertsStore";
 
 const RECOVERED_VISIBLE_MS = 30 * 60 * 1000; // keep a resolved outage visible 30 min
 
@@ -39,9 +40,11 @@ function fmtDuration(openedAt: string, resolvedAt: string): string {
 export function SystemAlertBanner() {
   const { data: alerts } = useSystemAlerts();
   const [expanded, setExpanded] = useState(false);
+  const dismissedIds = useDismissedAlertsStore((s) => s.ids);
+  const dismiss = useDismissedAlertsStore((s) => s.dismiss);
 
   const latest = alerts?.[0];
-  if (!latest) return null;
+  if (!latest || dismissedIds.includes(latest.id)) return null;
 
   const ongoing = latest.resolvedAt === null;
   const recentlyResolved =
@@ -68,19 +71,29 @@ export function SystemAlertBanner() {
         transition={{ duration: 0.2 }}
         className={`overflow-hidden text-xs ${tone}`}
       >
-        <button
-          type="button"
-          onClick={() => setExpanded((v) => !v)}
-          className="flex w-full items-center justify-center gap-2 px-4 py-1.5"
-        >
-          <Icon className="size-3.5 shrink-0" />
-          <span className="truncate">{headline}</span>
-          {(latest.detail || !ongoing) && (
-            <ChevronDown
-              className={`size-3 shrink-0 transition-transform ${expanded ? "rotate-180" : ""}`}
-            />
-          )}
-        </button>
+        <div className="flex items-center">
+          <button
+            type="button"
+            onClick={() => setExpanded((v) => !v)}
+            className="flex min-w-0 flex-1 items-center justify-center gap-2 py-1.5 pl-4"
+          >
+            <Icon className="size-3.5 shrink-0" />
+            <span className="truncate">{headline}</span>
+            {(latest.detail || !ongoing) && (
+              <ChevronDown
+                className={`size-3 shrink-0 transition-transform ${expanded ? "rotate-180" : ""}`}
+              />
+            )}
+          </button>
+          <button
+            type="button"
+            aria-label="Dismiss alert"
+            onClick={() => dismiss(latest.id)}
+            className="shrink-0 px-3 py-1.5 opacity-70 hover:opacity-100"
+          >
+            <X className="size-3.5" />
+          </button>
+        </div>
         {expanded && (ongoing ? latest.detail : true) && (
           <div className="border-t border-current/10 px-4 py-2 text-left font-mono text-[10px] leading-snug opacity-80">
             {ongoing ? (
@@ -90,7 +103,7 @@ export function SystemAlertBanner() {
                 <span className="text-bad line-through opacity-70">{latest.message}</span>
                 <span className="text-ok">
                   Recovered at {fmtTime(latest.resolvedAt as string)} — the gateway is healthy
-                  again. This banner clears automatically.
+                  again. This banner clears automatically, or dismiss it with ×.
                 </span>
                 {latest.detail && (
                   <details className="mt-1">
