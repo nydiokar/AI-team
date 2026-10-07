@@ -153,10 +153,12 @@ def test_PC02b_docker_one_off_and_unenrolled_session_still_refused(tmp_path, mon
     db, o = _setup(tmp_path, monkeypatch, enroll=False, machine=None)
     _register_carrier(db, "local-daemon")
     _docker(monkeypatch)
+    # [A82 Stage 8b] A non-enrolled session turn is refused at the managed cutoff
+    # (LegacyExecutionRetiredError), before the local-execution gate it used to hit.
+    with pytest.raises(tq.LegacyExecutionRetiredError):
+        _submit(o)  # unenrolled unpinned session
     with pytest.raises(HarnessAdmissionBlocked, match="local_execution_disabled"):
-        _submit(o)  # unenrolled (legacy) unpinned session
-    with pytest.raises(HarnessAdmissionBlocked, match="local_execution_disabled"):
-        _submit(o, session_id=None, source="web_oneoff")  # one-off
+        _submit(o, session_id=None, source="web_oneoff")  # one-off (unchanged)
     assert _managed_rows(db) == [] and o.task_queue.qsize() == 0
 
 

@@ -28,7 +28,6 @@ from src.control.db import MeshDB
 from src.core.interfaces import Session, SessionStatus
 from src.core.session_task_queue import SessionTaskQueue
 from src.orchestrator import HarnessAdmissionBlocked, TaskOrchestrator
-from tests.stage8a_legacy import unenrolled
 
 NOW = datetime(2026, 9, 25, 12, 0, 0, tzinfo=timezone.utc).isoformat()
 
@@ -129,24 +128,10 @@ def test_P1_01_enrolled_session_gets_one_durable_managed_turn(tmp_path, monkeypa
     assert "task_created" in o.events and "turn.accepted" in o.events
 
 
-# P1-02 --------------------------------------------------------------------- #
-def test_P1_02_unenrolled_session_keeps_legacy_path(tmp_path, monkeypatch):
-    db, o = _setup(tmp_path, monkeypatch, enroll=False)
-    tid = _submit(o, operation_id="web-op-1")
-    assert type(tid) is str and tid.startswith("task_")
-    assert o.task_queue.qsize() == 1 and tid in o.active_tasks
-    assert _managed_rows(db) == []
-    queued = o.task_queue.get_nowait()
-    assert TaskOrchestrator._TURN_OPERATION_META_KEY not in queued.metadata
-
-
-def test_P1_02b_no_mesh_db_is_legacy(tmp_path, monkeypatch):
-    _db, o = _setup(tmp_path, monkeypatch)
-    monkeypatch.setattr(db_mod, "get_db", lambda: None)
-    tid = _submit(o)
-    assert type(tid) is str and o.task_queue.qsize() == 1
-
-
+# P1-02 (unenrolled → legacy path) and P1-02b (no-mesh-DB → legacy) RETIRED at
+# the A82 Stage-8b convergence cutoff: a non-enrolled session turn is now refused
+# unconditionally (LegacyExecutionRetiredError), proven by
+# test_turn_queue_stage8a.py::test_S8_11b.
 # P1-03 --------------------------------------------------------------------- #
 def test_P1_03_harness_gate_refuses_before_admission(tmp_path, monkeypatch):
     db, o = _setup(tmp_path, monkeypatch)
@@ -473,48 +458,11 @@ def test_P1_10b_telegram_document_into_enrolled_session_refused(tmp_path, monkey
 
 
 # P1-11 (A87 rework probes L1/L2) ------------------------------------------ #
-def test_P1_11_no_enrollment_anywhere_means_no_marker_read_and_legacy_survives_db_fault(
-        tmp_path, monkeypatch):
-    db, o = _setup(tmp_path, monkeypatch, enroll=False)
-    stmts = []
-    db._conn().set_trace_callback(stmts.append)
-    _submit(o)
-    db._conn().set_trace_callback(None)
-    assert not [s for s in stmts if "turn_queue_enrolled" in s], stmts
-    assert o.task_queue.qsize() == 1
-
-    def boom(_sid):
-        raise RuntimeError("database disk image is malformed (injected)")
-
-    monkeypatch.setattr(db, "is_session_enrolled", boom)
-    tid = _submit(o)  # main behavior: legacy path unaffected
-    assert type(tid) is str and o.task_queue.qsize() == 2
-
-
-def test_P1_11b_web_unenrolled_marker_unreadable_is_legacy_200(tmp_path, monkeypatch):
-    db = MeshDB(str(tmp_path / "mesh.db"))
-    monkeypatch.setattr(db_mod, "get_db", lambda: db)
-    orch = _WebOrch(db, None)
-
-    async def legacy_submit(**kw):
-        orch.calls.append(kw)
-        return "task_legacy"
-
-    orch.submit_instruction = legacy_submit
-    s = Session(session_id="sess-1", backend="claude", repo_path="/tmp/repo",
-                status=SessionStatus.IDLE, created_at=NOW, updated_at=NOW, machine_id="worker-a")
-    orch.session_service.store.save(s)
-    db.upsert_session(s)
-    unenrolled(db, "sess-1")  # [A82 Stage 8a] born managed: model "nothing enrolled"
-    monkeypatch.setattr(db, "is_session_enrolled",
-                        lambda sid: (_ for _ in ()).throw(RuntimeError("x")))
-    c = _client(monkeypatch, orch)
-    r = c.post("/api/instructions", headers={"Authorization": "Bearer tok"},
-               json={"description": "hello", "session_id": "sess-1"})
-    assert r.status_code == 200 and r.json()["task_id"] == "task_legacy"
-    assert "turn_queue_enrolled" not in orch.calls[0]  # byte-identical legacy call
-
-
+# P1-11 (no enrollment ⇒ no marker read, legacy survives a DB fault) and P1-11b
+# (web unenrolled, marker unreadable ⇒ legacy 200) RETIRED at the A82 Stage-8b
+# convergence cutoff: there is no legacy session-execution path left to fall
+# back to — a non-enrolled session turn is refused unconditionally
+# (test_turn_queue_stage8a.py::test_S8_11b).
 def test_P1_11c_enrollment_exists_one_marker_read_per_web_request(tmp_path, monkeypatch):
     orch, c = _web(tmp_path, monkeypatch)  # sess-1 enrolled ⇒ presence True
     reads = []

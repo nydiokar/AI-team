@@ -199,26 +199,12 @@ def test_instruction_threads_parent_flow_run_id(client, orch):
     assert orch.parent_flow_run_ids[-1] == "flow_parent_1"
 
 
-def test_instruction_to_session_flips_busy(client, orch, tmp_path):
-    from src.core.interfaces import SessionStatus
-    res = orch.session_service.create_session(backend="claude", repo_path=str(tmp_path))
-    sid = res.session.session_id
-    unenrolled(get_db(), sid)  # [A82 Stage 8a] legacy branch: an unenrolled session
-
-    r = client.post("/api/instructions", headers=_auth(),
-                    json={"description": "fix bug", "session_id": sid})
-    assert r.status_code == 200
-    assert r.json()["task_id"] == "task_web_1"
-    # submit_instruction called with source=web_session and the session's repo as cwd.
-    desc, called_sid, cwd, source = orch.submitted[-1]
-    assert (desc, called_sid, source) == ("fix bug", sid, "web_session")
-    assert cwd == str(tmp_path)
-    # Session went BUSY and recorded the task id.
-    s = orch.session_service.store.get(sid)
-    assert s.status == SessionStatus.BUSY
-    assert s.last_task_id == "task_web_1"
-
-
+# test_instruction_to_session_flips_busy RETIRED at the A82 Stage-8b convergence
+# cutoff: it asserted the legacy optimistic-BUSY write for an UNENROLLED session
+# turn via /api/instructions — the branch deleted with the legacy execution path
+# (a managed/enrolled turn never flips BUSY: queued is not busy). The managed
+# enrolled envelope is covered by
+# tests/test_turn_queue_producer1.py::test_P1_08_web_enrolled_envelope_and_no_busy.
 def test_instruction_unknown_session_404(client):
     r = client.post("/api/instructions", headers=_auth(),
                     json={"description": "x", "session_id": "nope"})
