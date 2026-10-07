@@ -45,6 +45,15 @@ Fewer paid Manager wake turns per accepted delivery (spec §7 M1, target −25%)
       `join_case_id`, principal `automation`);
    3. re-emit `worker.wait_pending` for the same group with `from_task` swapped for `to_task`;
    4. exclude the task from this wake.
+
+   **Additional hard limit (extends spec §6.3):** a bounce triggered *solely* by
+   `unpursued_anomaly` or `ignored_contradiction` — with no other question at `act` level — requires
+   a code-extracted anchor (the specific anomaly text or the contradicted claim, present verbatim in
+   the worker report) before the bounce fires. Without an anchor the rework instruction has no
+   referent, the Manager cannot verify the finding in the diff, and the wrong-bounce rate is
+   structurally elevated for that question class. Extracting the anchor is a string operation over
+   the report text, not a Jev call. If no anchor is found, demote those questions to `flag`
+   (annotate-only) for this delivery.
 3. On the next wake for `to_task`, render the bounce history line.
 4. Flag `S1_DELIVERY_BOUNCE`. It refuses to enable while the A94 precondition artefact is missing
    (checked when the flag is read).
