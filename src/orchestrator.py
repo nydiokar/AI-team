@@ -7765,6 +7765,13 @@ class TaskOrchestrator(ITaskOrchestrator):
         from src.control.db import restart_context_restore_disabled
         return not restart_context_restore_disabled()
 
+    @staticmethod
+    def _restart_lost_fork_enabled() -> bool:
+        # [A98 O1] ON by default. Set RESTART_LOST_SESSION_FORK_DISABLED=true to opt
+        # out and restore the legacy resume-into-a-corpse behaviour.
+        from src.control.db import restart_lost_session_fork_disabled
+        return not restart_lost_session_fork_disabled()
+
     async def _maybe_inject_restart_recovery_context(self, task: "Task") -> None:
         """Prepend recent completed turns when a session's driver was lost on restart.
 
@@ -12530,11 +12537,31 @@ Generated from user description: {description}
     ) -> Tuple[str, Dict[str, Any]]:
         """The carrier-executable ``(action, payload)`` for ``task`` — shared by the
         legacy shadow-write (``_mesh_enqueue_task``) and the A82 managed activation
-        preparation, so both paths dispatch the identical shape. Pure."""
+        preparation, so both paths dispatch the identical shape. Pure except for one
+        registry flag read (A98 O1) gating the restart-lost fresh-fork branch, which
+        applies only to non-enrolled (legacy) sessions."""
         action_override = (task.metadata or {}).get("task_type", "")
         if action_override == "fetch_staged_file":
             action = "fetch_staged_file"
         elif session_id and session and not session.backend_session_id:
+            action = "create_session"
+        elif (
+            session_id
+            and session
+            and getattr(session, "driver_status", "") == "lost"
+            and not getattr(session, "turn_queue_enrolled", 0)
+            and self._restart_lost_fork_enabled()
+        ):
+            # [A98 O1] A worker restart orphaned this session's in-memory SDK
+            # driver (driver_status='lost'). It HAS a backend_session_id, so the
+            # legacy branch below would emit resume_session — which the worker
+            # refuses ("session was lost ... cannot be resumed by the continuous
+            # driver") and the Wake-Dispatcher then re-injects restart-context
+            # into that corpse forever. Instead dispatch a FRESH create_session
+            # (role re-boot + A54 boot-reconcile + the <prior_context> block
+            # _maybe_inject_restart_recovery_context already prepends on exactly
+            # this driver_status='lost' condition), which is the coherent
+            # fork-and-continue the restart-recovery design always intended.
             action = "create_session"
         elif session_id:
             action = "resume_session"
