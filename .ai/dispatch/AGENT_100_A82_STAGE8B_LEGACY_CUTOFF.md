@@ -51,13 +51,18 @@ managed path is the sole survivor. Concrete targets (verified present on `main`)
    (`:12313`) — they are not legacy-exec.
 
 ## GATE — do not execute until ALL true (RESERVED to operator)
-* **Operator go** on the delete-now-vs-later fork (deleting removes the fallback).
-* **A Codex AND an opencode-server managed turn proven live** (cert §4(ii); today unproven — and
-  Codex may lack `run_managed_turn`, i.e. a real build gap, not just a probe). If that proof reveals
-  a gap, FIX THAT FIRST — do not delete the fallback over a backend that cannot yet run managed.
-* **One agent-source send proven live** over a minted sender capability (cert §4(i); only
-  operator-source was validated).
-* A84 carry (o) Case-outbox resolved OR explicitly accepted as out-of-scope.
+* **Operator go** on the delete-now-vs-later fork (deleting removes the fallback). ← STILL PENDING.
+* ~~A Codex AND an opencode-server managed turn proven live~~ — **MET 2026-10-07**
+  (`A82_MULTIBACKEND_VALIDATION.md`: Codex `task_a0e13623` + opencode-server `task_b6557da4` both
+  completed managed live. The cert §4(ii) "Codex has no managed methods" warning was STALE/WRONG —
+  `codex_native.py:373/:385` exist.)
+* ~~One agent-source send proven live~~ — **MET 2026-10-07** (same doc: `task_834db4e9` admitted
+  `turn_source=agent`, FIFO seq 2, no clobber). *Note: opencode-server cannot source agent sends by
+  design — `opencode.py:1297` `provision_sender_capability` returns False (shared per-process MCP);
+  documented limitation, not a gap.*
+* A84 carry (o) Case-outbox resolved OR explicitly accepted as out-of-scope. ← still open (tracked under A84).
+
+**Gate status: 2 of the 3 technical preconditions MET; remaining = operator go + A84 carry (o).**
 
 ## ACCEPTANCE — done only when all true
 * The §5 targets are deleted; `grep` shows no remaining `_LEGACY_SESSION_EXECUTION_RETIRED` /
