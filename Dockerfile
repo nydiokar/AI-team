@@ -50,6 +50,10 @@ COPY --chown=ai-team:ai-team main.py server_main.py worker_main.py ./
 COPY --chown=ai-team:ai-team scripts/ ./scripts/
 COPY --chmod=755 deploy/docker-entrypoint.sh /usr/local/bin/docker-entrypoint
 COPY --chown=ai-team:ai-team --from=web-build /build/web/dist ./web/dist
+# Commit this image was built from, reported by /health (src/core/build_info.py).
+# Declared last so a new SHA only rebuilds this metadata layer.
+ARG AI_TEAM_GIT_SHA=unknown
+ENV AI_TEAM_GIT_SHA=${AI_TEAM_GIT_SHA}
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/docker-entrypoint"]
 CMD ["python", "main.py"]
 

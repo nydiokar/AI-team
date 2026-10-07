@@ -40,6 +40,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from src.control.turn_queue import CANCEL_MANAGED_ACTION, ManagedTurnOwnership
 
+from src.core.build_info import build_info
 from src.core.process_utils import (
     WORKER_INCARNATION_ENV,
     WORKER_NODE_ENV,
@@ -2418,6 +2419,7 @@ class WorkerAgent:
     def _register(self) -> None:
         # [A82 Stage 3] Advertise protocol 1 only for backends with a managed path.
         managed_backends = self._managed_backends()
+        build_info()  # pin the loaded commit at startup, before the checkout can move
         self._http.post("/nodes/register", {
             "node_id": self.cfg.node_id,
             "tailscale_ip": self.cfg.tailscale_ip,
@@ -2579,6 +2581,9 @@ class WorkerAgent:
             # Pooled live backend sessions (may exceed active_tasks: an idle
             # session keeps its claude process warm between turns).
             "live_sessions": self._count_live_backend_sessions(),
+            # Commit this worker process loaded; the task-server compares it
+            # with its own build to surface gateway/worker version skew.
+            "build_sha": build_info().git_sha,
         }
         mem = self._memory_watchdog_sample()
         if mem is not None:

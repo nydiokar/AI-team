@@ -37,6 +37,7 @@ from src.control.db import cache_heartbeat_interval_sec, get_db
 from src.control.mesh_health import get_mesh_health
 from src.control.node_registry import NodeInfo, NodeCapabilities, get_registry
 from src.control.telemetry_store import TelemetryStore
+from src.core.build_info import build_info, node_build_skew
 from src.core.telemetry import TelemetryEvent
 
 logger = logging.getLogger(__name__)
@@ -582,10 +583,13 @@ def health() -> Dict[str, Any]:
     db = get_db()
     stats = db.stats() if db else {}
     mesh_health = get_mesh_health()
+    build = build_info()
     return {
         "status": "ok",
         "db": stats,
         "mesh_health": mesh_health.stats(),
+        # Counts only — node ids stay behind auth (/nodes).
+        "build": {**build.model_dump(), **node_build_skew(get_registry().list_all(), build.git_sha)},
     }
 
 

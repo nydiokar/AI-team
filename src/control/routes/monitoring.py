@@ -19,6 +19,7 @@ from src.control.control_api import (
     logger,
 )
 from src.core import observability
+from src.core.build_info import build_info
 
 
 def build_router(orchestrator: Any, *, require_auth: Callable[..., Any]) -> APIRouter:
@@ -42,7 +43,12 @@ def build_router(orchestrator: Any, *, require_auth: Callable[..., Any]) -> APIR
         # node ids / pins / counts live behind auth: /api/turn-queue/coverage.
         missing = getattr(orchestrator, "_managed_carrier_missing", None)
         coverage_ok = (not missing) if isinstance(missing, list) else None
-        return {"status": "ok", "governor": governor, "turn_queue": {"coverage_ok": coverage_ok}}
+        return {
+            "status": "ok",
+            "governor": governor,
+            "turn_queue": {"coverage_ok": coverage_ok},
+            "build": build_info().model_dump(),
+        }
 
     @router.get("/api/turn-queue/coverage", dependencies=[Depends(require_auth)])
     def api_turn_queue_coverage() -> Dict[str, Any]:
