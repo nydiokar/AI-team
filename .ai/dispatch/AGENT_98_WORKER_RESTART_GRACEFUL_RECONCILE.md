@@ -6,8 +6,8 @@ owner: "incident-investigation"
 depends_on: []
 results_ref: DISPATCH_LOG.md#A98             # -> DISPATCH_LOG.md section with the verdict prose
 evidence:
-  tests/test_restart_lost_fork.py,tests/test_a98_restart_reconcile.py,.ai/dispatch/AGENT_98_WORKER_RESTART_GRACEFUL_RECONCILE.md   # this packet (scorecard + plan)
-updated_at: "2026-10-07T11:05:32.378950+00:00"
+  tests/test_a98_restart_reconcile.py   # this packet (scorecard + plan)
+updated_at: "2026-10-07T11:06:27.405377+00:00"
 ```
 
 # DISPATCH — A98 · Worker-restart graceful reconcile (the "one restart → big mess" incident)
