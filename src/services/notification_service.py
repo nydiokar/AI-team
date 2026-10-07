@@ -347,6 +347,85 @@ class NotificationService:
         except Exception as e:
             logger.debug("maybe_push_case_resume failed case=%s err=%s", case_id, e)
 
+    async def notify_restart(
+        self,
+        *,
+        node_id: str,
+        lost_sessions: int,
+        old_incarnation: str = "",
+        new_incarnation: str = "",
+        chat_id: Optional[int] = None,
+    ) -> None:
+        """[A98 O5] Tell the operator a worker/node restarted and how many sessions
+        it touched — the signal that was MISSING in the 2026-10-07 incident (the
+        operator never got a Telegram ping when Horse restarted). Best-effort on both
+        channels: a notification failure never blocks the reconcile that already ran.
+        """
+        from src.core.observability import emit_event
+
+        emit_event("node_restart_notification", session_id=None)
+
+        title = f"🔄 Worker restarted — {node_id}"
+        body = (
+            f"[{node_id}] restarted; {lost_sessions} session(s) marked lost and being "
+            f"re-established (fresh fork / respawn)."
+        )
+        self._maybe_push_restart(node_id=node_id, title=title, body=body)
+
+        tg = self._telegram
+        target = chat_id
+        if target is None:
+            try:
+                from config import config as _cfg
+                target = getattr(getattr(_cfg, "telegram", None), "notification_chat_id", None)
+            except Exception:
+                target = None
+        if target and tg:
+            text = (
+                f"🔄 *Worker restarted* — `{node_id}`\n"
+                f"{lost_sessions} session(s) marked lost; the harness is re-establishing "
+                f"them automatically (A98 fresh-fork / respawn).\n"
+                f"Incarnation `{(old_incarnation or '?')[:8]}` → `{(new_incarnation or '?')[:8]}`.\n\n"
+                f"Watch recovery in the Web UI → /sessions"
+            )
+            try:
+                await tg.notify_completion(
+                    f"node-restart-{node_id}", text, success=True, chat_id=target,
+                )
+            except Exception as e:
+                logger.warning("notify_restart telegram failed node=%s err=%s", node_id, e)
+
+    def _maybe_push_restart(self, *, node_id: str, title: str, body: str) -> None:
+        """Detached Web Push for a detected node restart. Mirrors
+        ``_maybe_push_case_resume`` (same bounded fan-out, same never-raise)."""
+        import asyncio
+
+        try:
+            from config import config as _cfg
+            from src.control.db import get_db
+            from src.services.push_service import PushService, build_task_payload
+
+            svc = PushService(_cfg, get_db())
+            ok, _reason = svc.available()
+            if not ok:
+                return
+            payload = build_task_payload(
+                title=title, body=body, task_id=None, session_id=None, url="/sessions",
+            )
+
+            async def _run() -> None:
+                try:
+                    await svc.fanout(payload)
+                except Exception as e:
+                    logger.debug("push fanout node_restart node=%s err=%s", node_id, e)
+
+            try:
+                asyncio.get_running_loop().create_task(_run())
+            except RuntimeError:
+                logger.debug("no running loop for node_restart push node=%s", node_id)
+        except Exception as e:
+            logger.debug("maybe_push_restart failed node=%s err=%s", node_id, e)
+
     async def notify_quota_digest(self, message: str, *, chat_id: Optional[int] = None) -> None:
         """Deliver a temporary quota coordinator digest through notification seams."""
         from src.core.observability import emit_event
