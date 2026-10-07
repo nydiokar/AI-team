@@ -434,6 +434,15 @@ class TurnRequestPageOut(BaseModel):
     # (notification / history / telemetry) ended ``failed`` + the latest one.
     effects_failed: int = 0
     effects_failed_turn_id: Optional[str] = None
+    # [A101] Read-only projection of why the head managed turn is held, and the
+    # Case a quota pause can be resumed on. Pure mirror of the scheduler gates —
+    # it carries NO new behaviour; it only lets the session window surface the
+    # hold reason + the (unchanged) resume decision co-located with the composer.
+    # ``pause_reason`` ∈ {operator_hold, operator_pause, quota, transient, retry,
+    # manager_rebound, carrier_offline, backoff, legacy_draining, lineage}.
+    blocked: bool = False
+    pause_reason: Optional[str] = None
+    resume_case_id: Optional[str] = None
 
 
 class TurnRequestDetailOut(TurnRequestSummaryOut):

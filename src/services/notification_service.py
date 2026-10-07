@@ -241,15 +241,22 @@ class NotificationService:
         objective: str = "",
         auto: bool = False,
         chat_id: Optional[int] = None,
+        session_id: Optional[str] = None,
     ) -> None:
         """[quota-resume] Tell the operator their quota came back and a Case is
         waiting on a decision — on BOTH channels, because this is the one moment
         the harness genuinely needs a human and it usually arrives hours later,
         when nobody is looking at the dashboard.
 
+        [A101] ``session_id`` deep-links the push/Telegram to the SESSION window
+        (``/sessions/{id}``) where the resume decision now lives, instead of the
+        Work/Case view it used to live in. Falls back to ``/work/{case}`` when the
+        pause carries no session (e.g. the Manager session is gone). Same channels,
+        same message — only the destination of the link moves.
+
         Channel split is deliberate:
           * **Web Push** — a real browser notification (works with the tab
-            closed), deep-linking to the Case where the decision lives.
+            closed), deep-linking to where the decision lives.
           * **Telegram** — notification ONLY. It carries no approve/decline
             affordance on purpose: approving spends real money and the decision
             surface stays the authenticated Web UI, which is where the estimate,
@@ -277,7 +284,9 @@ class NotificationService:
         summary = " ".join((objective or "").split())[:120]
         body = f"[{short_case}] {mode} · {cost}" + (f" · {summary}" if summary else "")
 
-        self._maybe_push_case_resume(case_id=case_id, title=title, body=body)
+        self._maybe_push_case_resume(
+            case_id=case_id, title=title, body=body, session_id=session_id,
+        )
 
         tg = self._telegram
         target = chat_id
@@ -293,11 +302,15 @@ class NotificationService:
                 if auto else
                 f"⏸ *Quota restored* — Case `{short_case}` is paused and waiting."
             )
+            # [A101] Link to the session window (where the decision now lives)
+            # when the pause carries one; else fall back to the Case view.
+            link = f"/sessions/{session_id}" if session_id else f"/work/{case_id}"
+            link_target = session_id if session_id else case_id
             tail = (
                 "\n\nCASE_QUOTA_RESUME_AUTO is ON — no approval was asked. Open the "
-                "Web UI to watch it → /work/"
+                f"Web UI to watch it → {link}"
                 if auto else
-                "\n\nApprove or decline in the Web UI → /work/"
+                f"\n\nApprove or decline in the Web UI → {link}"
             )
             text = (
                 head + "\n"
@@ -305,7 +318,7 @@ class NotificationService:
                    else f"Recommended: `{mode}` · estimated {cost}")
                 + (f"\nReset: {reset_at}" if reset_at else "")
                 + (f"\n{summary}" if summary else "")
-                + tail + case_id
+                + tail + (f" ({link_target})" if link.endswith("/") else "")
             )
             try:
                 await tg.notify_completion(
@@ -314,10 +327,16 @@ class NotificationService:
             except Exception as e:
                 logger.warning("notify_case_resume_proposal telegram failed case=%s err=%s", case_id, e)
 
-    def _maybe_push_case_resume(self, *, case_id: str, title: str, body: str) -> None:
+    def _maybe_push_case_resume(
+        self, *, case_id: str, title: str, body: str, session_id: Optional[str] = None,
+    ) -> None:
         """Detached Web Push for a resume proposal. Mirrors ``_maybe_push_outcome``
         (same bounded fan-out, same never-raise contract); only the deep link and
-        the payload identity differ — the Case, not a task."""
+        the payload identity differ — the Case, not a task.
+
+        [A101] Deep-link to the SESSION window (``/sessions/{id}``) when the pause
+        carries a session — that is where the resume decision now surfaces; else
+        fall back to the Case view (``/work/{case}``)."""
         import asyncio
 
         try:
@@ -330,8 +349,8 @@ class NotificationService:
             if not ok:
                 return
             payload = build_task_payload(
-                title=title, body=body, task_id=None, session_id=None,
-                url=f"/work/{case_id}",
+                title=title, body=body, task_id=None, session_id=session_id,
+                url=(f"/sessions/{session_id}" if session_id else f"/work/{case_id}"),
             )
 
             async def _run() -> None:

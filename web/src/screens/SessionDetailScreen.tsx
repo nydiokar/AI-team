@@ -47,6 +47,7 @@ import { GitPanelSheet } from "../components/sessions/GitPanelSheet";
 import { SessionKeepSheet } from "../components/sessions/SessionKeepSheet";
 import { useSessions, useApprovals, useSessionMessages, useArtifacts, useArtifact, useSessionTurns, useSessionTurnQueue, useSessionUsage, useSessionActivity, useJobs, useCacheHeartbeats } from "../hooks/useLiveData";
 import { TurnQueuePanel } from "../components/timeline/TurnQueuePanel";
+import { CaseResumePanel } from "../components/work/CaseResumePanel";
 import { queueOwnedIds, transcriptFinishedIds, waitingTurnIds } from "../lib/turnQueue";
 import { retiredBackendReason } from "../lib/backends";
 import { compactTokens } from "../components/timeline/SessionTurns";
@@ -1334,6 +1335,15 @@ export function SessionDetailScreen() {
 
         {id && !closed && turnQueue?.enrolled && (
           <TurnQueuePanel sessionId={id} page={turnQueue} ownedIds={queueIds} />
+        )}
+
+        {/* [A101] The quota resume decision, moved OUT of the Work tab and
+            co-located with the composer. Shown when this session has a message
+            held by a quota pause (read-model `resume_case_id`). It is the exact
+            same component the Work/Case view used — same options (Decline / In
+            place / Fresh Manager), same effects — only its location changed. */}
+        {id && !closed && turnQueue?.resume_case_id && (
+          <CaseResumePanel caseId={turnQueue.resume_case_id} />
         )}
 
         {/* Composer pinned outside the scroll container so it always sits at the true bottom */}

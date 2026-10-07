@@ -912,12 +912,20 @@ _LEGACY_EXEC_LIVE_SQL = (
 # within ~15 s of the legacy row finishing (not after the generic 300 s cap).
 _LEGACY_DRAIN_BACKOFF_CAP_SEC = 15.0
 
-_MANAGED_RETRY_GATE_SQL = """
-    NOT EXISTS (
+# [A101] The three hold predicates of the managed retry gate, factored out as
+# reusable ``EXISTS (...)`` fragments so a read-only projection
+# (``session_block_state``) can report WHICH one holds a queued turn using the
+# EXACT same SQL the scheduler evaluates — single source of truth, no drift.
+# ``_MANAGED_RETRY_GATE_SQL`` below is recomposed from them and is semantically
+# identical to the prior inline gate (behaviour proven by the turn-queue gate
+# tests). The fragments reference the caller's ``t`` (mesh_tasks) / ``s``
+# (sessions) aliases, exactly as before.
+_RETRY_PAUSE_PENDING_SQL = """EXISTS (
         SELECT 1 FROM mesh_tasks pm INDEXED BY idx_mesh_tasks_retry_pause
         WHERE pm.retry_pause_state = 'pending' AND pm.session_id = t.session_id
-    )
-    AND NOT EXISTS (
+    )"""
+
+_QUOTA_PAUSE_ACTIVE_SQL = """EXISTS (
         SELECT 1 FROM flow_events pe
         WHERE t.session_id = (
             SELECT entity_id FROM flow_links
@@ -941,8 +949,9 @@ _MANAGED_RETRY_GATE_SQL = """
                 AND json_valid(pe.payload_json)
                 AND t.parent_task_id = json_extract(pe.payload_json, '$.paused_task_id')
           ))
-    )
-    AND NOT EXISTS (
+    )"""
+
+_TRANSIENT_PAUSE_ACTIVE_SQL = """EXISTS (
         SELECT 1 FROM flow_events pe
         WHERE t.session_id = (
             SELECT entity_id FROM flow_links
@@ -966,7 +975,12 @@ _MANAGED_RETRY_GATE_SQL = """
                 AND json_valid(pe.payload_json)
                 AND t.parent_task_id = json_extract(pe.payload_json, '$.paused_task_id')
           ))
-    )
+    )"""
+
+_MANAGED_RETRY_GATE_SQL = f"""
+    NOT {_RETRY_PAUSE_PENDING_SQL}
+    AND NOT {_QUOTA_PAUSE_ACTIVE_SQL}
+    AND NOT {_TRANSIENT_PAUSE_ACTIVE_SQL}
 """
 
 # A queued human instruction remains visible on its original Manager session
@@ -4737,6 +4751,13 @@ class MeshDB:
             ).fetchone()
             if not int(effects[0] or 0):
                 effects = (0, None)
+            # [A101] Read-only projection of WHY the head managed turn is held
+            # (quota / transient / retry / rebind / carrier / backoff / legacy /
+            # lineage) so the session window can surface the hold + the quota
+            # resume decision co-located with the composer. Pure mirror of the
+            # scheduler gates; no scheduling effect.
+            block = self._session_block_state(conn, sid, bool(session["turn_queue_paused"]),
+                                              session["turn_queue_hold"])
             return {
                 "effects_failed": int(effects[0] or 0),
                 "effects_failed_turn_id": effects[1],
@@ -4748,6 +4769,9 @@ class MeshDB:
                 "enrolled": bool(session["turn_queue_enrolled"]),
                 "paused": bool(session["turn_queue_paused"]),
                 "hold": session["turn_queue_hold"],
+                "blocked": block["blocked"],
+                "pause_reason": block["pause_reason"],
+                "resume_case_id": block["resume_case_id"],
             }
         except TurnQueueError:
             raise
@@ -4790,6 +4814,86 @@ class MeshDB:
             "SELECT session_id FROM mesh_tasks WHERE id = ? AND queue_protocol = 1", (task_id,),
         ).fetchone()
         return str(row[0]) if row and row[0] else None
+
+    def _session_block_state(
+        self, conn: Any, session_id: str, paused: bool, hold: Optional[str],
+        *, now: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """[A101] Read-only projection: WHY the session's head managed turn is
+        held, mirroring the scheduler gates (``_MANAGED_RETRY_GATE_SQL`` and its
+        factored quota/transient/retry fragments, ``_MANAGED_CASE_BINDING_GATE_SQL``,
+        head-select ``not_before``/``blocked_until``/``lineage_state`` and
+        ``activate_prepared_turn``'s legacy-drain check).
+
+        Pure read — NO writes, NO scheduling effect. The hold is evaluated on the
+        earliest still-``queued`` managed row (exactly the row head-selection would
+        try to activate); if none is queued, nothing is held. Reason is reported in
+        operator priority (diagnosis §5b): operator hold/pause → quota → transient →
+        retry → manager rebind → carrier offline → backoff → legacy drain → lineage.
+        ``resume_case_id`` is populated ONLY for the quota hold — the single state
+        that needs a manual operator decision (``CaseResumePanel``); every other
+        reason is auto-clearing or operator-column and carries no resume affordance.
+
+        Defensive by contract: any projection error degrades to "not blocked" so a
+        read-model add can never break the queue page (§7 backing-resource failure).
+        """
+        empty: Dict[str, Any] = {"blocked": False, "pause_reason": None, "resume_case_id": None}
+        if hold:
+            return {"blocked": True, "pause_reason": "operator_hold", "resume_case_id": None}
+        if paused:
+            return {"blocked": True, "pause_reason": "operator_pause", "resume_case_id": None}
+        ts = now or _now()
+        try:
+            flags = conn.execute(
+                f"""
+                SELECT
+                  CASE WHEN {_QUOTA_PAUSE_ACTIVE_SQL} THEN 1 ELSE 0 END AS quota_held,
+                  CASE WHEN {_TRANSIENT_PAUSE_ACTIVE_SQL} THEN 1 ELSE 0 END AS transient_held,
+                  CASE WHEN {_RETRY_PAUSE_PENDING_SQL} THEN 1 ELSE 0 END AS retry_held,
+                  CASE WHEN {_MANAGED_CASE_BINDING_GATE_SQL} THEN 0 ELSE 1 END AS rebound,
+                  t.blocked_reason AS blocked_reason,
+                  t.blocked_until AS blocked_until,
+                  t.not_before AS not_before,
+                  t.lineage_state AS lineage_state,
+                  COALESCE(t.flow_run_id, s.current_case_id) AS case_id
+                FROM mesh_tasks t
+                JOIN sessions s ON s.session_id = t.session_id
+                WHERE t.session_id = ? AND t.queue_protocol = 1 AND t.status = 'queued'
+                ORDER BY t.queue_sequence ASC LIMIT 1
+                """,
+                (session_id,),
+            ).fetchone()
+            if flags is None:
+                return dict(empty)
+            if flags["quota_held"]:
+                return {"blocked": True, "pause_reason": "quota",
+                        "resume_case_id": flags["case_id"]}
+            if flags["transient_held"]:
+                return {"blocked": True, "pause_reason": "transient", "resume_case_id": None}
+            if flags["retry_held"]:
+                return {"blocked": True, "pause_reason": "retry", "resume_case_id": None}
+            if flags["rebound"]:
+                return {"blocked": True, "pause_reason": "manager_rebound", "resume_case_id": None}
+            reason = str(flags["blocked_reason"] or "")
+            if reason.startswith("carrier_offline"):
+                return {"blocked": True, "pause_reason": "carrier_offline", "resume_case_id": None}
+            if reason.startswith("legacy_work_draining"):
+                return {"blocked": True, "pause_reason": "legacy_draining", "resume_case_id": None}
+            # A still-live protocol-0 EXECUTION row drains the session even before
+            # an activation attempt stamps the ``legacy_work_draining`` reason.
+            if conn.execute(_LEGACY_EXEC_LIVE_SQL, (session_id,)).fetchone() is not None:
+                return {"blocked": True, "pause_reason": "legacy_draining", "resume_case_id": None}
+            if (flags["blocked_until"] and str(flags["blocked_until"]) > ts) or (
+                flags["not_before"] and str(flags["not_before"]) > ts
+            ):
+                return {"blocked": True, "pause_reason": "backoff", "resume_case_id": None}
+            if flags["lineage_state"] == "pending":
+                return {"blocked": True, "pause_reason": "lineage", "resume_case_id": None}
+            return dict(empty)
+        except Exception as exc:  # never break the queue page on a projection error
+            logger.debug("session_block_state projection failed session=%s err=%s",
+                         session_id, exc)
+            return dict(empty)
 
     def session_turn_queue_states(self, session_ids: List[str]) -> Dict[str, Dict[str, Any]]:
         """[A82 Stage 6] Batched queue overlay for a page of session views: for

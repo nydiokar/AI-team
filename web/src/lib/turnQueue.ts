@@ -241,6 +241,32 @@ export function blockedReasonLabel(reason: string | null | undefined): string | 
   return BLOCKED_REASON_LABEL[key] ?? humanize(key);
 }
 
+/**
+ * [A101] Human label for the session-level `pause_reason` projected by the
+ * turn-queue read-model (why the head managed turn is held). Quota carries its
+ * own first-class decision (CaseResumePanel by the composer); the rest are
+ * informational so "N waiting" is never unexplained. Returns null for unknown
+ * or absent reasons (caller falls back to the generic "paused" copy).
+ */
+export const PAUSE_REASON_LABEL: Record<string, string> = {
+  quota: "Paused — daily quota reached · resume below",
+  transient: "Paused — provider hiccup · retrying automatically",
+  retry: "Paused — a retry is pending · clears automatically",
+  manager_rebound: "Held — this Case moved to a new Manager session",
+  carrier_offline: "Waiting — the worker node is offline",
+  backoff: "Waiting — backing off, will retry shortly",
+  legacy_draining: "Waiting — a prior task is still finishing",
+  lineage: "Preparing — committing Case lineage",
+  operator_pause: "Queue paused",
+  operator_hold: "Stopped by you",
+};
+
+export function pauseReasonLabel(reason: string | null | undefined): string | null {
+  const raw = (reason ?? "").trim();
+  if (!raw) return null;
+  return PAUSE_REASON_LABEL[raw] ?? null;
+}
+
 /** Raw overlay → domain shape (null ⇒ unenrolled: legacy status semantics). */
 export function toSessionTurnQueue(
   raw: RawSessionTurnQueue | null | undefined,
