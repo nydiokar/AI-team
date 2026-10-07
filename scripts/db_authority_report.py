@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """[A88] Read-only reconciliation report: worker-local mesh.db vs controller mesh.db.
 
-Run before retiring a worker's local ``state/mesh.db`` (docs/DATABASE_AUTHORITY.md §5-6).
+Run before retiring a worker's local ``state/mesh.db`` (docs/backend/DATABASE_AUTHORITY.md §5-6).
 Never writes either file: both are opened ``mode=ro`` and compared in SQL (no row
 materialisation), so it is safe against a live controller and idempotent.
 

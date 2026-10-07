@@ -853,7 +853,7 @@ def _fire_nudge(node: NodeInfo) -> None:
 
 # ---------------------------------------------------------------------------
 # Controller-state endpoints (A88) — workers read controller-owned state here
-# instead of opening a mesh.db of their own (docs/DATABASE_AUTHORITY.md).
+# instead of opening a mesh.db of their own (docs/backend/DATABASE_AUTHORITY.md).
 # ---------------------------------------------------------------------------
 
 _CASE_ID_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")

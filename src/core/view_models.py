@@ -5,7 +5,7 @@ Telegram lists today and a Web UI dashboard later. Derived from ``Session``,
 never persisted. The DTO carries the raw ``backend`` string only — rendering
 (icons/labels) is each surface's concern, NOT this DTO's.
 
-See docs/COCKPIT_REFACTOR_SPEC.md §4 (Move C) and docs/CONTROL_CONTRACT.md §6.
+See docs/COCKPIT_REFACTOR_SPEC.md §4 (Move C) and docs/backend/CONTROL_CONTRACT.md §6.
 """
 from __future__ import annotations
 from dataclasses import dataclass, asdict

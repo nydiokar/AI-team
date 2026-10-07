@@ -240,9 +240,34 @@ Default proposed values:
 
 - `CACHE_HEARTBEAT_TTL_SEC=3600`
 - `CACHE_HEARTBEAT_INTERVAL_SEC=2700` (45 minutes)
-- `CACHE_HEARTBEAT_MAX_BEATS_DEFAULT=6`
-- `CACHE_HEARTBEAT_MAX_BEATS_HARD=15`
+- `CACHE_HEARTBEAT_MAX_BEATS_DEFAULT` — **derived**: `ceil(SDK_TURN_TIMEOUT_SEC / interval)`
+  (≈14 at the defaults), floored at 6. This blankets one full backend turn-timeout
+  window (~10h), the moment the Manager is guaranteed to be woken regardless; warming
+  never extends past it. An explicit env value still wins for a flat override.
+- `CACHE_HEARTBEAT_MAX_BEATS_HARD=15` — the continuous-idle diminishing-returns stop:
+  ~11h of unbroken silence (zero worker/Manager activity) ⇒ stop, the wait premise is
+  in doubt.
 - `CACHE_HEARTBEAT_MIN_CACHE_TOKENS=100000`
+
+### Supervision checkpoints (`CACHE_HEARTBEAT_CHECKPOINT_ENABLED`, registry, default ON)
+
+Two beats become deliberate supervision checkpoints instead of blind keep-warm pings:
+
+- **Awareness beat** (`CACHE_HEARTBEAT_AWARENESS_BEAT=6`, ≈4.5h of unbroken silence):
+  the Manager steps back and assesses the awaited work (progress / stalled / drifting /
+  already finished / lost) using its tools, acts if warranted, then replies
+  `CONTINUE_SUPERVISION` or `CONCLUDE_SUPERVISION`.
+- **Decision beat** (`max_beats − 1`, ≈9.75h): a purely operational decision — the prompt
+  mentions no cache, heartbeat, or timeout; the Manager reasons only about the work's
+  stage/quality and replies `CONTINUE_SUPERVISION` (keep overseeing) or
+  `CONCLUDE_SUPERVISION` (done / blocked / wrap up / abandon).
+
+**Renewal is deliberate, never automatic.** A `CONTINUE_SUPERVISION` at the decision beat
+is the *only* thing that resets the idle-beat budget and extends the controller expiry by
+another window; otherwise the budget exhausts at the hard max and the controller stops
+(the worker/turn timeout then wakes the Manager anyway). The CONTINUE/CONCLUDE → lifecycle
+mapping is invisible to the Manager by design. `CONCLUDE_SUPERVISION` (and the legacy
+`STOP_CACHE_HEARTBEAT`) stop the controller.
 
 The due time is based on the last successful real turn or heartbeat. For wait-groups
 and watched jobs, the coordinator can also use owner `started_at` to avoid sending

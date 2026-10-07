@@ -50,7 +50,7 @@ role-prompt boot (Phase 3.1 proper — noted below), the `SESSION_ID` env enrich
   in `~/.claude.json` (Claude Code only; merges, never clobbers `jobs`/other keys). **Default
   invocation is byte-identical** (no manager registration). Prints the "also set
   MANAGER_TOOLS_ENABLED=1" reminder.
-- **`docs/ENV_FEATURE_FLAGS.md`** — `MANAGER_TOOLS_ENABLED` row in §A (behaviour gates) + the
+- **`docs/backend/ENV_FEATURE_FLAGS.md`** — `MANAGER_TOOLS_ENABLED` row in §A (behaviour gates) + the
   "should-be-managed" table (it's an unmanaged `os.environ.get`, per the maintenance rule).
 - **Tests** — `tests/test_claude_driver_manager_tools.py` (16: gate predicates + the full
   double-gate truth table + jobs-independence) and `tests/test_setup_mcp_manager.py` (4:

@@ -28,14 +28,22 @@ as trace/history, don't build against it · 🔵 planning — spec/proposal, not
 
 ## Architecture & contracts
 
-Durable descriptions of how the system is built and the boundaries other code must respect.
+Durable descriptions of how the system is built and the boundaries other code must
+respect. Backend and frontend each have their own folder and front door.
+
+### `docs/backend/` — the gateway backend (processes, APIs, contracts, data)
 
 | Doc | Status | What it's for |
 |---|---|---|
-| [`ARCHITECTURE.md`](ARCHITECTURE.md) | 🟢 | Process topology + HTTP surface map, incl. §2b the flag-gated Manager/Case surface (`/api/manager`, `/api/work`). Keep current when routes/processes change. |
-| [`CONTROL_CONTRACT.md`](CONTROL_CONTRACT.md) | 🟢 | The M1 inbound/outbound contract — event envelope, entry points, backend registry, read model. Read before adding a second surface or a new backend. |
-| [`CONVERSATION_DATA_FLOW.md`](CONVERSATION_DATA_FLOW.md) | 🟢 | Where conversation/artifact data lives and how it flows; §0 documents the DB-canonical migration (2026-06-30). |
-| [`ENV_FEATURE_FLAGS.md`](ENV_FEATURE_FLAGS.md) | 🟢 | Complete inventory of default-OFF feature flags. Check here before assuming a built feature is live. |
+| [`backend/INDEX.md`](backend/INDEX.md) | 🟢 | Front door for backend docs — start here before the individual files below. |
+| [`backend/ARCHITECTURE.md`](backend/ARCHITECTURE.md) | 🟢 | Process/deployment topology (PM2 + Docker), the Control API (`:9003`) and mesh task-server (`:9002`) route maps, incl. the Manager/Case surface. Keep current when routes/processes change. |
+| [`backend/CONTROL_CONTRACT.md`](backend/CONTROL_CONTRACT.md) | 🟢 | The M1 inbound/outbound contract — event envelope, entry points, backend registry, read model. Read before adding a second surface or a new backend. |
+| [`backend/CONVERSATION_DATA_FLOW.md`](backend/CONVERSATION_DATA_FLOW.md) | 🟢 | Where conversation/artifact data lives and how it flows; §0 documents the DB-canonical migration (2026-06-30). |
+| [`backend/DATABASE_AUTHORITY.md`](backend/DATABASE_AUTHORITY.md) | 🟢 | Controller vs. worker DB authority (A88, merged PR #180): the controller owns `mesh.db`, workers read controller state over the task-server API. |
+| [`backend/ENV_FEATURE_FLAGS.md`](backend/ENV_FEATURE_FLAGS.md) | 🟢 | Complete inventory of default-OFF feature flags. Check here before assuming a built feature is live. |
+| [`backend/MESH_SECURITY.md`](backend/MESH_SECURITY.md) | 🟢 | Mesh trust domain + threat model: what the operator is trusted with, what a leaked token means, how to respond. |
+| [`backend/CODEX_APP_SERVER_ADAPTER_CONVERGENCE.md`](backend/CODEX_APP_SERVER_ADAPTER_CONVERGENCE.md) | 🟢 | Closed convergence record + code boundary of the single Codex backend (app-server RPC) and its runtime-recycle procedure. |
+| [`backend/QUOTA_WINDOW_COORDINATOR_PHASE1.md`](backend/QUOTA_WINDOW_COORDINATOR_PHASE1.md) | 🟢 | Architecture of the observe-only quota window coordinator (A61 baseline). |
 
 ### `docs/frontend/` — the Web UI (`web/`), frontend-only docs
 
@@ -60,6 +68,13 @@ others are kept as trace, not duplicated history.
 | [`Task_Harness_v0.4.md`](Task_Harness_v0.4.md) | 🟡 | Original v0.4 kernel spec — superseded in substance by v0.5, kept as origin trace. |
 | [`WORK_CONTROL_SUBSTRATE_MILESTONE.md`](WORK_CONTROL_SUBSTRATE_MILESTONE.md) | 🟢 | M2 milestone record — shipped & merged; describes `flow_links`/`flow_events`. |
 | [`M3_MANAGER_INVOCATION_SPEC.md`](M3_MANAGER_INVOCATION_SPEC.md) | 🟢 | M3 (Manager-as-invoked-role) spec + backend-readiness dossier. Check `.ai/CONTEXT.md` for build progress against this spec. |
+| [`AUTONOMOUS_CASE_CONTINUATION_DESIGN.md`](AUTONOMOUS_CASE_CONTINUATION_DESIGN.md) | 🟢 | M3.4 design detail — wait-group state machine, delta, acceptance test. Job 1 merged (A52); A54/A55 (reconstruction, crash-respawn) still open. Its wait-group half is challenged by `TBD/WORKER_COMPLETION_NOTIFY_REDESIGN.md`. |
+| [`PERSISTENT_MANAGER_LOOP_ANALYSIS.md`](PERSISTENT_MANAGER_LOOP_ANALYSIS.md) | 🟡 | Opening analysis for M3.4. §0–§4 still valid; §5–§7 superseded by the continuation design above (see its banner). |
+| [`SPEC_COMPLETION_PLAN.md`](SPEC_COMPLETION_PLAN.md) | 🟡 | Ordered v0.7 backlog as of 2026-07-30. Forward priorities now live in `.ai/CONTEXT.md` — use this only for the dependency reasoning. |
+| [`MANAGER_CONTEXT_CONTINUITY_SPEC.md`](MANAGER_CONTEXT_CONTINUITY_SPEC.md) | 🔵 | Proposed context-pressure rollover for long-running Managers (generalizes crash-respawn). Not built; flag-gated, default OFF. |
+| [`SKILLS_LIBRARY_O1.md`](SKILLS_LIBRARY_O1.md) | 🟡 | **Superseded 2026-10-06** by native project skills in `.claude/skills/`. A76's `skills/` text-expansion slice and `SKILLS_LIBRARY_ENABLED` are removed. |
+| [`SYSTEM_ONE_DECISION_LAYER_SPEC.md`](SYSTEM_ONE_DECISION_LAYER_SPEC.md) | 🔵 | System-One (TypeSafe Jev) calibrated decision layer — accepted 2026-10-05; build dispatched as A94 → A95 → A96. |
+| [`PEER_MESSAGING_INVESTIGATION.md`](PEER_MESSAGING_INVESTIGATION.md) | 🔵 | A68 design recommendation for a durable, authority-free agent-to-agent message primitive. No implementation. |
 | [`PRIOR_ART_MAX_REUSE.md`](PRIOR_ART_MAX_REUSE.md) | 🔵 | Advisory salvage map — ideas mined from the retired MAX orchestrator for harness M3/M4. Not a build surface itself. |
 
 ### `docs/harness/` — the loop's own operating docs (templates, generators, runbook)
@@ -79,6 +94,8 @@ others are kept as trace, not duplicated history.
 | [`harness/generators/draft_packet.md`](harness/generators/draft_packet.md) | 🟢 | DRAFT generator — intent → current free-prose dispatch packet. |
 | [`harness/generators/adversarial_review.md`](harness/generators/adversarial_review.md) | 🟢 | REVIEW generator — adversarial pass, F-tag convention still followed. |
 | [`harness/generators/closure_summary.md`](harness/generators/closure_summary.md) | 🟢 | CLOSE generator — closure summary + doc-update stub, still broadly accurate. |
+| [`harness/generators/spec_authoring.md`](harness/generators/spec_authoring.md) | 🟢 | SPEC generator (M4, A56) — feature intent → authored spec + rubric-scored review gate. |
+| [`harness/generators/decomposer.md`](harness/generators/decomposer.md) | 🟢 | DECOMPOSE generator (M4, A56) — approved objective → dependency-linked task-DAG inside one Case. |
 
 **Retired and removed (2026-08-01, A64 cleanup):** `harness/manager_invocation.md` (legacy
 paste-driver, fully superseded by `harness/roles/manager.md` + live `/api/manager` role-boot, zero
@@ -92,24 +109,42 @@ v0.6 automation; the file said the operator may delete it). Both existed only in
 | [`SESSION_STATE_TIMELINE_ARCHITECTURE_REVIEW.md`](SESSION_STATE_TIMELINE_ARCHITECTURE_REVIEW.md) | 🟢 | Adversarial review of Web UI session/job/task/artifact/telemetry state honesty (2026-07-01). |
 | [`SESSION_STATE_TIMELINE_EXECUTION_PLAN.md`](SESSION_STATE_TIMELINE_EXECUTION_PLAN.md) | 🟢 | Implementation-ready roadmap that followed the review above. Cross-check `.ai/CONTEXT.md` Shipped Ledger for what's actually landed. |
 | [`LLM_TURN_OBSERVABILITY_SPEC.md`](LLM_TURN_OBSERVABILITY_SPEC.md) | 🟢 | Turn-observability/usage-accounting spec (M1–M4). M1/M2/M3 shipped per `.ai/CONTEXT.md`; M4 (OpenCode) deferred. |
-| [`SESSION_CACHE_HEARTBEAT_SPEC.md`](SESSION_CACHE_HEARTBEAT_SPEC.md) | 🔵 | Proposed session-keyed Claude Code prompt-cache heartbeat for durable long waits; default-OFF, bounded paid automation. |
+| [`SESSION_CACHE_HEARTBEAT_SPEC.md`](SESSION_CACHE_HEARTBEAT_SPEC.md) | 🟢 | Session-keyed Claude Code prompt-cache heartbeat for durable long waits. Built (A80, PR #111); act-mode flags default OFF. Open follow-ups: `.ai/CONTEXT.md` "Deferred — A80". |
+| [`WORKER_CACHE_HEARTBEAT_EXTENSION.md`](WORKER_CACHE_HEARTBEAT_EXTENSION.md) | ⚪ | Rejected 2026-09-22 — extending the heartbeat to parked worker sessions. Kept for the reasoning only. |
+| [`SESSION_TURN_QUEUE_DESIGN.md`](SESSION_TURN_QUEUE_DESIGN.md) | 🔵 | Unified durable turn queue on `mesh_tasks` (A82). R0 merged + deployed 2026-10-02 with flags OFF; Stage 8 enrollment pending — see the A82 packet. |
+| [`TBD/SESSION_WAIT_STATE_GRANULARITY.md`](TBD/SESSION_WAIT_STATE_GRANULARITY.md) | 🟢 | Session state legibility — primary status + derived secondary reason. Shipped as A83 (`7c5c100`) despite the file's "not built" header and `TBD/` location. |
+| [`EVENT_DRIVEN_READ_REFRESH.md`](EVENT_DRIVEN_READ_REFRESH.md) | 🟢 | A81 (PR #142): Web UI read models refresh on SSE events instead of redundant 3–5 s polls. |
+| [`session_kept_pins_design.md`](session_kept_pins_design.md) | 🟢 | "Keep" mark on a chat session (survives close/restart, searchable note). Built — `POST /api/sessions/{id}/keep`. |
+| [`SESSION_WINDOW_WARMING_SPEC.md`](SESSION_WINDOW_WARMING_SPEC.md) | 🟢 | Quota window coordinator spec — implemented 2026-08-19; §19 records divergences. Architecture summary: `backend/QUOTA_WINDOW_COORDINATOR_PHASE1.md`. |
 | [`DEFERRED.md`](DEFERRED.md) | 🟢 | Web UI/Cockpit items deliberately not built, with why. |
 
 ## Runbooks — operational procedures
 
 | Doc | Status | What it's for |
 |---|---|---|
-| [`RUNBOOKS/OPERATIONS_PM2.md`](RUNBOOKS/OPERATIONS_PM2.md) | 🟢 | Running the gateway under PM2 (the supported way to keep it alive). |
-| [`RUNBOOKS/OPERATIONS_DOCKER.md`](RUNBOOKS/OPERATIONS_DOCKER.md) | 🔵 | Docker Compose controller and Codex-worker deployment; pending full local and two-machine validation. |
+| [`RUNBOOKS/OPERATIONS_PM2.md`](RUNBOOKS/OPERATIONS_PM2.md) | 🟢 | PM2 supervision: the canonical native worker ("Native Worker" section) and the PM2 controller mode. |
+| [`RUNBOOKS/OPERATIONS_DOCKER.md`](RUNBOOKS/OPERATIONS_DOCKER.md) | 🟢 | Docker Compose control plane (gateway + task-server). Its containerized-worker sections are non-canonical (see its scope note). |
 | [`RUNBOOKS/CONTROL_SURFACE_DEPLOY_RUNBOOK.md`](RUNBOOKS/CONTROL_SURFACE_DEPLOY_RUNBOOK.md) | 🟢 | Deploying the unified gateway (Telegram + Web on one process). |
 | [`RUNBOOKS/PHASE_4_RUNBOOK.md`](RUNBOOKS/PHASE_4_RUNBOOK.md) | 🔵 | VPS cutover runbook — migrate control plane off this PC. Not executed yet. |
 | [`RUNBOOK_db_self_sufficient.md`](RUNBOOK_db_self_sufficient.md) | 🟢 | Procedure to migrate conversation/artifact data into `mesh.db` and drop fat `results/*.json`. Migration itself is done; kept as the reversibility procedure. |
+| [`MESH_NODE_CREDENTIALS_ROLLOUT.md`](MESH_NODE_CREDENTIALS_ROLLOUT.md) | 🔵 | Step-by-step rollout + rollback for per-node mesh credentials. Runs only after A71 merges; A71 is not built yet. |
+| [`INCIDENTS/HORSE_WORKER_RESTARTS.md`](INCIDENTS/HORSE_WORKER_RESTARTS.md) | 🟢 | Append-only incident ledger for `ai-team-worker` self-restarts on node Horse (sessions marked `lost`). Add every new occurrence. |
+
+### Docker deployment design
+
+| Doc | Status | What it's for |
+|---|---|---|
+| [`DOCKER_WORKER_HOST_INTEGRATION.md`](DOCKER_WORKER_HOST_INTEGRATION.md) | 🟢 | Canonical Docker worker/host integration architecture (locked 2026-09-25); live acceptance operator-gated. |
+| [`WORKER_CONTAINER_ACCEPTANCE.md`](WORKER_CONTAINER_ACCEPTANCE.md) | 🔵 | A85 container acceptance baseline: static invariants proven, executable gate deferred to a docker-capable host. |
+| [`DEPLOYMENT_DOCKER_DESIGN.md`](DEPLOYMENT_DOCKER_DESIGN.md) | 🟡 | Original production Docker design. Still valid for the control plane; superseded for the worker, which stays native under PM2. |
 
 ## Reference / schema
 
 | Doc | Status | What it's for |
 |---|---|---|
 | [`schema/results.schema.json`](schema/results.schema.json) | 🟢 | JSON schema for task result artifacts. |
+| [`adr/0001-canonical-sdk-driver-for-agent-spawn.md`](adr/0001-canonical-sdk-driver-for-agent-spawn.md) | 🟢 | ADR-0001 (accepted 2026-07-22): agents always spawn on the persistent `ClaudeSDKClientDriver`, never the CLI driver. |
+| [`REPO_READABILITY_O4.md`](REPO_READABILITY_O4.md) | 🟢 | A77 measurement + rationale behind the ctags symbol index (`scripts/repo_index/symbol_lookup.py`) that agents use to orient cheaply. |
 | [`dictionary/words_&_relations.md`](dictionary/words_&_relations.md) | 🔵 | Working glossary — Case/Task/Session/Event/Artifact vocabulary and the Manager/Skill/Tool layering. Not yet cross-linked from other specs; treat as draft until reconciled with `harness/roles/manager.md` and the M3 spec. |
 | [`cost_monitoring_audit.md`](cost_monitoring_audit.md) | 🟢 | A65 Phase-0 truthfulness audit of the cost telemetry the Cost read-model/dashboard is built on: real-usage provenance, codex `includes_cache` double-count, 51% unpriced share, standalone-session dominance, attribution gaps, `total`-definition bug. Update as the A65 read-model lands. |
 
@@ -122,8 +157,9 @@ tables for the authoritative prioritization; these are the supporting writeups.
 |---|---|---|
 | [`TBD/BACKEND_HOOKS_STRATEGY.md`](TBD/BACKEND_HOOKS_STRATEGY.md) | 🔵 | Whether backend lifecycle hooks (Claude Code/Codex/OpenCode) can replace/supplement gateway state management. |
 | [`TBD/CLAUDE_HOOK_IDEAS.md`](TBD/CLAUDE_HOOK_IDEAS.md) | 🔵 | Claude Code hooks as a leverage point for deterministic lifecycle behavior. |
-| [`TBD/SESSION_WINDOW_WARMING_SPEC.md`](TBD/SESSION_WINDOW_WARMING_SPEC.md) | 🔵 | Quota window coordinator proposal — no implementation yet. Corresponds to the unmerged `phase1-quota-window-coordinator` branch (see `.ai/CONTEXT.md`). |
-| [`TBD/BACKEND_RUNTIME_RELEASES.md`](TBD/BACKEND_RUNTIME_RELEASES.md) | 🔵 | Operator-approved, per-node Codex/Claude runtime-release design: immutable candidates, worker-wide drain, canary, recovery proof, and rollback. |
+| [`TBD/SESSION_WINDOW_WARMING_SPEC.md`](TBD/SESSION_WINDOW_WARMING_SPEC.md) | 🟡 | Older "proposal only" copy of the quota window coordinator spec. The implemented, maintained version is [`SESSION_WINDOW_WARMING_SPEC.md`](SESSION_WINDOW_WARMING_SPEC.md). |
+| [`TBD/AI_TEAM_RUNTIME_UPDATE_AUTOMATION_SPEC.md`](TBD/AI_TEAM_RUNTIME_UPDATE_AUTOMATION_SPEC.md) | 🔵 | Operator-gated Codex/Claude runtime-update automation (replaced `BACKEND_RUNTIME_RELEASES.md` on 2026-09-25). A86 is blocked: workers still run as host processes. |
+| [`TBD/WORKER_COMPLETION_NOTIFY_REDESIGN.md`](TBD/WORKER_COMPLETION_NOTIFY_REDESIGN.md) | 🔵 | Proposal: redesign how a Manager learns a worker finished, retiring the wait-group half of the M3.4 design. A84 slice 1 merged; Case-outbox slice open. |
 
 ## Archive — retired, historical record only
 
@@ -162,6 +198,9 @@ the narrative history that ties them together.
 - **Adding a doc?** Check [`.ai/DOC_MAP.md`](../.ai/DOC_MAP.md) first — a new file in
   `docs/` is justified only when no existing surface owns the information. Then add
   one row here, in the category it fits; don't create a new category for one file.
+  A doc that describes the backend **as built** (processes, APIs, contracts, data
+  ownership) goes in `docs/backend/` and also gets a row in
+  [`backend/INDEX.md`](backend/INDEX.md). Web UI docs go in `docs/frontend/`.
 - **Superseding a doc?** Mark it 🟡 here (don't delete — see harness convention of
   keeping prior versions as trace) and update the entry that replaces it to point
   back for history if relevant.
