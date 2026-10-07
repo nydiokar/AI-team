@@ -167,6 +167,149 @@ Not done: the gateway `turn.started` / `turn.result_recorded` events. The reconc
 - **N2:** `BackingStoreError` and `sqlite3.OperationalError` hit during the fence, a read, or an effect are retried on the next pass and never count toward the 5 attempts (`test_N2`: 7 fence errors + 2 read errors, then 1 send, `done`).
 - **N3:** a `notifying` row with a NULL fence is closed on its state alone (no live holder can own it) instead of staying stuck (`test_N3`). Tests: a84 effects + telemetry + docker suites: 100 passed, 0 failures.
 
+### A84 carry (o) — durable Case completion outbox — 2026-10-08, branch `feat/a84-outbox` from post-Stage-8b `main`
+
+**Scope delivered.** The remaining carry (o): one durable, Case-scoped completion
+signal per terminal managed Case worker child, drained through the existing
+coalesced continuation transport. Flag **`CASE_COMPLETION_OUTBOX_ENABLED`** (new,
+registry-writable, **default OFF**). No flag activated, no deploy, no worker restart.
+
+**Schema (migration 44, `_CURRENT_VERSION` → 44).**
+- `completion_outbox(child_task_id PK, case_id, outcome, created_at, delivered_at, delivery_reason)`
+  + partial index `idx_completion_outbox_pending ON completion_outbox(case_id) WHERE delivered_at IS NULL`.
+- `flow_runs.continuation_mode TEXT` — the **immutable per-Case cutover marker** (R3):
+  stamped ONCE at `open_case` from the flag, never updated (a dedicated create-only
+  param on `create_flow_run`, deliberately NOT in `_FLOW_EXTRA_FIELDS`, so
+  `update_flow_run` cannot mutate it — proven by `test_continuation_mode_is_immutable_via_update_flow_run`).
+
+**Atomicity invariant (ACCEPTANCE 1) — PROVEN.** The outbox row is written in the
+SAME `self._write()` txn that flips the task terminal, inside `complete_turn` AND
+`resolve_recovery`, via `_record_case_child_outbox`. Gate: (1) `flow_run_id` set,
+(2) Case mode == 'outbox', (3) a positive `flow_links` task-membership row
+(entity_type='task') — so the Manager's own turns and control/continuation tokens
+never produce a row. `INSERT OR IGNORE` on the PK makes a duplicate terminal a
+no-op. `tests/test_completion_outbox.py` (14, real file-backed SQLite, no mocks):
+committed invariant for success/failed/cancelled; **rollback** via a real
+`RAISE(ABORT)` trigger on the outbox INSERT (neither the status flip nor the row
+commit; the same turn then commits exactly one row once the fault clears);
+duplicate-terminal-same-token idempotent; foreign-token refused with no second row;
+legacy-mode Case / control task / non-child turn each write NO row; resolve_recovery
+atomic. **One row, or neither — proven both legs.**
+
+**Drain + cutover (ACCEPTANCE 3) — PROVEN.** `_continue_case_once` routes by the
+IMMUTABLE marker (`db.case_continuation_mode`, read once/tick — never the live
+flag): 'outbox' → `_compute_outbox_tick` (a synthetic tick shaped exactly like
+`compute_continuation_tick`, so every downstream guard — round cap, late-manager
+binding, crash-respawn, the deterministic `cont:{case}:{gen}` id + atomic
+single-flight claim, enrolled-vs-legacy wake — runs UNCHANGED); any other Case →
+the legacy wait-group tick, byte-identical. Coalescing: all undelivered children in
+ONE wake; generation = continuation-watermark + 1 (so a second tick before finalize
+computes the same id and loses the claim — no double wake; a child arriving
+mid-round is presented next round). Delivered-mark lands at the crash-safe
+consumption ACK, in the SAME txn, in BOTH paths (`record_continuation_consumed` for
+the legacy wake, `_finalize_producer_token` for the managed/enrolled wake) via
+`_mark_outbox_delivered_conn` — a crash before the wake returns redelivers, never
+strands. Out-of-band review suppression: a reviewed child is marked
+`delivered(reason='reviewed_in_turn')` with no wake. `tests/test_completion_outbox_drain.py`
+(5, real DB, outbox rows produced end-to-end by the real `complete_turn`): coalesced
+single wake drained once; no double-wake before ACK; review suppression; legacy Case
+keeps its wait-group path and owns no outbox rows; **cutover — a legacy wait-group
+Case and a new outbox Case each drain EXACTLY once, no cross-path duplicate wake or
+stranding**.
+
+**Cutover ownership predicate (TASK 5).** A Case is **outbox-owned** iff
+`flow_runs.continuation_mode == 'outbox'` (stamped at birth under the flag);
+**legacy-owned** iff the column is NULL (every pre-migration Case, and every Case
+born with the flag OFF). The predicate is a PERSISTED per-Case fact, never inferred
+from the live flag. Boot reconciliation is inherent: the marker + the outbox rows
+are durable, so after a gateway restart `pending_case_outbox` re-reads the pending
+rows and the drain resumes with no in-memory wait-group reconstruction — which is
+the whole point of carry (o). No in-flight Case can sit between the two paths
+because mode is immutable and set at birth.
+
+**Terminal-writer inventory (ACCEPTANCE 4).** The outbox invariant binds at the
+DB terminal write, not the `task.finished` projection. Managed Case worker children
+reach terminal ONLY through `MeshDB.complete_turn` (the turn ran) and
+`MeshDB.resolve_recovery` (operator/quiescence resolution of a started turn) — both
+now carry the atomic outbox write. `withdraw_turn`, the `close_session_turns`
+withdrawal, `request_turn_cancel` before start, and `release_turn` of a never-invoked
+attempt do NOT write an outbox row — the turn never ran, so there is no completion to
+deliver (legacy `cancelled_before_start` parity). The gateway effects consumer's
+`task.finished` (slice 1) is a downstream projection, NOT the terminal seam, so it
+cannot bypass the invariant. Legacy/control rows: `flow_run_id` NULL or Case mode
+NULL ⇒ no row. No managed-Case-child terminal path bypasses the seam.
+
+**R1 — barrier semantics (caller sweep).** Repo-wide sweep of `arm_wait_group`:
+production callers are the `/api/cases/{id}/wait-group` route (`api_arm_wait_group`,
+validates condition ∈ {ANY, ALL, NAMED}) and the Manager MCP tool
+(`_arm_wait_group`), plus the orchestrator seam; the Manager role CAN request
+true ALL/NAMED barriers and the tests exercise them heavily. The outbox models
+wake-on-each-undelivered-completion-when-idle, NOT a synchronized ALL/NAMED barrier.
+**Decision: DO NOT delete the wait-group primitive.** The outbox is ADDITIVE and
+per-Case: an outbox-mode Case uses the outbox; any Case needing an ALL/NAMED barrier
+stays legacy (wait-group). The two coexist by the immutable marker. Deleting
+`arm_wait_group` would remove a live Manager-facing capability → per this job's
+RESERVED DECISIONS that changes Manager-facing semantics, so **TASK 7 (removal of
+the wait primitive / Manager-tool change) is DEFERRED to A87** with this evidence —
+not done here, and NO Manager tool/prompt/read-model was changed.
+
+**R2 — reaper / bounded liveness backstop: bound JUSTIFIED, live scan LEFT OPEN.**
+The bound IS derivable from existing leases (no invented value): claim lease
+`mesh.claim_lease_sec`=300 s; node offline `node_heartbeat_timeout_sec`=90 s;
+`live_state` freshness 90 s; active-task hard cap `claim_max_runtime_sec`=1800 s;
+existing reaper cadence 30 s (`_stale_claim_reaper_loop`). A lost managed child is
+reapable by the exact `list_stale_claims` predicate (lease-expired AND
+missing/offline/incarnation-mismatch/not-in-fresh-live_state, or runtime-cap
+exceeded). Design: a bounded, index-served (LIMIT 25) scan folded into the existing
+per-tick `_reconcile_managed_recovery` (NO new timer, NO unbounded event-loop scan)
+synthesizes a terminal outcome through the SAME atomic seam (outbox row produced);
+the fence against a late real result is ALREADY PROVEN — the `child_task_id` PK plus
+the terminal-status guard in `complete_turn` make a post-synthesis real result an
+idempotent no-op / refused token (tests T05/T06). **Decision: per R2 and this job's
+"correctness over speed / prove everything" mandate, the durable outbox ships
+WITHOUT the live reaper scan wired in — the protocol-1 stale-scan + terminal
+synthesizer needs the fake-carrier E2E (lost→late-result) that the test-cost guard
+forbids running cheaply here, and I will not wire an unproven synthesizer into live
+completion plumbing.** A84 stays OPEN for the reaper slice; the bound + design above
+are the evidence-backed block.
+
+**§7 service-boundary checklist (new DB API / drain).**
+- *Concurrency:* the atomic write is serialized by the single `_write()` txn + PK;
+  the drain is the single Wake-Dispatcher loop, single-flighted by the existing
+  deterministic cont-id + atomic `claim_task` — two ticks cannot double-wake.
+- *Memory at N=100 concurrent Cases:* the drain iterates open Cases sequentially;
+  per Case one index-served `pending_case_outbox` read capped at LIMIT 256 child-id
+  strings, released per Case. No cross-Case accumulation. Bounded.
+- *Request size:* no new external boundary — the outbox write rides the existing
+  managed-completion route (`_guard_managed_body` cap unchanged); the drain takes no
+  external input. `pending_case_outbox` LIMIT 256 caps coalesce fan-in.
+- *Timeout:* every write goes through `_write`/`_managed_write` deadlines (5 s);
+  a failing outbox write rolls the whole terminal txn back (invariant preserved).
+- *Malformed input:* the child predicate is derived in-txn; a missing flow_run /
+  link / Case mode simply writes no row. `reviewed_task_ids` / `case_continuation_mode`
+  swallow a read glitch to a safe default (no suppression / legacy path).
+- *Backing failure:* a DB failure on the outbox INSERT aborts BOTH writes (proven);
+  a failure at the consumption ACK leaves the cont row claimed ⇒ reaped/redelivered,
+  outbox row stays pending ⇒ redelivered — at-least-once wake, idempotent.
+
+**Files changed:** `src/control/db.py` (migration 44, flag + registry entry,
+`case_continuation_mode`/`pending_case_outbox`/`mark_case_outbox_delivered`/
+`reviewed_task_ids`/`_mark_outbox_delivered_conn`/`_record_case_child_outbox`,
+`create_flow_run`+`open_case` marker, outbox write in `complete_turn`+`resolve_recovery`,
+delivered-mark in `record_continuation_consumed`+`_finalize_producer_token`),
+`src/orchestrator.py` (`_continue_case_once` mode branch + `_compute_outbox_tick`),
+`tests/test_completion_outbox.py` (new, 14), `tests/test_completion_outbox_drain.py`
+(new, 5), `tests/test_turn_queue_stage8a.py` (migration-ceiling rewind fix).
+
+**Tests/results (targeted, no e2e):** new 19 green; regression green across
+test_case_continuation, test_turn_queue_a84_effects, test_flow_runs, test_case_respawn,
+test_control_api_wait_group, test_turn_queue_4b/4c/4d/4e_review(+r1)/producers/producer1,
+test_case_brief, test_case_quota_resume, test_case_transient_resume,
+test_flow_schema_extension, test_control_api, test_turn_queue_db/stage8a,
+test_flow_links_events, test_wake_dispatcher_eventdriven, test_session_cache_heartbeat,
+test_heartbeat_checkpoint, test_codex_managed_carrier_integration. Full CI `pytest -q`
+runs on the PR (e2e deselected by default).
+
 ## Closure (fill on completion)
 
 Record changed files, exact tests/results, the legacy cutover disposition, any deferred reaper bound, and confirmation that no flag was activated or worker restarted.
