@@ -51,23 +51,49 @@ pulled back in for routine steps.
   rollback is image-level and you must NEVER roll back to pre-A82 while protocol-1 rows exist.
 - psutil is declared/pinned but may not be installed in a given worker venv — VERIFY on each box.
 
+## LIVE FINDINGS (2026-10-07, verified from controller/containers)
+- `safe_worker_deploy.py` is NOT buggy — `_run(env=env)` only passes env to the subprocess; it does
+  not mutate os.environ, so `_promote --update-env` reads a clean env. The `canary=true` leak on
+  Horse was the WORKER's own shell improvisation (exported WORKER_CANARY then ran a --update-env
+  restart). Lesson for kanebra: do NOT hand-run `--update-env` from a shell that touched
+  WORKER_CANARY. Use the clean relaunch `pm2 delete ai-team-worker; pm2 start ecosystem.config.js
+  --only ai-team-worker --update-env` (proven to clear it on Horse).
+- WORKER_CANARY ⇒ worker runs polling_disabled (src/worker/agent.py:3387) = online but inert.
+- This Manager session (f078ce07f3d1) carrier = `machine_id=kanebra-worker` (OLD code). Migration 43
+  enrolls it ⇒ after the gateway cutover its turns route to the managed queue which kanebra-worker
+  (old, non-managed) won't claim ⇒ THIS SESSION LIKELY FREEZES at cutover. Bash tool calls run
+  locally in the worker, so within a single turn after cutover bash still works; the NEXT-turn
+  re-entry may not arrive.
+- Gateway container currently has MESH_LOCAL_CARRIER_NODE_ID UNSET (only MESH_ENABLED=true). Must be
+  set to an ONLINE MANAGED carrier at recreate. Only Horse qualifies now.
+- Image sqlite = 3.40.1 (>=3.35, RETURNING OK). No blocker.
+
+## Execution model chosen
+Drive cutover + validation from BASH within turns (local execution; does not need my own turn
+routing), doing the destructive kanebra-worker restart DEAD LAST. If turns freeze after cutover,
+continuation/operator finishes from the first unchecked step. Dropped the kanebra bridge (S4) — it
+would not save this session (driver lives on kanebra-worker) and adds a canary on the session-critical
+host. Horse suffices as the managed carrier for cutover.
+
 ## Step status (update as you go)
 - [x] S1 Reconcile PR #185 onto main (routes re-homed, flag default-on, CI green) — accepted.
-- [x] S2 Merge PR #185 → main. main @ `60d5747`. Live image still `prod-621acd6` (18 behind).
-- [ ] S3 Deploy Horse (new managed carrier #1). Verify: Horse re-registers new incarnation + git
-      HEAD = main + `pip show psutil` present + advertises managed turns.
-- [ ] S4 Bring up local bridge `kanebra-worker-canary` (new code) via
-      `safe_worker_deploy.py --no-promote --keep-canary` AFTER `git pull`. Verify canary online.
-- [ ] S5 Deploy gateway + task-server (deploying-the-gateway skill): backup → rebuild image from
-      main → migration 43 → health. Set `MESH_LOCAL_CARRIER_NODE_ID` = `kanebra-worker-canary`
-      (the bridge) so managed turns route to new code. Verify schema_version=43, coverage_ok true.
-- [ ] S6 Retire old local worker: promote it onto new code (`safe_worker_deploy.py` promote, or
-      pm2 restart ai-team-worker --update-env after git pull), then delete the canary. (This is the
-      step that kills the original Manager session — expected. The continuing Manager owns it.)
-- [ ] S7 LIVE VALIDATION (O5): dispatch a worker turn to a busy session; while running, enqueue a
-      second message → assert 202 + distinct turn id + no BUSY clobber; when turn 1 finishes, the
-      scheduler activates turn 2 and delivers it to the SAME session (resume, not create). This is
-      the Stage 8a proof. See tests/test_turn_queue_stage8a.py for the expected end-to-end shape.
+- [x] S2 Merge PR #185 → main. main @ `60d5747` (burndown commit on top).
+- [x] S3 Deploy Horse (managed carrier #1). VERIFIED: Horse online, canary=false, slots=4,
+      managed_backends=[claude,codex,opencode-server], inc 7b3599, new code. DONE.
+- [~] S4 local bridge — DROPPED (see Execution model).
+- [ ] S5 Deploy gateway + task-server (deploying-the-gateway skill): backup DB → rebuild ai-team:local
+      from main → recreate gateway+task-server → migration 43 → verify schema_version=43 + health.
+      Ensure MESH_LOCAL_CARRIER_NODE_ID=Horse effective in the gateway container (write .env add-only
+      if missing, then recreate). Verify /api/turn-queue/coverage coverage_ok.
+- [ ] S6 LIVE VALIDATION (O5) via API/curl against a Horse-carried session: start a turn; while BUSY
+      enqueue a 2nd message → assert 202 + distinct turn id + no BUSY clobber; when turn 1 finishes,
+      scheduler activates turn 2 delivered to the SAME session (resume, not create). Record evidence
+      here. Done via API so it does not depend on this Manager's own turn routing.
+- [ ] S7 Upgrade kanebra-worker to new code DEAD LAST: clean relaunch `pm2 delete ai-team-worker;
+      pm2 start ecosystem.config.js --only ai-team-worker --update-env` (clears WORKER_CANARY; proven
+      on Horse). THIS KILLS THIS MANAGER SESSION — expected. Run detached if issued from a
+      kanebra-carried agent. Verify kanebra-worker returns canary=false + managed_backends populated.
+      Optionally repoint MESH_LOCAL_CARRIER_NODE_ID=kanebra-worker + recreate gateway.
 - [ ] S8 Close Case with continuation plan (Stage 8b: delete legacy execution code + its tests).
 
 ## If you are the continuing Manager
