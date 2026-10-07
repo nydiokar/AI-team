@@ -1,12 +1,12 @@
 ```yaml
 job_id: AGENT_101_SESSION_BLOCKING_STATE_SURFACING
 created_at: "2026-10-07T18:59:46.815411+00:00"        # CANONICAL — set once at dispatch, never derive again
-status: active              # ready | active | blocked | done | dead
+status: done              # ready | active | blocked | done | dead
 owner: ""
 depends_on: []
 results_ref: null             # -> DISPATCH_LOG.md section with the verdict prose
-evidence: [".ai/dispatch/A101_SESSION_BLOCKING_STATE_DIAGNOSIS.md"]                  # artifact paths that PROVE it ran (checked to exist)
-updated_at: "2026-10-07T19:34:00.249435+00:00"
+evidence: [".ai/dispatch/A101_O1_FINDINGS_RESUME_DECISION.md","tests/test_a101_block_state.py"]                  # artifact paths that PROVE it ran (checked to exist)
+updated_at: "2026-10-07T20:39:57.401226+00:00"
 ```
 
 # DISPATCH — AGENT_101_SESSION_BLOCKING_STATE_SURFACING
