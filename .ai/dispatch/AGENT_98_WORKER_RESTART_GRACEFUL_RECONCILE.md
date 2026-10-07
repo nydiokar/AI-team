@@ -210,6 +210,20 @@ O7 code shipped (worker-side, activates on the next operator-gated worker restar
   trail and have the Horse/kanebra workers on A98 code. The gateway-side fixes (O1/O2/O5) are fully live
   now regardless of worker code.
 
+## Frozen expected-behavior + comparator (2026-10-07)
+
+The expected causal chain is frozen as a reviewable contract so any future worker-restart incident can
+be judged step-by-step and its failure point pinpointed:
+- **Spec (narrative):** `docs/RUNBOOKS/WORKER_RESTART_EXPECTED_BEHAVIOR.md` — the 8-step chain
+  (trigger→action unit→effect→who's paged→final state) + a failure-point decision tree
+  (flag off / half-built / missing carrier / missing action unit / operator-inaction).
+- **Comparator (executable, read-only):** `scripts/conformance/worker_restart_conformance.py` embeds
+  the same steps as data (`FROZEN_STEPS`) and evaluates a real incident: `--print-spec`, or
+  `--node <N> [--since ISO] [--until ISO]` → per-step PASS/FAIL/UNKNOWN, the FIRST divergence, and its
+  pinpoint. Validated: replaying the 2026-10-07 Horse incident reproduces the exact failure chain
+  (first divergence step 3 = no O5 page on the pre-A98 gateway; then step 4 resume→session_lost, step 5
+  no respawn, step 6 worker ×5, step 7 incident end state).
+
 ## SCOPE OUT
 - The A82 managed-turn (message-queue) cutover — these sessions are NOT enrolled; this fix targets the
   **current** legacy continuous-driver path so it stops being a mess today. Re-verify under A82 later.
