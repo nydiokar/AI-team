@@ -1,12 +1,12 @@
 ```yaml
 job_id: AGENT_99_TURN_QUEUE_FRONTEND_OVERHAUL
 created_at: "2026-10-07T15:59:39.560284+00:00"        # CANONICAL — set once at dispatch, never derive again
-status: blocked              # ready | active | blocked | done | dead
+status: active              # ready | active | blocked | done | dead
 owner: 
 depends_on: []
 results_ref: null             # -> DISPATCH_LOG.md section with the verdict prose
 evidence: [".ai/dispatch/A99_TURN_QUEUE_UI_PROPOSAL.md"]                  # artifact paths that PROVE it ran (checked to exist)
-updated_at: "2026-10-07T16:20:00.628356+00:00"
+updated_at: "2026-10-07T16:37:18.332251+00:00"
 ```
 
 # DISPATCH — AGENT_99_TURN_QUEUE_FRONTEND_OVERHAUL
@@ -101,6 +101,56 @@ Phase-2 implementation in this dispatch; no unrelated web refactors beyond the q
 ## TRAIL
 Commit `.ai/dispatch/A99_TURN_QUEUE_UI_PROPOSAL.md` to `main` (docs-only). Report: the top 3
 functional defects found, the proposed IA in one paragraph, and the Phase-2 plan headline.
+
+## Phase 2 — OPERATOR DESIGN DIRECTIVES (authoritative; approved to build 2026-10-07)
+These are the operator's own words, distilled. They **override** the Phase-1 proposal wherever they
+conflict (notably: the proposal's "always-present rail" is REPLACED by the collapse-when-empty +
+thin-indicator model below). Build to THESE.
+
+**D1 — Queue shows ONLY waiting turns; passed/active turns live in the CHAT.** Today a message that
+already went through (active, "working") still shows in the queue AND does **not** appear in the
+chat/transcript — the user never sees the actual message. **Root-cause this** (trace the
+`queueOwnedIds` dedup boundary in `turnQueue.ts` + whether the A84 managed-completion effects
+populate the transcript read model) and FIX: an active/started/finished turn renders in the
+transcript; the queue component shows only turns that are genuinely *still waiting*.
+
+**D2 — Hide the queue entirely when zero waiting.** If there are no waiting turns, render **nothing**
+(no empty panel).
+
+**D3 — Collapsed = a super-thin, barely-visible indicator.** The default must NOT be today's
+~quarter-screen panel. It is a slim line showing *how many are waiting* + *who sent them*, ideally
+tucked near/into the composer. Minimal footprint. Click to expand.
+
+**D4 — Expand = a compact box (NOT full-screen; if full-screen, done properly).** Lists the waiting
+turns. Each row is super-thin: **sender + a 1–2 word preview**; clicking a row opens the **full
+message in a plain, readable view**. Reference well-regarded compact "received-messages" patterns
+(e.g. Claude Code's) for density and polish.
+
+**D5 — Sender identity is REQUIRED on every item.** Show WHO sent each turn (operator / manager /
+agent / which session) and what it is — never a bare "system"/"continuation". The user must see
+where each message comes from. (Backend fields: `turn_source`, `source`, `sender_session_id`,
+`turn_kind` — surface them meaningfully.)
+
+**D6 — Count semantics.** "1 message" means **1 waiting** message shown — do not also count/show the
+active one.
+
+**D7 — Edit is BROKEN — fix it.** Clicking Edit currently does not open an editable input (no
+keyboard/focus) and the editor is too small. Edit must focus an input and **expand** to a comfortable
+size.
+
+**D8 — Keep the Withdraw confirmation** (operator likes it).
+
+**D9 — Relocate Pause Queue.** Its current placement is awkward. Once the component shrinks, give
+Pause a sensible home so it is not in the way. It is the "stop a message that shouldn't go through"
+control — keep that capability obvious (alongside per-item withdraw).
+
+**D10 — Real design quality.** Use the `frontend`/design skill and apply critical UX + aesthetic
+judgment (convenience AND beauty; must not block content). If a specific *trusted* external design
+skill would materially help, SURFACE it to the Manager for approval — do NOT install unvetted skills.
+
+**D11 — Must be viewable.** The deliverable has to be something the operator can open in the live UI
+and judge — so Phase 2 ends in a merged + deployed build (Manager owns merge/deploy), then operator
+approve/iterate.
 
 ## Milestone checklist
 - [x] `frontend` skill invoked and applied
