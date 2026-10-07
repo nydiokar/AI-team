@@ -2753,6 +2753,46 @@ class MeshDB:
             return "active_task_over_max_runtime"
         return None
 
+    @classmethod
+    def _claim_staleness_reason(
+        cls,
+        r: sqlite3.Row,
+        now: datetime,
+        lease_sec: int,
+        live_state_max_age_sec: int,
+        active_task_max_runtime_sec: int,
+    ) -> Optional[str]:
+        """The single node-truth predicate shared by the protocol-0 claim reaper
+        (:func:`list_stale_claims`) and the protocol-1 managed-child reaper
+        (:func:`list_stale_managed_children`). A claim is stale iff ``claimed_at``
+        is older than ``lease_sec`` AND one of: the claiming node is missing /
+        offline / restarted-in-place (incarnation mismatch) / reports fresh
+        live_state that no longer lists the task / the task exceeded the active
+        hard runtime cap. Row MUST carry ``claimed_at`` + the ``node_status`` /
+        ``node_incarnation_id`` / ``claimer_incarnation`` / ``live_state`` columns.
+        Keeping ONE predicate guarantees the two reapers never diverge."""
+        claimed_dt = cls._parse_dt(r["claimed_at"])
+        if claimed_dt is None:
+            return None
+        if (now - claimed_dt).total_seconds() <= lease_sec:
+            return None
+        node_status = r["node_status"]
+        if node_status is None:
+            return "node_missing"
+        if node_status == "offline":
+            return "node_offline"
+        if node_status == "online":
+            if (
+                r["claimer_incarnation"] is not None
+                and r["node_incarnation_id"] is not None
+                and r["node_incarnation_id"] != r["claimer_incarnation"]
+            ):
+                return "incarnation_mismatch"
+            return cls._stale_online_claim_reason(
+                r, now, live_state_max_age_sec, active_task_max_runtime_sec,
+            )
+        return None
+
     def list_stale_claims(
         self,
         lease_sec: int = 300,
@@ -2799,37 +2839,12 @@ class MeshDB:
             ).fetchall()
             conn.close()
             now = datetime.utcnow()
-            cutoff = lease_sec
             result = []
             for r in rows:
-                claimed_dt = self._parse_dt(r["claimed_at"])
-                if claimed_dt is None:
-                    continue
-                age = (now - claimed_dt).total_seconds()
-                if age <= cutoff:
-                    continue
-
-                node_status = r["node_status"]
-                reason = None
-                if node_status is None:
-                    reason = "node_missing"
-                elif node_status == "offline":
-                    reason = "node_offline"
-                elif (
-                    node_status == "online"
-                    and r["claimer_incarnation"] is not None
-                    and r["node_incarnation_id"] is not None
-                    and r["node_incarnation_id"] != r["claimer_incarnation"]
-                ):
-                    reason = "incarnation_mismatch"
-                elif node_status == "online":
-                    reason = self._stale_online_claim_reason(
-                        r,
-                        now,
-                        live_state_max_age_sec,
-                        active_task_max_runtime_sec,
-                    )
-
+                reason = self._claim_staleness_reason(
+                    r, now, lease_sec, live_state_max_age_sec,
+                    active_task_max_runtime_sec,
+                )
                 if reason:
                     d = dict(r)
                     d.pop("node_status", None)
@@ -2839,6 +2854,155 @@ class MeshDB:
         except Exception as e:
             logger.warning("event=db_list_stale_claims_failed err=%s", e)
             return []
+
+    def list_stale_managed_children(
+        self,
+        lease_sec: int = 300,
+        *,
+        live_state_max_age_sec: int = 90,
+        active_task_max_runtime_sec: int = 1800,
+        limit: int = 25,
+    ) -> List[Dict[str, Any]]:
+        """[A84 TASK 6 — lost-carrier reaper] The protocol-1 analog of
+        :func:`list_stale_claims`: managed Case worker children of an **open,
+        outbox-mode** Case that are still in a live state (``claimed`` / ``running``
+        / ``recovery_required``) but whose carrier is provably gone/stale by the
+        EXACT same node-truth predicate (``_claim_staleness_reason``). Such a child
+        has lost its terminal report — without a backstop its Case Manager waits
+        forever — so the reaper synthesizes its terminal through the atomic outbox
+        seam (:func:`synthesize_managed_terminal`).
+
+        Bounded by ``limit`` (§7 request-size: the coalesce fan-in and the per-tick
+        synthesis batch are capped; the count of concurrently-claimed managed
+        children is already small, bounded by live workers). Scopes to
+        ``continuation_mode = 'outbox'`` + non-terminal Case status, so legacy Cases
+        and closed Cases are never touched. Returns ``{id, flow_run_id,
+        _stale_reason}`` dicts (ids + reason only — no large result bodies loaded).
+        """
+        try:
+            import sqlite3 as _sqlite3
+            placeholders = ",".join("?" * len(self._CLOSED_STATUSES))
+            conn = _sqlite3.connect(str(self._path))
+            conn.row_factory = _sqlite3.Row
+            rows = conn.execute(
+                f"""
+                SELECT t.id, t.flow_run_id, t.claimed_at, t.claimer_incarnation,
+                       n.status AS node_status, n.incarnation_id AS node_incarnation_id,
+                       n.live_state, n.live_state_updated_at
+                FROM mesh_tasks t
+                JOIN flow_runs f ON f.flow_run_id = t.flow_run_id
+                LEFT JOIN nodes n ON t.claimed_by = n.node_id
+                WHERE t.queue_protocol = 1
+                  AND t.status IN ('claimed', 'running', 'recovery_required')
+                  AND t.claimed_at IS NOT NULL
+                  AND t.flow_run_id IS NOT NULL
+                  AND f.continuation_mode = 'outbox'
+                  AND COALESCE(f.status, '') NOT IN ({placeholders})
+                ORDER BY t.claimed_at ASC
+                LIMIT ?
+                """,
+                (*self._CLOSED_STATUSES, int(limit)),
+            ).fetchall()
+            conn.close()
+            now = datetime.utcnow()
+            result: List[Dict[str, Any]] = []
+            for r in rows:
+                reason = self._claim_staleness_reason(
+                    r, now, lease_sec, live_state_max_age_sec,
+                    active_task_max_runtime_sec,
+                )
+                if reason:
+                    result.append({
+                        "id": r["id"],
+                        "flow_run_id": r["flow_run_id"],
+                        "_stale_reason": reason,
+                    })
+            return result
+        except Exception as e:
+            logger.warning("event=db_list_stale_managed_children_failed err=%s", e)
+            return []
+
+    def synthesize_managed_terminal(
+        self,
+        task_id: str,
+        *,
+        reason: str = "carrier_lost",
+        error_class: str = "carrier_lost",
+    ) -> str:
+        """[A84 TASK 6 — lost-carrier reaper] Synthesize a terminal (``failed``)
+        outcome for a managed Case worker child whose carrier is provably gone, in
+        the SAME atomic txn as the Case completion-outbox row — so the exactly-once
+        outbox invariant fires identically to a real completion. Returns one of:
+          * ``"synthesized"`` — this call flipped the live row terminal + wrote the
+            outbox row;
+          * ``"already_terminal"`` — a real result (or a prior synthesis) beat us;
+            the row is already terminal (the FENCE: no second row, no double wake);
+          * ``"skipped"`` — not a reapable managed row (missing / wrong protocol /
+            not in a live state).
+
+        FENCE against a late real result (ACCEPTANCE: synth → late result rejected):
+        the row's ``claim_token`` is left UNTOUCHED, and the terminal flip is guarded
+        to the live states. A late ``complete_turn`` with the carrier's own token
+        therefore hits the idempotent-replay leg (OWN06: already terminal ⇒ equal
+        result, no re-write, no second outbox row — ``INSERT OR IGNORE`` on the PK
+        would no-op anyway); a foreign token is refused (OWN05). Idempotent re-scan:
+        a second reaper pass sees the row terminal ⇒ ``already_terminal`` ⇒ no-op.
+        ``effects_state='pending'`` mirrors ``complete_turn`` so the slice-1 effects
+        consumer runs the same post-commit projection (task.finished / telemetry).
+        """
+        now = _now()
+        synthetic = f"carrier_lost: {reason}"[:500]
+        result_json = json.dumps({
+            "output": "",
+            "errors": [synthetic],
+            "synthesized_by": "lost_carrier_reaper",
+        })
+        try:
+            with self._write() as conn:
+                row = conn.execute(
+                    "SELECT id, status, queue_protocol, flow_run_id, session_id "
+                    "FROM mesh_tasks WHERE id = ?",
+                    (task_id,),
+                ).fetchone()
+                if row is None or row["queue_protocol"] != 1:
+                    return "skipped"
+                cur_status = row["status"]
+                from .turn_queue import TERMINAL_STATUSES
+                if cur_status in TERMINAL_STATUSES:
+                    # A real result (or a prior synthesis) already landed — fenced.
+                    return "already_terminal"
+                if cur_status not in ("claimed", "running", "recovery_required"):
+                    return "skipped"
+                conn.execute(
+                    """
+                    UPDATE mesh_tasks
+                    SET status = 'failed', error = ?, error_class = ?,
+                        result = COALESCE(result, ?),
+                        completed_at = ?, updated_at = ?, blocked_attempts = 0,
+                        effects_state = 'pending'
+                    WHERE id = ? AND queue_protocol = 1
+                      AND status IN ('claimed', 'running', 'recovery_required')
+                    """,
+                    (synthetic, error_class, result_json, now, now, task_id),
+                )
+                if conn.execute("SELECT changes()").fetchone()[0] == 0:
+                    # Lost the state race to a concurrent real terminal — fenced.
+                    return "already_terminal"
+                # Session audit parity with complete_turn (append-only).
+                if row["session_id"]:
+                    conn.execute(
+                        "INSERT INTO task_events (session_id, task_id, timestamp, "
+                        "success, execution_time, error) VALUES (?, ?, ?, 0, NULL, ?)",
+                        (row["session_id"], task_id, now, synthetic),
+                    )
+                # The load-bearing half: the durable Case completion-outbox row, in
+                # THIS same txn, through the exact same seam as a real completion.
+                self._record_case_child_outbox(
+                    conn, task_id, row["flow_run_id"], "failed", now,
+                )
+                return "synthesized"
+        except Exception as e:
+            raise _turn_backing_error("synthesize_managed_terminal", task_id=task_id, err=e)
 
     def complete_task(
         self,
