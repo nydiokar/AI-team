@@ -404,6 +404,34 @@ def test_foreign_and_late_messages_are_never_our_result(backend, fake, tmp_path)
     assert "FOREIGN" not in res.output
 
 
+def test_in_progress_and_tool_step_replies_are_never_our_result(backend, fake, tmp_path):
+    # Live 1.18.32: /session/status can read idle while our reply is still being
+    # generated (no time.completed, no finish) or between a finished tool-calls
+    # step and the next step. Neither is the terminal reply.
+    fake.add_session("ses_p")
+    fake.release.clear()
+    fake.idle_while_held = True
+    backend._MANAGED_IDLE_GRACE_POLLS = 10_000
+    th, out = _bg(backend.run_managed_turn, _session(tmp_path, native="ses_p"), "mine", _own(turn="u-p"))
+    _wait(lambda: len(fake.prompts) == 1)
+    mid = fake.prompts[0]["messageID"]
+    step = {"info": {
+        "id": fake.new_id("msg"), "role": "assistant", "sessionID": "ses_p", "parentID": mid,
+        "time": {"created": fake.tick(), "completed": fake.tick()}, "finish": "tool-calls"},
+        "parts": [{"type": "tool", "tool": "glob"}, {"type": "step-finish", "reason": "tool-calls"}]}
+    partial = {"info": {
+        "id": fake.new_id("msg"), "role": "assistant", "sessionID": "ses_p", "parentID": mid,
+        "time": {"created": fake.tick()}}, "parts": [{"type": "step-start"}]}
+    with fake.lock:
+        fake.sessions["ses_p"] += [step, partial]
+    time.sleep(0.3)
+    assert "result" not in out, "an unfinished reply must never complete our turn"
+    fake.release.set()
+    th.join(5)
+    res = out["result"]
+    assert res.success is True and res.output == "managed reply"
+
+
 def test_lost_ack_reconciled_by_our_message_id(backend, fake, tmp_path):
     fake.add_session("ses_l")
     fake.ack_delay = 2.0  # > ack timeout ⇒ the client never sees the 204
