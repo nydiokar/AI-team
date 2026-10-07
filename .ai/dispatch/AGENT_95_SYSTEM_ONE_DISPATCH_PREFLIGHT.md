@@ -30,6 +30,12 @@ service boundary) · **Type:** code
 Fewer reworked, off-objective or duplicate worker tasks, by catching weak envelopes before dispatch.
 The Manager retains control (P1), and the effect is measured as flagged-vs-unflagged rework separation.
 
+Second-order effect on A94: forcing criteria to pass `acc_<i>_uncheckable` here shifts A94's delivery
+coverage toward `acc_<i>_unmet` — the strongest question category (criteria-grounded, one hop,
+literal). Vague criteria that slip through pre-flight fall back to open-ended text-only questions that
+are structurally weaker. The two moves are mutually reinforcing: better envelopes at dispatch → better
+Jev precision at delivery review.
+
 ## TASK
 1. Battery `src/system_one/batteries/preflight.py`: state, code-only checks, questions and gate per
    spec §6.2.
