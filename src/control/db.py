@@ -346,6 +346,12 @@ RUNTIME_FLAG_DEFINITIONS: Dict[str, Dict[str, str]] = {
         "registry_writable": "1",
         "description": "Disable bounded prior-context injection after a worker restart loses SDK state.",
     },
+    "RESTART_LOST_SESSION_FORK_DISABLED": {
+        "default": "0",
+        "effect_scope": "live",
+        "registry_writable": "1",
+        "description": "Disable forking a restart-lost SDK session onto a FRESH subprocess (create_session) on its next task. Default (fork ON): a session whose in-memory driver was lost on a worker restart dispatches create_session (role re-boot + A54 boot-reconcile + injected prior-context) instead of resume_session, which the worker refuses into a corpse (A98 O1).",
+    },
     "MANAGER_ROLE_ENABLED": {
         "default": "0",
         "effect_scope": "session_boot",
@@ -1142,6 +1148,16 @@ def harness_level3_guard_enabled() -> bool:
 def restart_context_restore_disabled() -> bool:
     """Registry-over-env read of ``RESTART_CONTEXT_RESTORE_DISABLED``."""
     return runtime_flag_enabled("RESTART_CONTEXT_RESTORE_DISABLED")
+
+
+def restart_lost_session_fork_disabled() -> bool:
+    """Registry-over-env read of ``RESTART_LOST_SESSION_FORK_DISABLED`` (A98 O1).
+
+    Default OFF ⇒ the fork is ON: a restart-lost SDK session dispatches
+    ``create_session`` (fresh subprocess) on its next task instead of
+    ``resume_session`` (refused by the worker guard). Set the flag to opt out and
+    restore the legacy resume-into-a-corpse behaviour."""
+    return runtime_flag_enabled("RESTART_LOST_SESSION_FORK_DISABLED")
 
 
 def control_api_docs_enabled() -> bool:
