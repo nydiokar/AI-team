@@ -10,6 +10,7 @@ from src.control.db import (
 from src.core.interfaces import Session, SessionStatus
 from src.core.interfaces import Task, TaskPriority, TaskStatus, TaskType
 from src.orchestrator import TaskOrchestrator
+from tests.stage8a_legacy import enqueue_pre_cutover, unenrolled
 
 
 def _iso(offset_sec: int = 0) -> str:
@@ -228,6 +229,7 @@ def test_due_heartbeat_claims_one_lease_and_submits_turn(tmp_path, monkeypatch) 
     _cache_evidence(db, cache_read=1000)
     session = _session()
     db.upsert_session(session)
+    unenrolled(db, "sess_hb")  # [A82 Stage 8a] the legacy heartbeat branch: an unenrolled session
     hb = db.ensure_cache_heartbeat_owner(
         "sess_hb", reason="manual", owner_type="operator", owner_id="manual",
     )
@@ -430,7 +432,8 @@ def test_finalize_uses_db_cache_evidence_when_result_usage_is_sparse(tmp_path, m
         backend="claude", action=CACHE_HEARTBEAT_ACTION, payload={},
     )
     db.claim_task(lease_id, "host")
-    db.enqueue_task(
+    enqueue_pre_cutover(
+        db,
         wake_task_id, session_id="sess_hb", machine_id="",
         backend="claude", action="resume_session", payload={},
     )

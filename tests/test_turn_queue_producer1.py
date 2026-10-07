@@ -28,6 +28,7 @@ from src.control.db import MeshDB
 from src.core.interfaces import Session, SessionStatus
 from src.core.session_task_queue import SessionTaskQueue
 from src.orchestrator import HarnessAdmissionBlocked, TaskOrchestrator
+from tests.stage8a_legacy import unenrolled
 
 NOW = datetime(2026, 9, 25, 12, 0, 0, tzinfo=timezone.utc).isoformat()
 
@@ -70,6 +71,11 @@ def _setup(tmp_path, monkeypatch, *, enroll=True, machine="worker-a"):
     ))
     if enroll:
         db.enroll_session("sess-1")
+    else:
+        # [A82 Stage 8a] Every session is born managed; an UNENROLLED session
+        # now exists only behind the operator exit — model it through it.
+        db.unenroll_session_drained("sess-1")
+        db.refresh_enrollment_presence()
     # A registered managed-capable carrier for the session's assignment.
     _register_carrier(db, "worker-a")
     o = TaskOrchestrator.__new__(TaskOrchestrator)
@@ -499,6 +505,7 @@ def test_P1_11b_web_unenrolled_marker_unreadable_is_legacy_200(tmp_path, monkeyp
                 status=SessionStatus.IDLE, created_at=NOW, updated_at=NOW, machine_id="worker-a")
     orch.session_service.store.save(s)
     db.upsert_session(s)
+    unenrolled(db, "sess-1")  # [A82 Stage 8a] born managed: model "nothing enrolled"
     monkeypatch.setattr(db, "is_session_enrolled",
                         lambda sid: (_ for _ in ()).throw(RuntimeError("x")))
     c = _client(monkeypatch, orch)

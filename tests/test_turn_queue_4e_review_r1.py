@@ -16,6 +16,7 @@ from tests.test_turn_queue_4b import _pass, _wire
 from tests.test_turn_queue_producer1 import (  # noqa: F401
     NOW, _flags, _no_cli_spawn, _setup,
 )
+from tests.stage8a_legacy import enqueue_pre_cutover, unenrolled
 
 
 @pytest.fixture(autouse=True)
@@ -240,12 +241,15 @@ def test_legacy_execution_insert_refused_for_enrolled_session(tmp_path):
     for action in ("close_session", "cancel_turn"):
         db.enqueue_task(f"ctl-{action}", "s", "worker-a", "claude", action, {})
         assert db.get_task(f"ctl-{action}")["status"] == "pending"
-    # An unenrolled session's legacy execution is unchanged.
+    # [A82 Stage 8a] The fence is unconditional: an UNENROLLED session's legacy
+    # execution row is refused too (was: "unchanged").
     db.upsert_session(Session(session_id="u", backend="claude", repo_path="/tmp/repo",
                               status=SessionStatus.IDLE, created_at=NOW, updated_at=NOW,
                               machine_id="worker-a"))
-    db.enqueue_task("legacy-u", "u", "worker-a", "claude", "resume_session", {"prompt": "x"})
-    assert db.claim_task("legacy-u", "worker-a") is True
+    unenrolled(db, "u")
+    with pytest.raises(LegacyExecutionRefusedError):
+        db.enqueue_task("legacy-u", "u", "worker-a", "claude", "resume_session", {"prompt": "x"})
+    assert db.get_task("legacy-u") is None
 
 
 def test_legacy_execution_claim_refused_for_enrolled_session(tmp_path):
@@ -256,8 +260,8 @@ def test_legacy_execution_claim_refused_for_enrolled_session(tmp_path):
     db.upsert_session(Session(session_id="s", backend="claude", repo_path="/tmp/repo",
                               status=SessionStatus.IDLE, created_at=NOW, updated_at=NOW,
                               machine_id="worker-a"))
-    # Inserted while the session was still legacy; enrolled before a poll.
-    db.enqueue_task("legacy-1", "s", "worker-a", "claude", "resume_session", {"prompt": "x"})
+    # Inserted while the session was still legacy (pre-cutover); enrolled before a poll.
+    enqueue_pre_cutover(db, "legacy-1", "s", "worker-a", "claude", "resume_session", {"prompt": "x"})
     db.enroll_session("s")
     with pytest.raises(LegacyExecutionRefusedError):
         db.claim_task("legacy-1", "worker-a")

@@ -74,60 +74,37 @@ def _patch(monkeypatch, tmp_path):
     return db
 
 
-def test_pinned_to_this_host_is_self_claimed_not_pending(_patch):
+def test_unpinned_oneoff_is_self_claimed(_patch):
+    """A session-less one-off runs on THIS host: its shadow row is self-claimed
+    so no daemon sharing the node id can run it a second time."""
     db = _patch
-    orch = _orch(db, _session(machine_id=HOST))  # picker chose the local node
+    orch = _orch(db, None)  # no session ⇒ one-off
 
-    orch._mesh_enqueue_task(_task(), "claude")
+    orch._mesh_enqueue_task(
+        types.SimpleNamespace(id="t-1", prompt="do the thing", metadata={}), "claude",
+    )
 
     row = db.get_task("t-1")
-    assert row["status"] == "claimed", "host-pinned task must be self-claimed"
-    assert row["claimed_by"] == HOST
-    # The decisive check: a daemon with the SAME node_id must NOT see it as work.
-    assert db.get_pending_tasks(node_id=HOST) == []
-
-
-def test_unpinned_is_self_claimed(_patch):
-    db = _patch
-    orch = _orch(db, _session(machine_id=""))  # built-in gateway worker
-
-    orch._mesh_enqueue_task(_task(), "claude")
-
-    row = db.get_task("t-1")
+    assert row["action"] == "run_oneoff"
     assert row["status"] == "claimed" and row["claimed_by"] == HOST
     assert db.get_pending_tasks(node_id=HOST) == []
 
 
-def test_pinned_to_other_host_stays_pending_for_that_worker(_patch):
+@pytest.mark.parametrize("pin", [HOST, "", "Horse", "kanebra"],
+                         ids=["this_host", "unpinned", "remote", "unknown_node"])
+def test_session_task_never_leaves_a_claimable_protocol0_row(_patch, pin):
+    """[A82 Stage 8a] Converted from the per-pin legacy shadow-row tests
+    (host-pinned self-claim, unpinned self-claim, remote pin left pending,
+    unknown pin failed fast): a SESSION task's protocol-0 execution row is now
+    refused at insert, so wherever the session is pinned no daemon — same node
+    id, remote or phantom — can ever claim (double-run) it, and no orphan is
+    left pending. Session turns run on the managed queue."""
     db = _patch
-    # A genuinely remote node must be REGISTERED for its pinned work to stay
-    # claimable (#177 rejects a pin to an unknown node).
     db.upsert_node("Horse", "100.0.0.2", 9001, ["claude"], 2)
-    orch = _orch(db, _session(machine_id="Horse"))  # a genuinely remote node
+    orch = _orch(db, _session(machine_id=pin))
 
     orch._mesh_enqueue_task(_task(), "claude")
 
-    row = db.get_task("t-1")
-    assert row["status"] == "pending", "remote-pinned task must stay claimable"
-    assert row["claimed_by"] is None
-    # This host must NOT self-claim another node's work…
-    assert db.get_pending_tasks(node_id=HOST, accept_unpinned=False) == []
-    # …but the pinned remote worker sees it.
-    seen = db.get_pending_tasks(node_id="Horse")
-    assert [r["id"] for r in seen] == ["t-1"]
-
-
-def test_pinned_to_unknown_node_is_rejected_not_left_pending(_patch):
-    """[#177] A pin to a node that was never registered (e.g. 'kanebra' when the
-    real node is 'kanebra-worker') is rejected at enqueue — marked failed so it
-    never becomes a pending orphan and the dispatch poller fails fast."""
-    db = _patch
-    orch = _orch(db, _session(machine_id="kanebra"))  # no such node
-
-    orch._mesh_enqueue_task(_task(), "claude")
-
-    row = db.get_task("t-1")
-    assert row["status"] == "failed", "unknown-node pin must fail fast, never linger pending"
-    assert "not a registered mesh node" in (row["error"] or "")
-    # No worker — real or phantom — ever sees it as claimable work.
-    assert db.get_pending_tasks(node_id="kanebra") == []
+    assert db.get_task("t-1") is None
+    for node in (HOST, "Horse", "kanebra"):
+        assert db.get_pending_tasks(node_id=node) == []

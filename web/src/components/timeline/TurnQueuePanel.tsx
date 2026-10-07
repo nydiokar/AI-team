@@ -24,6 +24,7 @@ import {
 } from "../../transport/apiClient";
 import {
   blockedReasonLabel,
+  effectsFailedLabel,
   isEditableTurn,
   sessionTurnQueueKey,
   turnCardLabel,
@@ -162,7 +163,9 @@ export function TurnQueuePanel({
         : api.pauseTurnRequests(token, sessionId),
     );
 
-  if (!page.enrolled || (cards.length === 0 && !held)) return null;
+  const effectsFailed = effectsFailedLabel(page.effects_failed);
+
+  if (!page.enrolled || (cards.length === 0 && !held && !effectsFailed)) return null;
 
   return (
     <section
@@ -187,6 +190,11 @@ export function TurnQueuePanel({
       {held && (
         <p className="mt-1 text-[12px] text-warn" title={page.hold ?? undefined}>
           {holdReason ? `${holdReason} — ` : "Queue paused — "}nothing new starts until you resume.
+        </p>
+      )}
+      {effectsFailed && (
+        <p className="mt-1 text-[12px] text-bad" title={page.effects_failed_turn_id ?? undefined}>
+          {effectsFailed}
         </p>
       )}
       {notice && (

@@ -18,6 +18,7 @@ import pytest
 
 from src.control.db import MeshDB
 from src.core.interfaces import Session, SessionStatus
+from tests.stage8a_legacy import enqueue_pre_cutover
 
 
 NOW = datetime(2026, 9, 25, 12, 0, 0)
@@ -42,7 +43,8 @@ def _session(db: MeshDB, session_id: str = "mgr-1", backend: str = "claude") -> 
 
 
 def _enqueue(db: MeshDB, task_id: str, session_id: str = "mgr-1", **payload) -> None:
-    db.enqueue_task(
+    enqueue_pre_cutover(
+        db,
         task_id=task_id,
         session_id=session_id,
         machine_id=None,

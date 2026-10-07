@@ -27,6 +27,7 @@ from src.core.interfaces import SessionStatus
 from src.orchestrator import TaskOrchestrator
 from src.core.session_task_queue import SessionTaskQueue
 from tests.test_turn_queue_4b import _pass, _run, _wire  # noqa: F401
+from tests.stage8a_legacy import claim_pre_cutover, enqueue_pre_cutover
 from tests.test_turn_queue_producer1 import (  # noqa: F401
     _flags, _managed_rows, _no_cli_spawn, _register_carrier, _sess, _setup, _submit,
 )
@@ -182,9 +183,10 @@ def test_ROLL03f_legacy_in_memory_work_refused(tmp_path: Any, monkeypatch: Any, 
 def test_ROLL03g_durable_legacy_row_refused(tmp_path: Any, monkeypatch: Any, flag_on: None,
                                             status: str) -> None:
     db, o = _setup(tmp_path, monkeypatch, enroll=False)
-    db.enqueue_task("legacy-row", "sess-1", "worker-a", "claude", "resume_session", {"prompt": "x"})
+    # [A82 Stage 8a] a pre-cutover legacy row (the fence refuses new ones)
+    enqueue_pre_cutover(db, "legacy-row", "sess-1", "worker-a", "claude", "resume_session", {"prompt": "x"})
     if status == "claimed":
-        assert db.claim_task("legacy-row", "worker-a")
+        assert claim_pre_cutover(db, "legacy-row", "worker-a")
     err = _refused(_enroll, o)
     assert err.code == "legacy_work_in_flight" and not _enrolled(db)
     # A finished legacy row is history, not work: enrollment proceeds.
@@ -364,18 +366,22 @@ def test_ROLL05b_legacy_poller_never_receives_managed_rows(tmp_path: Any, monkey
     assert row["status"] == "pending" and row["queue_protocol"] == 1  # durable, not run
     err = _refused(_submit, o)
     assert err.status_code == 503 and err.code == "carrier_unavailable"
-    # Legacy keeps working on the old worker: an UNENROLLED session's legacy
-    # execution row is offered and claimable exactly as before.
+    # [A82 Stage 8a] The old worker still gets its CONTROL rows (offered and
+    # claimable exactly as before); session EXECUTION never reaches the legacy
+    # routes — refused at insert even for an unenrolled session.
     from src.core.interfaces import Session
 
     db.upsert_session(Session(session_id="legacy-s", backend="claude", repo_path="/tmp/repo",
                               status=SessionStatus.IDLE, created_at="2026-10-02T00:00:00",
                               updated_at="2026-10-02T00:00:00", machine_id="worker-a"))
-    db.enqueue_task("legacy-t", "legacy-s", "worker-a", "claude", "resume_session", {"prompt": "x"})
+    db.unenroll_session_drained("legacy-s")
+    with pytest.raises(tq.LegacyExecutionRefusedError):
+        db.enqueue_task("legacy-t", "legacy-s", "worker-a", "claude", "resume_session", {"prompt": "x"})
+    db.enqueue_task("close-t", "legacy-s", "worker-a", "claude", "close_session", {})
     legacy = client.get("/tasks/pending", params={"node_id": "worker-a"}, headers=h).json()
     rows = legacy if isinstance(legacy, list) else legacy.get("tasks", [])
-    assert [r.get("id") for r in rows] == ["legacy-t"]
-    assert client.post("/tasks/legacy-t/claim", json={"node_id": "worker-a"},
+    assert [r.get("id") for r in rows] == ["close-t"]
+    assert client.post("/tasks/close-t/claim", json={"node_id": "worker-a"},
                        headers=h).status_code == 200
 
 

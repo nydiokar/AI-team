@@ -128,7 +128,9 @@ def test_R4_next_managed_turn_replaces_the_dead_session(monkeypatch):
 def test_R4_flag_off_session_with_ended_reader_is_not_evicted(monkeypatch):
     """Legacy byte-identical: with the managed flag OFF (no replay) a session
     whose reader ended is handled exactly as before (no new eviction)."""
-    monkeypatch.delenv("WORKER_MANAGED_TURNS", raising=False)
+    # [Stage 8a cutover] flag now defaults ON; pin an explicit false value for
+    # the flag-OFF legacy path this test asserts.
+    monkeypatch.setenv("WORKER_MANAGED_TURNS", "0")
 
     def no_spawn(self):
         raise AssertionError("would spawn a real CLI (session was evicted)")

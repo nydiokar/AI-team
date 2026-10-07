@@ -17,7 +17,7 @@ from typing import Any, Callable, Dict, List, Optional
 from src.services.session_store import SessionStore
 from src.core.interfaces import Session, SessionOrigin, SessionStatus
 from src.core.view_models import SessionView
-from src.backends.registry import is_valid_backend, DEFAULT_BACKEND
+from src.backends.registry import is_valid_backend, retired_backend_reason, DEFAULT_BACKEND
 
 logger = logging.getLogger(__name__)
 
@@ -96,6 +96,9 @@ class SessionService:
         backend = (backend or DEFAULT_BACKEND).strip().lower()
         if not is_valid_backend(backend):
             return CommandResult(False, reason="unknown_backend")
+        if retired_backend_reason(backend):
+            # [A82 Stage 8a] A retired backend takes no new session.
+            return CommandResult(False, reason="backend_retired", detail=retired_backend_reason(backend))
         # Fail early on a bad working directory (Move #38). For LOCAL sessions the
         # gateway host can stat the path, so validate it up front — a nonexistent /
         # not-a-dir / outside-allowed-root repo is rejected at create time instead

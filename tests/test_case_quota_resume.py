@@ -187,6 +187,7 @@ class _Orch:
         self.affiliations = []
         self.active_tasks = {}
         self.running = True
+        self.managed_respawns = []
 
     # -- real implementations ------------------------------------------------
     def _emit_event(self, name, _t=None, payload=None):
@@ -271,6 +272,13 @@ class _Orch:
         return await TaskOrchestrator._do_respawn_manager_for_case(
             self, db, case_id, generation, dead_sid,
         )
+
+    async def _respawn_manager_managed(self, db, case_id, generation, dead_sid, objective):
+        # [A82 Stage 8a] Every dead Manager is replaced on the managed path;
+        # its mechanics are proven on real pieces (test_turn_queue_stage8a.py
+        # S8-10, the 4e suites). Here: resume_case's decision only.
+        self.managed_respawns.append((case_id, dead_sid))
+        return True
 
     async def _handle_dead_manager_session(self, db, case_id, generation, dead_sid):
         return await TaskOrchestrator._handle_dead_manager_session(
@@ -742,10 +750,10 @@ def test_dead_session_downgrades_in_place_to_a_fresh_manager(tmp_path, monkeypat
     out = asyncio.run(orch.resume_case(case_id, mode="in_place"))
 
     assert out["ok"] is True and out["mode"] == "fresh_manager"
-    assert orch.session_service.created == ["respawned-mgr-1"]
-    assert db.case_manager_session_id(case_id) == "respawned-mgr-1"
+    # [A82 Stage 8a] the dead Manager is replaced (managed respawn) on the SAME
+    # Case; no new Case is opened.
+    assert orch.managed_respawns == [(case_id, "mgr-1")]
     assert {c["flow_run_id"] for c in db.list_open_cases()} == open_before
-    assert orch.deliveries[0]["source"] == "manager_respawn"
 
 
 def test_resume_refuses_a_terminal_case(tmp_path, monkeypatch):

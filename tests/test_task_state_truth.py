@@ -7,6 +7,7 @@ from src.core.task_state_truth import (
     derive_job_execution_state,
     derive_task_execution_state,
 )
+from tests.stage8a_legacy import claim_pre_cutover, enqueue_pre_cutover
 
 
 NOW = datetime(2026, 7, 1, 12, 0, 0)
@@ -29,7 +30,8 @@ def _enqueue(db: MeshDB, task_id: str = "task_truth", session_id: str = "sess_tr
             last_task_id=task_id,
         )
     )
-    db.enqueue_task(
+    enqueue_pre_cutover(
+        db,
         task_id=task_id,
         session_id=session_id,
         machine_id="worker-a",
@@ -79,7 +81,7 @@ def test_claimed_task_with_fresh_worker_live_state_derives_worker_running(tmp_pa
     db = _db(tmp_path)
     _node(db)
     _enqueue(db, task_id="task_fresh")
-    assert db.claim_task("task_fresh", "worker-a")
+    assert claim_pre_cutover(db, "task_fresh", "worker-a")
     db.heartbeat_node(
         "worker-a",
         live_state=json.dumps(
@@ -115,7 +117,7 @@ def test_claimed_task_with_stale_worker_heartbeat_is_unknown_not_running(tmp_pat
     db = _db(tmp_path)
     _node(db)
     _enqueue(db, task_id="task_stale_heartbeat")
-    assert db.claim_task("task_stale_heartbeat", "worker-a")
+    assert claim_pre_cutover(db, "task_stale_heartbeat", "worker-a")
     db.heartbeat_node(
         "worker-a",
         live_state=json.dumps({"v": 1, "active_tasks": ["task_stale_heartbeat"]}),
@@ -138,7 +140,7 @@ def test_claimed_task_after_node_incarnation_changed_is_stale_claim(tmp_path) ->
     db = _db(tmp_path)
     _node(db, incarnation_id="inc-a")
     _enqueue(db, task_id="task_old_incarnation")
-    assert db.claim_task("task_old_incarnation", "worker-a")
+    assert claim_pre_cutover(db, "task_old_incarnation", "worker-a")
     _node(db, incarnation_id="inc-b")
 
     derived = derive_task_execution_state(
@@ -156,7 +158,7 @@ def test_claimed_task_with_fresh_claim_but_no_live_state_derives_claimed(tmp_pat
     db = _db(tmp_path)
     _node(db, incarnation_id="inc-a")
     _enqueue(db, task_id="task_claimed")
-    assert db.claim_task("task_claimed", "worker-a")
+    assert claim_pre_cutover(db, "task_claimed", "worker-a")
 
     derived = derive_task_execution_state(
         db.get_task("task_claimed"),
@@ -173,7 +175,7 @@ def test_terminal_task_result_wins_over_stale_worker_state(tmp_path) -> None:
     db = _db(tmp_path)
     _node(db)
     _enqueue(db, task_id="task_done")
-    assert db.claim_task("task_done", "worker-a")
+    assert claim_pre_cutover(db, "task_done", "worker-a")
     db.heartbeat_node("worker-a", live_state=json.dumps({"v": 1, "active_tasks": ["task_done"]}))
     _age_node(db, seconds=600)
     db.complete_task("task_done", {"success": True, "output": "done"})
@@ -205,7 +207,7 @@ def test_fresh_live_state_without_claimed_task_derives_detached(tmp_path) -> Non
     db = _db(tmp_path)
     _node(db)
     _enqueue(db, task_id="task_detached")
-    assert db.claim_task("task_detached", "worker-a")
+    assert claim_pre_cutover(db, "task_detached", "worker-a")
     db.heartbeat_node(
         "worker-a",
         live_state=json.dumps({"v": 1, "active_tasks": ["other_task"]}),

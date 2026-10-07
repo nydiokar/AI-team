@@ -56,6 +56,8 @@ def _session(db: MeshDB, sid: str = "sess-1", *, enroll: bool = True,
     ))
     if enroll:
         db.enroll_session(sid)
+    else:  # [A82 Stage 8a] born managed: model the unenrolled session
+        db.unenroll_session_drained(sid)
 
 
 def _req(sid: str = "sess-1", body: str = "hello", op: str = "op-1", **kw) -> ta.AdmissionRequest:
