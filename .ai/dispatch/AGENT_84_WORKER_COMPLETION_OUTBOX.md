@@ -6,7 +6,7 @@ owner: A84 worker - slice 1 managed-completion consumer
 depends_on: [AGENT_82_SESSION_TURN_QUEUE]
 results_ref: DISPATCH_LOG.md#A84
 evidence: []
-updated_at: "2026-10-02T12:57:39.722551+00:00"
+updated_at: "2026-10-07T20:37:17.597284+00:00"
 ```
 
 # DISPATCH — A84 · Worker completion delivery through a durable Case outbox
