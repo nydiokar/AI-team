@@ -4,11 +4,9 @@
 
 | status | job_id | created | updated | depends_on | proof | flags |
 |---|---|---|---|---|---|---|
-| active | AGENT_100_A82_STAGE8B_LEGACY_CUTOFF | 2026-10-07 | 2026-10-07 | — | — |  |
 | active | AGENT_101_SESSION_BLOCKING_STATE_SURFACING | 2026-10-07 | 2026-10-07 | — | ✓ |  |
 | active | AGENT_60_WARM_WORKER_IDLE_REAPER | 2026-07-30 | 2026-08-21 | — | ✓ | STALE_47d |
 | active | AGENT_65_COST_MONITORING_VISIBILITY | 2026-08-03 | 2026-08-03 | — | ✓ | STALE_64d |
-| active | AGENT_82_SESSION_TURN_QUEUE | 2026-09-22 | 2026-10-07 | — | ✓ |  |
 | active | AGENT_84_WORKER_COMPLETION_OUTBOX | 2026-09-24 | 2026-10-02 | AGENT_82_SESSION_TURN_QUEUE | — |  |
 | active | AGENT_87_SESSION_RUNTIME_COORDINATOR | 2026-09-24 | 2026-09-25 | — | — |  |
 | active | AGENT_88_DATABASE_AUTHORITY_UNIFICATION | 2026-09-26 | 2026-10-01 | — | ✗MISSING |  |
@@ -40,6 +38,7 @@
 | unknown | A82_STAGE8A_DEPLOY_BURNDOWN | ? | ? | — | — | BAD_STATUS |
 | unknown | A82_STAGE8A_VALIDATION | ? | ? | — | — | BAD_STATUS |
 | unknown | A99_TURN_QUEUE_UI_PROPOSAL | ? | ? | — | — | BAD_STATUS |
+| done | AGENT_100_A82_STAGE8B_LEGACY_CUTOFF | 2026-10-07 | 2026-10-07 | — | ✓ |  |
 | done | AGENT_10_M3_CLAUDE_TELEMETRY | 2026-07-03 | 2026-08-03 | — | ✓ |  |
 | done | AGENT_11_MESH_AFFINITY_ROUTING | 2026-07-03 | 2026-08-03 | — | ✓ |  |
 | done | AGENT_12_HARNESS_SELFTEST | 2026-07-03 | 2026-08-03 | — | ✓ |  |
@@ -94,6 +93,7 @@
 | done | AGENT_79_PWA_LIVE_REFRESH_UX | 2026-08-24 | 2026-08-24 | — | ✓ |  |
 | done | AGENT_80_SESSION_CACHE_HEARTBEAT | 2026-08-26 | 2026-08-29 | — | ✓ |  |
 | done | AGENT_81_EVENT_DRIVEN_REFRESH | 2026-09-15 | 2026-09-15 | — | ✓ |  |
+| done | AGENT_82_SESSION_TURN_QUEUE | 2026-09-22 | 2026-10-07 | — | ✓ |  |
 | done | AGENT_83_SESSION_STATE_LEGIBILITY | 2026-09-22 | 2026-09-25 | — | ✓ |  |
 | done | AGENT_89_REMOTE_TURN_CANCEL_DELIVERY | 2026-09-26 | 2026-09-26 | — | ✓ |  |
 | done | AGENT_8_OPERATOR_SIGNAL | 2026-07-03 | 2026-08-03 | — | ✓ |  |
