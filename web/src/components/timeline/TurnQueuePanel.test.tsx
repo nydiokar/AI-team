@@ -1,10 +1,12 @@
 // @vitest-environment jsdom
 /**
- * [A82 Stage 6] UI01–08 (interaction half): queue cards with a mocked network
- * (no backend, no paid model). Edit carries the expected revision and, on 409,
- * refetches the item without overwriting a started prompt; withdraw targets
- * only the selected item; pause/resume; recovery resolution needs an explicit
- * acknowledgement; keyboard/accessibility; timeline dedup by durable id.
+ * [A82 Stage 6 · A99 redesign] Turn-queue component with a mocked network (no
+ * backend, no paid model). Covers the operator directives: the collapsed thin
+ * indicator (D3), waiting-only rows (D1/D6), render-nothing-when-empty (D2),
+ * sender identity (D5), a focused + expanded editor (D7), the two-step withdraw
+ * confirm (D8), the relocated Pause/Resume (D9), and recovery resolution
+ * including `requeue` (defect F1). Plus the timeline dedup that puts an active
+ * turn back in the chat (D1 root-cause fix).
  */
 import { act, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
@@ -65,6 +67,7 @@ beforeEach(() => {
   root = createRoot(container);
   client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   for (const fn of Object.values(apiMock)) fn.mockReset();
+  useSentStore.setState({ bySession: {} });
 });
 
 afterEach(() => {
@@ -92,6 +95,11 @@ async function click(el: HTMLElement) {
   });
 }
 
+/** The queue is collapsed by default (D3) — open it to reach the rows. */
+async function expand() {
+  await click(button("Show turn queue"));
+}
+
 function typeInto(el: HTMLTextAreaElement, value: string) {
   const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!;
   act(() => {
@@ -102,34 +110,68 @@ function typeInto(el: HTMLTextAreaElement, value: string) {
 
 const owned = (...ids: string[]) => new Set(ids);
 
-describe("TurnQueuePanel", () => {
-  it("renders cards by durable id with conservative labels and only owned ids", () => {
+describe("TurnQueuePanel — collapse / thin indicator (D2/D3)", () => {
+  it("renders nothing when enrolled but nothing is waiting/paused/attention (D2)", () => {
+    render(<TurnQueuePanel sessionId="s1" page={page([])} ownedIds={owned()} />);
+    expect(container.querySelector("section")).toBeNull();
+    expect(container.querySelector("button")).toBeNull();
+  });
+
+  it("default is a thin indicator: waiting count + who sent them (D3/D5/D6)", () => {
     render(
       <TurnQueuePanel
         sessionId="s1"
         page={page([
-          summary("a", { status: "running", queue_position: 1 }),
-          summary("b", { status: "pending", queue_position: 2 }),
-          summary("c", { status: "queued", queue_position: 3 }),
-          summary("d", { status: "recovery_required", blocked_reason: "managed_result_oversize: artifact=/x" }),
+          summary("c", { status: "queued" }),
+          summary("e", { status: "queued", turn_source: "agent", sender_session_id: "1f9bce3f5a" }),
         ])}
-        ownedIds={owned("a", "b", "c", "d")}
+        ownedIds={owned("c", "e")}
       />,
     );
-    const cards = [...container.querySelectorAll("li[data-turn-id]")];
-    expect(cards.map((c) => c.getAttribute("data-turn-id"))).toEqual(["a", "b", "c", "d"]);
-    expect(cards[0].textContent).toContain("Working");
-    expect(cards[1].textContent).toContain("Starting");
-    expect(cards[2].textContent).toContain("Waiting");
-    expect(cards[3].textContent).toContain("Recovery required");
-    expect(cards[3].textContent).toContain("Result too large");
-    // Only the waiting human item offers edit/withdraw.
-    expect(cards[0].textContent).not.toContain("Edit");
-    expect(cards[2].textContent).toContain("Edit");
-    expect(container.querySelector("section")?.getAttribute("aria-label")).toBe("Turn queue");
-    // A finished exchange owns its id: the card yields (no duplicate).
-    render(<TurnQueuePanel sessionId="s1" page={page([summary("a", { status: "running" })])} ownedIds={owned()} />);
-    expect(container.querySelector("li[data-turn-id]")).toBeNull();
+    // Collapsed: a single control, no heavyweight panel.
+    expect(container.querySelector("section")).toBeNull();
+    const bar = button("Show turn queue");
+    expect(bar.textContent).toContain("2");
+    expect(bar.textContent).toContain("waiting");
+    expect(bar.textContent).toContain("You");
+    expect(bar.textContent).toContain("Agent 1f9bce3f");
+  });
+
+  it("shows ONLY waiting turns; an active/finished turn never appears here (D1/D6)", async () => {
+    render(
+      <TurnQueuePanel
+        sessionId="s1"
+        page={page(
+          [
+            summary("a", { status: "running", queue_position: 1 }),
+            summary("c", { status: "queued", queue_position: 2 }),
+          ],
+          { active_turn_id: "a", active_status: "running" },
+        )}
+        // Waiting-only ownership from the screen: the running turn is NOT owned.
+        ownedIds={owned("c")}
+      />,
+    );
+    await expand();
+    const rows = [...container.querySelectorAll("li[data-turn-id]")];
+    expect(rows.map((r) => r.getAttribute("data-turn-id"))).toEqual(["c"]);
+    expect(container.textContent).not.toContain("running");
+  });
+});
+
+describe("TurnQueuePanel — read, edit (D7), withdraw (D8)", () => {
+  it("opens a row to the full message, then Edit focuses an expanded editor (D4/D7)", async () => {
+    apiMock.turnRequest.mockResolvedValueOnce(detail("c", { revision: 1, body: "the full prompt text" }));
+    render(<TurnQueuePanel sessionId="s1" page={page([summary("c")])} ownedIds={owned("c")} />);
+    await expand();
+    await click(button("Open request #1 from You"));
+    expect(container.textContent).toContain("the full prompt text");
+    await click(button("Edit request #1"));
+    const area = container.querySelector("textarea") as HTMLTextAreaElement;
+    expect(area.value).toBe("the full prompt text");
+    // D7: the editor is focused and roomy (not the old tiny, unfocused box).
+    expect(document.activeElement).toBe(area);
+    expect(area.rows).toBeGreaterThanOrEqual(8);
   });
 
   it("edit sends the expected revision; 409 refetches and keeps the draft", async () => {
@@ -138,9 +180,11 @@ describe("TurnQueuePanel", () => {
     apiMock.turnRequest.mockResolvedValueOnce(detail("c", { revision: 2, body: "someone else's text" }));
     apiMock.editTurnRequest.mockResolvedValueOnce(detail("c", { revision: 3 }));
     render(<TurnQueuePanel sessionId="s1" page={page([summary("c")])} ownedIds={owned("c")} />);
+    await expand();
+    await click(button("Open request #1 from You"));
     await click(button("Edit request #1"));
     const area = container.querySelector("textarea") as HTMLTextAreaElement;
-    expect(area.value).toBe("full body c"); // full intent from the one-item read
+    expect(area.value).toBe("full body c");
     typeInto(area, "my edit");
     await click(button("Save"));
     expect(apiMock.editTurnRequest).toHaveBeenLastCalledWith(expect.anything(), "c", 1, "my edit");
@@ -156,20 +200,24 @@ describe("TurnQueuePanel", () => {
     apiMock.editTurnRequest.mockRejectedValueOnce(new ApiError(409, "consumed"));
     apiMock.turnRequest.mockResolvedValueOnce(detail("c", { status: "running", revision: 1 }));
     render(<TurnQueuePanel sessionId="s1" page={page([summary("c")])} ownedIds={owned("c")} />);
+    await expand();
+    await click(button("Open request #1 from You"));
     await click(button("Edit request #1"));
     typeInto(container.querySelector("textarea") as HTMLTextAreaElement, "too late");
     await click(button("Save"));
     expect(container.textContent).toContain("Already started");
     const area = container.querySelector("textarea") as HTMLTextAreaElement;
-    expect(area.value).toBe("too late"); // the operator's text is kept
+    expect(area.value).toBe("too late");
     expect(area.readOnly).toBe(true);
     expect(button("Save").disabled).toBe(true);
     expect(apiMock.editTurnRequest).toHaveBeenCalledTimes(1);
   });
 
-  it("Escape cancels an edit (keyboard)", async () => {
+  it("Escape leaves the editor without saving (keyboard)", async () => {
     apiMock.turnRequest.mockResolvedValueOnce(detail("c"));
     render(<TurnQueuePanel sessionId="s1" page={page([summary("c")])} ownedIds={owned("c")} />);
+    await expand();
+    await click(button("Open request #1 from You"));
     await click(button("Edit request #1"));
     const area = container.querySelector("textarea") as HTMLTextAreaElement;
     await act(async () => {
@@ -179,8 +227,9 @@ describe("TurnQueuePanel", () => {
     expect(apiMock.editTurnRequest).not.toHaveBeenCalled();
   });
 
-  it("withdraw affects only the selected item, after confirmation, and drops its optimistic bubble", async () => {
-    apiMock.withdrawTurnRequest.mockResolvedValueOnce(summary("c", { status: "withdrawn", revision: 2 }));
+  it("withdraw affects only the selected item, after confirmation, and drops its optimistic bubble (D8)", async () => {
+    apiMock.turnRequest.mockResolvedValueOnce(detail("c", { revision: 4 }));
+    apiMock.withdrawTurnRequest.mockResolvedValueOnce(summary("c", { status: "withdrawn", revision: 5 }));
     useSentStore.setState({
       bySession: { s1: [
         { id: "m1", sessionId: "s1", text: "c", createdAt: "t", delivery: "acknowledged", taskId: "c" },
@@ -194,6 +243,8 @@ describe("TurnQueuePanel", () => {
         ownedIds={owned("c", "e")}
       />,
     );
+    await expand();
+    await click(button("Open request #1 from You"));
     await click(button("Withdraw request #1"));
     expect(apiMock.withdrawTurnRequest).not.toHaveBeenCalled();
     await click(button("Confirm withdraw"));
@@ -201,37 +252,34 @@ describe("TurnQueuePanel", () => {
     expect(apiMock.withdrawTurnRequest).toHaveBeenCalledWith(expect.anything(), "c", 4);
     expect(useSentStore.getState().bySession.s1.map((m) => m.taskId)).toEqual(["e"]);
   });
+});
 
-  it("pause/resume toggles the persistent queue hold and shows the paused state", async () => {
+describe("TurnQueuePanel — pause (D9), recovery incl. requeue (F1), errors", () => {
+  it("pause/resume lives in the expanded header and toggles the hold", async () => {
     apiMock.resumeTurnRequests.mockResolvedValueOnce({ session_id: "s1", paused: false, hold: null });
     render(<TurnQueuePanel sessionId="s1" page={page([], { paused: true })} ownedIds={owned()} />);
+    // Collapsed bar still flags the paused state so it's discoverable.
+    expect(button("Show turn queue").textContent).toContain("paused");
+    await expand();
     expect(container.textContent).toContain("Queue paused");
-    expect(button("Resume queue").getAttribute("aria-pressed")).toBe("true");
-    await click(button("Resume queue"));
+    await click(button("Resume"));
     expect(apiMock.resumeTurnRequests).toHaveBeenCalledWith(expect.anything(), "s1");
     expect(apiMock.pauseTurnRequests).not.toHaveBeenCalled();
   });
 
-  it("an operator-stop hold is visible with no cards and offers Resume, never Pause", async () => {
-    // [S6-F4] e.g. a stop that held the session without the pause flag.
+  it("an operator-stop hold with nothing waiting shows Resume, never Pause", async () => {
     apiMock.resumeTurnRequests.mockResolvedValueOnce({ session_id: "s1", paused: false, hold: null });
     render(
       <TurnQueuePanel sessionId="s1" page={page([], { paused: false, hold: "operator_stop" })} ownedIds={owned()} />,
     );
+    await expand();
     expect(container.textContent).toContain("Stopped by operator");
-    expect(container.textContent).not.toContain("Pause queue");
-    expect(button("Resume queue").getAttribute("aria-pressed")).toBe("true");
-    await click(button("Resume queue"));
-    expect(apiMock.resumeTurnRequests).toHaveBeenCalledWith(expect.anything(), "s1");
-    expect(apiMock.pauseTurnRequests).not.toHaveBeenCalled();
+    expect(button("Resume")).toBeTruthy();
+    expect([...container.querySelectorAll("button")].some((b) => b.textContent?.trim() === "Pause")).toBe(false);
   });
 
-  it("an enrolled session with no cards, no pause and no hold renders nothing", () => {
-    render(<TurnQueuePanel sessionId="s1" page={page([])} ownedIds={owned()} />);
-    expect(container.querySelector("section")).toBeNull();
-  });
-
-  it("[Stage 8a] finished turns whose effects failed are surfaced even with no cards", () => {
+  it("[Stage 8a] failed post-commit effects surface with a drill-down", async () => {
+    apiMock.turnRequest.mockResolvedValueOnce(detail("t9", { effects_error: "history write timed out" }));
     render(
       <TurnQueuePanel
         sessionId="s1"
@@ -239,37 +287,65 @@ describe("TurnQueuePanel", () => {
         ownedIds={owned()}
       />,
     );
-    const text = container.textContent ?? "";
-    expect(text).toContain("2 finished turns: reply delivery failed");
-    expect(container.querySelector("[title='t9']")).not.toBeNull();
+    await expand();
+    expect(container.textContent).toContain("2 finished turns: reply delivery failed");
+    await click(button("View error"));
+    expect(container.textContent).toContain("history write timed out");
   });
 
-  it("recovery resolution requires an explicit acknowledgement", async () => {
+  it("recovery_required resolves to cancel/fail only, gated on an acknowledgement", async () => {
     apiMock.resolveTurnRecovery.mockResolvedValueOnce({ ok: true, task_id: "d", status: "failed" });
     render(
       <TurnQueuePanel
         sessionId="s1"
-        page={page([summary("d", { status: "recovery_required", blocked_reason: "carrier lost" })])}
-        ownedIds={owned("d")}
+        page={page(
+          [summary("d", { status: "recovery_required", blocked_reason: "carrier lost" })],
+          { active_turn_id: "d", active_status: "recovery_required" },
+        )}
+        ownedIds={owned()}
       />,
     );
+    await expand();
     await click(button("Resolve…"));
+    // requeue is NOT offered after start.
+    expect([...container.querySelectorAll("button")].some((b) => b.textContent?.trim() === "Requeue")).toBe(false);
     expect(button("Mark failed").disabled).toBe(true);
     const box = container.querySelector("input[type=checkbox]") as HTMLInputElement;
     await click(box);
     await click(button("Mark failed"));
-    expect(apiMock.resolveTurnRecovery).toHaveBeenCalledWith(expect.anything(), "d", "failed", expect.any(String));
+    expect(apiMock.resolveTurnRecovery).toHaveBeenCalledWith(expect.anything(), "d", "failed", expect.any(String), true);
+  });
+
+  it("a never-started claim that stalled offers Requeue with no acknowledgement (F1)", async () => {
+    apiMock.resolveTurnRecovery.mockResolvedValueOnce({ ok: true, task_id: "k", status: "queued" });
+    render(
+      <TurnQueuePanel
+        sessionId="s1"
+        page={page(
+          [summary("k", { status: "claimed", blocked_reason: "carrier_offline: worker-a" })],
+          { active_turn_id: "k", active_status: "claimed" },
+        )}
+        ownedIds={owned()}
+      />,
+    );
+    await expand();
+    await click(button("Resolve…"));
+    // No acknowledgement checkbox for a safe requeue.
+    expect(container.querySelector("input[type=checkbox]")).toBeNull();
+    await click(button("Requeue"));
+    expect(apiMock.resolveTurnRecovery).toHaveBeenCalledWith(expect.anything(), "k", "requeue", expect.any(String), false);
   });
 
   it("a non-409 failure keeps state and says so (no silent success)", async () => {
     apiMock.pauseTurnRequests.mockRejectedValueOnce(new ApiError(503, "db_unavailable"));
     render(<TurnQueuePanel sessionId="s1" page={page([summary("c")])} ownedIds={owned("c")} />);
-    await click(button("Pause queue"));
+    await expand();
+    await click(button("Pause"));
     expect(container.querySelector("[role=alert]")?.textContent).toContain("Not saved");
   });
 });
 
-describe("useSessionTimeline × queue cards", () => {
+describe("useSessionTimeline × queue cards (D1 root-cause fix)", () => {
   function Probe({ turns, queueIds }: { turns: RawTranscriptTurn[]; queueIds: ReadonlySet<string> }) {
     const items = useSessionTimeline("s1", undefined, turns, [], queueIds);
     return (
@@ -283,23 +359,32 @@ describe("useSessionTimeline × queue cards", () => {
     );
   }
 
-  it("a waiting/started prompt is never shown as a consumed exchange; acknowledged sends reconcile by id", () => {
+  const turns: RawTranscriptTurn[] = [
+    { task_id: "done", timestamp: "t", success: true, status: "completed", instruction: "old ask", result: "old answer", file_count: 0, usage: null },
+    { task_id: "run", timestamp: "t", success: true, status: "running", instruction: "running ask", result: "", file_count: 0, usage: null },
+  ];
+
+  it("a WAITING prompt is owned by its card; acknowledged waiting sends reconcile by id", () => {
     useSentStore.setState({
       bySession: { s1: [
         { id: "m1", sessionId: "s1", text: "queued text", createdAt: "t", delivery: "acknowledged", taskId: "q1" },
         { id: "m2", sessionId: "s1", text: "still sending", createdAt: "t", delivery: "sending", taskId: null },
       ] },
     });
-    const turns: RawTranscriptTurn[] = [
-      { task_id: "done", timestamp: "t", success: true, status: "completed", instruction: "old ask", result: "old answer", file_count: 0, usage: null },
-      { task_id: "run", timestamp: "t", success: true, status: "running", instruction: "running ask", result: "", file_count: 0, usage: null },
-    ];
-    render(<Probe turns={turns} queueIds={new Set(["run", "q1"])} />);
+    // Waiting-only ownership: only the queued turn id q1 is owned.
+    render(<Probe turns={turns} queueIds={new Set(["q1"])} />);
     const text = container.textContent ?? "";
     expect(text).toContain("old ask");
     expect(text).toContain("old answer");
-    expect(text).not.toContain("running ask"); // owned by its "Working" card
     expect(text).not.toContain("queued text"); // owned by its "Waiting" card
     expect(text).toContain("still sending"); // not yet acknowledged: optimistic bubble
+  });
+
+  it("an ACTIVE turn is no longer hidden by the queue — it renders in the chat (D1)", () => {
+    useSentStore.setState({ bySession: {} });
+    // The running turn is NOT in the waiting-only queueIds, so its instruction
+    // bubble appears in the transcript instead of vanishing into the queue.
+    render(<Probe turns={turns} queueIds={new Set(["q1"])} />);
+    expect(container.textContent).toContain("running ask");
   });
 });

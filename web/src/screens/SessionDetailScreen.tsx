@@ -47,7 +47,7 @@ import { GitPanelSheet } from "../components/sessions/GitPanelSheet";
 import { SessionKeepSheet } from "../components/sessions/SessionKeepSheet";
 import { useSessions, useApprovals, useSessionMessages, useArtifacts, useArtifact, useSessionTurns, useSessionTurnQueue, useSessionUsage, useSessionActivity, useJobs, useCacheHeartbeats } from "../hooks/useLiveData";
 import { TurnQueuePanel } from "../components/timeline/TurnQueuePanel";
-import { queueOwnedIds, transcriptFinishedIds } from "../lib/turnQueue";
+import { queueOwnedIds, transcriptFinishedIds, waitingTurnIds } from "../lib/turnQueue";
 import { retiredBackendReason } from "../lib/backends";
 import { compactTokens } from "../components/timeline/SessionTurns";
 import { useSessionAffiliations } from "../hooks/useWork";
@@ -612,8 +612,11 @@ export function SessionDetailScreen() {
   const { data: activity } = useSessionActivity(id, 30);
   // Pending/terminal dedup by durable id: a finished exchange wins over a card.
   const finishedIds = useMemo(() => transcriptFinishedIds(turns ?? []), [turns]);
+  // [A99 D1] The queue owns ONLY still-waiting turns. The instant a turn starts,
+  // it leaves this set, so the transcript (and its optimistic bubble) renders it
+  // in the chat — an active/finished turn is never hidden inside the queue.
   const queueIds = useMemo(
-    () => queueOwnedIds((turnQueue?.turns ?? []).map((turn) => turn.id), finishedIds),
+    () => queueOwnedIds(waitingTurnIds(turnQueue?.turns ?? []), finishedIds),
     [turnQueue, finishedIds],
   );
   const timeline = useSessionTimeline(id, session, turns ?? [], approvals ?? [], queueIds);
