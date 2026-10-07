@@ -128,8 +128,52 @@ worker → confirm the next task dispatches `create_session` (not `resume_sessio
 injected `<prior_context>`, and continues. Deferred to avoid spawning a stray worker on the shared tree
 without a go-ahead.
 
-**Next: O2** — route `session_lost` / `ERROR`+`driver_lost` to A55 crash-respawn (handles the
-die-at-idle case where no next task ever comes, which O1 does not cover).
+**O2 — BUILT (crash-respawn for ERROR+driver_lost).** The A55 wake-path respawn trigger (only
+`None/CLOSED/CANCELLED`) now also fires for a session left `ERROR` + `driver_status=='lost'` by a
+restart (discriminated by `driver_lost` so a genuine ERROR is untouched). Covers the case where O1's
+fresh-fork itself failed, or a `session_lost` turn marked the Manager ERROR before O1 could fork — the
+incident's 02:51 + 07:57 identical re-pokes. Opt-out `RESPAWN_ON_RESTART_ERROR_DISABLED` (default ON).
+Predicate extracted to `_is_restart_dead_session` (5 unit tests).
+
+**O3 — ALREADY BUILT (verified), no change needed.** Incarnation-change reconciliation is complete:
+`NodeRegistry.register` (`src/control/node_registry.py:126`) diffs old vs new incarnation and, on
+change, releases claims + revokes managed grants + `mark_driver_sessions_lost_for_node`
+(`db.py`) → sets `driver_status='lost'` on that node's idle/awaiting SDK sessions. This is HOW the
+incident's sessions got `driver_status='lost'`. The missing half was the *reaction* (O1/O2), not the
+detection.
+
+**O4 — SATISFIED by O1 + existing single-flight (no new code).** With O1 a lost session's wake
+dispatches `create_session` (fresh), so restart-context is injected into a FRESH session, never a
+corpse. The wake path already skips BUSY sessions and holds a single-flight claim lease, so the
+02:51/07:57 re-poke + 01:58:59 double-dispatch cannot recur (a fork in flight → session BUSY → later
+wakes skip). Documented here rather than adding a redundant guard.
+
+**O5 — BUILT (operator notification).** `TaskOrchestrator._detect_node_restarts_once` (in the stale-busy
+reconcile loop) tracks per-node incarnations and fires `NotificationService.notify_restart` (best-effort
+Web Push + Telegram, mirrors the quota-resume seam) ONCE per detected flip — the signal that was missing
+(the operator got no Telegram when Horse restarted). Opt-out `RESTART_NOTIFY_DISABLED` (default ON).
+First sighting seeds a baseline (no spurious notify). 3 unit tests.
+
+**O6 — SATISFIED by O1 + single-flight (no new code).** O1 forks ONCE (`create_session` mints one new
+backend session = one cache creation); on success `driver_status→live`, so later turns resume warm.
+The expensive repeated cold-resume (the incident's ~1.2M cache-write) was the OLD resume-into-corpse
+loop, which O1 removes. BUSY-skip + claim lease prevent a concurrent second fork. Residual: the single
+fork still pays one cache creation — unavoidable when the in-memory driver is gone.
+
+**O7 — BUILT (worker memory watchdog).** `WorkerAgent._memory_watchdog_sample` samples the worker
+process-tree RSS each heartbeat, warns (`event=worker_memory_pressure`, throttled 1/min) and rides a
+`memory` field on the heartbeat `live_state` (LiveStatePayload is `extra="allow"`) when over threshold
+(`WORKER_MEMORY_WATCHDOG_PCT` default 85, or `WORKER_MEMORY_WATCHDOG_MB`). This is the OOM early-warning
+trail that was entirely absent. Opt-out `WORKER_MEMORY_WATCHDOG_DISABLED` (default ON). 2 unit tests.
+*(Gateway-side restart detection already logs `event=node_restart_detected` via O5; node-offline already
+logs `event=node_offline`.)*
+
+**Flags registered (all default to the ON behaviour):** `RESTART_LOST_SESSION_FORK_DISABLED` (O1),
+`RESPAWN_ON_RESTART_ERROR_DISABLED` (O2), `RESTART_NOTIFY_DISABLED` (O5),
+`WORKER_MEMORY_WATCHDOG_DISABLED` (O7) — all in `RUNTIME_FLAG_DEFINITIONS`.
+
+**Remaining to fully close:** deploy O2/O5/O7 (gateway redeploy for O2/O5; O7 is worker-side — lands on
+the next worker restart, operator-gated) + the live restart drill with a dedicated throwaway worker.
 
 ## SCOPE OUT
 - The A82 managed-turn (message-queue) cutover — these sessions are NOT enrolled; this fix targets the
