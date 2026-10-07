@@ -2126,9 +2126,23 @@ class TaskOrchestrator(ITaskOrchestrator):
         # Manager). Escalate ONCE instead of returning 0 in silence. A transient
         # non-waiting state (IDLE just-restored, BUSY mid-turn) is NOT a strand — it
         # resolves on its own — so only CLOSED/CANCELLED/missing escalates.
+        #
+        # [A98 O2] A worker restart can land the Manager in ERROR with
+        # driver_status='lost' (the fresh-fork create_session itself failed, or the
+        # session was marked ERROR by a terminal 'session_lost' turn before O1 could
+        # fork it). That is a dead session too — the restart killed it — but ERROR is
+        # NOT CLOSED/CANCELLED, so pre-A98 it fell through to a plain wake that the
+        # worker refuses forever (the incident's 02:51 + 07:57 identical re-pokes).
+        # Treat ERROR+driver_lost as crash-respawn-eligible (discriminated by
+        # driver_status='lost' so a genuine non-restart ERROR is untouched).
+        # Class-referenced (not self.) so duck-typed fakes that borrow
+        # _continue_case_once don't need to re-declare these two staticmethods.
+        _restart_errored = TaskOrchestrator._is_restart_dead_session(
+            session, TaskOrchestrator._respawn_on_restart_error_enabled()
+        )
         if session is None or session.status in (
             SessionStatus.CLOSED, SessionStatus.CANCELLED,
-        ):
+        ) or _restart_errored:
             # [A55 / M3.4 Job 3] CRASH-RESPAWN. The bound Manager session is dead
             # (gone/closed) but the Case is genuinely open (the 'blocked' guard
             # above already excluded operator-halted Cases) and SATISFIED — its
@@ -4665,6 +4679,10 @@ class TaskOrchestrator(ITaskOrchestrator):
                 except Exception as e:
                     logger.debug("event=stale_busy_reconcile_failed err=%s", e)
                 try:
+                    await self._detect_node_restarts_once()
+                except Exception as e:
+                    logger.debug("event=detect_node_restarts_failed err=%s", e)
+                try:
                     await self._reap_idle_warm_workers_once()
                 except Exception as e:
                     logger.debug("event=idle_warm_worker_reap_failed err=%s", e)
@@ -4672,6 +4690,58 @@ class TaskOrchestrator(ITaskOrchestrator):
         except asyncio.CancelledError:
             logger.info("event=stale_busy_reconciler_stopped")
             raise
+
+    async def _detect_node_restarts_once(self) -> None:
+        """[A98 O5] Observe node incarnation flips and notify the operator ONCE per
+        restart. The session mark-lost + claim release already happen in
+        NodeRegistry.register (O3); O1/O2 then re-establish each session. This adds
+        the coherent operator-facing signal that was MISSING in the 2026-10-07
+        incident — the operator got no Telegram/push when Horse restarted.
+
+        First observation of a node seeds the baseline (no notify); only a changed
+        incarnation on an already-seen node fires. Best-effort; never raises.
+        """
+        from src.control.db import restart_notify_disabled
+        if restart_notify_disabled():
+            return
+        db = get_db()
+        if db is None:
+            return
+        rows = await asyncio.to_thread(db.list_nodes)
+        seen = getattr(self, "_seen_incarnations", None)
+        if seen is None:
+            seen = {}
+            self._seen_incarnations = seen
+        for row in rows or []:
+            node_id = row.get("node_id")
+            inc = row.get("incarnation_id")
+            if not node_id or not inc:
+                continue
+            prev = seen.get(node_id)
+            seen[node_id] = inc
+            if prev is None or prev == inc:
+                continue  # first sighting (baseline) or unchanged
+            # Incarnation flipped since we last looked ⇒ the worker/node restarted.
+            try:
+                lost = await asyncio.to_thread(
+                    db.count_lost_sessions_for_node, node_id
+                )
+            except Exception:
+                lost = 0
+            logger.warning(
+                "event=node_restart_detected node_id=%s old_incarnation=%s "
+                "new_incarnation=%s lost_sessions=%d",
+                node_id, prev, inc, lost,
+            )
+            notifier = getattr(self, "notifier", None)
+            if notifier is not None:
+                with contextlib.suppress(Exception):
+                    await notifier.notify_restart(
+                        node_id=node_id,
+                        lost_sessions=lost,
+                        old_incarnation=prev,
+                        new_incarnation=inc,
+                    )
 
     def _repair_managed_stale_busy(self, session: Any, row: Dict[str, Any]) -> bool:
         """[A82 Stage 6] A BUSY session whose last turn is MANAGED: an open
@@ -7771,6 +7841,26 @@ class TaskOrchestrator(ITaskOrchestrator):
         # out and restore the legacy resume-into-a-corpse behaviour.
         from src.control.db import restart_lost_session_fork_disabled
         return not restart_lost_session_fork_disabled()
+
+    @staticmethod
+    def _respawn_on_restart_error_enabled() -> bool:
+        # [A98 O2] ON by default. Set RESPAWN_ON_RESTART_ERROR_DISABLED=true to opt
+        # out (then an ERROR+driver_lost Manager strands instead of respawning).
+        from src.control.db import respawn_on_restart_error_disabled
+        return not respawn_on_restart_error_disabled()
+
+    @staticmethod
+    def _is_restart_dead_session(session: Any, respawn_enabled: bool) -> bool:
+        """[A98 O2] True when a worker restart left this Manager session ERROR +
+        driver_status='lost' — a dead session that crash-respawn should own (like
+        CLOSED/CANCELLED), discriminated by driver_status='lost' so a genuine
+        non-restart ERROR is untouched. ``respawn_enabled`` gates the behaviour."""
+        return bool(
+            session is not None
+            and getattr(session, "status", None) == SessionStatus.ERROR
+            and getattr(session, "driver_status", "") == "lost"
+            and respawn_enabled
+        )
 
     async def _maybe_inject_restart_recovery_context(self, task: "Task") -> None:
         """Prepend recent completed turns when a session's driver was lost on restart.
