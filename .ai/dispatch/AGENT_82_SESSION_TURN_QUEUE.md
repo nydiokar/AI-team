@@ -1,12 +1,12 @@
 ```yaml
 job_id: AGENT_82_SESSION_TURN_QUEUE
 created_at: "2026-09-22T11:39:06.841262+00:00"        # CANONICAL — set once at dispatch, never derive again
-status: active              # ready | active | blocked | done | dead
+status: done              # ready | active | blocked | done | dead
 owner: worker-a82-stage4e
 depends_on: []
 results_ref: .ai/dispatch/A82_E2E_CERTIFICATION.md#A82             # -> DISPATCH_LOG.md section with the verdict prose
 evidence: tests/test_turn_queue_respawn_revalidation.py                  # artifact paths that PROVE it ran (checked to exist)
-updated_at: "2026-10-07T16:30:23.842925+00:00"
+updated_at: "2026-10-07T19:44:14.106355+00:00"
 ```
 
 # A82 — Build the unified session turn queue
