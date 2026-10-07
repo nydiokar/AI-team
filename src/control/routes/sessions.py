@@ -276,6 +276,14 @@ def build_router(
                             "session": await asyncio.to_thread(core._session_payload, session, with_queue=True)}
                     idem_put("instructions", idempotency_key, resp)
                     return JSONResponse(resp)
+                # [A82 Stage 8a, review F2] No pathway for a non-enrolled session
+                # turn after the cutover: refuse BEFORE the optimistic BUSY write.
+                refuse = getattr(orchestrator, "refuse_unenrolled_session_turn", None)
+                if callable(refuse):
+                    try:
+                        refuse(session.session_id, enrolled=False)
+                    except TurnQueueError as err:
+                        raise core._turn_queue_http(err)
                 # Status write (BUSY + last_user_message) lives on the service.
                 orchestrator.session_service.mark_busy(
                     session.session_id, last_user_message=body.description)

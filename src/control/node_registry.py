@@ -366,10 +366,11 @@ class NodeRegistry:
 
     def _carrier_back_online(self, node_id: str) -> None:
         """[A82 pre-cutover rework, F6] Release the node's ``carrier_offline``
-        holds and wake the turn scheduler (an in-process hint: the task server
-        is embedded in the gateway; out of process the cleared ``blocked_until``
-        is picked up by the scheduler's ≤60 s safety-net pass). Best-effort:
-        the backoff still bounds activation if this fails."""
+        holds and wake the turn scheduler (an in-process hint, effective only
+        when this task server runs inside the gateway process; with a separate
+        task-server process the cleared ``blocked_until`` is picked up by the
+        gateway scheduler's ≤60 s safety-net pass). Best-effort: the backoff
+        still bounds activation if this fails."""
         try:
             from src.control.db import get_db
             db = get_db()
@@ -383,8 +384,9 @@ class NodeRegistry:
 
     def _note_managed_released(self, count: int) -> None:
         """[A82 Stage 7] Released superseded grants re-entered the waiting count:
-        raise the shared allowance + hint the scheduler (in-process: the task
-        server is embedded in the gateway). The scheduler refresh is the backstop."""
+        raise this process's allowance + hint its scheduler (effective only
+        when the task server runs inside the gateway process). With a separate
+        task-server process the gateway scheduler's DB refresh is the backstop."""
         try:
             from src.control.turn_scheduler import notify_managed_released
             notify_managed_released(count)

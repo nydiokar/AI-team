@@ -68,6 +68,8 @@ def _scrub_surrogates(obj: Any) -> Any:
 # always still carries {ok, reason} so the client owns the wording (no prose here).
 _REASON_STATUS = {
     "unknown_backend": 400,
+    # [A82 Stage 8a] retired backend (e.g. the OpenCode CLI): use opencode-server
+    "backend_retired": 410,
     "unknown_model": 400,
     "unknown_effort": 400,
     "invalid_repo_path": 400,
@@ -440,6 +442,10 @@ class TurnRequestPageOut(BaseModel):
     enrolled: bool
     paused: bool
     hold: Optional[str] = None
+    # [A82 Stage 8a] Finished turns of this session whose post-commit effects
+    # (notification / history / telemetry) ended ``failed`` + the latest one.
+    effects_failed: int = 0
+    effects_failed_turn_id: Optional[str] = None
 
 
 class TurnRequestDetailOut(TurnRequestSummaryOut):
@@ -448,6 +454,10 @@ class TurnRequestDetailOut(TurnRequestSummaryOut):
     body: str = ""
     completed_at: Optional[str] = None
     flow_run_id: Optional[str] = None
+    # [A82 Stage 8a] A84 post-commit effects outcome of a finished turn
+    # (``failed`` = the reply/notification may never have reached the user).
+    effects_state: Optional[str] = None
+    effects_error: Optional[str] = None
 
     @classmethod
     def from_row(cls, row: Dict[str, Any]) -> "TurnRequestDetailOut":

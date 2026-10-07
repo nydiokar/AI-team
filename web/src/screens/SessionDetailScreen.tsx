@@ -48,6 +48,7 @@ import { SessionKeepSheet } from "../components/sessions/SessionKeepSheet";
 import { useSessions, useApprovals, useSessionMessages, useArtifacts, useArtifact, useSessionTurns, useSessionTurnQueue, useSessionUsage, useSessionActivity, useJobs, useCacheHeartbeats } from "../hooks/useLiveData";
 import { TurnQueuePanel } from "../components/timeline/TurnQueuePanel";
 import { queueOwnedIds, transcriptFinishedIds } from "../lib/turnQueue";
+import { retiredBackendReason } from "../lib/backends";
 import { compactTokens } from "../components/timeline/SessionTurns";
 import { useSessionAffiliations } from "../hooks/useWork";
 import { useSessionTimeline } from "../hooks/useSessionTimeline";
@@ -621,6 +622,8 @@ export function SessionDetailScreen() {
   );
   const running = session?.opState === "running";
   const closed = session?.lifecycle === "closed";
+  // [A82 Stage 8a] A retired-backend session stays readable; it takes no turns.
+  const retiredReason = retiredBackendReason(session?.backend);
   // Only treat as "loading" on the very first fetch — subsequent polls use
   // placeholderData so they never wipe the existing conversation.
   const loading = sessionsLoading || (messagesLoading && !messagesFetched);
@@ -1338,7 +1341,17 @@ export function SessionDetailScreen() {
                 <ContextFillGauge contextFill={activity.contextFill} />
               </div>
             )}
-            <Composer sessionId={id} running={running} />
+            {retiredReason ? (
+              <div
+                role="status"
+                className="border-t border-hairline bg-surface-1/95 px-4 py-3 text-[13px] text-warn backdrop-blur-xl"
+                style={{ paddingBottom: "max(0.75rem, env(safe-area-inset-bottom))" }}
+              >
+                {retiredReason}
+              </div>
+            ) : (
+              <Composer sessionId={id} running={running} />
+            )}
           </>
         ) : id ? (
           // Closed sessions (e.g. a completed one-off opened from a push

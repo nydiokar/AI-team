@@ -34,6 +34,8 @@ Classes: **C** controller-canonical · **W** worker-private · **P** cache/proje
 | LLM telemetry (`llm_*`) | C | controller ingest (`/telemetry/batches`) | controller | HTTP **plus** a local mirror when the controller URL looked remote (`telemetry_sink.py:466-477`); live worker dropped it (tailnet IP == own IP) but still created/migrated the DB | HTTP only; spool (`logs/telemetry_spool`) is the durability layer |
 | Telemetry spool `logs/telemetry_spool/*.json` | W | worker | worker (replay) | unchanged | unchanged — bounded by `TELEMETRY_SPOOL_MAX_BYTES`, rebuildable (only unsent batches) |
 | `logs/events.ndjson`, job logs `.ai/job_*.log`, `<repo>/uploads/` | W | worker | worker / operator | unchanged | unchanged |
+| A82 managed-result spool `<WORKER_STATE_DIR or logs/carrier_state>/<node_id>/managed_result_spool/*.json` | W | carrier (worker) | carrier (boot replay, retry until a matching receipt) | — | unchanged — a delivery obligation, not execution intent: removed only on a receipt matching task + claim token; bounded 8 MiB/envelope, 128 MiB/carrier (`src/worker/managed_result_spool.py`) |
+| A82 `ManagedClaimStore` `<same state dir>/managed_claims/<task_id>.json` | W | carrier (written at claim, before start) | carrier (restart recovery of every held managed attempt) | — | unchanged — write-ahead `invoked` flag; removed only on receipt / acknowledged release / resolved recovery (`ManagedClaimStore`) |
 | `$CODEX_HOME/gateway-ownership.sqlite3` | W (host) | backend on that host | same | unchanged | unchanged — process-ownership fencing, host-scoped by design |
 | Worker `state/quota_windows.db` | P (worker-local observation cache) | worker prewarmer coordinator | worker prewarmer only | unchanged | unchanged — see §4 R2 |
 | Controller `quota_windows.db` | C | controller (`/telemetry/quota-observation` ingest) | controller quota API | — | — |
@@ -169,4 +171,4 @@ step 5) and the previous task-server image; the new routes are additive.
 - **Semantic:** A82 splits claiming into legacy `_fetch_pending` + `_fetch_pending_managed`. The
   `_controller_state_ready()` gate must cover **both** (managed claims too) after the merge.
 - A82's worker-local `ManagedClaimStore` and managed-result spool are worker-private state;
-  add them to §2 when A82 merges.
+  recorded in §2 (A82 Stage 8a).

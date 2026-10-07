@@ -140,6 +140,25 @@ def _isolate_turn_allowance(monkeypatch):
     yield
 
 
+@pytest.fixture(autouse=True)
+def _session_turns_route_without_mesh(monkeypatch):
+    """[A82 Stage 8a] This harness forces ``MESH_ENABLED=false`` for cost
+    safety (guard 2: no task server is ever started), yet the managed-queue
+    suites model registered carriers in the per-test DB. The production
+    no-carrier policy (``_REFUSE_SESSION_TURNS_WITHOUT_MESH``: a session turn
+    with the mesh off ⇒ typed ``carrier_required``) would therefore refuse
+    every session turn here, so the harness routes them normally; the policy
+    itself is asserted explicitly in ``tests/test_turn_queue_stage8a.py``."""
+    from src.orchestrator import TaskOrchestrator
+
+    monkeypatch.setattr(TaskOrchestrator, "_REFUSE_SESSION_TURNS_WITHOUT_MESH", False)
+    # Likewise the cutover invariant (non-enrolled session turns / unenroll
+    # refused): off here so the legacy session branches that remain until
+    # Stage 8b stay exercised; asserted on in test_turn_queue_stage8a.py (S8-11).
+    monkeypatch.setattr(TaskOrchestrator, "_LEGACY_SESSION_EXECUTION_RETIRED", False)
+    yield
+
+
 # --- 4. e2e marker + opt-in gate --------------------------------------------
 
 def pytest_addoption(parser):

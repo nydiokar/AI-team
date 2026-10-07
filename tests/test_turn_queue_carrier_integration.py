@@ -724,7 +724,12 @@ def test_INT12_foreign_turn_result_not_served_managed_turn_gets_its_own(db, tmp_
     assert r.status_code == 409
 
 
-def test_INT13_legacy_row_with_flag_on_still_uses_legacy_send(db, tmp_path, real_claude):
+def test_INT13_pre_cutover_legacy_row_never_runs_on_a_managed_worker(db, tmp_path, real_claude):
+    """[A82 Stage 8a] Converted from ``..._still_uses_legacy_send``: a protocol-0
+    session EXECUTION row left pending from before the cutover is refused at
+    the claim — failed, terminal, never re-offered — and NO send of any kind
+    reaches the backend (no legacy send, no managed send)."""
+    from tests.stage8a_legacy import enqueue_pre_cutover
     from tests.test_turn_queue_sdk_ownership import _result
 
     real_claude.fake.replies["legacy prompt"] = [_result("legacy bare reply")]
@@ -733,19 +738,19 @@ def test_INT13_legacy_row_with_flag_on_still_uses_legacy_send(db, tmp_path, real
     w._backends = {"claude": real_claude.backend}
     db.upsert_session(Session(session_id="sess-13", backend="claude", repo_path="",
                               status=SessionStatus.IDLE, created_at=NOW, updated_at=NOW, machine_id=NODE))
-    db.enqueue_task("t-13", "sess-13", NODE, "claude", "resume_session", {
+    enqueue_pre_cutover(db, "t-13", "sess-13", NODE, "claude", "resume_session", {
         "prompt": "legacy prompt",
         "session": {"session_id": "sess-13", "backend": "claude", "repo_path": "",
                     "backend_session_id": "native-prev"},
     })
     _run_one(w, "t-13")
 
-    assert real_claude.calls == {"send": 1, "send_managed": 0, "run_managed_turn": 0}
+    assert real_claude.calls == {"send": 0, "send_managed": 0, "run_managed_turn": 0}
     posted = [c[1] for c in http.calls if c[0] == "POST"]
-    assert "/tasks/t-13/claim" in posted and "/tasks/t-13/result" in posted
-    assert not any("managed" in p or "recovery" in p for p in posted[1:])
-    assert _row(db, "t-13")["status"] == "completed"
-    assert json.loads(_row(db, "t-13")["result"])["output"] == "legacy bare reply"
+    assert "/tasks/t-13/claim" in posted and "/tasks/t-13/result" not in posted
+    row = _row(db, "t-13")
+    assert row["status"] == "failed" and "legacy_execution_refused" in str(row["error"])
+    assert asyncio.run(w._fetch_pending()) == []  # never re-offered
 
 
 # --------------------------------------------------------------------------- #

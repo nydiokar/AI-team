@@ -203,7 +203,9 @@ def test_MAJOR2_foreign_tool_result_user_message_does_not_claim_managed_turn():
 def test_D4_managed_send_requires_echo_replay_and_legacy_ignores_echoes(monkeypatch):
     from src.control.turn_queue import ManagedUnsupportedError
 
-    monkeypatch.delenv("WORKER_MANAGED_TURNS", raising=False)
+    # [Stage 8a cutover] flag now defaults ON; pin an explicit false value to
+    # exercise the replay-OFF branch.
+    monkeypatch.setenv("WORKER_MANAGED_TURNS", "0")
     assert _SDKSession("k", "/tmp", None, {})._replay_user_messages is False
     monkeypatch.setenv("WORKER_MANAGED_TURNS", "1")
     assert _SDKSession("k", "/tmp", None, {})._replay_user_messages is True

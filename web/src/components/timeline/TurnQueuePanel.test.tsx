@@ -231,6 +231,19 @@ describe("TurnQueuePanel", () => {
     expect(container.querySelector("section")).toBeNull();
   });
 
+  it("[Stage 8a] finished turns whose effects failed are surfaced even with no cards", () => {
+    render(
+      <TurnQueuePanel
+        sessionId="s1"
+        page={page([], { effects_failed: 2, effects_failed_turn_id: "t9" })}
+        ownedIds={owned()}
+      />,
+    );
+    const text = container.textContent ?? "";
+    expect(text).toContain("2 finished turns: reply delivery failed");
+    expect(container.querySelector("[title='t9']")).not.toBeNull();
+  });
+
   it("recovery resolution requires an explicit acknowledgement", async () => {
     apiMock.resolveTurnRecovery.mockResolvedValueOnce({ ok: true, task_id: "d", status: "failed" });
     render(

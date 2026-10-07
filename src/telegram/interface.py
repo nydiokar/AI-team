@@ -23,7 +23,7 @@ from src.core.process_utils import (
 from src.services.session_store import SessionStore
 from src.core.interfaces import Session, SessionStatus
 from src.services.path_resolver import PathResolver, PathResolution
-from src.backends.registry import valid_backend_names
+from src.backends.registry import retired_backend_reason, valid_backend_names
 from src.control.turn_queue import TurnAdmission, TurnQueueError
 
 try:
@@ -992,7 +992,7 @@ class TelegramInterface:
                 [InlineKeyboardButton(text="🧠 Claude", callback_data="session_new_backend:claude")],
                 [InlineKeyboardButton(text="🤖 Codex", callback_data="session_new_backend:codex")],
                 [InlineKeyboardButton(text="🛰 OpenCode (server)", callback_data="session_new_backend:opencode-server")],
-                [InlineKeyboardButton(text="🛠 OpenCode (CLI)", callback_data="session_new_backend:opencode")],
+                # [A82 Stage 8a] The OpenCode CLI backend is retired (no button).
                 [InlineKeyboardButton(text="✖️ Cancel", callback_data="session_new_cancel:")],
             ]
         )
@@ -1287,7 +1287,8 @@ class TelegramInterface:
             return None
         try:
             # [A82 Stage 6] Same "Stop active" as the web: persistent pause first.
-            managed = stop_managed(session, pause_queue=True)
+            # [Stage 8a, final-review F4] Blocking DB work: off the event loop.
+            managed = await asyncio.to_thread(stop_managed, session, pause_queue=True)
         except Exception as e:
             return f"❌ Cancellation not recorded: {e}"
         if managed is None:
@@ -2300,7 +2301,10 @@ class TelegramInterface:
             return
         backend, repo_path = args[0].lower(), " ".join(args[1:])
         if backend not in valid_backend_names():
-            await update.message.reply_text("❌ Backend must be 'claude', 'codex', 'opencode', or 'opencode-server'.")
+            await update.message.reply_text("❌ Backend must be 'claude', 'codex', or 'opencode-server'.")
+            return
+        if retired_backend_reason(backend):
+            await update.message.reply_text(f"❌ {retired_backend_reason(backend)}.")
             return
         resolution = self._path_resolver().resolve_session_path(repo_path)
         if not resolution.ok or not resolution.resolved_path:
@@ -2462,7 +2466,10 @@ class TelegramInterface:
         _valid_backends = valid_backend_names()
         backend = args[0].lower()
         if backend not in _valid_backends:
-            await update.message.reply_text("❌ Backend must be 'claude', 'codex', 'opencode', or 'opencode-server'.")
+            await update.message.reply_text("❌ Backend must be 'claude', 'codex', or 'opencode-server'.")
+            return
+        if retired_backend_reason(backend):
+            await update.message.reply_text(f"❌ {retired_backend_reason(backend)}.")
             return
 
         # Detect optional node_id: if args[1] matches a known online node treat as node
@@ -2619,6 +2626,9 @@ class TelegramInterface:
             if backend not in _valid_backends:
                 await query.edit_message_text("❌ Unknown backend.")
                 return
+            if retired_backend_reason(backend):  # a stale picker button
+                await query.edit_message_text(f"❌ {retired_backend_reason(backend)}.")
+                return
             # If mesh is enabled and workers are online, show node picker first.
             nodes = self._mesh_online_nodes()
             if nodes:
@@ -2655,6 +2665,9 @@ class TelegramInterface:
             if backend not in _valid_backends:
                 await query.edit_message_text("❌ Unknown backend.")
                 return
+            if retired_backend_reason(backend):  # a stale picker button
+                await query.edit_message_text(f"❌ {retired_backend_reason(backend)}.")
+                return
             node_label = "this server" if node_id == "__local__" else node_id
             markup = self._build_session_repo_markup(backend, node_id=node_id, back_to="node")
             if not self._repo_choices_for_node(node_id, limit=10):
@@ -2688,6 +2701,9 @@ class TelegramInterface:
                 return
             if backend not in _valid_backends:
                 await query.edit_message_text("❌ Unknown backend.")
+                return
+            if retired_backend_reason(backend):  # a stale picker button
+                await query.edit_message_text(f"❌ {retired_backend_reason(backend)}.")
                 return
             choices = self._repo_choices_for_node(node_id, limit=10)
             if repo_index < 0 or repo_index >= len(choices):
@@ -2805,7 +2821,9 @@ class TelegramInterface:
         # pause commits first; /session_resume is the explicit release.
         stop_managed = getattr(self.orchestrator, "stop_managed_session_turn", None)
         try:
-            managed = stop_managed(session, pause_queue=True) if callable(stop_managed) else None
+            # [Stage 8a, final-review F4] Blocking DB work: off the event loop.
+            managed = (await asyncio.to_thread(stop_managed, session, pause_queue=True)
+                       if callable(stop_managed) else None)
         except Exception as e:
             await update.message.reply_text(f"Cancellation not recorded: {e}")
             return
