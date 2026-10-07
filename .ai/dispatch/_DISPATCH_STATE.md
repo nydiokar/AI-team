@@ -4,7 +4,7 @@
 
 | status | job_id | created | updated | depends_on | proof | flags |
 |---|---|---|---|---|---|---|
-| active | AGENT_60_WARM_WORKER_IDLE_REAPER | 2026-07-30 | 2026-08-21 | — | ✓ | STALE_46d |
+| active | AGENT_60_WARM_WORKER_IDLE_REAPER | 2026-07-30 | 2026-08-21 | — | ✓ | STALE_47d |
 | active | AGENT_65_COST_MONITORING_VISIBILITY | 2026-08-03 | 2026-08-03 | — | ✓ | STALE_64d |
 | active | AGENT_82_SESSION_TURN_QUEUE | 2026-09-22 | 2026-09-27 | — | ✓ |  |
 | active | AGENT_84_WORKER_COMPLETION_OUTBOX | 2026-09-24 | 2026-10-02 | AGENT_82_SESSION_TURN_QUEUE | — |  |
@@ -32,6 +32,7 @@
 | blocked | AGENT_86_RUNTIME_UPDATE_AUTOMATION | 2026-09-24 | 2026-09-27 | AGENT_85_WORKER_CONTAINER_ACCEPTANCE | — |  |
 | blocked | AGENT_96_SYSTEM_ONE_DELIVERY_BOUNCE | 2026-10-05 | 2026-10-05 | AGENT_94_SYSTEM_ONE_CORE_DELIVERY_SCORECARD | — |  |
 | unknown | A82_STAGE8A_DEPLOY_BURNDOWN | ? | ? | — | — | BAD_STATUS |
+| unknown | A82_STAGE8A_VALIDATION | ? | ? | — | — | BAD_STATUS |
 | done | AGENT_10_M3_CLAUDE_TELEMETRY | 2026-07-03 | 2026-08-03 | — | ✓ |  |
 | done | AGENT_11_MESH_AFFINITY_ROUTING | 2026-07-03 | 2026-08-03 | — | ✓ |  |
 | done | AGENT_12_HARNESS_SELFTEST | 2026-07-03 | 2026-08-03 | — | ✓ |  |
