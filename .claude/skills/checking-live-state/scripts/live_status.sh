@@ -36,7 +36,9 @@ if [ -n "$TS_ADDR" ]; then
   "${CURL[@]}" "http://$TS_ADDR/health" | python3 -c 'import json,sys
 d=json.load(sys.stdin)
 db=d.get("db") or {}
-print("status=%s" % d.get("status"), " ".join("%s=%s" % (k, db.get(k)) for k in ("schema_version","nodes_online","nodes_total","tasks_pending","tasks_stale_pending","tasks_claimed","sessions_busy")), "mesh_degraded=%s" % (d.get("mesh_health") or {}).get("degraded"))' 2>/dev/null || echo "UNREACHABLE at $TS_ADDR"
+b=d.get("build") or {}
+print("status=%s" % d.get("status"), " ".join("%s=%s" % (k, db.get(k)) for k in ("schema_version","nodes_online","nodes_total","tasks_pending","tasks_stale_pending","tasks_claimed","sessions_busy")), "mesh_degraded=%s" % (d.get("mesh_health") or {}).get("degraded"))
+print("build=%s version=%s nodes_build_mismatch=%s nodes_build_unknown=%s" % (b.get("git_sha"), b.get("version"), b.get("nodes_build_mismatch"), b.get("nodes_build_unknown")))' 2>/dev/null || echo "UNREACHABLE at $TS_ADDR"
 else
   echo "task-server port not published / container missing"
 fi
