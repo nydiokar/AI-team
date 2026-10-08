@@ -55,7 +55,7 @@ def test_R4_clean_exit_after_deadline_is_quiescent_dead_session():
     fake = _EOFClient()
     fake.defer_echo = True
     sess = _start_fake_session(fake)
-    sess._turn_timeout_sec = lambda: 0.3
+    sess._managed_stall_sec = lambda: 0.3
     sess._on_proactive = lambda k, o: None
     try:
         out = _managed_in_thread(sess, "p")
@@ -79,7 +79,7 @@ def test_R4_clean_exit_mid_turn_fails_caller_and_frees_session():
     fake = _EOFClient()
     fake.defer_echo = True
     sess = _start_fake_session(fake)
-    sess._turn_timeout_sec = lambda: 5
+    sess._managed_stall_sec = lambda: 5
     try:
         out = _managed_in_thread(sess, "p")
         _wait_query(fake)
@@ -155,7 +155,7 @@ def test_R4_flag_off_session_with_ended_reader_is_not_evicted(monkeypatch):
 # =========================================================================== #
 def test_R4_operator_resolution_frees_session_for_next_managed_turn(db, tmp_path, real_claude, admin):
     real_claude.fake.defer_echo = True          # the CLI never begins our turn
-    real_claude.sess._turn_timeout_sec = lambda: 0.3
+    real_claude.sess._managed_stall_sec = lambda: 0.3
     http = _ClientHTTP(TestClient(ts.app))
     w = _worker(tmp_path, http)
     w._backends = {"claude": real_claude.backend}
@@ -173,7 +173,7 @@ def test_R4_operator_resolution_frees_session_for_next_managed_turn(db, tmp_path
     # Next managed turn on the same session succeeds.
     real_claude.fake.defer_echo = False
     real_claude.fake.replies["next prompt"] = [_assistant("n", sid="n2"), _result("NEXT OK", sid="n2")]
-    real_claude.sess._turn_timeout_sec = lambda: 5
+    real_claude.sess._managed_stall_sec = lambda: 5
     _seed_turn_for_session(db, "t-2", "sess-1", "next prompt")
     _run_one(w, "t-2")
     assert _row(db, "t-2")["status"] == "completed"
@@ -216,7 +216,7 @@ def test_R4_not_submitted_attestation_returns_turn_to_pending(db, tmp_path, real
         return await real_orig(*a, **k)
 
     monkeypatch.setattr(sess, "_submit_turn", slow_submit)
-    sess._turn_timeout_sec = lambda: 0.2
+    sess._managed_stall_sec = lambda: 0.2
     http = _ClientHTTP(TestClient(ts.app))
     w = _worker(tmp_path, http)
     w._backends = {"claude": real_claude.backend}

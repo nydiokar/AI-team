@@ -2473,11 +2473,17 @@ class TaskOrchestrator(ITaskOrchestrator):
         error containment — one bad row never starves the batch. Returns the count
         of carriers reaped THIS tick."""
         from src.control.db import case_completion_outbox_enabled
+        from src.core.turn_liveness import turn_limits
 
         if not case_completion_outbox_enabled():
             return 0
+        # Never reap a child its LIVE carrier still reports active before the
+        # shared turn hard cap: the carrier owns the no-progress decision.
+        max_runtime_sec = int(turn_limits().hard_cap_sec)
         try:
-            stale = await asyncio.to_thread(db.list_stale_managed_children)
+            stale = await asyncio.to_thread(
+                db.list_stale_managed_children, active_task_max_runtime_sec=max_runtime_sec,
+            )
         except Exception as e:  # noqa: BLE001 — next tick retries
             logger.warning("event=lost_carrier_scan_failed err=%s", e)
             return 0

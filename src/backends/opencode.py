@@ -42,6 +42,7 @@ from src.core.process_utils import (
     ensure_node_on_path, process_gone_proof, process_identity, terminate_many_popen,
 )
 from src.core.interfaces import CodingBackend, ExecutionResult, Session
+from src.core.turn_liveness import ProgressClock, TurnLimits, turn_limits
 from src.core.telemetry import TelemetryContext, telemetry_subprocess_env
 
 logger = logging.getLogger(__name__)
@@ -1305,7 +1306,15 @@ class OpenCodeServerBackend(CodingBackend):
         available on OpenCode."""
         return False
 
-    def _managed_deadline_sec(self) -> float:
+    def _managed_stall_sec(self) -> Optional[float]:
+        """No-progress window for a managed turn; ``None`` ⇒ the shared
+        :func:`turn_limits` default (a long turn that keeps producing native
+        events is never given up on)."""
+        return None
+
+    def _managed_compaction_timeout_sec(self) -> float:
+        """Socket timeout of the synchronous ``/summarize`` call (it streams no
+        progress, so it keeps a bounded per-call limit)."""
         try:
             from config import config as _cfg
             return float(max(1, int(getattr(_cfg.opencode, "timeout_seconds", 1800))))
@@ -1380,7 +1389,8 @@ class OpenCodeServerBackend(CodingBackend):
         non-quiescent until this attempt was made. Never aborts."""
         response: Dict[str, Any] = {}
         try:
-            response = self._managed_wait(entry, self._LATE_CAPTURE_SEC)
+            response = self._managed_wait(entry, TurnLimits(stall_sec=self._LATE_CAPTURE_SEC,
+                                                            hard_cap_sec=self._LATE_CAPTURE_SEC))
         except Exception as e:  # noqa: BLE001 — server lost / never recorded / window over
             logger.info("event=opencode_managed_late_capture_ended turn=%s why=%s", entry.turn_uuid, e)
         try:
@@ -1552,10 +1562,11 @@ class OpenCodeServerBackend(CodingBackend):
                                            error_class="cancelled", execution_time=time.time() - start)
             stop_reader = threading.Event()
             reader_ready = threading.Event()
+            progress: Dict[str, Any] = {"at": time.monotonic()}  # bumped by the event reader
             activity = threading.Thread(
                 target=self._read_activity_events,
                 args=(key, oc_id, telemetry_context, telemetry_sink, stop_reader, reader_ready,
-                      {"at": time.monotonic()}),
+                      progress),
                 name=f"opencode-events-{oc_id[:12]}", daemon=True)
             activity.start()
             reader_ready.wait(timeout=2)
@@ -1574,7 +1585,7 @@ class OpenCodeServerBackend(CodingBackend):
                     if refused:
                         return ExecutionResult(False, "", backend_session_id=oc_id, errors=[refused],
                                                error_class="provider_error", execution_time=time.time() - start)
-                response = self._managed_wait(entry, start + self._managed_deadline_sec() - time.time())
+                response = self._managed_wait(entry, turn_limits(self._managed_stall_sec()), progress)
             finally:
                 stop_reader.set()
                 activity.join(timeout=2)
@@ -1633,22 +1644,30 @@ class OpenCodeServerBackend(CodingBackend):
         raise RecoveryRequiredError(f"OpenCode prompt acceptance is ambiguous ({err}); "
                                     "message id not found in native history")
 
-    def _managed_wait(self, entry: _ManagedTurn, budget_sec: float) -> Dict[str, Any]:
+    def _managed_wait(self, entry: _ManagedTurn, limits: TurnLimits,
+                      progress: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """Wait for OUR terminal reply. Returns the correlated assistant message
-        (``{}`` ⇒ our turn ended without one). Deadline / lost server ⇒ typed
-        recovery; the native turn is never interrupted for it."""
+        (``{}`` ⇒ our turn ended without one). No native progress for
+        ``limits.stall_sec`` (``progress["at"]``, bumped by the event reader) or
+        the hard cap / lost server ⇒ typed recovery; the native turn is never
+        interrupted for it."""
         from src.control.turn_queue import RecoveryRequiredError
 
         key, oc_id, mid = entry.key, entry.oc_session_id, entry.message_id
-        deadline = time.monotonic() + max(0.0, budget_sec)
+        clock = ProgressClock()
         idle_polls = 0
         while True:
             if entry.forgotten:
                 return {}  # [m4] terminal server-side: nothing to deliver
             if entry.cancel_armed and not entry.cancel_delivered:
                 self._abort_if_ours(entry)
-            if time.monotonic() >= deadline:
-                raise RecoveryRequiredError("OpenCode managed turn deadline expired without a terminal reply")
+            if progress is not None:
+                clock.observe(float(progress.get("at") or 0.0))
+            expiry = clock.expiry(limits)
+            if expiry:
+                raise RecoveryRequiredError(f"OpenCode managed turn {expiry} "
+                                            f"({'no native progress' if expiry == 'stalled' else 'hard cap'}) "
+                                            "without a terminal reply")
             status = self._native_status(key, oc_id)
             if status is None:
                 if not self._base_urls.get(key):
@@ -1707,7 +1726,7 @@ class OpenCodeServerBackend(CodingBackend):
                 entry.submitted_at = time.monotonic()
             summarized, err = self._http(key, "POST", f"/session/{oc_id}/summarize",
                                          {"providerID": provider_id, "modelID": model_id},
-                                         timeout=int(self._managed_deadline_sec()))
+                                         timeout=int(self._managed_compaction_timeout_sec()))
             if entry.cancel_delivered:
                 return ExecutionResult(False, "", backend_session_id=oc_id,
                                        errors=["OpenCode managed compaction cancelled."],
@@ -2202,9 +2221,9 @@ class OpenCodeServerBackend(CodingBackend):
                                 activity_category = "waiting_permission"
                             elif name == "session.error":
                                 last_progress["error"] = "OpenCode reported a session error."
-                            if name == "message.part.updated" and part.get("type") in ("text", "reasoning"):
-                                last_progress["at"] = time.monotonic()
-                            elif name == "message.part.updated" and part.get("type") == "tool" and (part.get("state") or {}).get("status") in ("completed", "error"):
+                            if name == "message.part.updated":
+                                # Any streamed part of OUR session (text, reasoning, a tool
+                                # starting / streaming output / finishing) is native progress.
                                 last_progress["at"] = time.monotonic()
                             activity_key = (activity_category, activity_tool)
                             if activity_category and activity_key != last_activity:

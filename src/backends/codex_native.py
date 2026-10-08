@@ -32,14 +32,17 @@ from src.core.interfaces import CodingBackend, ExecutionResult, Session
 from src.core.process_utils import (ensure_node_on_path, process_gone_proof, process_identity,
                                      resolve_codex_executable)
 from src.core.telemetry import EMITTER_PROCESS_INSTANCE_ID, TelemetryContext
+from src.core.turn_liveness import ProgressClock, turn_limits
 from src.core.telemetry_adapters.codex import CodexTelemetryAdapter
 
 logger = logging.getLogger(__name__)
 MAX_OUTPUT = 8 * 1024 * 1024
 MAX_TURN_SECONDS = 36000
-# [A82 step 4a] The managed caller's deadline. Expiry NEVER interrupts: the turn
-# is held for recovery and its eventual reply binds to its turn uuid only.
-MANAGED_TURN_SECONDS = MAX_TURN_SECONDS
+# [A82 step 4a] The managed caller's NO-PROGRESS window (None ⇒ the shared
+# ``turn_limits`` default): a turn whose app-server keeps streaming events is
+# never given up on. Expiry NEVER interrupts: the turn is held for recovery and
+# its eventual reply binds to its turn uuid only.
+MANAGED_STALL_SECONDS: float | None = None
 # Native thread states in which no turn of OURS runs: "notLoaded" (this carrier's
 # app-server does not hold it) and "gone" (that app-server process is dead).
 _QUIET_STATES = frozenset({"idle", "systemError", "notLoaded", "gone"})
@@ -159,6 +162,7 @@ class _ManagedCall(BaseModel):
     submitted: bool = False
     abandoned: bool = False
     forgotten: bool = False
+    progress: ProgressClock = Field(default_factory=ProgressClock)  # touched per native event
 
 
 class _Hold(BaseModel):
@@ -437,7 +441,9 @@ class CodexBackend(CodingBackend):
             self._calls[turn_uuid] = call
         worker = threading.Thread(target=target, name="codex-managed-turn", daemon=True)
         worker.start()
-        worker.join(MANAGED_TURN_SECONDS)
+        limits = turn_limits(MANAGED_STALL_SECONDS)
+        while worker.is_alive() and not call.progress.expiry(limits):
+            worker.join(max(0.01, min(1.0, call.progress.remaining(limits))))
         with call.lock:
             if "error" in box:
                 raise box["error"]
@@ -905,6 +911,8 @@ class CodexBackend(CodingBackend):
                     event = channel.get()
                 except queue.Empty:
                     continue
+                if managed is not None:
+                    managed.progress.touch()
                 method = event["method"]
                 params = event["params"]
                 turn_id = params.get("turnId")
