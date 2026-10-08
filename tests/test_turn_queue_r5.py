@@ -67,7 +67,7 @@ def test_R5_M1_dead_session_with_pending_late_handoff_is_not_quiescent():
     sess = _start_fake_session(fake)
     release = threading.Event()
     sess._on_proactive = lambda k, o: release.wait(5)
-    sess._turn_timeout_sec = lambda: 0.3
+    sess._managed_stall_sec = lambda: 0.3
     try:
         out = _managed_in_thread(sess, "late")
         _wait_query(fake)
@@ -101,7 +101,7 @@ def test_R5_M3_starved_loop_past_deadline_does_not_attest_not_submitted():
     fake = _FakeClient()
     fake.defer_echo = True
     sess = _start_fake_session(fake)
-    sess._turn_timeout_sec = lambda: 0.2
+    sess._managed_stall_sec = lambda: 0.2
     sess._abandon_wait_sec = 0.3
     real_q = sess.is_quiescent
 

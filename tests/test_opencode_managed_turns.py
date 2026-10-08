@@ -51,6 +51,7 @@ class FakeOpenCode:
         self.summarize_error = False
         self.status_error = False
         self.idle_while_held = False  # status omits the session while the reply is held
+        self.progress_session = ""    # set ⇒ the SSE stream emits text-part progress for it
         self._clock = 1_000
         self._n = 0
         fake = self
@@ -150,6 +151,10 @@ class FakeOpenCode:
                 while self.alive:
                     time.sleep(0.2)
                     h.wfile.write(b": hb\n")
+                    if self.progress_session:
+                        h.wfile.write(json.dumps({"payload": {"type": "message.part.updated", "properties": {
+                            "part": {"type": "text", "sessionID": self.progress_session}}}}).encode()
+                            .join([b"data: ", b"\n"]))
                     h.wfile.flush()
             except OSError:
                 pass
@@ -271,7 +276,7 @@ def backend(fake, stand_in_proc, tmp_path, monkeypatch):
     oc._MANAGED_RECONCILE_TRIES = 3
     oc._MANAGED_IDLE_GRACE_POLLS = 3
     oc._MANAGED_ABSENT_GRACE_SEC = 0.5
-    oc._managed_deadline_sec = lambda: 20.0
+    oc._managed_stall_sec = lambda: 20.0
     return oc
 
 
@@ -458,7 +463,7 @@ def test_lost_ack_never_recorded_is_recovery_required(backend, fake, tmp_path):
 def test_deadline_is_recovery_required_without_abort_and_late_reply_not_bound(backend, fake, tmp_path):
     fake.add_session("ses_d")
     fake.release.clear()
-    backend._managed_deadline_sec = lambda: 0.5
+    backend._managed_stall_sec = lambda: 0.5
     s = _session(tmp_path, native="ses_d")
     res = backend.run_managed_turn(s, "x", _own(turn="u-d"))
     assert res.error_class == "recovery_required"
@@ -477,6 +482,23 @@ def test_deadline_is_recovery_required_without_abort_and_late_reply_not_bound(ba
     # the late reply is in native history parented to OUR id only
     late = [m for m in fake.sessions["ses_d"] if m["info"].get("parentID") == managed_message_id("u-d")]
     assert late and late[0]["parts"][0]["text"] == "managed reply"
+
+
+def test_working_turn_longer_than_the_stall_window_is_never_cut_off(backend, fake, tmp_path):
+    """Regression (2026-10-08, task_e05a467a on Horse): a managed turn that keeps
+    producing native progress must run to its real reply — only a turn with NO
+    progress for the stall window goes to recovery (was: a 30 min wall clock)."""
+    fake.add_session("ses_long")
+    fake.release.clear()
+    fake.progress_session = "ses_long"
+    backend._managed_stall_sec = lambda: 0.6
+    th, out = _bg(backend.run_managed_turn, _session(tmp_path, native="ses_long"), "x", _own(turn="u-long"))
+    time.sleep(1.8)  # 3x the stall window, progress flowing every 0.2 s
+    assert out == {}, f"a progressing turn was given up on: {out}"
+    fake.release.set()
+    th.join(5)
+    assert out["result"].success is True, out["result"].errors
+    assert out["result"].output == "managed reply" and fake.aborts == []
 
 
 def test_carrier_crash_attribution_by_deterministic_id(fake, stand_in_proc, tmp_path, monkeypatch):
@@ -730,7 +752,7 @@ def _native_store(tmp_path, monkeypatch):
 def test_m4_late_reply_is_captured_bound_to_the_turn_and_session_busy_until_delivered(backend, fake, tmp_path):
     fake.add_session("ses_late")
     fake.release.clear()
-    backend._managed_deadline_sec = lambda: 0.5
+    backend._managed_stall_sec = lambda: 0.5
     in_sink, release_sink = threading.Event(), threading.Event()
     got: List[Any] = []
     s = _session(tmp_path, native="ses_late")
@@ -759,7 +781,7 @@ def test_m4_late_reply_is_captured_bound_to_the_turn_and_session_busy_until_deli
 def test_m4_forgotten_turn_gets_no_late_delivery(backend, fake, tmp_path):
     fake.add_session("ses_fg")
     fake.release.clear()
-    backend._managed_deadline_sec = lambda: 0.5
+    backend._managed_stall_sec = lambda: 0.5
     got: List[Any] = []
     backend.set_proactive_sink(lambda sid, outcome: got.append(outcome))
     s = _session(tmp_path, native="ses_fg")
@@ -774,7 +796,7 @@ def test_m4_forgotten_turn_gets_no_late_delivery(backend, fake, tmp_path):
 def test_m4_late_reply_completes_the_held_turn_through_the_carrier(db, backend, fake, tmp_path):
     fake.add_session("ses_lc")
     fake.release.clear()
-    backend._managed_deadline_sec = lambda: 0.5
+    backend._managed_stall_sec = lambda: 0.5
     w = _oc_worker(tmp_path, backend)
     w._setup_proactive_delivery()
     _seed_oc_turn(db, "t-oc-late", "sess-oc-late", "slow", str(tmp_path), "ses_lc")
@@ -941,7 +963,7 @@ def test_m7_write_ahead_store_lives_under_the_carrier_state_dir(monkeypatch, tmp
 
 def test_m7_first_turn_resolved_by_late_capture_clears_its_write_ahead_row(backend, fake, tmp_path):
     fake.release.clear()
-    backend._managed_deadline_sec = lambda: 0.5
+    backend._managed_stall_sec = lambda: 0.5
     got: List[Any] = []
     backend.set_proactive_sink(lambda sid, outcome: got.append(outcome))
     res = backend.run_managed_turn(_session(tmp_path, native=""), "x", _own(turn="u-wa"))
@@ -969,7 +991,7 @@ def test_close_stops_that_sessions_late_watcher_and_no_late_delivery(backend, fa
     fake.add_session("ses_cl")
     fake.add_session("ses_other")
     fake.release.clear()
-    backend._managed_deadline_sec = lambda: 0.5
+    backend._managed_stall_sec = lambda: 0.5
     got: List[Any] = []
     backend.set_proactive_sink(lambda sid, outcome: got.append(sid))
     s = _session(tmp_path, native="ses_cl")

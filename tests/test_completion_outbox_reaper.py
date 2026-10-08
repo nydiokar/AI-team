@@ -249,6 +249,26 @@ def test_R20_reaper_inert_when_flag_off(tmp_path, monkeypatch):
     assert _status(db, "w1") == "running"
 
 
+def test_R20b_long_running_child_of_a_live_carrier_is_never_reaped(tmp_path, monkeypatch):
+    """Regression: the reaper used a hardcoded 30 min runtime cap, so a Case
+    worker turn still ACTIVE on a live carrier was synthesized `failed` after
+    30 min. The server cap is now the shared turn hard cap (turn_liveness)."""
+    import json
+
+    db = _db(tmp_path)
+    case_id = _open_outbox_case(db, monkeypatch)
+    inc = db.upsert_node("node-A", "", 9001, ["opencode-server"], 2, incarnation_id="inc-A")
+    _seed_lost_child(db, "w1", case_id, claimed_by="node-A", claimer_incarnation=inc, age_sec=7200)
+    live = {"active_tasks": ["w1"], "active_task_details": {"w1": {"started_at": _stale_ts(7200)}}}
+    conn = db._conn()
+    conn.execute("UPDATE nodes SET live_state = ?, live_state_updated_at = ? WHERE node_id = 'node-A'",
+                 (json.dumps(live), _stale_ts(0)))
+    conn.commit()
+    orch = _FakeOrch(_FakeStore(_FakeSession("mgr-sess")))
+    assert _reap(orch, db) == 0
+    assert _status(db, "w1") == "running"
+
+
 def test_R21_reaper_synthesizes_then_drain_wakes_once_and_fences_late(tmp_path, monkeypatch):
     db = _db(tmp_path)
     db.upsert_node(socket.gethostname(), "", 9001, ["claude"], 2)

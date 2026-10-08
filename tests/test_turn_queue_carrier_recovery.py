@@ -402,7 +402,7 @@ def test_P4_managed_deadline_late_reply_reaches_sink_as_late_managed():
     sess = _start_fake_session(fake)
     got: List[Any] = []
     sess._on_proactive = lambda k, o: got.append(o)
-    sess._turn_timeout_sec = lambda: 0.3
+    sess._managed_stall_sec = lambda: 0.3
     try:
         with pytest.raises(RecoveryRequiredError):
             sess.send_managed("slow prompt")
@@ -422,7 +422,7 @@ def test_P4b_late_reply_completes_the_held_turn_via_carrier(db, tmp_path, real_c
     w._backends = {"claude": real_claude.backend}
     real_claude.sess._on_proactive = w._deliver_proactive_turn
     real_claude.sess.session_key = "sess-9"  # production: pool key == session id
-    real_claude.sess._turn_timeout_sec = lambda: 0.3
+    real_claude.sess._managed_stall_sec = lambda: 0.3
     real_claude.fake.replies["slow"] = []
     _seed_session_turn(db, "t-9", "sess-9", "slow")
     _run_one(w, "t-9")
