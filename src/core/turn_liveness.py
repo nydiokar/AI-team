@@ -17,9 +17,9 @@ from __future__ import annotations
 import threading
 import time
 from collections.abc import Callable
-from typing import Literal
+from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 DEFAULT_STALL_SEC: int = 36000
 HARD_CAP_MULTIPLIER: int = 4
@@ -91,3 +91,40 @@ class ProgressClock:
         with self._lock:
             last: float = self.last_progress_at
         return max(0.0, min(self.started_at + limits.hard_cap_sec, last + limits.stall_sec) - now)
+
+
+class TurnControl(BaseModel):
+    """What the carrier hands a backend for ONE agent turn — identity + liveness.
+
+    The backend contract (A102): tag the prompt with ``turn_uuid`` (so its reply
+    is attributable), call :meth:`touch` on EVERY native event of the turn, and
+    give up (typed ``RecoveryRequiredError``, never an interrupt) only when
+    :meth:`expired` says so. Backends never read timeout config themselves: the
+    policy (``limits``) is decided once, by the carrier, from :func:`turn_limits`.
+    ``ownership`` is the carrier's ``turn_queue.ManagedTurnOwnership`` (fencing);
+    ``on_process`` receives the backend process identity before submit."""
+
+    model_config = ConfigDict(arbitrary_types_allowed=True, frozen=True)
+
+    turn_uuid: str
+    limits: TurnLimits
+    ownership: Any = None
+    on_process: Callable[[dict], Any] | None = None
+    progress: ProgressClock = Field(default_factory=ProgressClock)
+
+    def touch(self) -> None:
+        self.progress.touch()
+
+    def expired(self) -> TurnExpiry:
+        return self.progress.expiry(self.limits)
+
+    def remaining(self) -> float:
+        return self.progress.remaining(self.limits)
+
+
+def turn_control(turn_uuid: str, *, ownership: Any = None,
+                 on_process: Callable[[dict], Any] | None = None,
+                 stall_override: float | None = None) -> TurnControl:
+    """A :class:`TurnControl` whose clock starts now, limits from :func:`turn_limits`."""
+    return TurnControl(turn_uuid=turn_uuid, limits=turn_limits(stall_override),
+                       ownership=ownership, on_process=on_process)
