@@ -64,7 +64,7 @@ def test_D1_notification_folded_mid_turn_managed_reply_still_served():
     sess = _start_fake_session(fake)
     proactive: List[str] = []
     sess._on_proactive = lambda k, o: proactive.append(o.output)
-    sess._turn_timeout_sec = lambda: 5.0
+    sess._managed_stall_sec = lambda: 5.0
     try:
         out = _managed_in_thread(sess, "run tests in background then report")
         _wait_query(fake)  # never emit the turn's frames before its prompt is written
@@ -82,7 +82,7 @@ def test_D1b_after_folded_notification_session_becomes_quiescent_again():
     fake = _FakeClient()
     sess = _start_fake_session(fake)
     sess._on_proactive = lambda k, o: None
-    sess._turn_timeout_sec = lambda: 5.0
+    sess._managed_stall_sec = lambda: 5.0
     try:
         out = _managed_in_thread(sess, "p")
         _wait_query(fake)  # never emit the turn's frames before its prompt is written
@@ -104,7 +104,7 @@ def test_D2_batched_notifications_one_continuation_next_reply_served():
     sess = _start_fake_session(fake)
     proactive: List[str] = []
     sess._on_proactive = lambda k, o: proactive.append(o.output)
-    sess._turn_timeout_sec = lambda: 5.0
+    sess._managed_stall_sec = lambda: 5.0
     try:
         _emit_autonomous(sess, fake, _task_updated("a", "running"), _task_updated("b", "running"),
                          _task_notification("a"), _task_notification("b"),
@@ -137,7 +137,7 @@ def test_D3_abandoned_unechoed_prompt_keeps_session_in_flight_until_its_echo():
     sess = _start_fake_session(fake)
     got: List[Any] = []
     sess._on_proactive = lambda k, o: got.append(o)
-    sess._turn_timeout_sec = lambda: 0.3
+    sess._managed_stall_sec = lambda: 0.3
     try:
         out = _managed_in_thread(sess, "queued prompt")
         out["t"].join(5)
@@ -162,7 +162,7 @@ def test_D3b_unechoed_prompt_exit_on_stream_end():
     fake = _FakeClient()
     fake.defer_echo = True
     sess = _start_fake_session(fake)
-    sess._turn_timeout_sec = lambda: 0.2
+    sess._managed_stall_sec = lambda: 0.2
     out = _managed_in_thread(sess, "never echoed")
     out["t"].join(2)
     assert len(sess._pending) == 1
@@ -181,7 +181,7 @@ def test_MAJOR2_foreign_tool_result_user_message_does_not_claim_managed_turn():
     sess = _start_fake_session(fake)
     proactive: List[str] = []
     sess._on_proactive = lambda k, o: proactive.append(o.output)
-    sess._turn_timeout_sec = lambda: 5
+    sess._managed_stall_sec = lambda: 5
     try:
         out = _managed_in_thread(sess, "mine")
         _wait_query(fake)
@@ -273,7 +273,7 @@ def test_M3a_late_handoff_keeps_session_non_quiescent_until_sink_returns():
     sess = _start_fake_session(fake)
     release = threading.Event()
     sess._on_proactive = lambda k, o: release.wait(3)
-    sess._turn_timeout_sec = lambda: 0.3
+    sess._managed_stall_sec = lambda: 0.3
     try:
         out = _managed_in_thread(sess, "slow")
         out["t"].join(5)

@@ -257,7 +257,7 @@ def pooled_claude(monkeypatch):
 
     monkeypatch.setattr(cd, "_SDKSession", _Boot)
     # A mis-attributed turn must fail fast (deadline ⇒ recovery), not hang.
-    monkeypatch.setattr(_Boot, "_turn_timeout_sec", lambda self: 3.0)
+    monkeypatch.setattr(_Boot, "_managed_stall_sec", lambda self: 3.0)
     backend = ClaudeCodeBackend("sdk")
     assert backend.supports_managed_turns()
     yield SimpleNamespace(backend=backend, script=script, booted=booted)

@@ -47,6 +47,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from src.core.interfaces import ExecutionResult, Session
 from src.core.process_utils import terminate_many_popen
+from src.core.turn_liveness import ProgressClock, TurnLimits, turn_limits
 from src.core.roles import MANAGER_ROLE_ID, WORKER_ROLE_ID, load_manager_role, load_worker_role
 from src.backends.claude_role_adapter import claude_system_prompt, manager_tool_names, worker_tool_names
 
@@ -852,6 +853,10 @@ class _SDKSession:
         # How long a managed caller waits, after its deadline, for the loop to
         # run the abandon step before it may attest "not submitted".
         self._abandon_wait_sec: float = 5.0
+        # Progress clock of the current managed turn: reset per managed send,
+        # touched by the reader on EVERY native message, so a long turn that
+        # keeps streaming is never given up on (only a stall / the hard cap is).
+        self._turn_progress: ProgressClock = ProgressClock()
         # Late managed replies handed to the sink but not yet accepted by it —
         # the session is not quiescent until the carrier has taken them.
         self._late_handoffs: int = 0
@@ -1073,6 +1078,7 @@ class _SDKSession:
         end_reason = "normal EOF from SDK stream"
         try:
             async for msg in self._client.receive_messages():
+                self._turn_progress.touch()
                 if isinstance(msg, AssistantMessage):
                     # [A82 Stage 2] A model continuation is now in flight until
                     # its terminal ResultMessage arrives — a quiescence conjunct
@@ -1466,7 +1472,7 @@ class _SDKSession:
         managed submit reuses the exact same reader/dispatch machinery."""
         from src.control.turn_queue import OwnershipConflictError
 
-        timeout = self._turn_timeout_sec()
+        limits = turn_limits(self._managed_stall_sec())
         if not self._lock.acquire(blocking=False):
             logger.warning(
                 "event=sdk_managed_turn_conflict session_key=%s — a turn is in "
@@ -1482,11 +1488,12 @@ class _SDKSession:
             # One ticket per managed call binds the deadline abandon to THIS
             # call's pending entry (set on the loop at registration).
             ticket: Dict[str, Any] = {"abandoned": False, "pending": None}
+            self._turn_progress = ProgressClock()
             return self._submit_managed_no_interrupt(
                 self._reserve_and_submit_managed(
                     message, progress_cb, turn_uuid, ticket, local_command=local_command,
                 ),
-                timeout, ticket,
+                limits, ticket,
             )
         finally:
             self._lock.release()
@@ -1674,11 +1681,13 @@ class _SDKSession:
                 asyncio.create_task(self._run_proactive(outcome))
 
     def _submit_managed_no_interrupt(
-        self, coro, timeout: Optional[float], ticket: Optional[Dict[str, Any]] = None
+        self, coro, limits: TurnLimits, ticket: Optional[Dict[str, Any]] = None
     ) -> "TurnOutcome":
         """Run a managed coroutine on the SDK loop WITHOUT the legacy
         interrupt-on-failure of :meth:`submit` (§15 decision 1: the managed path
-        never calls ``cancel_inflight``). A deadline expiry raises a typed
+        never calls ``cancel_inflight``). The wait ends only when the turn makes
+        no native progress for ``limits.stall_sec`` (``_turn_progress``, touched
+        by the reader per message) or hits the hard cap — then it raises a typed
         :class:`RecoveryRequiredError` and leaves the turn registered in
         ``_pending`` so the quiescence oracle keeps the session held until the
         backend actually reaches a terminal result (design §3.3: uncertainty
@@ -1691,44 +1700,54 @@ class _SDKSession:
             coro.close()
             raise RuntimeError("SDK session loop is not running")
         fut = asyncio.run_coroutine_threadsafe(coro, self._loop)
-        try:
-            return fut.result(timeout=timeout)
-        except concurrent.futures.TimeoutError:
-            logger.warning(
-                "event=sdk_managed_turn_deadline session_key=%s timeout=%s — no "
-                "interrupt; turn held for recovery",
-                self.session_key, timeout,
-            )
-            # M3: the eventual real reply must reach the carrier, not an unread
-            # future — mark the outstanding managed turn abandoned (on the loop).
+        clock = self._turn_progress
+        while True:
             try:
-                if ticket is not None:
-                    abandoned = threading.Event()
+                return fut.result(timeout=max(0.01, min(1.0, clock.remaining(limits))))
+            except concurrent.futures.TimeoutError:
+                expiry = clock.expiry(limits)
+                if expiry:
+                    break  # no native progress for the window (or hard cap)
+        logger.warning(
+            "event=sdk_managed_turn_deadline session_key=%s expiry=%s stall_sec=%s "
+            "hard_cap_sec=%s — no interrupt; turn held for recovery",
+            self.session_key, expiry, limits.stall_sec, limits.hard_cap_sec,
+        )
+        # M3: the eventual real reply must reach the carrier, not an unread
+        # future — mark the outstanding managed turn abandoned (on the loop).
+        try:
+            if ticket is not None:
+                abandoned = threading.Event()
 
-                    def _abandon_and_signal() -> None:
-                        try:
-                            self._abandon_managed_pending(ticket)
-                        finally:
-                            abandoned.set()
+                def _abandon_and_signal() -> None:
+                    try:
+                        self._abandon_managed_pending(ticket)
+                    finally:
+                        abandoned.set()
 
-                    self._loop.call_soon_threadsafe(_abandon_and_signal)
-                    if abandoned.wait(self._abandon_wait_sec) and ticket.get("pending") is None:
-                        # The loop never registered (so never submitted) this
-                        # prompt: attest "not submitted" (typed conflict ⇒ the
-                        # carrier releases it to pending, prompt preserved).
-                        from src.control.turn_queue import OwnershipConflictError
+                self._loop.call_soon_threadsafe(_abandon_and_signal)
+                if abandoned.wait(self._abandon_wait_sec) and ticket.get("pending") is None:
+                    # The loop never registered (so never submitted) this
+                    # prompt: attest "not submitted" (typed conflict ⇒ the
+                    # carrier releases it to pending, prompt preserved).
+                    from src.control.turn_queue import OwnershipConflictError
 
-                        raise OwnershipConflictError(
-                            "managed turn deadline expired before submission (not submitted)",
-                            session_key=self.session_key, reason="not_submitted",
-                        )
-            except RuntimeError:
-                pass
-            raise RecoveryRequiredError(
-                "managed turn exceeded its deadline without a terminal result; "
-                "backend not interrupted — recovery required",
-                session_key=self.session_key, reason="managed_turn_deadline",
-            )
+                    raise OwnershipConflictError(
+                        "managed turn deadline expired before submission (not submitted)",
+                        session_key=self.session_key, reason="not_submitted",
+                    )
+        except RuntimeError:
+            pass
+        raise RecoveryRequiredError(
+            "managed turn exceeded its deadline without a terminal result; "
+            "backend not interrupted — recovery required",
+            session_key=self.session_key, reason="managed_turn_deadline",
+        )
+
+    def _managed_stall_sec(self) -> Optional[float]:
+        """No-progress window for a managed turn; ``None`` ⇒ the shared
+        :func:`turn_limits` default."""
+        return None
 
     def _turn_timeout_sec(self) -> Optional[float]:
         """Resolve the per-turn deadline (shared by legacy + managed send)."""

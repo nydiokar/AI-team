@@ -562,12 +562,41 @@ def test_SDK06c_managed_deadline_raises_typed_recovery_without_interrupt(monkeyp
     fake = _FakeClient()
     fake.replies["never"] = []
     sess = _start_fake_session(fake)
-    monkeypatch.setattr(sess, "_turn_timeout_sec", lambda: 0.3)
+    monkeypatch.setattr(sess, "_managed_stall_sec", lambda: 0.3)
     try:
         with pytest.raises(RecoveryRequiredError):
             sess.send_managed("never")
         assert fake.interrupts == 0
         assert sess.is_quiescent() is False
+    finally:
+        sess.close()
+
+
+def test_SDK06d_working_turn_longer_than_the_stall_window_is_never_cut_off(monkeypatch):
+    """A managed turn whose CLI keeps streaming messages runs to its real result;
+    only a turn with NO native message for the stall window goes to recovery."""
+    fake = _FakeClient()
+    fake.replies["long"] = []
+    sess = _start_fake_session(fake)
+    monkeypatch.setattr(sess, "_managed_stall_sec", lambda: 0.6)
+    out: dict = {}
+
+    def _send() -> None:
+        try:
+            out["r"] = sess.send_managed("long")
+        except BaseException as e:  # noqa: BLE001
+            out["exc"] = e
+
+    th = threading.Thread(target=_send, daemon=True)
+    try:
+        th.start()
+        for _ in range(9):  # 1.8 s = 3x the stall window, a message every 0.2 s
+            time.sleep(0.2)
+            sess._loop.call_soon_threadsafe(fake.q.put_nowait, _assistant("still working"))
+        assert out == {}, f"a progressing turn was given up on: {out}"
+        sess._loop.call_soon_threadsafe(fake.q.put_nowait, _result("done"))
+        th.join(5)
+        assert out["r"].output == "done" and fake.interrupts == 0
     finally:
         sess.close()
 
