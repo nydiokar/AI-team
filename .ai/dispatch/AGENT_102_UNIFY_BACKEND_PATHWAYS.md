@@ -189,7 +189,11 @@ Owns `src/worker/**`, `src/core/interfaces.py`, `src/core/backend_call.py`, `src
 - New features or behaviour beyond what the managed path does today.
 
 ## TRAIL / EVIDENCE (fill at close)
-- PRs: S0 #205, S1-Claude #…, S1-Codex #…, S1-OpenCode #…, S2 #…
+- PRs: S0 #205 (merged `4ead64a`), S1-Claude #…, S1-Codex #…, S1-OpenCode #…, S2 #…
+- Dispatched 2026-10-08 (node `kanebra`, opus, role=worker, one worktree each):
+  S1-Claude `task_f40508df` / session `ead810e403bc` (`.worktrees/a102-claude`);
+  S1-Codex `task_b5afb280` / session `f65a69f8b50c` (`.worktrees/a102-codex`);
+  S1-OpenCode `task_90c5ba29` / session `7f2f8e988829` (`.worktrees/a102-opencode`).
 - Grep proof output; per-PR pytest lines; live long-turn task ids.
 
 ---
