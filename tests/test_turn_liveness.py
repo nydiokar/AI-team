@@ -71,3 +71,19 @@ def test_stall_override_scales_hard_cap(monkeypatch):
 
     monkeypatch.setattr(cfg.system, "task_timeout", 0)
     assert turn_limits(0.5) == TurnLimits(stall_sec=0.5, hard_cap_sec=2.0)
+
+
+def test_turn_control_carries_identity_and_carrier_decided_limits(monkeypatch):
+    from config import config as cfg
+    from src.core.turn_liveness import turn_control
+
+    monkeypatch.setattr(cfg.system, "task_timeout", 0)
+    ctl = turn_control("uuid-1", ownership="own", stall_override=0.05)
+    assert ctl.turn_uuid == "uuid-1" and ctl.ownership == "own"
+    assert ctl.limits == TurnLimits(stall_sec=0.05, hard_cap_sec=0.2)
+    assert ctl.expired() == ""
+    import time
+    time.sleep(0.06)
+    assert ctl.expired() == "stalled"
+    ctl.touch()
+    assert ctl.expired() == "" and 0 < ctl.remaining() <= 0.05
