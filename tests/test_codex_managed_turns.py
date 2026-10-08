@@ -112,9 +112,15 @@ def complete(tid, turn_id, status, text=None):
 def run_turn(tid, turn_id, c, text):
     hold = c.get("hold")
     if hold:
+        beat = c.get("progress_every")  # held turn keeps streaming native events
+        next_beat = time.monotonic()
         while not os.path.exists(hold):
             if threads[tid]["active"] != turn_id:
                 return
+            if beat and time.monotonic() >= next_beat:
+                next_beat = time.monotonic() + beat
+                note(tid, "item/started", turnId=turn_id,
+                     item={"id": "r-%f" % next_beat, "type": "reasoning"})
             time.sleep(0.02)
     if c.get("die_mid_turn"):
         time.sleep(0.3)  # the turn/start response is consumed first
@@ -458,7 +464,7 @@ def test_app_server_death_mid_turn_is_attributable_failure_with_process_proof(h)
 # --------------------------------------------------------------------------- #
 def test_deadline_holds_without_interrupt_and_late_result_binds_to_turn_uuid(h, monkeypatch):
     assert h.backend.run_managed_turn(h.session(), "warm", own()).success  # app-server up
-    monkeypatch.setattr(native_mod, "MANAGED_TURN_SECONDS", 0.5)
+    monkeypatch.setattr(native_mod, "MANAGED_STALL_SECONDS", 0.5)
     late: list[tuple[str, Any]] = []
     h.backend.set_proactive_sink(lambda sid, outcome: late.append((sid, outcome)))
     h.ctl(hold=h.release_path, output="late answer")
@@ -475,9 +481,27 @@ def test_deadline_holds_without_interrupt_and_late_result_binds_to_turn_uuid(h, 
     wait_for(lambda: h.backend.is_quiescent(h.session()))
 
 
+def test_working_turn_longer_than_the_stall_window_is_never_cut_off(h, monkeypatch):
+    """A managed turn whose app-server keeps streaming events runs to its real
+    result; only a turn with NO native event for the window goes to recovery."""
+    assert h.backend.run_managed_turn(h.session(), "warm", own()).success  # app-server up
+    monkeypatch.setattr(native_mod, "MANAGED_STALL_SECONDS", 0.6)
+    h.ctl(hold=h.release_path, output="long answer", progress_every=0.2)
+    out: dict = {}
+    th = threading.Thread(target=lambda: out.update(
+        r=h.backend.run_managed_turn(h.session(), "hello", own(turn_uuid="uuid-long"))), daemon=True)
+    th.start()
+    time.sleep(1.8)  # 3x the stall window
+    assert out == {}, f"a progressing turn was given up on: {out}"
+    h.release()
+    th.join(10)
+    assert out["r"].success is True and out["r"].output == "long answer", out["r"].errors
+    assert h.requests("turn/interrupt") == []
+
+
 def test_forget_drops_late_delivery_but_quiescence_follows_native_truth(h, monkeypatch):
     assert h.backend.run_managed_turn(h.session(), "warm", own()).success  # app-server up
-    monkeypatch.setattr(native_mod, "MANAGED_TURN_SECONDS", 0.5)
+    monkeypatch.setattr(native_mod, "MANAGED_STALL_SECONDS", 0.5)
     late: list = []
     h.backend.set_proactive_sink(lambda sid, outcome: late.append(outcome))
     h.ctl(hold=h.release_path)
@@ -493,7 +517,7 @@ def test_forget_drops_late_delivery_but_quiescence_follows_native_truth(h, monke
 
 
 def test_deadline_before_submission_is_not_submitted(h, monkeypatch):
-    monkeypatch.setattr(native_mod, "MANAGED_TURN_SECONDS", 0.0)
+    monkeypatch.setattr(native_mod, "MANAGED_STALL_SECONDS", 0.0)
     gate = threading.Event()
     real = CodexOwnership.acquire
 
@@ -779,7 +803,7 @@ def test_m2_cutover_sweep_clears_identityless_owner_only_when_its_process_is_gon
 
 def test_m3_session_stays_busy_until_late_reply_delivery_was_attempted(h, monkeypatch):
     assert h.backend.run_managed_turn(h.session(), "warm", own()).success
-    monkeypatch.setattr(native_mod, "MANAGED_TURN_SECONDS", 0.5)
+    monkeypatch.setattr(native_mod, "MANAGED_STALL_SECONDS", 0.5)
     in_sink, release_sink = threading.Event(), threading.Event()
     seen: list[bool] = []
 
@@ -978,7 +1002,7 @@ def test_F1_forget_keeps_the_fence_while_the_submission_is_unanswered_on_a_live_
 
 def test_F1_forget_keeps_the_fence_while_the_native_turn_runs(h, monkeypatch):
     assert h.backend.run_managed_turn(h.session(), "warm", own()).success
-    monkeypatch.setattr(native_mod, "MANAGED_TURN_SECONDS", 0.5)
+    monkeypatch.setattr(native_mod, "MANAGED_STALL_SECONDS", 0.5)
     h.ctl(hold=h.release_path)
     result = h.backend.run_managed_turn(h.session(), "hello", own(turn_uuid="uuid-run"))
     assert result.error_class == "recovery_required"
