@@ -793,8 +793,12 @@ def test_read_session_history_registered():
 # ---------------------------------------------------------------------------
 
 def test_dispatch_worker_records_durable_wait_when_case(monkeypatch):
-    """A worker dispatched INTO a Case also records a durable pending-wait marker
-    (POST /api/cases/{case}/waits) so a restart can reconcile it."""
+    """[A104] A worker dispatched INTO a Case is durable WITHOUT a wait marker: the
+    dispatch carries the requesting session (``requester_session_id`` from the
+    carrier's SESSION_ID env) so the gateway addresses the completion to that
+    session's inbox — no POST /api/cases/{case}/waits any more."""
+    monkeypatch.delenv("AI_TEAM_SESSION_ID", raising=False)
+    monkeypatch.setenv("SESSION_ID", "mgr-sess")
     calls = []
 
     def fake_request(method, path, payload=None, timeout=20.0, headers=None):
@@ -809,10 +813,13 @@ def test_dispatch_worker_records_durable_wait_when_case(monkeypatch):
     out = mcp_manager._dispatch_worker(
         {"objective": "do x", "cwd": "/repo", "case_id": "case_1", "model": "sonnet"}
     )
-    waits = [c for c in calls if c[1] == "/api/cases/case_1/waits"]
-    assert waits and waits[0][0] == "POST"
-    assert waits[0][2] == {"task_id": "task_w"}
-    assert "durable wait recorded" in out
+    assert not any(c[1].endswith("/waits") for c in calls)
+    (instr,) = [c for c in calls if c[1] == "/api/instructions"]
+    assert instr[0] == "POST" and instr[2]["case_id"] == "case_1"
+    assert instr[2]["requester_session_id"] == "mgr-sess"
+    assert "durable wait recorded" not in out
+    assert "lands in YOUR inbox" in out
+    assert "record_review(case_id='case_1', task_id='task_w')" in out
 
 
 def test_dispatch_worker_wait_relay_failure_is_nonfatal(monkeypatch):
@@ -848,8 +855,9 @@ def test_dispatch_worker_no_wait_relay_without_case(monkeypatch):
 
 
 def test_reconcile_waits_formats_resolved_and_pending(monkeypatch):
-    """reconcile_waits summarizes resolved + still-open waits and tells the Manager
-    to re-arm wait_for_worker for the open ones."""
+    """reconcile_waits summarizes the Case's inbox: finished-unreviewed (with
+    outcome, told to review) and still-running requests (A104: told to return
+    control — the completion wakes it; no wait_for_worker re-arm)."""
     def fake_request(method, path, payload=None, timeout=20.0, headers=None):
         assert method == "POST" and path == "/api/cases/case_1/waits/reconcile"
         return {
@@ -861,7 +869,9 @@ def test_reconcile_waits_formats_resolved_and_pending(monkeypatch):
     monkeypatch.setattr(mcp_manager, "_api_request", fake_request)
     out = mcp_manager._reconcile_waits({"case_id": "case_1"})
     assert "t_done" in out and "success" in out
-    assert "t_open" in out and "wait_for_worker(task_id='t_open'" in out
+    assert "record_review" in out
+    assert "t_open still running" in out and "just return control" in out
+    assert "wait_for_worker" not in out
 
 
 def test_reconcile_waits_reports_disabled(monkeypatch):

@@ -38,7 +38,7 @@ from src.control.db import (
     quota_resume_task_id,
 )
 from src.core import SessionStatus
-from src.core.interfaces import TaskResult
+from src.core.interfaces import Session, TaskResult
 from src.orchestrator import (
     CASE_RESUME_APPROVAL_ACTION,
     TaskOrchestrator,
@@ -47,6 +47,7 @@ from src.orchestrator import (
     _session_status_after_result,
     is_quota_pause_result,
 )
+from tests.inbox_seed import seed_finished_child
 
 
 # --------------------------------------------------------------------------- #
@@ -175,6 +176,8 @@ class _Orch:
 
     _FLOW_RUN_META_KEY = TaskOrchestrator._FLOW_RUN_META_KEY
     _CASE_ID_META_KEY = TaskOrchestrator._CASE_ID_META_KEY
+    _TURN_ENROLLED_META_KEY = TaskOrchestrator._TURN_ENROLLED_META_KEY
+    _TURN_PRODUCER_META_KEY = TaskOrchestrator._TURN_PRODUCER_META_KEY
 
     def __init__(self, store, snapshots=None):
         self.session_store = store
@@ -253,6 +256,35 @@ class _Orch:
         self.deliveries.append(
             {"description": description, "session_id": session_id, "source": source}
         )
+        return f"turn-{len(self.deliveries)}"
+
+    # [A104] The inbox wake path, REAL down to admission; ``_enqueue_task`` is
+    # the recorded seam (managed admission itself is proven in
+    # test_agent_inbox_delivery.py).
+    async def _deliver_inbox(self, db, recipient, case_id, **kw):
+        return await TaskOrchestrator._deliver_inbox(self, db, recipient, case_id, **kw)
+
+    async def _admit_inbox_wake(self, *a):
+        return await TaskOrchestrator._admit_inbox_wake(self, *a)
+
+    async def _escalate_round_cap_once(self, db, case_id, cap, generation):
+        return await TaskOrchestrator._escalate_round_cap_once(self, db, case_id, cap, generation)
+
+    def _make_task(self, *a, **k):
+        return TaskOrchestrator._make_task(self, *a, **k)
+
+    def _parse_description_simple(self, description):
+        return TaskOrchestrator._parse_description_simple(self, description)
+
+    def _stash_task_meta(self, task, key, value):
+        return TaskOrchestrator._stash_task_meta(self, task, key, value)
+
+    async def _enqueue_task(self, task):
+        self.deliveries.append({
+            "description": task.prompt, "session_id": task.metadata.get("session_id"),
+            "source": task.metadata.get("source"),
+            "producer": task.metadata.get(self._TURN_PRODUCER_META_KEY),
+        })
         return f"turn-{len(self.deliveries)}"
 
     async def _finalize_continuation(self, *a, **k):
@@ -804,21 +836,29 @@ def test_paused_case_is_not_woken_even_when_a_wait_group_satisfies(tmp_path, mon
 
 def test_unpaused_case_still_wakes_normally(tmp_path, monkeypatch):
     """Regression guard: with no pause on the ledger the quota branch is inert
-    and the pre-existing continuation behaviour is unchanged."""
+    and the continuation behaviour is unchanged — (A104) the Manager's finished
+    request in its agent inbox is delivered as ONE wake turn."""
     _flags(monkeypatch)
     monkeypatch.setenv("DURABLE_RELAY_ENABLED", "1")
     db = _mk_db(tmp_path, monkeypatch)
+    db.upsert_session(Session(
+        session_id="mgr-1", backend="claude", repo_path="/repo",
+        status=SessionStatus.AWAITING_INPUT, created_at=_iso(_now()), updated_at=_iso(_now()),
+        machine_id=socket.gethostname(),
+    ))
+    db.enroll_session("mgr-1")
     orch = _Orch(_FakeStore(_FakeSession("mgr-1")), snapshots=_spent_snapshot())
     case_id = _case(db, "mgr-1")
     db.arm_wait_group(case_id, "g1", "ALL", ["t1"])
-    db.append_flow_event(case_id, "task.finished", "worker",
-                         entity_type="task", entity_id="t1",
-                         payload={"outcome": "success"})
+    seed_finished_child(db, case_id, "t1", requester="mgr-1")
 
     delivered = asyncio.run(TaskOrchestrator._continue_case_once(orch, db, case_id))
 
     assert delivered == 1
     assert orch.deliveries[0]["source"] == "manager_continuation"
+    assert orch.deliveries[0]["session_id"] == "mgr-1"
+    assert orch.deliveries[0]["producer"]["turn_kind"] == "continuation"
+    assert "t1" in orch.deliveries[0]["description"]
 
 
 # --------------------------------------------------------------------------- #
