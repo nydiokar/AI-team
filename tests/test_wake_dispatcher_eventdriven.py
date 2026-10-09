@@ -6,17 +6,17 @@ work on the gateway event loop even when nothing had happened. These tests pin
 the two behaviour-preserving wins:
 
 1. ``MeshDB.max_flow_event_ids`` — one batched change-signal query.
-2. ``_continue_case_once`` skips the per-Case read + recompute while a Case's
-   newest flow_event id has not advanced since it was last found idle, and
-   resumes recomputing the instant a new event lands.
+2. [A104] The dispatcher no longer keeps a per-Case skip-cache keyed on
+   ``max_flow_event_ids``: its work list is the agent inbox's ready
+   (recipient, Case) pairs (an index-served read), so an idle Case costs no
+   per-Case delivery work at all, and is delivered the moment a message lands.
 """
 
-import asyncio
-
 from src.control.db import MeshDB
-from src.orchestrator import TaskOrchestrator
 
-from tests.test_case_continuation import _FakeOrch, _FakeStore, _FakeSession, _open_case, _finished
+from tests.test_agent_inbox_delivery import _fresh_allowance  # noqa: F401 — autouse fixture
+from tests.test_case_continuation import _open_case, _finished
+from tests.test_turn_queue_producer1 import _flags, _no_cli_spawn  # noqa: F401
 
 
 def _db(tmp_path) -> MeshDB:
@@ -44,43 +44,28 @@ def test_max_flow_event_ids_is_batched_and_correct(tmp_path, monkeypatch):
 
 
 def test_idle_case_recompute_is_skipped_until_a_new_event_lands(tmp_path, monkeypatch):
-    monkeypatch.setenv("CASE_CONTINUATION_ENABLED", "1")
-    monkeypatch.setenv("CASE_RESPAWN_REQUIRES_APPROVAL", "0")
-    db = _db(tmp_path)
-    case_id = _open_case(db, session_id="mgr-sess")
+    """[A104] An open Case with an empty inbox gets NO per-Case delivery call on a
+    tick (no flow_event read, no recompute); a completion landing in the inbox
+    makes the very next tick deliver it."""
+    from tests.inbox_seed import seed_finished_child
+    from tests.test_agent_inbox_delivery import _env, _tick
 
-    calls = {"n": 0}
-    real_compute = db.compute_continuation_tick
+    db, o = _env(tmp_path, monkeypatch)
+    case_id = _open_case(db, session_id="sess-1")
+    _finished(db, case_id, "noise")  # Case events alone are not a delivery signal
 
-    def _counting_compute(cid):
-        calls["n"] += 1
-        return real_compute(cid)
+    calls = []
+    real_deliver = o._deliver_inbox
 
-    db.compute_continuation_tick = _counting_compute  # type: ignore[assignment]
+    async def _counting_deliver(db_, recipient, cid, **kw):
+        calls.append((recipient, cid))
+        return await real_deliver(db_, recipient, cid, **kw)
 
-    orch = _FakeOrch(_FakeStore(_FakeSession("mgr-sess")))
-    orch._continuation_skip_cache = {}
+    o._deliver_inbox = _counting_deliver
 
-    mid0 = db.max_flow_event_ids([case_id]).get(case_id)
+    assert _tick(o) == 0 and _tick(o) == 0
+    assert calls == []  # idle: no per-Case delivery work
 
-    # First evaluation: nothing satisfied -> computes once and caches idle @ mid0.
-    assert asyncio.run(
-        TaskOrchestrator._continue_case_once(orch, db, case_id, cur_max_event_id=mid0)
-    ) == 0
-    assert calls["n"] == 1
-    assert orch._continuation_skip_cache.get(case_id) == mid0
-
-    # Second evaluation, SAME event id: provably identical -> skip the recompute.
-    assert asyncio.run(
-        TaskOrchestrator._continue_case_once(orch, db, case_id, cur_max_event_id=mid0)
-    ) == 0
-    assert calls["n"] == 1  # not incremented -> the 500-row read was skipped
-
-    # A new event lands: the id advances, the skip must release and recompute.
-    _finished(db, case_id, "t1")
-    mid1 = db.max_flow_event_ids([case_id]).get(case_id)
-    assert mid1 != mid0
-    assert asyncio.run(
-        TaskOrchestrator._continue_case_once(orch, db, case_id, cur_max_event_id=mid1)
-    ) == 0
-    assert calls["n"] == 2  # recomputed because the Case changed
+    seed_finished_child(db, case_id, "t1", requester="sess-1")
+    assert _tick(o) == 1
+    assert calls == [("sess-1", case_id)]

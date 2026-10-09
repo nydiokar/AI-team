@@ -327,6 +327,47 @@ class NotificationService:
             except Exception as e:
                 logger.warning("notify_case_resume_proposal telegram failed case=%s err=%s", case_id, e)
 
+    async def notify_inbox_dead_letter(
+        self,
+        *,
+        message_id: str,
+        recipient_session_id: str,
+        about_task_id: Optional[str],
+        case_id: Optional[str],
+        reason: str,
+        attempts: int,
+    ) -> None:
+        """[A104 I5] An agent-inbox message could not be delivered (attempts
+        exhausted / recipient gone) and is now dead: the operator must learn it,
+        once, on the same two channels as a resume proposal (Web Push deep-linked
+        to the recipient session + Telegram notification). Best-effort."""
+        from src.core.observability import emit_event
+
+        emit_event("inbox_dead_letter", session_id=recipient_session_id)
+        title = "⚠ Agent message not delivered"
+        body = (
+            f"[{(case_id or 'no case')[:8]}] completion of {about_task_id or message_id} "
+            f"→ session {recipient_session_id[:12]}: {reason} after {attempts} attempt(s)"
+        )
+        self._maybe_push_case_resume(
+            case_id=case_id or "", title=title, body=body, session_id=recipient_session_id,
+        )
+        tg = self._telegram
+        try:
+            from config import config as _cfg
+            target = getattr(getattr(_cfg, "telegram", None), "notification_chat_id", None)
+        except Exception:
+            target = None
+        if target and tg:
+            try:
+                await tg.notify_completion(
+                    f"inbox-dead-{message_id[:24]}",
+                    f"{title}\n{body}\n\nOpen the session → /sessions/{recipient_session_id}",
+                    success=False, chat_id=target,
+                )
+            except Exception as e:
+                logger.warning("notify_inbox_dead_letter telegram failed msg=%s err=%s", message_id, e)
+
     def _maybe_push_case_resume(
         self, *, case_id: str, title: str, body: str, session_id: Optional[str] = None,
     ) -> None:

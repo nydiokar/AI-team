@@ -10,12 +10,18 @@ outstanding waits/groups. These tests exercise the whole contract against a real
 
   * ``get_case_brief`` returns EVERY field from the seeded ledger alone.
   * it is a BOUNDED single query set (no per-worker fanout).
-  * ``boot_reconcile_case`` reconciles waits AND re-arms live groups IDEMPOTENTLY
-    (a double-boot writes no duplicate markers).
+  * ``boot_reconcile_case`` reports the Case's pending inbox state IDEMPOTENTLY
+    (A104: the inbox and its filters are durable by themselves — nothing is
+    re-armed and a double-boot writes nothing).
   * flag OFF ⇒ byte-identical: the brief is read-only; the boot hook no-ops.
+
+A104: workers / waits are seeded through the agent inbox (a requested child +
+its terminal txn — ``tests/inbox_seed``), not ``worker.wait_*``/``task.finished``
+ledger events.
 """
 
 from src.control.db import MeshDB
+from tests.inbox_seed import seed_child, seed_finished_child
 
 
 def _db(tmp_path) -> MeshDB:
@@ -30,31 +36,12 @@ def _cont_on(monkeypatch) -> None:
     monkeypatch.setenv("CASE_CONTINUATION_ENABLED", "1")
 
 
-def _dispatch_worker(db: MeshDB, case_id: str, task_id: str) -> None:
-    """Seed a dispatched worker exactly as the orchestrator does: a task link
-    (entity_type='task', role='task', created_by='manager') + a task.attached event."""
-    db.create_flow_link(case_id, "task", task_id, "task", created_by="manager")
-
-
-def _finished(db: MeshDB, case_id: str, task_id: str, outcome: str = "success") -> None:
-    db.append_flow_event(
-        case_id, "task.finished", "worker",
-        entity_type="task", entity_id=task_id,
-        payload={"outcome": outcome},
-    )
-
-
 def _events(db: MeshDB, case_id: str, event_type: str) -> list:
     return [e for e in db.list_flow_events(case_id) if e["event_type"] == event_type]
 
 
-def _wait_group_markers(db: MeshDB, case_id: str, gid: str) -> list:
-    return [
-        e for e in db.list_flow_events(case_id)
-        if e.get("entity_type") == "wait_group"
-        and e.get("entity_id") == gid
-        and e.get("event_type") == "worker.wait_pending"
-    ]
+def _filters(db: MeshDB, case_id: str, gid: str) -> list:
+    return [f for f in db.inbox_list_filters(case_id) if f["wait_group_id"] == gid]
 
 
 # --------------------------------------------------------------------------- #
@@ -62,20 +49,18 @@ def _wait_group_markers(db: MeshDB, case_id: str, gid: str) -> list:
 # --------------------------------------------------------------------------- #
 
 def _seed_full_case(db: MeshDB) -> str:
-    """A Case with 2 dispatched workers (one finished+reviewed, one in-flight),
-    per-task waits, and an armed ANY wait-group over both."""
+    """A Case with 2 requested workers (one finished with its completion still
+    unconsumed, one in-flight), a Case-level accepted verdict, and an armed ANY
+    wait-group (inbox filter) over both."""
     case_id = db.open_case(
         "Ship the feature", "sess-mgr", role="manager",
         completion_criteria="tests green; diff reviewed", round_cap=7,
     )
-    _dispatch_worker(db, case_id, "task_done")
-    _dispatch_worker(db, case_id, "task_live")
+    seed_finished_child(db, case_id, "task_done", requester="sess-mgr")
+    seed_child(db, case_id, "task_live", requester="sess-mgr", token="tok-live")
     # A worker session link (kept warm) for task_done.
     db.create_flow_link(case_id, "session", "sess-worker-1", "worker", created_by="manager")
-    # task_done finished + accepted; per-task wait recorded for both.
-    db.record_worker_wait(case_id, "task_done")
-    db.record_worker_wait(case_id, "task_live")
-    _finished(db, case_id, "task_done", "success")
+    # A Case-level (untagged) verdict: does NOT consume task_done's message.
     db.append_flow_event(
         case_id, "review.accepted", "manager",
         payload={"verdict": "accepted", "reason": "diff verified"},
@@ -146,8 +131,7 @@ def test_brief_bounded_query_set_no_per_worker_fanout(tmp_path, monkeypatch):
         db = _db(tmp_path / f"w{n_workers}")
         case_id = db.open_case("obj", "sess", role="manager", round_cap=5)
         for i in range(n_workers):
-            _dispatch_worker(db, case_id, f"task_{i}")
-            _finished(db, case_id, f"task_{i}")
+            seed_finished_child(db, case_id, f"task_{i}", requester="sess")
         db.arm_wait_group(case_id, "g", "ALL", [f"task_{i}" for i in range(n_workers)])
 
         conn = db._conn()
@@ -176,29 +160,25 @@ def test_boot_reconcile_reconciles_and_rearms_idempotently(tmp_path, monkeypatch
     db = _db(tmp_path)
     case_id = _seed_full_case(db)
 
-    # Pre: task_done finished with an unresolved per-task wait; group armed once.
-    assert _events(db, case_id, "worker.wait_resolved") == []
-    assert len(_wait_group_markers(db, case_id, "batch-1")) == 1
+    # Pre: task_done finished with its completion unconsumed; filter armed once.
+    assert len(_filters(db, case_id, "batch-1")) == 1
+    before_events = db.list_flow_events(case_id)
 
-    # First boot: reconcile clears the finished-wait, re-arms the live group.
+    # First boot: reports what pending_for holds; the durable filter needs no re-arm.
     r1 = db.boot_reconcile_case(case_id)
     assert r1["ok"] is True
-    resolved = [x["task_id"] for x in r1["reconciled"]["resolved"]]
-    assert "task_done" in resolved                 # finished ⇒ resolved
-    assert r1["rearmed"] == ["batch-1"]            # live group re-armed
+    assert [x["task_id"] for x in r1["reconciled"]["resolved"]] == ["task_done"]
+    assert [x["task_id"] for x in r1["reconciled"]["pending"]] == ["task_live"]
+    assert r1["rearmed"] == []
 
-    resolved_after_1 = _events(db, case_id, "worker.wait_resolved")
-    group_markers_after_1 = _wait_group_markers(db, case_id, "batch-1")
-
-    # Second boot (double-boot): idempotent — NO duplicate markers written.
+    # Second boot (double-boot): idempotent — same report, nothing written.
     r2 = db.boot_reconcile_case(case_id)
-    assert r2["ok"] is True
-    # task_done already resolved ⇒ not re-resolved; the group is still armed ⇒
-    # re-arm is an idempotent no-op (returns the existing marker id).
-    assert _events(db, case_id, "worker.wait_resolved") == resolved_after_1
-    assert _wait_group_markers(db, case_id, "batch-1") == group_markers_after_1
-    # Exactly one group marker ever — a double-boot did NOT create a second group.
-    assert len(_wait_group_markers(db, case_id, "batch-1")) == 1
+    assert r2 == r1
+    assert db.list_flow_events(case_id) == before_events
+    assert _events(db, case_id, "worker.wait_resolved") == []
+    assert _events(db, case_id, "worker.wait_pending") == []
+    # Exactly one filter ever — a double-boot did NOT create a second group.
+    assert len(_filters(db, case_id, "batch-1")) == 1
 
 
 # --------------------------------------------------------------------------- #
@@ -213,8 +193,7 @@ def test_brief_is_read_only_regardless_of_flags(tmp_path, monkeypatch):
     monkeypatch.delenv("CASE_CONTINUATION_ENABLED", raising=False)
     db = _db(tmp_path)
     case_id = db.open_case("obj", "sess", role="manager", round_cap=5)
-    _dispatch_worker(db, case_id, "task_1")
-    _finished(db, case_id, "task_1")
+    seed_finished_child(db, case_id, "task_1", requester="sess")
 
     before_events = db.list_flow_events(case_id)
     before_links = db.list_flow_links(flow_run_id=case_id)
@@ -228,8 +207,7 @@ def test_boot_reconcile_noop_when_relay_off(tmp_path, monkeypatch):
     monkeypatch.delenv("DURABLE_RELAY_ENABLED", raising=False)
     db = _db(tmp_path)
     case_id = db.open_case("obj", "sess", role="manager")
-    _dispatch_worker(db, case_id, "task_1")
-    _finished(db, case_id, "task_1")
+    seed_finished_child(db, case_id, "task_1", requester="sess")
 
     before = db.list_flow_events(case_id)
     result = db.boot_reconcile_case(case_id)

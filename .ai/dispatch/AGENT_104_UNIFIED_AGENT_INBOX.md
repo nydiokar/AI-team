@@ -398,6 +398,38 @@ from the Manager host's checkout (Horse, un-redeployed) so dispatch identity mus
   `1 failed, 555 passed`; the 1 failure `test_control_api_auth_coverage` is environmental (fails identically with
   this change stashed: the local `web/dist` mounts SPA routes `GET /` + `/{full_path:path}`; passes in a clean
   `origin/main` worktree without `web/dist`).
+
+### Gate 3 — readers on `pending_for`, bounded delivery (2026-10-09)
+- **RED first:** `tests/test_agent_inbox_delivery.py::test_IR01_incident_2026_10_09…` written before the Gate 3 code,
+  on `main` @ `dd53a72` (Gate 2): `assert 8 == 1` — 8 ticks ⇒ 8 `cturn_*` wakes, ALL `withdrawn` (the incident loop,
+  reproduced on a real file-backed MeshDB with a Manager-own turn, operator messages, a worker finish, 520 Case
+  events, 1,050 session rows). GREEN after: one `wake_*` turn presenting only the worker, zero withdrawals, message
+  `acked`, latest reply in the chat window.
+- **What moved onto the inbox (one PR):** wake producer (`_wake_dispatcher_tick_once` iterates
+  `inbox_ready_recipients` → `_deliver_inbox` → `_admit_inbox_wake`; the claim pending→delivered is in the admission
+  txn), activation check (`_managed_turn_obsolete` → `_inbox_wake_obsolete` → `pending_for(...).carried_by(turn)`),
+  settlement (wake terminal / withdraw txns + `sweep_settled` backstop; legacy `cont:` tokens discharged, never
+  re-armed), session reason (`inbox_waiting_for`, role-free), brief / `reconcile_worker_waits` / `boot_reconcile_case`
+  / `record_worker_wait` / `arm_wait_group` (D5/D7 shims, frozen shapes), heartbeat liveness (filters), tagged-review
+  ack (in `append_flow_event`'s txn), close → `dead(case_closed)` (no alert), D4 lineage (`continued_from` stamped at
+  respawn + rebind record follow; a wake stranded on a replaced seat is withdrawn refunded and re-delivered the same
+  tick), I5 cap 5 + backoff 30 s·2^(n-1) + one push/Telegram alert per dead message (`notify_inbox_dead_letter`,
+  migration 46 `alerted_at`), I6 (inbox wakes write no Case link / admission telemetry; withdrawn turns reconcile to a
+  distinct `withdrawn` status excluded from turn lists/counts), I7 (`get_session_turns` newest window, never-run rows
+  excluded in SQL; round-cap idempotency via targeted `has_flow_event`), the lost-carrier reaper (requested children,
+  no flag), MCP tool texts + respawn prompt + `docs/harness/roles/manager.md`.
+- **Bugs caught in review and fixed before merge:** pause handlers must still run for every open Case each tick
+  (M15); a retry R of a failed wake inherits its messages (no double wake, M16); an operator-stopped Manager is held,
+  not treated as dead (4b R04/R04b/F01); a wake queued on a rebound seat is withdrawn (4c Q08/Q17b); an unenrolled
+  recipient's messages die with an alert instead of pending forever (4b R11).
+- **Scenario matrix:** `tests/test_agent_inbox_delivery.py` → `19 passed` (IR01 + M01–M16: idle, busy, dead→lineage,
+  dead→alert, restart mid-delivery, ALL filter, out-of-band review, review while queued, operator interleave, Case
+  close, rebind, N withdrawals ⇒ N admissions then dead+alert, backoff, **same-function test M12** (producer AND
+  activation call `agent_inbox.pending_for`), worker→worker, legacy token superseded, pause pass, retry carry).
+- **Legacy tests repaired** (rewritten onto the inbox or deleted with reason — per-module notes in the PR):
+  37-module Gate 3 target set → `694 passed`. Wider selector set (128 files referencing the touched modules) →
+  `6 failed, 1826 passed, 9 skipped`; 4 failures are pre-existing on `main` since PR #207 (A102: K06, INT10b, S8_06,
+  S8_06c), 2 were the stage-8a schema-rewind helper (fixed: it now strips the 45/46 artifacts too).
 - Gate 1 inventory table (inline above or linked section) + reproduction `rg` commands
 - Gate 4 dry-run report path + DB backup path
 - Test modules + pass counts per gate
@@ -408,7 +440,7 @@ from the Manager host's checkout (Horse, un-redeployed) so dispatch identity mus
 - [x] D1 containment verified (flag value recorded)
 - [x] Gate 1 — inventory complete, every row has a fate + consumer plan
 - [x] Gate 2 — inbox schema + agent addressing, RED→GREEN tests
-- [ ] Gate 3 — all readers on `pending_for`, bounded delivery, never-run turns traceless; scenario matrix green
+- [x] Gate 3 — all readers on `pending_for`, bounded delivery, never-run turns traceless; scenario matrix green
 - [ ] Gate 4 — migration dry-run lossless; operator go; applied with backup
 - [ ] Gate 5 — superseded code removed, shims kept, I7 fixed, `rg` clean
 - [ ] Gate 6 — deployed; live acceptance 1–7 recorded

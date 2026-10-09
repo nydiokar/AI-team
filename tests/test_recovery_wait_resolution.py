@@ -119,17 +119,24 @@ def test_backfill_ignores_resolved_group(tmp_path):
 # --- A46 per-task waits also covered, end to end via reconcile ------------------
 
 def test_reconcile_resolves_from_task_truth(tmp_path, monkeypatch):
+    """A104: the inbox row is written in the child's TERMINAL txn, whichever path
+    terminalises it — here the lost-carrier reaper (``synthesize_managed_terminal``),
+    which never emits ``task.finished`` itself. Reconcile still resolves it, with
+    no ``task.finished`` and no wait marker involved."""
+    from tests.inbox_seed import seed_child
+
     monkeypatch.setenv("DURABLE_RELAY_ENABLED", "1")
     db = _db(tmp_path)
     case_id = db.open_case("obj", "mgr-1", role="manager")
-    db.record_worker_wait(case_id, "task_t")  # A46 per-task wait (entity_type='task')
-    _task(db, "task_t", status="completed")
+    seed_child(db, case_id, "task_t", requester="mgr-1")
+    assert [p["task_id"] for p in db.reconcile_worker_waits(case_id)["pending"]] == ["task_t"]
+    assert db.synthesize_managed_terminal("task_t") == "synthesized"
 
-    # No task.finished was ever emitted (recovery path) — reconcile must still
-    # resolve it from the task-row truth (via the backfill it now runs first).
     out = db.reconcile_worker_waits(case_id)
     assert out["ok"] is True
-    assert [r["task_id"] for r in out["resolved"]] == ["task_t"]
+    assert out["resolved"] == [{"task_id": "task_t", "outcome": "failed"}]
+    assert out["pending"] == []
+    assert _finished(db, case_id) == []  # resolved from task truth, not the ledger
 
 
 # --- cross-path invariant: a task id ALONE must reach the right Case ------------

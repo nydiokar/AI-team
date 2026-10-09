@@ -13,6 +13,11 @@ These tests drive the GENUINE ``TaskOrchestrator._do_respawn_manager_for_case`` 
 ``_continue_case_once`` against a real ``MeshDB`` with a duck-typed ``self`` — no
 paid CLI, no live backend. Flags ``CASE_CONTINUATION_ENABLED`` +
 ``MANAGER_ROLE_ENABLED`` gate the respawn.
+
+A104: "satisfied" now means the dead Manager has a deliverable agent-inbox
+message (a child it requested finished — ``tests/inbox_seed``); the tick reaches
+the respawn through ``_deliver_inbox``'s dead-recipient branch (the recipient is
+the Case's bound Manager seat).
 """
 
 import asyncio
@@ -24,6 +29,7 @@ from src.control.db import (
     respawn_task_id,
 )
 from src.orchestrator import TaskOrchestrator
+from tests.inbox_seed import seed_finished_child
 
 
 # --------------------------------------------------------------------------- #
@@ -44,12 +50,9 @@ def _on(monkeypatch) -> None:
     monkeypatch.setenv("CASE_RESPAWN_REQUIRES_APPROVAL", "0")
 
 
-def _finished(db: MeshDB, case_id: str, task_id: str, outcome: str = "success") -> None:
-    db.append_flow_event(
-        case_id, "task.finished", "worker",
-        entity_type="task", entity_id=task_id,
-        payload={"outcome": outcome},
-    )
+def _finished(db: MeshDB, case_id: str, task_id: str, requester: str) -> None:
+    """A child ``requester`` dispatched finished: its completion is in the inbox."""
+    seed_finished_child(db, case_id, task_id, requester=requester)
 
 
 def _events(db: MeshDB, case_id: str, event_type: str) -> list:
@@ -181,6 +184,12 @@ class _FakeOrch:
             self, db, case_id, generation, dead_sid,
         )
 
+    async def _deliver_inbox(self, db, recipient, case_id, **kw):
+        return await TaskOrchestrator._deliver_inbox(self, db, recipient, case_id, **kw)
+
+    async def _escalate_round_cap_once(self, db, case_id, cap, generation):
+        return await TaskOrchestrator._escalate_round_cap_once(self, db, case_id, cap, generation)
+
     async def _handle_quota_paused_case(self, db, case_id):
         # The quota-pause branch of the tick. Inert here (no Case in this file
         # carries a `flow.quota_paused` event) — it is covered on its own in
@@ -229,8 +238,8 @@ def test_dead_satisfied_case_respawns_exactly_one_manager(tmp_path, monkeypatch)
     db.upsert_node(socket.gethostname(), "", 9001, ["claude"], 2)
     case_id, dead_sid = _open_case_with_dead_manager(db)
     db.arm_wait_group(case_id, "g1", "ALL", ["t1", "t2"])
-    _finished(db, case_id, "t1")
-    _finished(db, case_id, "t2")
+    _finished(db, case_id, "t1", dead_sid)
+    _finished(db, case_id, "t2", dead_sid)
 
     # The bound Manager session is GONE: store is empty of the dead sid.
     store = _FakeStore()  # dead_sid not present ⇒ session_store.get() → None
@@ -256,7 +265,7 @@ def test_closed_manager_session_is_respawned(tmp_path, monkeypatch):
     db.upsert_node(socket.gethostname(), "", 9001, ["claude"], 2)
     case_id, dead_sid = _open_case_with_dead_manager(db)
     db.arm_wait_group(case_id, "g1", "ANY", ["t1"])
-    _finished(db, case_id, "t1")
+    _finished(db, case_id, "t1", dead_sid)
 
     dead = _FakeSession(dead_sid, status=SessionStatus.CLOSED,
                         repo="/repo-dead", machine_id="__local__")
@@ -304,7 +313,7 @@ def test_blocked_case_with_dead_manager_is_not_respawned(tmp_path, monkeypatch):
     db.upsert_node(socket.gethostname(), "", 9001, ["claude"], 2)
     case_id, dead_sid = _open_case_with_dead_manager(db)
     db.arm_wait_group(case_id, "g1", "ALL", ["t1"])
-    _finished(db, case_id, "t1")
+    _finished(db, case_id, "t1", dead_sid)
     # operator kill → blocked; even with a dead Manager + satisfied wait, NO respawn.
     db.update_flow_run(case_id, status="blocked")
 
@@ -318,6 +327,8 @@ def test_blocked_case_with_dead_manager_is_not_respawned(tmp_path, monkeypatch):
     assert _events(db, case_id, "case.manager_respawned") == []
     assert db.get_task(respawn_task_id(case_id, 1)) is None
     assert orch.deliveries == []
+    # the message is HELD (not killed) while the Case is blocked.
+    assert [r["task_id"] for r in db.reconcile_worker_waits(case_id)["resolved"]] == ["t1"]
 
 
 # --------------------------------------------------------------------------- #
@@ -332,7 +343,7 @@ def test_manager_role_off_falls_back_to_strand_escalation(tmp_path, monkeypatch)
     db.upsert_node(socket.gethostname(), "", 9001, ["claude"], 2)
     case_id, dead_sid = _open_case_with_dead_manager(db)
     db.arm_wait_group(case_id, "g1", "ALL", ["t1"])
-    _finished(db, case_id, "t1")
+    _finished(db, case_id, "t1", dead_sid)
 
     store = _FakeStore()
     svc = _FakeSessionService(store)
@@ -343,4 +354,7 @@ def test_manager_role_off_falls_back_to_strand_escalation(tmp_path, monkeypatch)
     assert _events(db, case_id, "case.manager_respawned") == []
     assert len(_events(db, case_id, "case.manager_unavailable")) == 1
     assert len(orch.notifier.errors) == 1
+    # [A104] the strand is terminal for the message: dead(recipient_gone), not
+    # retried every tick.
+    assert db.pending_for(dead_sid, case_id=case_id).messages == []
 

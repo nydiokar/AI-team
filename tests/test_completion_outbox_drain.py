@@ -1,192 +1,132 @@
-"""A84 carry (o) — the outbox DRAIN through the real Wake-Dispatcher tick.
+"""A84 carry (o) — the completion DRAIN through the real Wake-Dispatcher tick.
 
-Drives the genuine ``TaskOrchestrator._continue_case_once`` (via the duck-typed
-``_FakeOrch`` harness from ``test_case_continuation``) against a REAL file-backed
-``MeshDB``. The outbox rows are produced end-to-end by the REAL atomic terminal
-write (``complete_turn``), never hand-inserted — so these prove the full path
-from "worker child recorded terminal" to "one coalesced Manager wake, drained
-exactly once".
+[A104] The Case-addressed ``completion_outbox`` drain is superseded by the agent
+inbox: a REQUESTED child's terminal writes ONE message addressed to its requester
+(``mesh_tasks.sender_session_id``) in the same txn, and the Wake-Dispatcher admits
+ONE managed wake turn carrying the ready messages. The surviving guarantees are
+proven here on the REAL H3 managed harness (``tests/test_agent_inbox_delivery``):
+file-backed ``MeshDB`` as ``get_db()``, real admission, real scheduler pass, real
+claim/start/complete. Messages are produced end-to-end by the REAL atomic terminal
+write (``complete_turn``), never hand-inserted.
 
-D01 two terminal children → ONE coalesced wake presenting both; ACK marks both
-    outbox rows delivered(reason='wake'); next tick is a no-op.
-D02 a second tick before the ACK does NOT double-wake (deterministic-id claim).
-D03 an out-of-band reviewed child is suppressed (delivered 'reviewed_in_turn'),
-    no wake owed.
-D04 a legacy-mode Case still drains via its wait-group and owns NO outbox rows
-    (cross-path isolation).
-D05 cutover: a legacy wait-group Case AND a new outbox Case each drain EXACTLY
-    once with no cross-path duplicate wake or stranding (ACCEPTANCE 3).
+D01 two terminal children → ONE coalesced wake presenting both; the wake's own
+    completion acks both messages (resolution 'wake'); next tick is a no-op.
+D02 a second tick before the wake completes does NOT double-wake (one wake in
+    flight per recipient/Case).
+D03 an out-of-band reviewed child is consumed (acked 'reviewed') with no wake.
+D05 cutover: a Case born legacy and a Case born outbox-mode each drain EXACTLY
+    once through the one inbox — birth mode no longer routes anything.
+
+Deleted with A104: D04 (a legacy-mode Case drains via its wait-group and owns no
+outbox rows) — it pinned the outbox-vs-legacy mode routing, which no longer exists.
 """
 from __future__ import annotations
 
-import socket
+from src.control.db import MeshDB
+from src.core.interfaces import SessionStatus as SS
 
-import pytest
-
-from src.control.db import MeshDB, continuation_task_id
-from src.orchestrator import TaskOrchestrator
-
-from tests.test_case_continuation import (
-    _FakeOrch, _FakeStore, _FakeSession, _continue, _finished, _reviewed, _events,
+from tests.inbox_seed import seed_finished_child
+from tests.test_agent_inbox_delivery import (  # noqa: F401 — autouse fixtures
+    _add_session, _drive, _env, _fresh_allowance, _tick, _wakes,
 )
-from tests.test_completion_outbox import _seed_running_child
+from tests.test_case_continuation import _FakeOrch, _reviewed  # noqa: F401 — _FakeOrch re-exported for scripts/a84_outbox_e2e.py
+from tests.test_turn_queue_producer1 import _flags, _no_cli_spawn  # noqa: F401
 
 
-class _FakeOrch(_FakeOrch):  # type: ignore[no-redef]
-    """Extends the continuation harness with the real outbox-tick method, which
-    ``_continue_case_once`` calls on ``self`` for an outbox-mode Case."""
-
-    def _compute_outbox_tick(self, db, case_id):
-        return TaskOrchestrator._compute_outbox_tick(self, db, case_id)
-
-
-def _db(tmp_path) -> MeshDB:
-    db = MeshDB(str(tmp_path / "mesh.db"))
-    db.upsert_node(socket.gethostname(), "", 9001, ["claude"], 2)
-    return db
-
-
-def _open_outbox_case(db: MeshDB, monkeypatch, session_id="mgr-sess") -> str:
+def _open_outbox_case(db: MeshDB, monkeypatch, session_id="sess-1") -> str:
+    """A Case BORN in outbox mode (the pre-A104 flag ON at birth)."""
     monkeypatch.setenv("CASE_COMPLETION_OUTBOX_ENABLED", "1")
-    return db.open_case("obj", session_id, role="manager")
+    cid = db.open_case("obj", session_id, role="manager")
+    monkeypatch.delenv("CASE_COMPLETION_OUTBOX_ENABLED")
+    return cid
 
 
-def _finish_child(db: MeshDB, case_id: str, task_id: str, token="tok") -> None:
-    """Terminal a managed Case worker child through the REAL atomic write, so its
-    outbox row is produced by complete_turn (not hand-inserted)."""
-    _seed_running_child(db, task_id, case_id, token=token)
-    db.complete_turn(task_id, token, {"output": "x"}, status="completed")
-
-
-def _pending(db: MeshDB, case_id: str):
-    return db.pending_case_outbox(case_id)
+def _inbox(db: MeshDB, case_id: str) -> dict:
+    return {r["about_task_id"]: dict(r) for r in db._conn().execute(
+        "SELECT * FROM agent_inbox WHERE case_id = ?", (case_id,)).fetchall()}
 
 
 # --- D01: coalesced single wake + exactly-once drain ---------------------- #
 def test_two_children_coalesce_to_one_wake_drained_once(tmp_path, monkeypatch):
-    db = _db(tmp_path)
+    db, o = _env(tmp_path, monkeypatch)
     case_id = _open_outbox_case(db, monkeypatch)
-    _finish_child(db, case_id, "w1", token="t-w1")
-    _finish_child(db, case_id, "w2", token="t-w2")
-    assert {r["child_task_id"] for r in _pending(db, case_id)} == {"w1", "w2"}
+    seed_finished_child(db, case_id, "w1", requester="sess-1")
+    seed_finished_child(db, case_id, "w2", requester="sess-1")
+    assert {m.about_task_id for m in db.pending_for("sess-1", case_id=case_id).messages} == {"w1", "w2"}
 
-    orch = _FakeOrch(_FakeStore(_FakeSession("mgr-sess")))
-    assert _continue(orch, db, case_id) == 1
+    ran = _drive(db, o)
     # exactly ONE coalesced wake presenting BOTH children
-    assert len(orch.deliveries) == 1
-    desc = orch.deliveries[0]["description"]
-    assert "w1" in desc and "w2" in desc
-    cont_id = continuation_task_id(case_id, 1)
-    rows = db.list_continuation_rows(case_id)
-    assert len(rows) == 1 and rows[0]["id"] == cont_id and rows[0]["status"] == "claimed"
+    assert len(ran) == 1
+    (wake,) = _wakes(db)
+    assert "w1" in wake["prompt"] and "w2" in wake["prompt"]
 
-    # Simulate the crash-safe ACK (the stubbed _finalize_continuation would call
-    # this): both outbox rows flip to delivered(reason='wake') in that txn.
-    db.record_continuation_consumed(case_id, cont_id, 1, ["w1", "w2"])
-    out = {r["child_task_id"]: dict(r) for r in db._conn().execute(
-        "SELECT * FROM completion_outbox WHERE case_id=?", (case_id,)).fetchall()}
-    assert out["w1"]["delivered_at"] and out["w1"]["delivery_reason"] == "wake"
-    assert out["w2"]["delivered_at"] and out["w2"]["delivery_reason"] == "wake"
-    assert _pending(db, case_id) == []
+    # The wake's own terminal (the harness, crash-safe in the terminal txn)
+    # acked both messages.
+    out = _inbox(db, case_id)
+    for t in ("w1", "w2"):
+        assert out[t]["state"] == "acked" and out[t]["resolution"] == "wake"
+        assert out[t]["delivery_turn_id"] == wake["id"]
+    assert db.pending_for("sess-1", case_id=case_id).messages == []
 
     # next tick: nothing pending ⇒ no wake
-    orch2 = _FakeOrch(_FakeStore(_FakeSession("mgr-sess")))
-    assert _continue(orch2, db, case_id) == 0
-    assert orch2.deliveries == []
+    assert _drive(db, o) == []
+    assert len(_wakes(db)) == 1
 
 
 # --- D02: no double wake before the ACK ----------------------------------- #
 def test_second_tick_before_ack_does_not_double_wake(tmp_path, monkeypatch):
-    db = _db(tmp_path)
+    db, o = _env(tmp_path, monkeypatch)
     case_id = _open_outbox_case(db, monkeypatch)
-    _finish_child(db, case_id, "w1", token="t-w1")
-    orch = _FakeOrch(_FakeStore(_FakeSession("mgr-sess")))
-    assert _continue(orch, db, case_id) == 1
-    # A second tick, the ACK not yet applied: same generation ⇒ same cont-id ⇒
-    # the atomic claim is lost ⇒ no second wake.
-    orch2 = _FakeOrch(_FakeStore(_FakeSession("mgr-sess")))
-    assert _continue(orch2, db, case_id) == 0
-    assert orch2.deliveries == []
-    assert len(db.list_continuation_rows(case_id)) == 1
+    seed_finished_child(db, case_id, "w1", requester="sess-1")
+    assert _tick(o) == 1
+    # Further ticks while the wake is in flight (not yet completed): the message
+    # is 'delivered' on it ⇒ no second wake.
+    assert _tick(o) == 0 and _tick(o) == 0
+    assert len(_wakes(db)) == 1
+    assert _inbox(db, case_id)["w1"]["state"] == "delivered"
 
 
 # --- D03: out-of-band review suppression ---------------------------------- #
 def test_reviewed_child_is_suppressed_without_a_wake(tmp_path, monkeypatch):
-    db = _db(tmp_path)
+    db, o = _env(tmp_path, monkeypatch)
     case_id = _open_outbox_case(db, monkeypatch)
-    _finish_child(db, case_id, "w1", token="t-w1")
+    seed_finished_child(db, case_id, "w1", requester="sess-1")
     _reviewed(db, case_id, "w1", verdict="accepted")  # Manager already adjudicated
-    orch = _FakeOrch(_FakeStore(_FakeSession("mgr-sess")))
-    assert _continue(orch, db, case_id) == 0
-    assert orch.deliveries == []
-    row = db._conn().execute(
-        "SELECT * FROM completion_outbox WHERE child_task_id='w1'").fetchone()
-    assert row["delivered_at"] and row["delivery_reason"] == "reviewed_in_turn"
+    assert _drive(db, o) == []
+    assert _wakes(db) == []
+    row = _inbox(db, case_id)["w1"]
+    assert row["state"] == "acked" and row["resolution"] == "reviewed"
 
 
-# --- D04: legacy Case keeps the wait-group path, owns no outbox rows ------- #
-def test_legacy_case_drains_via_wait_group_and_has_no_outbox(tmp_path, monkeypatch):
-    monkeypatch.delenv("CASE_COMPLETION_OUTBOX_ENABLED", raising=False)
-    monkeypatch.setenv("CASE_CONTINUATION_ENABLED", "1")
-    monkeypatch.setenv("CASE_RESPAWN_REQUIRES_APPROVAL", "0")
-    db = _db(tmp_path)
-    case_id = db.open_case("obj", "mgr-sess", role="manager")
-    assert db.case_continuation_mode(case_id) is None
-    db.arm_wait_group(case_id, "g1", "ALL", ["t1", "t2"])
-    _finished(db, case_id, "t1")
-    _finished(db, case_id, "t2")
-    orch = _FakeOrch(_FakeStore(_FakeSession("mgr-sess")))
-    assert _continue(orch, db, case_id) == 1
-    assert len(orch.deliveries) == 1
-    # legacy Case never writes/reads the outbox
-    assert db._conn().execute(
-        "SELECT COUNT(*) FROM completion_outbox WHERE case_id=?", (case_id,)
-    ).fetchone()[0] == 0
-
-
-# --- D05: cutover — both paths coexist, each drains exactly once ---------- #
+# --- D05: cutover — both birth modes drain exactly once via the inbox ----- #
 def test_cutover_legacy_and_outbox_each_drain_once_no_cross_path(tmp_path, monkeypatch):
-    monkeypatch.setenv("CASE_CONTINUATION_ENABLED", "1")
-    monkeypatch.setenv("CASE_RESPAWN_REQUIRES_APPROVAL", "0")
-    db = _db(tmp_path)
+    db, o = _env(tmp_path, monkeypatch)
+    _add_session(db, "sess-2", status=SS.AWAITING_INPUT)
 
-    # Legacy Case (flag OFF at birth) with a satisfied wait-group.
+    # Legacy Case (outbox flag OFF at birth) and outbox Case (flag ON at birth).
     monkeypatch.delenv("CASE_COMPLETION_OUTBOX_ENABLED", raising=False)
-    legacy = db.open_case("legacy", "mgr-legacy", role="manager")
-    db.arm_wait_group(legacy, "g1", "ALL", ["lt1", "lt2"])
-    _finished(db, legacy, "lt1")
-    _finished(db, legacy, "lt2")
-
-    # New outbox Case (flag ON at birth) with two terminal children.
-    outbox = _open_outbox_case(db, monkeypatch, session_id="mgr-outbox")
-    _finish_child(db, outbox, "ow1", token="t-ow1")
-    _finish_child(db, outbox, "ow2", token="t-ow2")
-
+    legacy = db.open_case("legacy", "sess-1", role="manager")
+    outbox = _open_outbox_case(db, monkeypatch, session_id="sess-2")
     assert db.case_continuation_mode(legacy) is None
     assert db.case_continuation_mode(outbox) == "outbox"
 
-    store = _FakeStore(_FakeSession("mgr-legacy"), _FakeSession("mgr-outbox"))
+    seed_finished_child(db, legacy, "lt1", requester="sess-1")
+    seed_finished_child(db, legacy, "lt2", requester="sess-1")
+    seed_finished_child(db, outbox, "ow1", requester="sess-2")
+    seed_finished_child(db, outbox, "ow2", requester="sess-2")
 
-    # Each Case drains EXACTLY once, via its OWN path.
-    o1 = _FakeOrch(store)
-    assert _continue(o1, db, legacy) == 1
-    assert o1.deliveries[0]["session_id"] == "mgr-legacy"
+    ran = _drive(db, o)
 
-    o2 = _FakeOrch(store)
-    assert _continue(o2, db, outbox) == 1
-    assert o2.deliveries[0]["session_id"] == "mgr-outbox"
-    d = o2.deliveries[0]["description"]
-    assert "ow1" in d and "ow2" in d
+    # Each Case drains EXACTLY once, to its own requester, presenting only its own children.
+    assert len(ran) == 2
+    by_session = {w["session_id"]: w for w in _wakes(db)}
+    assert set(by_session) == {"sess-1", "sess-2"}
+    assert by_session["sess-1"]["flow_run_id"] == legacy
+    assert "lt1" in by_session["sess-1"]["prompt"] and "ow1" not in by_session["sess-1"]["prompt"]
+    assert by_session["sess-2"]["flow_run_id"] == outbox
+    assert "ow1" in by_session["sess-2"]["prompt"] and "lt1" not in by_session["sess-2"]["prompt"]
 
-    # No cross-path bleed: legacy owns no outbox rows; outbox owns no wait groups.
-    assert db._conn().execute(
-        "SELECT COUNT(*) FROM completion_outbox WHERE case_id=?", (legacy,)).fetchone()[0] == 0
-    assert _events(db, outbox, "worker.wait_pending") == []
-
-    # ACK both and re-tick: neither re-wakes (exactly-once, no stranding).
-    db.record_continuation_consumed(legacy, continuation_task_id(legacy, 1), 1, ["lt1", "lt2"],
-                                    retired_group_ids=["g1"])
-    db.record_continuation_consumed(outbox, continuation_task_id(outbox, 1), 1, ["ow1", "ow2"])
-    assert _continue(_FakeOrch(store), db, legacy) == 0
-    assert _continue(_FakeOrch(store), db, outbox) == 0
-    assert _pending(db, outbox) == []
+    # Neither re-wakes (exactly-once, no stranding).
+    assert _drive(db, o) == []
+    assert {r["state"] for r in _inbox(db, legacy).values()} == {"acked"}
+    assert {r["state"] for r in _inbox(db, outbox).values()} == {"acked"}
