@@ -247,12 +247,6 @@ class _FakeOrch:
             self, db, case_id, session_id,
         )
 
-    async def _finalize_continuation(self, *a, **k):
-        # No-op stand-in so the background consumption task doesn't run here; the
-        # HARNESS-records-consumption contract is asserted directly via
-        # record_continuation_consumed (step 4).
-        self.finalized.append((a, k))
-
 
 def _continue(orch, db, case_id) -> int:
     return asyncio.run(TaskOrchestrator._continue_case_once(orch, db, case_id))

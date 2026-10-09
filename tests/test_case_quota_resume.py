@@ -287,11 +287,6 @@ class _Orch:
         })
         return f"turn-{len(self.deliveries)}"
 
-    async def _finalize_continuation(self, *a, **k):
-        # The post-wake consumption recorder — out of scope here (covered by
-        # test_case_continuation); this fake only needs the wake to be delivered.
-        return None
-
     async def _escalate_headless_case(self, db, case_id, session_id):
         return await TaskOrchestrator._escalate_headless_case(self, db, case_id, session_id)
 

@@ -143,16 +143,37 @@ def test_SYS03_producer_token_maps_to_deterministic_turn_id(tmp_path):
 # SYS04 — restart finalizer reconcilable from durable links/results
 # --------------------------------------------------------------------------- #
 def test_SYS04_finalizer_is_restart_reconcilable(tmp_path):
-    """Finalization must be restart-reconcilable from durable links/results; an
-    in-memory `asyncio.create_task(_finalize_...)` cannot be the sole completion
-    mechanism (design §7). RED: no durable finalizer-reconcile seam.
+    """Finalization must be restart-safe from durable state; an in-memory
+    `asyncio.create_task(_finalize_...)` cannot be the sole completion mechanism
+    (design §7). A104: there is no finalizer at all — the wake's inbox messages
+    are acked INSIDE its own terminal txn, so a fresh process over the same DB
+    finds the round counted and nothing pending or ready to re-admit.
     """
+    from tests.inbox_seed import seed_finished_child
+
     db = _db(tmp_path)
-    reconcile = _resolve(db, "reconcile_finalizers", "reattach_finalizers", "list_unfinalized_turns")
-    assert reconcile is not None, (
-        "no durable finalizer reconciliation on boot; completion relies on an "
-        "in-memory finalizer only (design §7)"
-    )
+    _session(db, "mgr-1")
+    case_id = db.open_case(objective="obj", session_id="mgr-1", role="manager")
+    seed_finished_child(db, case_id, "w1", requester="mgr-1")
+    (msg,) = db.pending_for("mgr-1").messages
+    wake = str(db.enqueue_turn(
+        session_id="mgr-1", body="wake", turn_kind="continuation", operation_id="wake-1",
+        flow_run_id=case_id, machine_id="worker-a", inbox_message_ids=[msg.message_id],
+    ))
+    with db._write() as conn:  # the scheduler's activation (not under test here)
+        conn.execute("UPDATE mesh_tasks SET status = 'pending' WHERE id = ?", (wake,))
+    tok = db.claim_turn(wake, "worker-a", "worker_daemon", "inc-1")
+    db.start_turn(wake, tok, incarnation_id="inc-1")
+    assert db.complete_turn(wake, tok, {"success": True, "output": "ok"}, status="completed")
+
+    fresh = MeshDB(str(tmp_path / "mesh.db"))  # a restarted process: no in-memory state
+    state = fresh._conn().execute(
+        "SELECT state, delivery_turn_id FROM agent_inbox WHERE message_id = ?", (msg.message_id,),
+    ).fetchone()
+    assert (state["state"], state["delivery_turn_id"]) == ("acked", wake)
+    assert fresh.pending_for("mgr-1").messages == []
+    assert fresh.inbox_ready_recipients() == []
+    assert fresh.inbox_rounds_used(case_id) == 1
 
 
 # --------------------------------------------------------------------------- #

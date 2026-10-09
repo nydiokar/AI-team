@@ -102,11 +102,11 @@ def build_router(orchestrator: Any, *, require_auth: Callable[..., Any]) -> APIR
         if flow is None:
             raise HTTPException(status_code=404, detail="case_not_found")
         links = db.list_flow_links(flow_run_id=flow_run_id)
-        events = db.list_flow_events(flow_run_id, limit=1000)
+        event_count = db.count_flow_events(flow_run_id)  # [A104 I7] exact, not capped
         parent_id = flow.get("parent_flow_run_id")
         parent = db.get_flow_run(parent_id) if parent_id else None
         children = db.list_child_flow_runs(flow_run_id)
-        model = _wrm.build_case_detail(flow, links, len(events), parent, children)
+        model = _wrm.build_case_detail(flow, links, event_count, parent, children)
         return JSONResponse(model)
 
     @router.get("/api/work/{flow_run_id}/timeline")
@@ -114,14 +114,16 @@ def build_router(orchestrator: Any, *, require_auth: Callable[..., Any]) -> APIR
         flow_run_id: str,
         limit: int = Query(500, ge=1, le=2000),
     ) -> JSONResponse:
-        """The case audit trail: append-only flow_events in order + linked
-        evidence pointers. 404 on unknown case."""
+        """The case audit trail: the NEWEST ``limit`` flow_events, in order, +
+        linked evidence pointers (A104 I7: a long Case shows its latest events —
+        incl. a worker's ``task.finished`` for an un-redeployed wait_for_worker).
+        404 on unknown case."""
         from src.control import work_read_model as _wrm
         db = core._db()
         flow = db.get_flow_run(flow_run_id) if db is not None else None
         if flow is None:
             raise HTTPException(status_code=404, detail="case_not_found")
-        events = db.list_flow_events(flow_run_id, limit=limit)
+        events = db.list_flow_events(flow_run_id, limit=limit, newest=True)
         links = db.list_flow_links(flow_run_id=flow_run_id)
         return JSONResponse(_wrm.build_case_timeline(flow_run_id, events, links))
 

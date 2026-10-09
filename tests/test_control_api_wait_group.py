@@ -34,6 +34,11 @@ class _StubOrchestrator:
             return {"ok": False, "reason": "case_not_found"}
         return {"ok": True, "brief": {"case_id": case_id, "workers": []}}
 
+    def reconcile_worker_waits(self, case_id, *, actor="manager"):
+        self.reconcile_calls.append(("waits", case_id, actor))
+        return {"ok": True, "reason": None, "resolved": [{"task_id": "t1", "outcome": "success"}],
+                "pending": [{"task_id": "t2"}]}
+
     def boot_reconcile_case(self, case_id, *, actor="manager"):
         self.reconcile_calls.append((case_id, actor))
         return {"ok": True, "reconciled": {"resolved": []}, "rearmed": []}
@@ -291,3 +296,13 @@ def test_case_state_unknown_case_404(monkeypatch):
     client = _kill_client(monkeypatch, _StateFailOrchestrator())
     r = client.post("/api/cases/nope/state", json={"state": "open"}, headers=_auth())
     assert r.status_code == 404
+
+
+def test_waits_reconcile_is_an_ungated_inbox_read(client, monkeypatch):
+    """[A104 D5] reconcile_waits reads pending_for and writes nothing, so it is no
+    longer hidden behind DURABLE_RELAY_ENABLED (OFF in production)."""
+    monkeypatch.setenv("DURABLE_RELAY_ENABLED", "0")
+    r = client.post("/api/cases/c1/waits/reconcile", headers=_auth())
+    assert r.status_code == 200
+    assert r.json()["resolved"] == [{"task_id": "t1", "outcome": "success"}]
+    assert r.json()["pending"] == [{"task_id": "t2"}]

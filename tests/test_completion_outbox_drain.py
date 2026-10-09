@@ -14,11 +14,14 @@ D01 two terminal children → ONE coalesced wake presenting both; the wake's own
 D02 a second tick before the wake completes does NOT double-wake (one wake in
     flight per recipient/Case).
 D03 an out-of-band reviewed child is consumed (acked 'reviewed') with no wake.
-D05 cutover: a Case born legacy and a Case born outbox-mode each drain EXACTLY
-    once through the one inbox — birth mode no longer routes anything.
+D05 two Cases with two Managers each drain EXACTLY once, to their own
+    requester, presenting only their own children (no cross-path).
 
 Deleted with A104: D04 (a legacy-mode Case drains via its wait-group and owns no
 outbox rows) — it pinned the outbox-vs-legacy mode routing, which no longer exists.
+A104 Phase 5 deleted the Case ``continuation_mode`` birth marker and the
+``CASE_COMPLETION_OUTBOX_ENABLED`` flag: D05 no longer asserts birth modes (there
+are none); its surviving per-requester isolation guarantee is kept.
 """
 from __future__ import annotations
 
@@ -29,16 +32,12 @@ from tests.inbox_seed import seed_finished_child
 from tests.test_agent_inbox_delivery import (  # noqa: F401 — autouse fixtures
     _add_session, _drive, _env, _fresh_allowance, _tick, _wakes,
 )
-from tests.test_case_continuation import _FakeOrch, _reviewed  # noqa: F401 — _FakeOrch re-exported for scripts/a84_outbox_e2e.py
+from tests.test_case_continuation import _reviewed
 from tests.test_turn_queue_producer1 import _flags, _no_cli_spawn  # noqa: F401
 
 
-def _open_outbox_case(db: MeshDB, monkeypatch, session_id="sess-1") -> str:
-    """A Case BORN in outbox mode (the pre-A104 flag ON at birth)."""
-    monkeypatch.setenv("CASE_COMPLETION_OUTBOX_ENABLED", "1")
-    cid = db.open_case("obj", session_id, role="manager")
-    monkeypatch.delenv("CASE_COMPLETION_OUTBOX_ENABLED")
-    return cid
+def _open_case(db: MeshDB, session_id="sess-1") -> str:
+    return db.open_case("obj", session_id, role="manager")
 
 
 def _inbox(db: MeshDB, case_id: str) -> dict:
@@ -49,7 +48,7 @@ def _inbox(db: MeshDB, case_id: str) -> dict:
 # --- D01: coalesced single wake + exactly-once drain ---------------------- #
 def test_two_children_coalesce_to_one_wake_drained_once(tmp_path, monkeypatch):
     db, o = _env(tmp_path, monkeypatch)
-    case_id = _open_outbox_case(db, monkeypatch)
+    case_id = _open_case(db)
     seed_finished_child(db, case_id, "w1", requester="sess-1")
     seed_finished_child(db, case_id, "w2", requester="sess-1")
     assert {m.about_task_id for m in db.pending_for("sess-1", case_id=case_id).messages} == {"w1", "w2"}
@@ -76,7 +75,7 @@ def test_two_children_coalesce_to_one_wake_drained_once(tmp_path, monkeypatch):
 # --- D02: no double wake before the ACK ----------------------------------- #
 def test_second_tick_before_ack_does_not_double_wake(tmp_path, monkeypatch):
     db, o = _env(tmp_path, monkeypatch)
-    case_id = _open_outbox_case(db, monkeypatch)
+    case_id = _open_case(db)
     seed_finished_child(db, case_id, "w1", requester="sess-1")
     assert _tick(o) == 1
     # Further ticks while the wake is in flight (not yet completed): the message
@@ -89,7 +88,7 @@ def test_second_tick_before_ack_does_not_double_wake(tmp_path, monkeypatch):
 # --- D03: out-of-band review suppression ---------------------------------- #
 def test_reviewed_child_is_suppressed_without_a_wake(tmp_path, monkeypatch):
     db, o = _env(tmp_path, monkeypatch)
-    case_id = _open_outbox_case(db, monkeypatch)
+    case_id = _open_case(db)
     seed_finished_child(db, case_id, "w1", requester="sess-1")
     _reviewed(db, case_id, "w1", verdict="accepted")  # Manager already adjudicated
     assert _drive(db, o) == []
@@ -98,17 +97,14 @@ def test_reviewed_child_is_suppressed_without_a_wake(tmp_path, monkeypatch):
     assert row["state"] == "acked" and row["resolution"] == "reviewed"
 
 
-# --- D05: cutover — both birth modes drain exactly once via the inbox ----- #
+# --- D05: two Cases / two Managers each drain exactly once ---------------- #
 def test_cutover_legacy_and_outbox_each_drain_once_no_cross_path(tmp_path, monkeypatch):
     db, o = _env(tmp_path, monkeypatch)
     _add_session(db, "sess-2", status=SS.AWAITING_INPUT)
 
-    # Legacy Case (outbox flag OFF at birth) and outbox Case (flag ON at birth).
-    monkeypatch.delenv("CASE_COMPLETION_OUTBOX_ENABLED", raising=False)
+    # Names kept from the pre-A104 cutover test; there is no birth mode any more.
     legacy = db.open_case("legacy", "sess-1", role="manager")
-    outbox = _open_outbox_case(db, monkeypatch, session_id="sess-2")
-    assert db.case_continuation_mode(legacy) is None
-    assert db.case_continuation_mode(outbox) == "outbox"
+    outbox = _open_case(db, session_id="sess-2")
 
     seed_finished_child(db, legacy, "lt1", requester="sess-1")
     seed_finished_child(db, legacy, "lt2", requester="sess-1")

@@ -450,6 +450,43 @@ from the Manager host's checkout (Horse, un-redeployed) so dispatch identity mus
   Acceptance 4: `select count(*) from mesh_tasks where id like 'cont:%' and status in ('pending','claimed')` → **0**.
   Note: this deploy also shipped the already-merged #205/#206/#207 (A102 S0/S1-OpenCode, A103) — gateway-side
   impact reviewed (best-effort carrier nudge; retired OpenCode CLI class removed); worker code unaffected.
+
+### Gate 5 — superseded code removed (2026-10-09)
+- **Deleted (db):** `compute_continuation_tick`, `continuation_watermark`, `list_continuation_rows`,
+  `record_continuation_consumed`, `reconcile_finalizers`, `_finalize_producer_token`, `case_continuation_mode`,
+  `pending_case_outbox`, `mark_case_outbox_delivered`, `reviewed_task_ids`, `_mark_outbox_delivered_conn`,
+  `backfill_missing_task_finished` (wait-group fold), `PRODUCER_CONSUMING_STATUSES`, the
+  `CASE_COMPLETION_OUTBOX_ENABLED` flag (definition + `case_completion_outbox_enabled`) and the `continuation_mode`
+  birth stamping / `create_flow_run` parameter. `_record_case_child_outbox` now only writes/settles the inbox
+  (`completion_outbox` + `flow_runs.continuation_mode` stay as inert history — D6, nothing reads or writes them).
+- **Deleted (orchestrator):** `_continue_case_managed`, `_compute_outbox_tick`, `_withdraw_rebound_continuation`,
+  `_reconcile_continuation_finalizers` (+ tick call), `_finalize_continuation`, the restart-recovery ledger backfill
+  pass. **Deleted script:** `scripts/a84_outbox_e2e.py` (A84 outbox proof, superseded by the Gate 3 matrix).
+- **Kept (D7 shims, frozen shapes):** `record_worker_wait` (no-op), `arm_wait_group` (D2 filter),
+  `reconcile_worker_waits` / `get_case_brief` / `boot_reconcile_case` (reads of `pending_for`), routes `/waits`,
+  `/wait-group`, `/waits/reconcile` (now ungated — a pure read), `/brief`, `/boot-reconcile`,
+  `POST /control/cases/{id}/boot-reconcile`; the 15 MCP tool names.
+- **I7:** every former `list_flow_events` state reader now uses a targeted query (`has_flow_event`,
+  `count_flow_events`, `list_flow_events_of_types` — filtered in SQL before any bound): close-case rework gate,
+  `latest_spec_review`, `resume_case` resume count, headless/interrupt idempotency, advancement gate, Work detail
+  event count. The only remaining `list_flow_events` caller is the audit timeline route, now the NEWEST window.
+  `list_flow_links(created_by=)` filters in SQL for interrupt/orphan-sweep. `get_session_turns` newest window
+  (Gate 3).
+- **rg proof (src/ + scripts/):**
+  `rg -n "compute_continuation_tick|continuation_watermark|list_continuation_rows|record_continuation_consumed|reconcile_finalizers|_finalize_producer_token|case_continuation_mode|pending_case_outbox|mark_case_outbox_delivered|reviewed_task_ids|_mark_outbox_delivered_conn|backfill_missing_task_finished|case_completion_outbox_enabled|_compute_outbox_tick|_continue_case_managed|_withdraw_rebound_continuation|_reconcile_continuation_finalizers|_finalize_continuation|_case_has_unresolved_wait_group" src scripts`
+  → **0 hits**. `rg -n "list_flow_events\(" src scripts | grep -v "def "` → 1 hit (`routes/work.py` timeline,
+  `newest=True`). Pending-state reads: `rg -n "pending_for|case_pending|inbox_waiting_for|waiting_for\(" src` →
+  only `agent_inbox.py`, `db.py` wrappers/shims, `orchestrator._deliver_inbox` / `_inbox_wake_obsolete`,
+  `session_reason.build_reason_batch` — every one on the Gate 1 list.
+- **Tests updated/deleted (reasons in the PR and the subagent notes):** `test_completion_outbox` (mode-marker +
+  immutability deleted; writer tests moved to the inbox), `test_completion_outbox_drain` (D05 de-moded),
+  `test_completion_outbox_reaper` (R05), `test_turn_queue_4c` (Q03/Q10/Q12/Q16/Q18c/Q19 rewritten, Q15 deleted —
+  the finalizer is gone; the fence is now the `delivery_turn_id`-conditioned transitions, IB08),
+  `test_turn_queue_4e_review` (2 rewritten), `test_turn_queue_producers` (SYS04), `test_recovery_wait_resolution`
+  (5 backfill tests deleted — backfill removed), M14 (legacy token built directly), `test_control_api_wait_group`
+  (+ ungated reconcile route test).
+- **Targeted modules (all touched files):** wide selector set 129 files → `4 failed, 1796 passed, 9 skipped`; the 4
+  are the pre-existing A102 failures on main (K06, INT10b, S8_06, S8_06c).
 - Gate 1 inventory table (inline above or linked section) + reproduction `rg` commands
 - Gate 4 dry-run report path + DB backup path
 - Test modules + pass counts per gate
@@ -462,7 +499,7 @@ from the Manager host's checkout (Horse, un-redeployed) so dispatch identity mus
 - [x] Gate 2 — inbox schema + agent addressing, RED→GREEN tests
 - [x] Gate 3 — all readers on `pending_for`, bounded delivery, never-run turns traceless; scenario matrix green
 - [x] Gate 4 — migration dry-run lossless; operator go; applied with backup
-- [ ] Gate 5 — superseded code removed, shims kept, I7 fixed, `rg` clean
+- [x] Gate 5 — superseded code removed, shims kept, I7 fixed, `rg` clean
 - [ ] Gate 6 — deployed; live acceptance 1–7 recorded
 
 ## Closure (fill on completion)
