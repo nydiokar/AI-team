@@ -625,6 +625,17 @@ _STREAM_BUFFER_BYTES = 16 * 1024 * 1024
 _POISON_SAMPLE_CHARS = 500
 _stream_resync_installed = False
 
+# [A102] Per-session identity keys that MUST come from the session's own proc_env,
+# never inherited from the worker process env.  A worker restarted mid-agent-turn
+# (2026-09-09) captures a dead identity in os.environ; any session started after
+# that restart would inherit the stale values unless we force-override them.
+_AGENT_IDENTITY_KEYS: frozenset[str] = frozenset({
+    "SESSION_ID",
+    "AI_TEAM_SESSION_ID",
+    "AI_TEAM_TURN_ID",
+    "AI_TEAM_INVOCATION_ID",
+})
+
 
 def _log_stream_poison(discarded: str, reason: str) -> None:
     """Record a bounded, escaped sample of stdout text that could never parse.
@@ -930,7 +941,14 @@ class _SDKSession:
             cwd=self.cwd,
             allowed_tools=tools,
             permission_mode="bypassPermissions",
-            env={k: v for k, v in self.proc_env.items() if k not in os.environ},
+            # Per-session identity keys (A102): always resolve from this session's
+            # proc_env, never from the worker process env — a stale SESSION_ID
+            # captured at worker startup must never shadow a live session's identity.
+            # All other keys use the existing "supplement, don't override" filter.
+            env={
+                k: v for k, v in self.proc_env.items()
+                if k in _AGENT_IDENTITY_KEYS or k not in os.environ
+            },
             # Raised far above any real message (observed max on a live node:
             # 149 KB) so the ceiling is a memory bound, not a failure mode.
             max_buffer_size=_STREAM_BUFFER_BYTES,
