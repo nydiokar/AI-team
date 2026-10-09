@@ -11317,6 +11317,15 @@ Generated from user description: {description}
         else:
             self._record_flow_stage(flow_run_id, "queued")
         notify_turn_queue_changed()
+        # [A103] Nudge the carrier worker so it claims this turn without waiting
+        # out its adaptive poll backoff (up to 30 s on idle).  Fire-and-forget:
+        # the poll loop is the backstop; any nudge failure must not break admission.
+        if carrier:
+            try:
+                from src.control.node_inspector import _nudge_worker as _nw
+                asyncio.create_task(_nw(carrier, db))
+            except Exception:  # noqa: BLE001 — nudge is best-effort
+                pass
         return admission
 
     def _staged_file_ref(self, raw: Any, sid: str) -> "StagedFileRef":
@@ -11464,6 +11473,13 @@ Generated from user description: {description}
             flow_run_id, "objective_lock" if self._harness_flow_drive_enabled() else "queued",
         )
         notify_turn_queue_changed()
+        # [A103] Same carrier nudge as the main admission path — fire-and-forget.
+        if carrier:
+            try:
+                from src.control.node_inspector import _nudge_worker as _nw
+                asyncio.create_task(_nw(carrier, db))
+            except Exception:  # noqa: BLE001 — nudge is best-effort
+                pass
         return admission
 
     class _LineageFenceLost(Exception):
