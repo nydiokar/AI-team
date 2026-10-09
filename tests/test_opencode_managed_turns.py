@@ -23,7 +23,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import src.control.task_server as ts
-from src.backends.opencode import OpenCodeBackend, OpenCodeServerBackend, managed_message_id
+from src.backends.opencode import OpenCodeServerBackend, managed_message_id
 from src.control.turn_queue import ManagedTurnOwnership, OwnershipConflictError
 from src.core.interfaces import Session, SessionStatus
 from src.core.process_utils import process_gone_proof
@@ -320,10 +320,8 @@ def _wait(pred, timeout: float = 5.0) -> None:
 # --------------------------------------------------------------------------- #
 # Capability / identity
 # --------------------------------------------------------------------------- #
-def test_capability_matrix_server_supports_cli_fails_closed():
+def test_capability_matrix_server_supports_managed_turns():
     assert OpenCodeServerBackend().supports_managed_turns() is True
-    cli = OpenCodeBackend()
-    assert cli.supports_managed_turns() is False
     # Sender capability: OpenCode MCP config is per server process (shared by
     # every session in the repo) ⇒ never provisioned (fail closed).
     assert OpenCodeServerBackend().provision_sender_capability("gw-1", "secret") is False
