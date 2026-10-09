@@ -373,6 +373,31 @@ corrections 1–9), notably: `task.finished` is written post-commit by the effec
 from the Manager host's checkout (Horse, un-redeployed) so dispatch identity must also be derivable server-side
 (R1); respawn records no `continued_from` (D4 needs it). Genuine pending live: `task_b7ba302c` (4d8a46b5),
 `task_e7ae0733` (534463b6); `task_7b175284` reviewed-but-undelivered → ack.
+
+### Gate 2 — inbox schema + addressing (2026-10-09, commit `cc3e369`)
+- **Schema (migration 45):** `agent_inbox` (I1 shape + `resolution`), `idx_agent_inbox_pending` partial on
+  `(recipient_session_id, state) WHERE state IN ('pending','delivered')`, turn/about/case indexes;
+  `inbox_wait_filters` (D2); `idx_mesh_tasks_requester_open` (outstanding requests); `idx_sessions_continued_from`
+  (D4). Every `completion_outbox` row is copied (delivered → `acked`, undelivered → `dead(unaddressed_pre_inbox)`,
+  re-seeded by Phase 4). `completion_outbox` stays until Phase 5.
+- **Addressing:** `src/control/agent_inbox.py::record_completion` runs first inside `_record_case_child_outbox`
+  (all three terminal txns: `complete_turn`, `resolve_recovery`, `synthesize_managed_terminal`), addressed to the
+  child's `sender_session_id`; none for NULL/self. Requester stamped in `enqueue_turn`'s admission txn
+  (`requester_session_id` → `sender_session_id`; never self/unknown/closed). Sources: explicit
+  `requester_session_id` (`InstructionBody`, honoured only for the automation principal; `mcp_manager` sends its env
+  `AI_TEAM_SESSION_ID`/`SESSION_ID`) or R1 server resolution `MeshDB.resolve_dispatch_requester` (unique executing
+  Case member, else nobody + `inbox.requester_unresolved` audit event).
+- **Read + transitions:** `pending_for` (messages + outstanding requests, index-served, bounded 256), `deliver`,
+  `settle_turn`, `ack_about_task`, `kill_case`, `kill_recipient`, `readdress`, `successor_of`, `arm_filter`.
+- **RED first:** `tests/test_agent_inbox.py` before the code → collection `ImportError` (no module), then with the
+  module+migration but no addressing: 8× `unexpected keyword argument 'requester_session_id'`, IB09 `assert 0 == 1`
+  (no writer for the persisted requester), IB05b no `inbox.requester_unresolved` event.
+- **GREEN:** `.venv/bin/pytest tests/test_agent_inbox.py tests/test_mcp_manager.py` → `82 passed`. Regression set
+  (`tests/test_agent_inbox.py` + 16 control_api/mcp/manager modules + `test_completion_outbox{,_drain,_reaper}`,
+  `test_flow_schema_extension`, `test_turn_queue_{4b,4c,admission,api,db,producer1,sender}`) →
+  `1 failed, 555 passed`; the 1 failure `test_control_api_auth_coverage` is environmental (fails identically with
+  this change stashed: the local `web/dist` mounts SPA routes `GET /` + `/{full_path:path}`; passes in a clean
+  `origin/main` worktree without `web/dist`).
 - Gate 1 inventory table (inline above or linked section) + reproduction `rg` commands
 - Gate 4 dry-run report path + DB backup path
 - Test modules + pass counts per gate
@@ -382,7 +407,7 @@ from the Manager host's checkout (Horse, un-redeployed) so dispatch identity mus
 ## Milestone (burndown)
 - [x] D1 containment verified (flag value recorded)
 - [x] Gate 1 — inventory complete, every row has a fate + consumer plan
-- [ ] Gate 2 — inbox schema + agent addressing, RED→GREEN tests
+- [x] Gate 2 — inbox schema + agent addressing, RED→GREEN tests
 - [ ] Gate 3 — all readers on `pending_for`, bounded delivery, never-run turns traceless; scenario matrix green
 - [ ] Gate 4 — migration dry-run lossless; operator go; applied with backup
 - [ ] Gate 5 — superseded code removed, shims kept, I7 fixed, `rg` clean

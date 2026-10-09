@@ -396,6 +396,13 @@ def _dispatch_worker(args: Dict[str, Any]) -> str:
         # Use for a genuine child-CASE lineage edge; use case_id (above) to make the
         # worker JOIN the Manager's Case instead.
         body["parent_flow_run_id"] = parent_flow_run_id
+    # [A104 I2] Who is asking: this MCP server runs inside the requesting agent's
+    # session (the carrier exports its ai-team session id), so the worker's
+    # completion is addressed to THAT session's inbox. Absent ⇒ the gateway
+    # resolves the requester itself.
+    requester = (os.environ.get("AI_TEAM_SESSION_ID") or os.environ.get("SESSION_ID") or "").strip()
+    if requester and requester != session_id:
+        body["requester_session_id"] = requester[:128]
 
     # [A82 Stage 4b rework 2] Declare this caller as automation: for a session
     # enrolled in the managed turn queue the dispatched turn is non-human and
