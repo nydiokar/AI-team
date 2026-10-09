@@ -1,0 +1,43 @@
+# Provenance: transcribed from .ai/dispatch/AGENT_102_UNIFY_BACKEND_PATHWAYS.md (written 2026-10-08, before
+# the work): S1 per-backend deletions, S2 items 1-4, R2/R3 defaults, R4 "no shim survives A102", and
+# ACCEPTANCE 1 (policy names must not appear in src/backends). Written 2026-10-09. Not blind: A102 is the
+# operator's known case; the content is the packet's own list, no names were added.
+# Scope = the packet's S1+S2 file ownership (src/**, config/settings.py, worker_main.py).
+scope: [src, config, worker_main.py]
+retired:
+  # S2.1 interface twins + R4 shims
+  - run_managed_turn
+  - run_managed_compaction
+  - cancel_managed_turn
+  - forget_managed_turn
+  - supports_managed_turns
+  # S1-Claude
+  - send_managed
+  - _submit_managed_no_interrupt
+  - _turn_timeout_sec
+  - ClaudePrintResumeDriver
+  # S1-OpenCode
+  - _run_managed
+  - _managed_turn_body
+  - _managed_submit
+  - _managed_wait
+  - OpenCodeBackend
+  # S1-Codex
+  - MAX_TURN_SECONDS
+  - MANAGED_STALL_SECONDS
+  - MANAGED_TURN_SECONDS
+  - cancel_execution
+  # S2.3 dead gateway code
+  - _run_backend_local
+  - _dispatch_or_run_local
+  - _legacy_put_guard
+  - _enrollment_exclusion
+  # S2.4 flags
+  - WORKER_MANAGED_TURNS
+  - TURN_QUEUE_ENROLLMENT_ENABLED
+forbidden_in:
+  # Rule 3 "policy out of backends" + ACCEPTANCE 1; rule 4 "no if managed branches"
+  # policy names: every kind (config may be read by string key); `managed`: code only (rule 4 is about branches;
+  # strings like the 'ai-team.managed-turn:' id namespace and error texts are not branches)
+  src/backends: ['^timeout_seconds$', '^sdk_turn_timeout_sec$', '^inactivity_timeout_sec$',
+                 {pattern: '^managed$', kinds: [def, ref, import]}]
