@@ -55,10 +55,9 @@ def test_R4_clean_exit_after_deadline_is_quiescent_dead_session():
     fake = _EOFClient()
     fake.defer_echo = True
     sess = _start_fake_session(fake)
-    sess._managed_stall_sec = lambda: 0.3
     sess._on_proactive = lambda k, o: None
     try:
-        out = _managed_in_thread(sess, "p")
+        out = _managed_in_thread(sess, "p", stall=0.3)
         _wait_query(fake)
         out["t"].join(3)
         assert "e" in out  # deadline -> recovery
@@ -79,7 +78,6 @@ def test_R4_clean_exit_mid_turn_fails_caller_and_frees_session():
     fake = _EOFClient()
     fake.defer_echo = True
     sess = _start_fake_session(fake)
-    sess._managed_stall_sec = lambda: 5
     try:
         out = _managed_in_thread(sess, "p")
         _wait_query(fake)
@@ -118,7 +116,8 @@ def test_R4_next_managed_turn_replaces_the_dead_session(monkeypatch):
     try:
         new = drv._get_or_create(session, None, None, {})
         assert new is not dead and dead._closed is True and started == [new]
-        assert new.send_managed("second").output == "SECOND OK"
+        from src.core.turn_liveness import turn_control
+        assert new.send("second", turn=turn_control("u-second")).output == "SECOND OK"
     finally:
         for s in started:
             s.close()
@@ -153,9 +152,13 @@ def test_R4_flag_off_session_with_ended_reader_is_not_evicted(monkeypatch):
 # =========================================================================== #
 # MINOR-1 — operator resolve is a real exit (CLI alive, prompt never echoed)
 # =========================================================================== #
-def test_R4_operator_resolution_frees_session_for_next_managed_turn(db, tmp_path, real_claude, admin):
+def test_R4_operator_resolution_frees_session_for_next_managed_turn(db, tmp_path, real_claude, admin, monkeypatch):
     real_claude.fake.defer_echo = True          # the CLI never begins our turn
-    real_claude.sess._managed_stall_sec = lambda: 0.3
+    # [A102 rule 8] inject a short stall through every shim-built turn.
+    import src.backends.claude_code as _cc
+    _orig_tc = _cc.turn_control
+    _stall = {"s": 0.3}
+    monkeypatch.setattr(_cc, "turn_control", lambda u, **kw: _orig_tc(u, stall_override=_stall["s"], **kw))
     http = _ClientHTTP(TestClient(ts.app))
     w = _worker(tmp_path, http)
     w._backends = {"claude": real_claude.backend}
@@ -173,7 +176,7 @@ def test_R4_operator_resolution_frees_session_for_next_managed_turn(db, tmp_path
     # Next managed turn on the same session succeeds.
     real_claude.fake.defer_echo = False
     real_claude.fake.replies["next prompt"] = [_assistant("n", sid="n2"), _result("NEXT OK", sid="n2")]
-    real_claude.sess._managed_stall_sec = lambda: 5
+    _stall["s"] = 5.0
     _seed_turn_for_session(db, "t-2", "sess-1", "next prompt")
     _run_one(w, "t-2")
     assert _row(db, "t-2")["status"] == "completed"
@@ -216,7 +219,10 @@ def test_R4_not_submitted_attestation_returns_turn_to_pending(db, tmp_path, real
         return await real_orig(*a, **k)
 
     monkeypatch.setattr(sess, "_submit_turn", slow_submit)
-    sess._managed_stall_sec = lambda: 0.2
+    # [A102 rule 8] inject a short stall through every shim-built turn.
+    import src.backends.claude_code as _cc
+    _orig_tc = _cc.turn_control
+    monkeypatch.setattr(_cc, "turn_control", lambda u, **kw: _orig_tc(u, stall_override=0.2, **kw))
     http = _ClientHTTP(TestClient(ts.app))
     w = _worker(tmp_path, http)
     w._backends = {"claude": real_claude.backend}

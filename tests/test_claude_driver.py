@@ -21,9 +21,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from src.core.interfaces import ExecutionResult, Session, SessionStatus
+from src.core.turn_liveness import turn_control
 from src.backends.claude_driver import (
     CacheStats,
-    ClaudePrintResumeDriver,
     ClaudeSDKClientDriver,
     _SDKSession,
     _parse_print_resume,
@@ -187,107 +187,16 @@ class TestParsePrintResume:
 
 
 # ---------------------------------------------------------------------------
-# ClaudePrintResumeDriver._build_cmd
-# ---------------------------------------------------------------------------
-
-class TestPrintResumeDriverBuildCmd:
-    def test_first_turn_has_no_resume(self):
-        drv = ClaudePrintResumeDriver()
-        cmd = drv._build_cmd(resume_id=None, session_id="aaa", model=None)
-        assert "--resume" not in cmd
-        assert "--session-id" in cmd
-        assert "aaa" in cmd
-        assert "-p" in cmd
-        # Partial messages intentionally removed
-        assert "--include-partial-messages" not in cmd
-
-    def test_resume_turn_uses_resume_flag(self):
-        drv = ClaudePrintResumeDriver()
-        cmd = drv._build_cmd(resume_id="bbb", session_id=None, model=None)
-        assert "--resume" in cmd
-        assert "bbb" in cmd
-        assert "--session-id" not in cmd
-        assert "--include-partial-messages" not in cmd
-
-    def test_model_flag_included(self):
-        drv = ClaudePrintResumeDriver()
-        cmd = drv._build_cmd(resume_id=None, session_id="ccc", model="claude-opus-4-8")
-        assert "--model" in cmd
-        assert "claude-opus-4-8" in cmd
-
-    def test_dangerously_skip_permissions_present(self):
-        drv = ClaudePrintResumeDriver()
-        cmd = drv._build_cmd(resume_id=None, session_id="ddd", model=None)
-        assert "--dangerously-skip-permissions" in cmd
-
-
-# ---------------------------------------------------------------------------
-# ClaudePrintResumeDriver — send_turn blocked under test mode
-# ---------------------------------------------------------------------------
-
-class TestPrintResumeDriverBlockedUnderTestMode:
-    def test_start_session_raises_live_call_blocked(self):
-        from src.core.test_guard import LiveCallBlockedError
-        drv = ClaudePrintResumeDriver()
-        session = _make_session()
-        with pytest.raises(LiveCallBlockedError):
-            drv.start_session(session, "hello")
-
-    def test_send_turn_raises_live_call_blocked(self):
-        from src.core.test_guard import LiveCallBlockedError
-        drv = ClaudePrintResumeDriver()
-        session = _make_session(backend_session_id="existing-id")
-        with pytest.raises(LiveCallBlockedError):
-            drv.send_turn(session, "follow-up")
-
-
-# ---------------------------------------------------------------------------
-# ClaudePrintResumeDriver — cancel / close no-crash
-# ---------------------------------------------------------------------------
-
-class TestPrintResumeDriverCancelClose:
-    def test_cancel_unknown_session_is_noop(self):
-        drv = ClaudePrintResumeDriver()
-        session = _make_session()
-        drv.cancel(session)  # must not raise
-
-    def test_close_is_noop(self):
-        drv = ClaudePrintResumeDriver()
-        session = _make_session()
-        drv.close(session)  # must not raise
-
-    def test_driver_type_string(self):
-        drv = ClaudePrintResumeDriver()
-        assert drv.driver_type() == "print_resume"
-
-
-# ---------------------------------------------------------------------------
 # build_driver factory
 # ---------------------------------------------------------------------------
 
 class TestBuildDriver:
-    def test_explicit_print_resume(self):
-        drv = build_driver("print_resume")
-        assert isinstance(drv, ClaudePrintResumeDriver)
-
-    def test_auto_falls_back_to_print_resume_when_sdk_missing(self, monkeypatch):
-        # Patch _sdk_available to return False
-        import src.backends.claude_driver as driver_mod
-        monkeypatch.setattr(driver_mod, "_SDK_AVAILABLE", False)
-        drv = build_driver("auto")
-        assert isinstance(drv, ClaudePrintResumeDriver)
-        # Reset global so other tests aren't affected
-        monkeypatch.setattr(driver_mod, "_SDK_AVAILABLE", None)
-
-    def test_auto_uses_sdk_when_available(self, monkeypatch):
-        import src.backends.claude_driver as driver_mod
-        monkeypatch.setattr(driver_mod, "_SDK_AVAILABLE", True)
-        drv = build_driver("auto")
-        assert isinstance(drv, ClaudeSDKClientDriver)
-        monkeypatch.setattr(driver_mod, "_SDK_AVAILABLE", None)
-
     def test_explicit_sdk_returns_sdk_driver(self):
         drv = build_driver("sdk")
+        assert isinstance(drv, ClaudeSDKClientDriver)
+
+    def test_default_returns_sdk_driver(self):
+        drv = build_driver()
         assert isinstance(drv, ClaudeSDKClientDriver)
 
 
@@ -357,7 +266,7 @@ class TestSDKClientDriver:
 
         with patch.object(_SDKSession, "send", fake_send):
             with patch.object(_SDKSession, "start", lambda self_inner: None):
-                result = drv.start_session(session, "do turn one")
+                result = drv.start_session(session, "do turn one", turn=turn_control("u-start-returns-output"))
 
         assert result.success
         assert result.output == "turn one reply"
@@ -374,9 +283,9 @@ class TestSDKClientDriver:
 
         with patch.object(_SDKSession, "send", fake_send):
             with patch.object(_SDKSession, "start", lambda self_inner: None):
-                r1 = drv.start_session(session, "turn 1")
-                r2 = drv.send_turn(session, "turn 2")
-                r3 = drv.send_turn(session, "turn 3")
+                r1 = drv.start_session(session, "turn 1", turn=turn_control("u-identity-1"))
+                r2 = drv.send_turn(session, "turn 2", turn=turn_control("u-identity-2"))
+                r3 = drv.send_turn(session, "turn 3", turn=turn_control("u-identity-3"))
 
         assert r1.success and r2.success and r3.success
         assert r1.output == "reply-1"
@@ -396,8 +305,8 @@ class TestSDKClientDriver:
 
         with patch.object(_SDKSession, "send", fake_send):
             with patch.object(_SDKSession, "start", lambda self_inner: None):
-                drv.start_session(s1, "msg")
-                drv.start_session(s2, "msg")
+                drv.start_session(s1, "msg", turn=turn_control("u-diff-s1"))
+                drv.start_session(s2, "msg", turn=turn_control("u-diff-s2"))
 
         assert len(drv._sessions) == 2
         assert s1.session_id in drv._sessions
@@ -416,7 +325,7 @@ class TestSDKClientDriver:
 
         with patch.object(_SDKSession, "send", fake_send):
             with patch.object(_SDKSession, "start", lambda self_inner: None):
-                result = drv.run_oneoff("/repo", "do it once")
+                result = drv.run_oneoff("/repo", "do it once", turn=turn_control("u-oneoff"))
 
         assert result.success
         assert result.output == "oneoff reply"
@@ -435,7 +344,7 @@ class TestSDKClientDriver:
 
         with patch.object(_SDKSession, "send", fake_send):
             with patch.object(_SDKSession, "start", lambda self_inner: None):
-                drv.start_session(session, "msg")
+                drv.start_session(session, "msg", turn=turn_control("u-pool"))
 
         assert session.session_id in drv._sessions
         with patch.object(_SDKSession, "cancel_inflight") as mock_interrupt:
@@ -452,7 +361,7 @@ class TestSDKClientDriver:
 
         with patch.object(_SDKSession, "send", fake_send):
             with patch.object(_SDKSession, "start", lambda self_inner: None):
-                drv.start_session(session, "msg")
+                drv.start_session(session, "msg", turn=turn_control("u-pool"))
 
         drv.close(session)
         assert session.session_id not in drv._sessions
@@ -470,7 +379,7 @@ class TestSDKClientDriver:
 
         with patch.object(_SDKSession, "send", fake_send):
             with patch.object(_SDKSession, "start", lambda self_inner: None):
-                drv.start_session(session, "msg")
+                drv.start_session(session, "msg", turn=turn_control("u-pool"))
 
         dead = drv._sessions[session.session_id]
         dead._closed = True
@@ -490,18 +399,20 @@ class TestSDKClientDriver:
 
         with patch.object(_SDKSession, "send", bad_send):
             with patch.object(_SDKSession, "start", lambda self_inner: None):
-                result = drv.start_session(session, "msg")
+                result = drv.start_session(session, "msg", turn=turn_control("u-sdk-error"))
 
         assert not result.success
         assert "SDK connection lost" in result.errors[0]
 
-    def test_terminated_process_write_is_transient_and_tears_down_session(self):
+    def test_terminated_process_write_is_not_submitted_and_tears_down_session(self):
         # A gateway restart kills the CLI subprocess out from under a pooled
         # _SDKSession. The next turn's write raises CLIConnectionError with
-        # this specific message. That must NOT be classified "fatal" (which
-        # has zero retries) and must NOT leak the raw SDK string into
-        # result.output (the user-facing chat bubble) — and the dead session
-        # must be evicted from the pool so a retry respawns a fresh process.
+        # this specific message. [A102] With one turn body (managed semantics),
+        # a refused write is "not submitted" (error_class managed_conflict) so
+        # the carrier releases the prompt back to pending — NOT fatal (zero
+        # retries) and NOT the removed legacy "transient" class. The raw SDK
+        # string must not leak into result.output, and the dead session must be
+        # evicted from the pool so the next turn respawns a fresh process.
         from claude_agent_sdk import CLIConnectionError
 
         drv = ClaudeSDKClientDriver()
@@ -514,10 +425,11 @@ class TestSDKClientDriver:
 
         with patch.object(_SDKSession, "send", bad_send):
             with patch.object(_SDKSession, "start", lambda self_inner: None):
-                result = drv.start_session(session, "msg")
+                result = drv.start_session(session, "msg", turn=turn_control("u-terminated"))
 
         assert not result.success
-        assert result.error_class == "transient"
+        assert result.error_class == "managed_conflict"
+        assert "not_submitted" in result.errors[0]
         assert "Cannot write to terminated process" not in (result.output or "")
         assert "Cannot write to terminated process" in result.errors[0]
         assert session.session_id not in drv._sessions
@@ -531,7 +443,7 @@ class TestSDKClientDriver:
 
         with patch.object(_SDKSession, "send", fake_send):
             with patch.object(_SDKSession, "start", lambda self_inner: None):
-                drv.start_session(session, "msg")
+                drv.start_session(session, "msg", turn=turn_control("u-pool"))
 
         assert session.session_id in drv._sessions
         drv.mark_lost(session.session_id)
@@ -677,7 +589,7 @@ class TestErrorResultTurn:
 
         with patch.object(_SDKSession, "send", fake_send):
             with patch.object(_SDKSession, "start", lambda self_inner: None):
-                result = drv.start_session(session, "do work")
+                result = drv.start_session(session, "do work", turn=turn_control("u-do-work"))
 
         # Honest failure with the right class
         assert not result.success
@@ -707,7 +619,7 @@ class TestErrorResultTurn:
 
         with patch.object(_SDKSession, "send", fake_send):
             with patch.object(_SDKSession, "start", lambda self_inner: None):
-                result = drv.start_session(session, "do work")
+                result = drv.start_session(session, "do work", turn=turn_control("u-do-work"))
 
         assert not result.success
         # Even with nothing to salvage, the user gets the actionable banner,
@@ -733,7 +645,7 @@ class TestStreamClosedTurn:
 
         with patch.object(_SDKSession, "send", fake_send):
             with patch.object(_SDKSession, "start", lambda self_inner: None):
-                result = drv.start_session(session, "do work")
+                result = drv.start_session(session, "do work", turn=turn_control("u-do-work"))
 
         assert not result.success
         assert result.error_class == "sdk_stream_closed"
@@ -753,7 +665,7 @@ class TestStreamClosedTurn:
 
         with patch.object(_SDKSession, "send", fake_send):
             with patch.object(_SDKSession, "start", lambda self_inner: None):
-                result = drv.start_session(session, "do work")
+                result = drv.start_session(session, "do work", turn=turn_control("u-do-work"))
 
         assert not result.success
         assert result.error_class == "sdk_stream_closed"
@@ -774,8 +686,6 @@ class TestClaudeCodeBackendDriverIntegration:
         from src.backends.claude_driver import ClaudeSDKClientDriver
         backend = ClaudeCodeBackend.__new__(ClaudeCodeBackend)
         backend._driver = ClaudeSDKClientDriver()
-        from src.backends.claude_driver import ClaudePrintResumeDriver
-        backend._fallback = ClaudePrintResumeDriver()
         backend._exe = "claude"
         backend._session_procs = {}
         backend._oneoff_procs = set()
@@ -800,42 +710,18 @@ class TestClaudeCodeBackendDriverIntegration:
         # SDK driver does NOT call assert_live_calls_allowed — only print_resume does.
         # But ClaudeCodeBackend.create_session does check it. Patch it out.
         monkeypatch.setattr("src.backends.claude_code.ClaudeCodeBackend.create_session",
-                            lambda s, session, **kw: backend._driver.start_session(session, session.last_user_message))
+                            lambda s, session, **kw: backend._driver.start_session(session, session.last_user_message, turn=turn_control("u-create-routes")))
 
         result = backend.create_session(session)
         assert result.success
         assert result.output == "first response"
 
-    def test_session_lost_guard_blocks_resume(self):
-        from src.backends.claude_code import ClaudeCodeBackend
-        backend = self._make_backend_with_fake_sdk_driver()
-        session = _make_session()
-        session.driver_status = "lost"
-
-        result = backend.resume_session(session, "follow-up")
-        assert not result.success
-        assert result.error_class == "session_lost"
-
-    def test_cache_unhealthy_guard_blocks_print_resume(self):
-        from src.backends.claude_code import ClaudeCodeBackend
-        from src.backends.claude_driver import ClaudePrintResumeDriver
-        # Force print_resume driver
-        backend = ClaudeCodeBackend.__new__(ClaudeCodeBackend)
-        backend._driver = ClaudePrintResumeDriver()
-        backend._fallback = ClaudePrintResumeDriver()
-        backend._exe = "claude"
-        backend._session_procs = {}
-        backend._oneoff_procs = set()
-        import threading
-        backend._proc_lock = threading.Lock()
-
-        session = _make_session(backend_session_id="old-sid")
-        session.cache_health = "unhealthy"
-        session.cache_unhealthy_count = 2
-
-        result = backend.resume_session(session, "another turn")
-        assert not result.success
-        assert result.error_class == "cache_unhealthy"
+    # [A102] test_session_lost_guard_blocks_resume removed: the print/resume-era
+    # `session_lost` short-circuit in resume_session was a LEGACY-resume-only
+    # guard, absent from the managed `run_managed_turn` body that resume_session
+    # now carries (one turn body). Lost-session handling is the carrier/gateway's
+    # job (A98: a lost session is rerouted to a fresh create_session at the
+    # gateway before it reaches the backend), not a backend short-circuit.
 
     def test_observe_cache_health_marks_session_unhealthy(self):
         from src.backends.claude_code import ClaudeCodeBackend
@@ -943,36 +829,6 @@ class TestSDKSessionSendSerialisation:
         assert set(call_order) == {"A", "B"}
         assert results["A"][0] == "reply-A"
         assert results["B"][0] == "reply-B"
-
-
-class TestSDKSessionTurnConflictGuard:
-    def test_send_interrupts_a_stale_inflight_turn_instead_of_queuing_silently(self):
-        """A held lock (an abandoned prior turn that was never cancelled
-        cleanly) must be interrupted up front, not queued behind — queuing
-        silently is what let a resent prompt land in the same live
-        conversation as the abandoned one (the ever-growing-session bug)."""
-        sess = _SDKSession("key", "/tmp", None, {})
-        calls = []
-
-        def fake_cancel_inflight(self_inner):
-            calls.append("interrupted")
-            # Simulate the interrupt landing and the stale turn's `finally`
-            # releasing the lock it held.
-            sess._lock.release()
-
-        def fake_submit(coro, timeout=None):
-            coro.close()  # avoid "never awaited" noise; we're not exercising _do_query here
-            return _ok("new turn")
-
-        with patch.object(_SDKSession, "cancel_inflight", fake_cancel_inflight):
-            with patch.object(sess, "submit", fake_submit):
-                sess._lock.acquire()  # simulate a still-running stale turn
-                result = sess.send("hello")
-
-        assert calls == ["interrupted"]
-        assert result.output == "new turn"
-        assert not sess._lock.locked()
-
 
 
 class TestDriverStatePersistenceIntegration:

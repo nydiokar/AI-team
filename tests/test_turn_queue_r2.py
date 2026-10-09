@@ -40,12 +40,16 @@ def _wait_query(fake, n: int = 1, timeout: float = 5.0) -> None:
     assert len(fake.queries_sent) >= n, "prompt never reached the fake CLI"
 
 
-def _managed_in_thread(sess, msg: str) -> Dict[str, Any]:
+def _managed_in_thread(sess, msg: str, *, stall: float = 5.0, turn_uuid: str = "u-mit") -> Dict[str, Any]:
+    """[A102] Run the ONE echo-correlated send on a thread. ``stall`` sets the
+    no-progress window (replaces per-test ``_managed_stall_sec`` monkeypatches)."""
+    from src.core.turn_liveness import turn_control
+
     out: Dict[str, Any] = {}
 
     def run() -> None:
         try:
-            out["o"] = sess.send_managed(msg)
+            out["o"] = sess.send(msg, turn=turn_control(turn_uuid, stall_override=stall))
         except BaseException as e:  # noqa: BLE001
             out["e"] = e
     t = threading.Thread(target=run, daemon=True)
@@ -64,7 +68,6 @@ def test_D1_notification_folded_mid_turn_managed_reply_still_served():
     sess = _start_fake_session(fake)
     proactive: List[str] = []
     sess._on_proactive = lambda k, o: proactive.append(o.output)
-    sess._managed_stall_sec = lambda: 5.0
     try:
         out = _managed_in_thread(sess, "run tests in background then report")
         _wait_query(fake)  # never emit the turn's frames before its prompt is written
@@ -82,7 +85,6 @@ def test_D1b_after_folded_notification_session_becomes_quiescent_again():
     fake = _FakeClient()
     sess = _start_fake_session(fake)
     sess._on_proactive = lambda k, o: None
-    sess._managed_stall_sec = lambda: 5.0
     try:
         out = _managed_in_thread(sess, "p")
         _wait_query(fake)  # never emit the turn's frames before its prompt is written
@@ -104,7 +106,6 @@ def test_D2_batched_notifications_one_continuation_next_reply_served():
     sess = _start_fake_session(fake)
     proactive: List[str] = []
     sess._on_proactive = lambda k, o: proactive.append(o.output)
-    sess._managed_stall_sec = lambda: 5.0
     try:
         _emit_autonomous(sess, fake, _task_updated("a", "running"), _task_updated("b", "running"),
                          _task_notification("a"), _task_notification("b"),
@@ -137,9 +138,8 @@ def test_D3_abandoned_unechoed_prompt_keeps_session_in_flight_until_its_echo():
     sess = _start_fake_session(fake)
     got: List[Any] = []
     sess._on_proactive = lambda k, o: got.append(o)
-    sess._managed_stall_sec = lambda: 0.3
     try:
-        out = _managed_in_thread(sess, "queued prompt")
+        out = _managed_in_thread(sess, "queued prompt", stall=0.3)
         out["t"].join(5)
         _wait_query(fake)
         assert "e" in out  # RecoveryRequiredError at the deadline
@@ -162,8 +162,7 @@ def test_D3b_unechoed_prompt_exit_on_stream_end():
     fake = _FakeClient()
     fake.defer_echo = True
     sess = _start_fake_session(fake)
-    sess._managed_stall_sec = lambda: 0.2
-    out = _managed_in_thread(sess, "never echoed")
+    out = _managed_in_thread(sess, "never echoed", stall=0.2)
     out["t"].join(2)
     assert len(sess._pending) == 1
     sess.close()
@@ -181,7 +180,6 @@ def test_MAJOR2_foreign_tool_result_user_message_does_not_claim_managed_turn():
     sess = _start_fake_session(fake)
     proactive: List[str] = []
     sess._on_proactive = lambda k, o: proactive.append(o.output)
-    sess._managed_stall_sec = lambda: 5
     try:
         out = _managed_in_thread(sess, "mine")
         _wait_query(fake)
@@ -200,8 +198,9 @@ def test_MAJOR2_foreign_tool_result_user_message_does_not_claim_managed_turn():
         sess.close()
 
 
-def test_D4_managed_send_requires_echo_replay_and_legacy_ignores_echoes(monkeypatch):
+def test_D4_managed_send_requires_echo_replay(monkeypatch):
     from src.control.turn_queue import ManagedUnsupportedError
+    from src.core.turn_liveness import turn_control
 
     # [Stage 8a cutover] flag now defaults ON; pin an explicit false value to
     # exercise the replay-OFF branch.
@@ -210,17 +209,17 @@ def test_D4_managed_send_requires_echo_replay_and_legacy_ignores_echoes(monkeypa
     monkeypatch.setenv("WORKER_MANAGED_TURNS", "1")
     assert _SDKSession("k", "/tmp", None, {})._replay_user_messages is True
     fake = _FakeClient()
-    fake.replies["q"] = [_result("legacy reply")]
     sess = _start_fake_session(fake)
     proactive: List[Any] = []
     sess._on_proactive = lambda k, o: proactive.append(o)
     try:
-        # Legacy send with replayed echoes in the stream: byte-identical routing.
-        assert sess.send("q").output == "legacy reply" and proactive == []
+        # [A102] The ONE send requires --replay-user-messages (echo correlation);
+        # with the flag OFF it fails closed with ManagedUnsupportedError and never
+        # submits a prompt.
         sess._replay_user_messages = False
         with pytest.raises(ManagedUnsupportedError):
-            sess.send_managed("m")
-        assert fake.queries_sent == ["q"], "managed prompt submitted without echo correlation"
+            sess.send("m", turn=turn_control("u-d4"))
+        assert fake.queries_sent == [], "managed prompt submitted without echo correlation"
     finally:
         sess.close()
 
@@ -234,7 +233,7 @@ def test_m5_reply_served_between_timeout_and_abandon_goes_late():
     sess._on_proactive = lambda k, o: got.append(o)
     try:
         ticket = {"abandoned": False, "pending": None}
-        fut = asyncio.run_coroutine_threadsafe(sess._submit_turn("m", managed=True, ticket=ticket), sess._loop)
+        fut = asyncio.run_coroutine_threadsafe(sess._submit_turn("m", turn_uuid="u-m5", ticket=ticket), sess._loop)
         _wait_query(fake)
         _emit_autonomous(sess, fake, _result("SERVED"))  # echo was emitted at query
         assert fut.result(2).output == "SERVED"           # future holds the reply…
@@ -258,7 +257,7 @@ def test_m5b_deadline_before_submission_never_submits_the_prompt():
         ticket = {"abandoned": False, "pending": None}
         sess._loop.call_soon_threadsafe(sess._abandon_managed_pending, ticket)
         time.sleep(0.1)
-        fut = asyncio.run_coroutine_threadsafe(sess._submit_turn("m", managed=True, ticket=ticket), sess._loop)
+        fut = asyncio.run_coroutine_threadsafe(sess._submit_turn("m", turn_uuid="u-m5b", ticket=ticket), sess._loop)
         with pytest.raises(RecoveryRequiredError):
             fut.result(2)
         assert fake.queries_sent == [] and sess.is_quiescent() is True
@@ -273,9 +272,8 @@ def test_M3a_late_handoff_keeps_session_non_quiescent_until_sink_returns():
     sess = _start_fake_session(fake)
     release = threading.Event()
     sess._on_proactive = lambda k, o: release.wait(3)
-    sess._managed_stall_sec = lambda: 0.3
     try:
-        out = _managed_in_thread(sess, "slow")
+        out = _managed_in_thread(sess, "slow", stall=0.3)
         out["t"].join(5)
         _wait_query(fake)
         _emit_autonomous(sess, fake, fake.echo_for(), _result("LATE"))
