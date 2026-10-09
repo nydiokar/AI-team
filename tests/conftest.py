@@ -45,6 +45,52 @@ def _silence_db_migration_logs():
 
 
 @pytest.fixture(autouse=True, scope="session")
+def _migrated_db_template(tmp_path_factory):
+    """[A104 test speed] Migrate ONE template database per test session and
+    seed every NEW test database from it instead of replaying all migrations.
+
+    Opening a brand-new ``MeshDB`` runs every numbered migration (~0.15 s on the
+    Pi, thousands of times per run); copying a pre-migrated template and opening
+    it costs ~3 ms. The template is built by THIS session's code at session start,
+    so it can never drift from the migrations under test. Only an absent or EMPTY
+    file is seeded (``_isolate_db`` pre-creates an empty temp file); any file a
+    test built itself (e.g. a rewound schema) is opened untouched, and the normal
+    idempotent schema pass still runs on every open."""
+    import shutil
+    import sqlite3
+
+    import src.control.db as db_mod
+
+    root = tmp_path_factory.mktemp("meshdb-template")
+    built = root / "built.db"
+    db_mod.MeshDB(str(built)).close()
+    template = root / "template.db"
+    src_conn, dst_conn = sqlite3.connect(str(built)), sqlite3.connect(str(template))
+    try:
+        src_conn.backup(dst_conn)  # one self-contained file (no -wal sidecar)
+    finally:
+        dst_conn.close()
+        src_conn.close()
+
+    original_init = db_mod.MeshDB.__init__
+
+    def _seeded_init(self, db_path: str) -> None:
+        target = Path(str(db_path))
+        if str(db_path) != ":memory:" and (not target.exists() or target.stat().st_size == 0):
+            target.parent.mkdir(parents=True, exist_ok=True)
+            for ext in ("-wal", "-shm"):
+                Path(str(target) + ext).unlink(missing_ok=True)
+            shutil.copyfile(template, target)
+        original_init(self, db_path)
+
+    db_mod.MeshDB.__init__ = _seeded_init
+    try:
+        yield template
+    finally:
+        db_mod.MeshDB.__init__ = original_init
+
+
+@pytest.fixture(autouse=True, scope="session")
 def _enforce_test_mode():
     """Belt-and-suspenders: re-assert the guards for the whole session."""
     os.environ["AI_TEAM_TEST_MODE"] = "1"

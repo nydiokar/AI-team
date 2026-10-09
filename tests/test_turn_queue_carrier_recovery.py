@@ -431,7 +431,11 @@ def test_P4b_late_reply_completes_the_held_turn_via_carrier(db, tmp_path, real_c
     assert asyncio.run(w._reconcile_managed_claims()) == 0
     _emit_autonomous(real_claude.sess, real_claude.fake, _assistant("late", sid="native-late"),
                      _result("LATE ANSWER", sid="native-late"))
-    time.sleep(0.4)
+    # The late reply is spooled by the session's background reader thread: wait
+    # for it (bounded) instead of a fixed sleep, which flakes under parallel load.
+    deadline = time.monotonic() + 10.0
+    while _spooled(w) != ["t-9"] and time.monotonic() < deadline:
+        time.sleep(0.05)
     assert _spooled(w) == ["t-9"]
     asyncio.run(w._redeliver_spooled_results())
     row = _row(db, "t-9")

@@ -31,4 +31,7 @@ jobs:
         env:
           CLAUDE_SKIP_PERMISSIONS: "true"
         run: |
-          pytest -q
+          # -n auto: one xdist worker per runner core (A104 test speed). Each test
+          # still gets its own temp DB, seeded from a once-per-session migrated
+          # template (tests/conftest.py::_migrated_db_template).
+          pytest -q -n auto
