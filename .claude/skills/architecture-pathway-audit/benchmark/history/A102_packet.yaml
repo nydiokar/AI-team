@@ -2,8 +2,10 @@
 # the work): S1 per-backend deletions, S2 items 1-4, R2/R3 defaults, R4 "no shim survives A102", and
 # ACCEPTANCE 1 (policy names must not appear in src/backends). Written 2026-10-09. Not blind: A102 is the
 # operator's known case; the content is the packet's own list, no names were added.
-# Scope = the packet's S1+S2 file ownership (src/**, config/settings.py, worker_main.py).
-scope: [src, config, worker_main.py]
+# Scope = the packet's S1+S2 file ownership (src/**, tests/**, config/settings.py, worker_main.py). tests/ matters:
+# S1-OpenCode (merge c64a4a7) deleted OpenCodeBackend while S1-Claude-owned tests still imported it; main CI
+# stayed red from that merge on. With tests in scope this contract reports those imports at c64a4a7.
+scope: [src, tests, config, worker_main.py]
 retired:
   # S2.1 interface twins + R4 shims
   - run_managed_turn
