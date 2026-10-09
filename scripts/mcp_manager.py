@@ -419,19 +419,9 @@ def _dispatch_worker(args: Dict[str, Any]) -> str:
     # task.finished — is already durable; this makes the WAIT durable too).
     # Best-effort: a relay failure (incl. the 404 when DURABLE_RELAY_ENABLED is
     # OFF, or an unavailable gateway) must NEVER break the dispatch itself.
-    wait_relay_note: Optional[str] = None
-    if case_id and task_id and task_id != "?":
-        try:
-            _api_request(
-                "POST", f"/api/cases/{urllib.parse.quote(case_id)}/waits",
-                {"task_id": task_id},
-            )
-            wait_relay_note = (
-                "durable wait recorded — recoverable after a restart via "
-                "reconcile_waits(case_id)."
-            )
-        except RuntimeError:
-            wait_relay_note = None  # relay disabled/unavailable — silent, non-fatal
+    # [A104] No wait marker is recorded any more: the gateway addresses this
+    # worker's completion to the requesting session's inbox by itself (the child
+    # carries its requester; the completion row is written with its terminal).
 
     resolved_sid = sess_id or session_id
     if opened_session:
@@ -461,8 +451,6 @@ def _dispatch_worker(args: Dict[str, Any]) -> str:
             f"task; it does NOT spawn a child Case. Worker completion leaves the Case OPEN "
             f"(Task finished != Case completed)."
         )
-        if wait_relay_note:
-            lines.append(f"relay: {wait_relay_note}")
     if parent_flow_run_id:
         lines.append(
             f"parent_flow_run_id: {parent_flow_run_id} — sent as the Manager→worker "
@@ -471,23 +459,22 @@ def _dispatch_worker(args: Dict[str, Any]) -> str:
         )
     lines.append("")
     if case_id:
-        # [A38] A JOINED worker has NO flow_run of its own — its completion is a
-        # `task.finished` event on the Manager's Case timeline. wait_for_worker must
-        # therefore be given the Case as flow_run_id (task_id alone can't resolve a
-        # flow that does not exist); it filters the Case timeline by this task_id.
+        # [A104] The completion is addressed to THIS session's inbox (whoever
+        # requested the work) and delivered as ONE wake turn; nothing to arm.
         lines.append(
-            f"Next: after you have dispatched the workers for this batch, arm_wait_group("
-            f"case_id='{case_id}', member_task_ids=[…, '{task_id}'], condition='ANY') and RETURN "
-            f"control — the harness re-enters this Case with a review turn as each worker finishes, "
-            f"and a wake never interrupts a live operator turn. Only fall back to wait_for_worker("
-            f"task_id='{task_id}', flow_run_id='{case_id}') for a single synchronous wait when you "
-            f"have nothing else to do. (A joined worker has no own flow_run, so task_id ALONE cannot "
-            f"resolve it.) Neither holds a task slot."
+            f"Next: when this batch is dispatched, RETURN control. This worker's completion "
+            f"lands in YOUR inbox and you are woken ONCE with it (a wake never interrupts a live "
+            f"operator turn); review it with record_review(case_id='{case_id}', task_id='{task_id}'). "
+            f"Only if you need several parallel workers delivered TOGETHER, call arm_wait_group("
+            f"case_id='{case_id}', member_task_ids=[…, '{task_id}'], condition='ALL') — they then "
+            f"arrive in one wake when the last finishes. wait_for_worker(task_id='{task_id}', "
+            f"flow_run_id='{case_id}') is a synchronous fallback only. Neither holds a task slot."
         )
     else:
         lines.append(
-            f"Next: call wait_for_worker(task_id='{task_id}') to block until the worker's "
-            f"flow reaches a terminal/attention status. That poll does NOT hold a task slot."
+            f"Next: RETURN control — the completion lands in your inbox and wakes you once. "
+            f"wait_for_worker(task_id='{task_id}') is a synchronous fallback (it does NOT hold a "
+            f"task slot)."
         )
     return "\n".join(lines)
 
@@ -636,16 +623,10 @@ def _wait_for_worker(args: Dict[str, Any]) -> str:
 # ---------------------------------------------------------------------------
 
 def _reconcile_waits(args: Dict[str, Any]) -> str:
-    """[A46/M3.3] Recover the Manager's outstanding worker waits from the durable
-    ledger after a crash/restart.
-
-    ``wait_for_worker`` is an in-process poll — if the Manager/gateway crashes
-    mid-wait, that wait is lost. This tool asks the gateway to reconcile the Case's
-    durable ``worker.wait_pending`` markers against the already-durable
-    ``task.finished`` events: finished workers are RESOLVED (cleared), still-open
-    ones are returned as PENDING so the Manager can re-arm a fresh
-    ``wait_for_worker`` for each. Idempotent — safe to call repeatedly. A 404 means
-    the durable relay is disabled on the gateway (DURABLE_RELAY_ENABLED OFF)."""
+    """[A46 → A104] What is waiting for this Case, read from the agent inbox:
+    finished workers whose completion you have not consumed yet ("ready") and
+    requested workers still running. Read-only and idempotent; consumption happens
+    when you review a task (record_review with task_id) or a wake turn completes."""
     case_id = _bounded_text(args.get("case_id"), "case_id", _MAX_ID_CHARS, required=True)
     result = _api_request("POST", f"/api/cases/{urllib.parse.quote(case_id)}/waits/reconcile")
     if not result.get("ok"):
@@ -656,16 +637,16 @@ def _reconcile_waits(args: Dict[str, Any]) -> str:
     resolved = result.get("resolved") or []
     pending = result.get("pending") or []
     lines = [
-        f"Reconciled outstanding worker waits for Case {case_id}:",
-        f"  resolved (worker turn finished): {len(resolved)}",
-        f"  pending  (still running):        {len(pending)}",
+        f"Inbox state for Case {case_id}:",
+        f"  ready (finished, not yet reviewed): {len(resolved)}",
+        f"  running (requested, not finished):  {len(pending)}",
     ]
     for r in resolved:
-        lines.append(f"    ✓ {r.get('task_id')} → outcome={r.get('outcome')!r} (wait cleared)")
+        lines.append(f"    ✓ {r.get('task_id')} → outcome={r.get('outcome')!r} — review it (record_review task_id=…)")
     for p in pending:
-        lines.append(f"    … {p.get('task_id')} still open — re-arm with wait_for_worker(task_id='{p.get('task_id')}', flow_run_id='{case_id}')")
+        lines.append(f"    … {p.get('task_id')} still running — its completion will wake you; just return control")
     if not resolved and not pending:
-        lines.append("  (no outstanding waits — nothing to recover.)")
+        lines.append("  (nothing waiting.)")
     return "\n".join(lines)
 
 
@@ -674,15 +655,11 @@ def _reconcile_waits(args: Dict[str, Any]) -> str:
 # ---------------------------------------------------------------------------
 
 def _arm_wait_group(args: Dict[str, Any]) -> str:
-    """[M3.4] Arm a wait-GROUP over a set of dispatched workers so the harness
-    autonomously RE-ENTERS this Case when the group is satisfied — no manual poke.
-
-    ``condition``: ANY (wake on each new completion, coalescing simultaneous ones,
-    until drained), ALL/NAMED (wake once when every member has finished). When the
-    group is satisfied over the finished-but-unconsumed members, the gateway
-    delivers ONE coalesced review turn to this (live+idle) Manager session. Use this
-    INSTEAD of serially long-polling ``wait_for_worker`` when you want the Case to
-    continue itself across worker completions. A 404/disabled reason means
+    """[M3.4 → A104 D2] OPTIONAL delivery filter. Every worker completion already
+    reaches your inbox and wakes you once — nothing needs arming. Use this only to
+    hold a parallel batch together: ``ALL`` (or NAMED) delivers the members'
+    completions in ONE wake when the last one finishes. ``ANY`` is the default
+    behaviour (each completion as it lands). A 404/disabled reason means
     CASE_CONTINUATION_ENABLED is OFF on the gateway."""
     case_id = _bounded_text(args.get("case_id"), "case_id", _MAX_ID_CHARS, required=True)
     group_id = _bounded_text(args.get("wait_group_id"), "wait_group_id", _MAX_ID_CHARS, required=True)
@@ -700,10 +677,15 @@ def _arm_wait_group(args: Dict[str, Any]) -> str:
             f"arm_wait_group did NOT arm on Case {case_id}: {result.get('reason')}. "
             "(A 404/disabled reason means CASE_CONTINUATION_ENABLED is OFF on the gateway.)"
         )
+    if condition == "ANY":
+        return (
+            f"Recorded wait-group {group_id!r} (ANY) on Case {case_id}: that is already the "
+            "default — each completion reaches your inbox and wakes you once. Return control."
+        )
     return (
-        f"Armed wait-group {group_id!r} ({condition}) over {len(members)} worker task(s) on "
-        f"Case {case_id}. When satisfied, the harness autonomously re-enters this Case with ONE "
-        "coalesced review turn — you do not need to serially long-poll wait_for_worker."
+        f"Armed delivery filter {group_id!r} ({condition}) over {len(members)} worker task(s) on "
+        f"Case {case_id}: their completions are held and delivered together in ONE wake when "
+        "the last one finishes. Return control — no polling needed."
     )
 
 
@@ -800,10 +782,10 @@ def _get_case_brief(args: Dict[str, Any]) -> str:
         lines.append("  (none dispatched yet.)")
     lines.append("")
     lines.append(
-        f"Waits — open (still running): {open_waits or '[]'}; "
-        f"ready (finished, reconcile them): {ready_waits or '[]'}"
+        f"Inbox — running (requested, not finished): {open_waits or '[]'}; "
+        f"ready (finished, not yet reviewed): {ready_waits or '[]'}"
     )
-    lines.append(f"Armed wait-groups ({len(groups)}):")
+    lines.append(f"Delivery filters ({len(groups)}):")
     for g in groups:
         lines.append(
             f"  • {g.get('wait_group_id')} ({g.get('condition')}) over "
@@ -812,11 +794,12 @@ def _get_case_brief(args: Dict[str, Any]) -> str:
             + (f", present={g.get('presented_task_ids')}" if g.get('satisfied') else "")
         )
     if not groups:
-        lines.append("  (no live wait-groups.)")
+        lines.append("  (no delivery filters.)")
     lines.append("")
     lines.append(
-        "Resume from THIS state: reconcile any 'ready' waits, re-arm/continue the live "
-        "groups, review finished workers' git diffs, and decide close vs. rework."
+        "Resume from THIS state: review each 'ready' worker's git diff and record_review it "
+        "(task_id=…), return control while workers are still running (their completions wake "
+        "you), and decide close vs. rework."
     )
     return "\n".join(lines)
 
@@ -917,8 +900,8 @@ def _open_case(args: Dict[str, Any]) -> str:
         f"completion_criteria: {completion_criteria or '(none — set one so close_case can verify done)'}\n"
         f"{cap_line}\n"
         f"This is YOUR Case now. dispatch_worker(case_id='{case_id}') to run a worker into it, "
-        f"then arm_wait_group(case_id='{case_id}', …) to be re-entered on completion instead of "
-        f"block-polling. record_review after verifying its git diff, and close_case('{case_id}') "
+        f"then return control: its completion lands in your inbox and wakes you once. "
+        f"record_review after verifying its git diff, and close_case('{case_id}') "
         f"with a continuation_plan when the criteria are truly met. When you close it, this "
         f"session stays alive — open_case again for the next objective."
     )
@@ -1234,7 +1217,7 @@ _TOOLS = [
             "Dispatch a bounded task to a WORKER as a real gateway task (separate from the "
             "Manager's own session — never a sub-agent). Thin wrapper over the existing, "
             "auth-guarded, Level-3-gated POST /api/instructions. Returns the worker's task_id; "
-            "track it with wait_for_worker. Provide a professional, not-overstated objective. "
+            "its completion lands in YOUR inbox and wakes you once (no polling, nothing to arm). Provide a professional, not-overstated objective. "
             "If session_id is given the work runs in that existing worker session; otherwise, when "
             "you pass cwd, a NEW observable worker session is opened (case_role=worker, joined to "
             "your Case) that you and the operator can open, read, and resume — always prefer this "
@@ -1269,7 +1252,7 @@ _TOOLS = [
         "description": (
             "Open a NEW Case on YOUR OWN Manager session (POST /api/cases). This is how a single "
             "persistent Manager session takes on another objective without spawning a fresh session "
-            "— open -> dispatch_worker(case_id) -> arm_wait_group -> review -> close_case -> open the "
+            "— open -> dispatch_worker(case_id) -> return control (woken on completion) -> review -> close_case -> open the "
             "next. Provide your own session_id and a checkable completion_criteria (close_case will "
             "demand it). Pass round_cap to bound an autonomous continuation loop. Returns the new "
             "case_id. Use when you finish one Case and want to start the next in the same "
@@ -1281,7 +1264,7 @@ _TOOLS = [
                 "objective": {"type": "string", "description": "The objective for the new Case. Ground it; do not overstate scope."},
                 "session_id": {"type": "string", "description": "YOUR OWN Manager session id (the session this Case is owned by)."},
                 "completion_criteria": {"type": "string", "description": "The checkable done-gate close_case will require (e.g. 'tests green; diff reviewed; PR opened')."},
-                "round_cap": {"type": "integer", "description": "Optional autonomous-continuation backstop: the MAX number of Wake-Dispatcher re-entries (arm_wait_group) before the Case escalates instead of looping. A safety bound, not a tuning knob — set a small value (e.g. 6-10) for a live autonomous run. Omit to use the engine default (50)."},
+                "round_cap": {"type": "integer", "description": "Optional autonomous-continuation backstop: the MAX number of Wake-Dispatcher re-entries (completion wakes) before the Case escalates instead of looping. A safety bound, not a tuning knob — set a small value (e.g. 6-10) for a live autonomous run. Omit to use the engine default (50)."},
             },
             "required": ["objective", "session_id"],
         },
@@ -1309,8 +1292,8 @@ _TOOLS = [
             "GET /api/cases/{case_id}/brief) — the Manager's single 'where am I on this Case' "
             "read after a context reset (compaction, restart, respawn). Returns objective + "
             "completion_criteria + round cap + rounds used + every DISPATCHED worker (finished? "
-            "outcome? latest review verdict?) + outstanding/ready worker waits + every ARMED "
-            "wait-group and whether it is currently satisfied. Prefer this over get_case when "
+            "outcome? latest review verdict?) + what your inbox holds (running vs. ready-to-review "
+            "workers) + every delivery filter (arm_wait_group ALL) and whether it is satisfied. Prefer this over get_case when "
             "resuming a Case you have lost the in-memory picture of; get_case is the minimal "
             "status-only read. Read-only — it decides nothing."
         ),
@@ -1384,8 +1367,8 @@ _TOOLS = [
             "'accepted' records approval, 'rework_requested' records that changes are needed "
             "(and blocks close_case until a later accept/waive supersedes it), 'waived' records "
             "an accepted-as-is with a reason. Pass task_id = the worker task you reviewed to tag "
-            "the verdict to it; this also marks that finish consumed so the harness won't re-wake "
-            "you about an already-reviewed worker. A 404 means the emitter is disabled on the gateway."
+            "the verdict to it; this also consumes that completion in your inbox so the harness won't "
+            "wake you about an already-reviewed worker. A 404 means the emitter is disabled on the gateway."
         ),
         "inputSchema": {
             "type": "object",
@@ -1401,7 +1384,8 @@ _TOOLS = [
     {
         "name": "wait_for_worker",
         "description": (
-            "Block (read-only long-poll) until a dispatched worker's flow reaches a terminal "
+            "SYNCHRONOUS FALLBACK — normally just return control: a worker's completion lands in your "
+            "inbox and wakes you once. Block (read-only long-poll) until a dispatched worker's flow reaches a terminal "
             "status (done/failed/cancelled) or an attention status (blocked/review/needs-decision), "
             "or until timeout. Give task_id (preferred) or flow_run_id. **For a worker dispatched "
             "into your Case (dispatch_worker with case_id), pass BOTH task_id AND flow_run_id=<your "
@@ -1428,14 +1412,10 @@ _TOOLS = [
     {
         "name": "reconcile_waits",
         "description": (
-            "Recover your OUTSTANDING worker waits after a crash/restart (M3.3 durable "
-            "relay). wait_for_worker is an in-process poll, so a Manager/gateway crash "
-            "mid-wait loses it. This asks the gateway to reconcile your Case's durable "
-            "worker.wait_pending markers against the already-durable task.finished events: "
-            "finished workers are RESOLVED (cleared) and still-open ones are returned as "
-            "PENDING so you can re-arm a fresh wait_for_worker for each. Idempotent — safe "
-            "to call repeatedly. Call it when you resume a Case and are unsure which workers "
-            "you were still waiting on. A 404/disabled reason means DURABLE_RELAY_ENABLED is OFF."
+            "Read what is waiting for your Case from the agent inbox (durable — survives any "
+            "crash/restart): finished workers whose completion you have not reviewed yet, and "
+            "requested workers still running (they will wake you when done). Read-only and "
+            "idempotent. Call it when you resume a Case and are unsure where things stand."
         ),
         "inputSchema": {
             "type": "object",
@@ -1448,13 +1428,10 @@ _TOOLS = [
     {
         "name": "arm_wait_group",
         "description": (
-            "Arm a wait-GROUP over dispatched workers so the harness AUTONOMOUSLY re-enters "
-            "this Case when the group is satisfied — the M3.4 alternative to serially "
-            "long-polling wait_for_worker. condition ANY = wake on each new completion "
-            "(coalescing simultaneous ones) until drained; ALL/NAMED = wake ONCE when every "
-            "member has finished. On satisfaction the gateway delivers ONE coalesced review "
-            "turn to this live+idle Manager session. Use it when you want the Case to continue "
-            "itself across worker completions instead of blocking. A 404/disabled reason means "
+            "OPTIONAL delivery filter. You do NOT need this to be woken: every worker completion "
+            "already lands in your inbox and wakes you once. Use condition ALL (or NAMED) only to "
+            "hold a parallel batch so its completions arrive together in ONE wake when the last "
+            "member finishes. ANY is the default behaviour. A 404/disabled reason means "
             "CASE_CONTINUATION_ENABLED is OFF on the gateway."
         ),
         "inputSchema": {

@@ -18,6 +18,7 @@ from src.control import turn_queue as tq
 from src.control import turn_scheduler as ts
 from src.core.interfaces import ExecutionResult, SessionStatus
 from src.orchestrator import TaskOrchestrator
+from tests.inbox_seed import seed_finished_child
 from tests.test_turn_queue_producer1 import (  # noqa: F401
     _client, _flags, _managed_rows, _no_cli_spawn, _setup, _submit, _sess,
 )
@@ -775,9 +776,8 @@ def test_R04_stopped_enrolled_manager_is_not_woken_by_automation(tmp_path, monke
             assert o.stop_managed_session_turn(_sess())[0] is True
         auto = _Auto(o.session_store)
         auto._emit_turn_telemetry = lambda *a, **k: None
-        db.arm_wait_group(case_id, "g1", "ALL", ["w1"])
-        db.append_flow_event(case_id, "task.finished", "worker", entity_type="task",
-                             entity_id="w1", payload={"outcome": "success"})
+        # [A104] what waits for the Manager is its inbox: one requested child done
+        seed_finished_child(db, case_id, "w1", requester="sess-1")
         woke = asyncio.run(auto._continue_case_once(db, case_id))
         _append_pause(db, case_id, "sess-1", retry_at=_iso(_now() - timedelta(seconds=1)))
         owned = asyncio.run(auto._handle_transient_paused_case(db, case_id))
@@ -786,6 +786,9 @@ def test_R04_stopped_enrolled_manager_is_not_woken_by_automation(tmp_path, monke
             # "session_unavailable" and handed to the dead-manager path)
             assert owned is True and db.transient_pause(case_id) is not None
         cont = [r for r in _managed_rows(db) if r["turn_kind"] == "continuation"]
+        if stop:
+            # held, not dead: the message waits for the operator's release
+            assert [m.state for m in db.pending_for("sess-1").messages] == ["pending"]
         return woke, auto.deliveries, cont, db, owned, case_id
 
     # control: automation does act — an enrolled Manager's wake is ONE durable
@@ -840,12 +843,11 @@ def test_R04b_crash_respawn_approval_is_not_proposed_for_a_stopped_manager(tmp_p
     _pass(db, o)
     _run(db, t)
     assert o.stop_managed_session_turn(_sess())[0] is True
-    db.arm_wait_group(case_id, "g1", "ALL", ["w1"])
-    db.append_flow_event(case_id, "task.finished", "worker", entity_type="task",
-                         entity_id="w1", payload={"outcome": "success"})
+    seed_finished_child(db, case_id, "w1", requester="sess-1")  # [A104] inbox message
     auto = _Auto(o.session_store)
     assert asyncio.run(auto._continue_case_once(db, case_id)) == 0
     assert seen == []
+    assert [m.state for m in db.pending_for("sess-1").messages] == ["pending"]  # not killed
     # Close ⇒ dead (hold cleared): the crash path owns it again.
     assert o.session_service.close_session("sess-1", backends=o._backends).ok
     assert db.operator_stop_hold("sess-1") is None
@@ -1042,6 +1044,9 @@ def test_R08b_activation_refuses_on_the_hold_record_alone(tmp_path, monkeypatch)
 
 
 def test_R11_unenrolled_case_automation_never_reads_the_hold_record(tmp_path, monkeypatch):
+    """[A104] Nothing enrolled: the inbox delivers no wake to an unenrolled
+    recipient (the legacy ``submit_instruction`` wake is gone) — and the wake
+    path still never reads the hold record; the message dies (bounded)."""
     import inspect
     import threading as _th
 
@@ -1065,9 +1070,7 @@ def test_R11_unenrolled_case_automation_never_reads_the_hold_record(tmp_path, mo
     o.session_store.save(s)
     case_id = db.open_case("ship X", "sess-1", role="manager",
                            completion_criteria='{"round_cap": 5}')
-    db.arm_wait_group(case_id, "g1", "ALL", ["w1"])
-    db.append_flow_event(case_id, "task.finished", "worker", entity_type="task",
-                         entity_id="w1", payload={"outcome": "success"})
+    seed_finished_child(db, case_id, "w1", requester="sess-1")
     stmts = []
     real_conn = type(db)._conn
 
@@ -1077,9 +1080,16 @@ def test_R11_unenrolled_case_automation_never_reads_the_hold_record(tmp_path, mo
         return c
     monkeypatch.setattr(type(db), "_conn", traced)
     auto = _Auto(o.session_store)
-    assert asyncio.run(auto._continue_case_once(db, case_id)) == 1
+    assert asyncio.run(auto._continue_case_once(db, case_id)) == 0
     monkeypatch.setattr(type(db), "_conn", real_conn)
-    assert not [q for q in stmts if "turn_queue_hold" in q]
+    assert stmts and not [q for q in stmts if "turn_queue_hold" in q]
+    assert auto.deliveries == []
+    assert [r for r in _managed_rows(db) if r["turn_kind"] == "continuation"] == []
+    # Bounded: an unenrolled recipient can never be woken, so its message dies
+    # with an alert (recipient_not_enrolled) instead of pending forever.
+    assert db.pending_for("sess-1").messages == []
+    assert db._conn().execute("SELECT state, last_error FROM agent_inbox").fetchone()[:] \
+        == ("dead", "recipient_not_enrolled")
 
 
 # --------------------------------------------------------------------------- #
@@ -1111,9 +1121,7 @@ def _manager_case(db, o):
     s.status = SS.AWAITING_INPUT
     o.session_store.save(s)
     cid = db.open_case("ship X", "sess-1", role="manager", completion_criteria='{"round_cap": 5}')
-    db.arm_wait_group(cid, "g1", "ALL", ["w1"])
-    db.append_flow_event(cid, "task.finished", "worker", entity_type="task",
-                         entity_id="w1", payload={"outcome": "success"})
+    seed_finished_child(db, cid, "w1", requester="sess-1")  # [A104] inbox message
     return cid
 
 
