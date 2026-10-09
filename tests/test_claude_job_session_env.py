@@ -22,10 +22,10 @@ class _CapturingDriver:
         self.envs.append(dict(proc_env))
         return ExecutionResult(success=True, output="ok", errors=[])
 
-    def start_session(self, session, message, *, model=None, telemetry_context=None, proc_env=None) -> ExecutionResult:
+    def start_session(self, session, message, *, turn=None, model=None, telemetry_context=None, proc_env=None) -> ExecutionResult:
         return self._capture(proc_env or {})
 
-    def send_turn(self, session, message, *, model=None, telemetry_context=None, proc_env=None) -> ExecutionResult:
+    def send_turn(self, session, message, *, turn=None, model=None, telemetry_context=None, proc_env=None) -> ExecutionResult:
         return self._capture(proc_env or {})
 
 
