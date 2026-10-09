@@ -33,6 +33,7 @@
 | blocked | AGENT_96_SYSTEM_ONE_DELIVERY_BOUNCE | 2026-10-05 | 2026-10-05 | AGENT_94_SYSTEM_ONE_CORE_DELIVERY_SCORECARD | — |  |
 | unknown | A101_O1_FINDINGS_RESUME_DECISION | ? | ? | — | — | BAD_STATUS |
 | unknown | A101_SESSION_BLOCKING_STATE_DIAGNOSIS | ? | ? | — | — | BAD_STATUS |
+| unknown | A104_GATE1_INVENTORY | ? | ? | — | — | BAD_STATUS |
 | unknown | A82_E2E_CERTIFICATION | ? | ? | — | — | BAD_STATUS |
 | unknown | A82_MULTIBACKEND_VALIDATION | ? | ? | — | — | BAD_STATUS |
 | unknown | A82_STAGE8A_BACKEND_AUDIT | ? | ? | — | — | BAD_STATUS |
