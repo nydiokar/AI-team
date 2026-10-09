@@ -443,6 +443,13 @@ from the Manager host's checkout (Horse, un-redeployed) so dispatch identity mus
   (migrations 45/46), which only the new code creates — running it first would migrate the live DB under the old
   gateway. Lossless order used: fresh backup → deploy (schema migrates; the A84 rows are carried as
   dead/alerted, so nothing fires) → `--apply` immediately → verify.
+- **Applied live 2026-10-09T19:06:14Z** (PR #213 merged `07d6d29`; deploy `deploy/20261009T1903Z-07d6d29`, image
+  `ai-team:prod-07d6d29`, rollback `ai-team:pre-07d6d29`; migrations 45/46 applied 19:05:32Z). **Backup:**
+  `/home/cifran/ai-team-data/backups/mesh-pre-07d6d29-20261009T1903Z.db` (integrity ok, schema 44). Result identical
+  to the dry-run: 2 seeded, **0 lost**, 1 acked, 7 junk retired, 4 tokens discharged, 1,560 telemetry relabelled.
+  Acceptance 4: `select count(*) from mesh_tasks where id like 'cont:%' and status in ('pending','claimed')` → **0**.
+  Note: this deploy also shipped the already-merged #205/#206/#207 (A102 S0/S1-OpenCode, A103) — gateway-side
+  impact reviewed (best-effort carrier nudge; retired OpenCode CLI class removed); worker code unaffected.
 - Gate 1 inventory table (inline above or linked section) + reproduction `rg` commands
 - Gate 4 dry-run report path + DB backup path
 - Test modules + pass counts per gate
@@ -454,7 +461,7 @@ from the Manager host's checkout (Horse, un-redeployed) so dispatch identity mus
 - [x] Gate 1 — inventory complete, every row has a fate + consumer plan
 - [x] Gate 2 — inbox schema + agent addressing, RED→GREEN tests
 - [x] Gate 3 — all readers on `pending_for`, bounded delivery, never-run turns traceless; scenario matrix green
-- [ ] Gate 4 — migration dry-run lossless; operator go; applied with backup
+- [x] Gate 4 — migration dry-run lossless; operator go; applied with backup
 - [ ] Gate 5 — superseded code removed, shims kept, I7 fixed, `rg` clean
 - [ ] Gate 6 — deployed; live acceptance 1–7 recorded
 
