@@ -57,6 +57,8 @@ Pygments==2.21.0
 PyJWT==2.14.0
 pytest==9.1.1
 pytest-asyncio==1.4.0
+pytest-xdist==3.8.0
+execnet==2.1.1
 python-dateutil==2.9.0.post0
 python-dotenv==1.0.1
 python-multipart==0.0.32
