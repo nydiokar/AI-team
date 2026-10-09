@@ -4,23 +4,26 @@ from typing import Callable, Dict, Tuple
 from src.core.interfaces import CodingBackend
 from .claude_code import ClaudeCodeBackend
 from .codex_native import CodexBackend
-from .opencode import OpenCodeBackend, OpenCodeServerBackend
+from .opencode import OpenCodeServerBackend
 
 DEFAULT_BACKEND = "claude"
 
 # The ONE place the backend set is declared. name -> zero-arg factory.
+# [A102 S1-OpenCode, R3] The OpenCode CLI backend (``opencode``) was retired by
+# the operator on 2026-10-02 and its class deleted; nodes no longer advertise
+# it. OpenCode sessions use ``opencode-server``.
 _FACTORIES: Dict[str, Callable[[], CodingBackend]] = {
     "claude":          ClaudeCodeBackend,
     "codex":           CodexBackend,
-    "opencode":        OpenCodeBackend,
     "opencode-server": OpenCodeServerBackend,
 }
 
 
-# [A82 Stage 8a] Backends kept ONLY so existing sessions stay readable and
-# closable: no new session, turn or compaction is admitted for them (operator
-# decision 2026-10-02: the OpenCode CLI backend is retired; OpenCode sessions
-# use ``opencode-server``). Registry-level policy, never carrier/server logic.
+# [A82 Stage 8a / A102 S1-OpenCode R3] Retired backend names: no new session,
+# turn or compaction is admitted for them. The OpenCode CLI backend class was
+# deleted (R3), so it is no longer in ``_FACTORIES``; keeping the name here lets
+# the gateway refuse it with an operator-facing reason instead of a bare
+# "unknown backend". Registry-level policy, never carrier/server logic.
 RETIRED_BACKENDS: Dict[str, str] = {
     "opencode": "the OpenCode CLI backend is retired; use opencode-server",
 }

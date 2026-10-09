@@ -40,6 +40,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from src.backends.opencode import OpenCodeServerBackend
 from src.core.interfaces import Session, SessionStatus, ExecutionResult
 from src.services.session_store import SessionStore
+from src.core.turn_liveness import turn_control
 
 REPO = str(Path(__file__).resolve().parent.parent)  # this repo
 
@@ -71,7 +72,7 @@ def test_t1_create_session(b: OpenCodeServerBackend) -> None:
     """First turn — session created, ID captured, output non-empty."""
     s = _make_session()
     s.last_user_message = "Reply with exactly the word: T1OK"
-    r = b.create_session(s)
+    r = b.create_session(s, turn=turn_control(uuid.uuid4().hex))
     _assert(r.success, f"T1 failed: {r.errors}")
     _assert("T1OK" in r.output, f"T1 unexpected output: {r.output!r}")
     _assert(r.backend_session_id.startswith("ses_"), f"T1 bad session ID: {r.backend_session_id!r}")
@@ -82,7 +83,7 @@ def test_t1_create_session(b: OpenCodeServerBackend) -> None:
 def test_t2_resume_session(b: OpenCodeServerBackend, oc_session_id: str) -> None:
     """Second turn — same session ID, context preserved."""
     s = _make_session(backend_session_id=oc_session_id)
-    r = b.resume_session(s, "Reply with exactly the word: T2OK")
+    r = b.resume_session(s, "Reply with exactly the word: T2OK", turn=turn_control(uuid.uuid4().hex))
     _assert(r.success, f"T2 failed: {r.errors}")
     _assert("T2OK" in r.output, f"T2 unexpected output: {r.output!r}")
     _assert(r.backend_session_id == oc_session_id, f"T2 session ID changed: {r.backend_session_id!r}")
@@ -94,7 +95,7 @@ def test_t3_session_store_roundtrip(b: OpenCodeServerBackend) -> None:
     store = SessionStore()
     s = _make_session()
     s.last_user_message = "Reply with exactly: T3OK"
-    r = b.create_session(s)
+    r = b.create_session(s, turn=turn_control(uuid.uuid4().hex))
     _assert(r.success, f"T3 backend failed: {r.errors}")
 
     # Simulate orchestrator persisting the result
@@ -107,7 +108,7 @@ def test_t3_session_store_roundtrip(b: OpenCodeServerBackend) -> None:
     _assert(reloaded.backend_session_id == r.backend_session_id, "T3 session ID not persisted")
 
     # Resume using reloaded session
-    r2 = b.resume_session(reloaded, "Reply with exactly: T3RESUME")
+    r2 = b.resume_session(reloaded, "Reply with exactly: T3RESUME", turn=turn_control(uuid.uuid4().hex))
     _assert(r2.success, f"T3 resume failed: {r2.errors}")
     _assert("T3RESUME" in r2.output, f"T3 resume unexpected output: {r2.output!r}")
 
@@ -120,17 +121,17 @@ def test_t4_cancel(b: OpenCodeServerBackend) -> None:
     """cancel() does not hang and returns without error for both live and non-live sessions."""
     s = _make_session(backend_session_id="ses_doesnotexist000")
     start = time.time()
-    b.cancel(s)  # must not hang
+    b.cancel(s, "u-cancel")  # must not hang
     elapsed = time.time() - start
     _assert(elapsed < 5, f"T4 cancel took {elapsed:.1f}s — may be blocking")
 
     # Create a real session and cancel it
     s2 = _make_session()
     s2.last_user_message = "Reply with exactly: T4OK"
-    r = b.create_session(s2)
+    r = b.create_session(s2, turn=turn_control(uuid.uuid4().hex))
     _assert(r.success, f"T4 setup failed: {r.errors}")
     s2.backend_session_id = r.backend_session_id
-    b.cancel(s2)
+    b.cancel(s2, "u-cancel")
     print(f"  T4 OK — cancel non-blocking, elapsed={elapsed:.3f}s")
 
 
@@ -138,14 +139,14 @@ def test_t5_close(b: OpenCodeServerBackend) -> None:
     """close() deletes the session from the server."""
     s = _make_session()
     s.last_user_message = "Reply with exactly: T5OK"
-    r = b.create_session(s)
+    r = b.create_session(s, turn=turn_control(uuid.uuid4().hex))
     _assert(r.success, f"T5 setup failed: {r.errors}")
     s.backend_session_id = r.backend_session_id
 
     b.close(s)
 
     # Verify the session is gone — a resume should auto-recreate (not error)
-    r2 = b.resume_session(s, "Reply with exactly: T5AFTER")
+    r2 = b.resume_session(s, "Reply with exactly: T5AFTER", turn=turn_control(uuid.uuid4().hex))
     _assert(r2.success, f"T5 post-close resume failed: {r2.errors}")
     _assert(r2.backend_session_id != r.backend_session_id, "T5 expected new session ID after close+resume")
     print(f"  T5 OK — session deleted, resume auto-recreated new session={r2.backend_session_id!r}")
@@ -163,7 +164,7 @@ def test_t6_run_oneoff(b: OpenCodeServerBackend) -> None:
 def test_t7_session_resurrection(b: OpenCodeServerBackend) -> None:
     """resume_session with a stale/nonexistent session ID auto-recreates — no dead end."""
     s = _make_session(backend_session_id="ses_stale_does_not_exist_xyz")
-    r = b.resume_session(s, "Reply with exactly: T7OK")
+    r = b.resume_session(s, "Reply with exactly: T7OK", turn=turn_control(uuid.uuid4().hex))
     _assert(r.success, f"T7 failed: {r.errors}")
     _assert("T7OK" in r.output, f"T7 unexpected output: {r.output!r}")
     _assert(r.backend_session_id.startswith("ses_"), f"T7 no new session ID: {r.backend_session_id!r}")
@@ -174,7 +175,7 @@ def test_t7_session_resurrection(b: OpenCodeServerBackend) -> None:
 def test_t8_empty_id_resume(b: OpenCodeServerBackend) -> None:
     """resume_session with empty backend_session_id falls back to create_session."""
     s = _make_session(backend_session_id="")
-    r = b.resume_session(s, "Reply with exactly: T8OK")
+    r = b.resume_session(s, "Reply with exactly: T8OK", turn=turn_control(uuid.uuid4().hex))
     _assert(r.success, f"T8 failed: {r.errors}")
     _assert("T8OK" in r.output, f"T8 unexpected output: {r.output!r}")
     _assert(r.backend_session_id.startswith("ses_"), f"T8 no session ID: {r.backend_session_id!r}")
@@ -186,7 +187,7 @@ def test_t9_server_restart(b: OpenCodeServerBackend) -> None:
     # Warm up
     s = _make_session()
     s.last_user_message = "Reply with exactly: T9PRE"
-    r = b.create_session(s)
+    r = b.create_session(s, turn=turn_control(uuid.uuid4().hex))
     _assert(r.success, f"T9 pre-restart failed: {r.errors}")
     old_url = b._base_url
 
@@ -198,7 +199,7 @@ def test_t9_server_restart(b: OpenCodeServerBackend) -> None:
     # Next call must transparently restart
     s2 = _make_session()
     s2.last_user_message = "Reply with exactly: T9POST"
-    r2 = b.create_session(s2)
+    r2 = b.create_session(s2, turn=turn_control(uuid.uuid4().hex))
     _assert(r2.success, f"T9 post-restart failed: {r2.errors}")
     _assert("T9POST" in r2.output, f"T9 unexpected output: {r2.output!r}")
     _assert(b._base_url != "", "T9 server URL not repopulated")
@@ -214,7 +215,7 @@ def test_t10_concurrent_sessions(b: OpenCodeServerBackend) -> None:
     def run(label: str, reply: str) -> None:
         s = _make_session()
         s.last_user_message = f"Reply with exactly: {reply}"
-        r = b.create_session(s)
+        r = b.create_session(s, turn=turn_control(uuid.uuid4().hex))
         results[label] = r
 
     t_a = threading.Thread(target=run, args=("A", "T10A"))
@@ -251,7 +252,7 @@ async def test_t11_orchestrator_submit(b: OpenCodeServerBackend) -> None:
 
     # Simulate what the orchestrator does on first turn
     session.last_user_message = "Reply with exactly: T11FIRST"
-    raw: ExecutionResult = await asyncio.to_thread(b.create_session, session)
+    raw: ExecutionResult = await asyncio.to_thread(lambda: b.create_session(session, turn=turn_control(uuid.uuid4().hex)))
     _assert(raw.success, f"T11 first turn failed: {raw.errors}")
     _assert("T11FIRST" in raw.output, f"T11 first turn output: {raw.output!r}")
 
@@ -267,7 +268,7 @@ async def test_t11_orchestrator_submit(b: OpenCodeServerBackend) -> None:
 
     # Resume turn
     reloaded.last_user_message = "Reply with exactly: T11SECOND"
-    raw2: ExecutionResult = await asyncio.to_thread(b.resume_session, reloaded, "Reply with exactly: T11SECOND")
+    raw2: ExecutionResult = await asyncio.to_thread(lambda: b.resume_session(reloaded, "Reply with exactly: T11SECOND", turn=turn_control(uuid.uuid4().hex)))
     _assert(raw2.success, f"T11 second turn failed: {raw2.errors}")
     _assert("T11SECOND" in raw2.output, f"T11 second turn output: {raw2.output!r}")
 
@@ -279,7 +280,7 @@ def test_t12_execution_result_fields(b: OpenCodeServerBackend) -> None:
     """ExecutionResult has all fields the orchestrator reads (files_modified, parsed_output, etc.)."""
     s = _make_session()
     s.last_user_message = "Reply with exactly: T12OK"
-    r = b.create_session(s)
+    r = b.create_session(s, turn=turn_control(uuid.uuid4().hex))
     _assert(r.success, f"T12 failed: {r.errors}")
     _assert(isinstance(r.files_modified, list), "T12 files_modified not a list")
     _assert(isinstance(r.errors, list), "T12 errors not a list")
