@@ -430,6 +430,19 @@ from the Manager host's checkout (Horse, un-redeployed) so dispatch identity mus
   37-module Gate 3 target set → `694 passed`. Wider selector set (128 files referencing the touched modules) →
   `6 failed, 1826 passed, 9 skipped`; 4 failures are pre-existing on `main` since PR #207 (A102: K06, INT10b, S8_06,
   S8_06c), 2 were the stage-8a schema-rewind helper (fixed: it now strips the 45/46 artifacts too).
+
+### Gate 4 — live data migration (2026-10-09)
+- **Script:** `scripts/a104_seed_inbox.py` (`--dry-run` default, `--apply` = ONE txn, rolled back if any genuine
+  completion would be lost; idempotent). Tests: `tests/test_a104_seed_inbox.py` → `3 passed`.
+- **Dry-run on a prod copy** (ro `.backup` 2026-10-09T18:53:49Z): genuine completions 2 (`task_b7ba302c`,
+  `task_e7ae0733`) → both `pending`, **lost 0**; `task_7b175284` → `acked(reviewed)`; 7 junk rows →
+  `dead(superseded)`; 4 stuck tokens discharged (`cont:312ef564…:1`, `cont:4d8a46b5…:5`, `cont:83d10aec…:3`,
+  `cont:c96c7785…:1`); 1,560 never-run telemetry rows relabelled `cancelled`→`withdrawn`. Full per-Case report:
+  `.ai/dispatch/A104_PHASE4_MIGRATION_REPORT.md`.
+- **Packet correction (order):** the packet put the apply BEFORE the deploy, but the apply needs the inbox schema
+  (migrations 45/46), which only the new code creates — running it first would migrate the live DB under the old
+  gateway. Lossless order used: fresh backup → deploy (schema migrates; the A84 rows are carried as
+  dead/alerted, so nothing fires) → `--apply` immediately → verify.
 - Gate 1 inventory table (inline above or linked section) + reproduction `rg` commands
 - Gate 4 dry-run report path + DB backup path
 - Test modules + pass counts per gate
