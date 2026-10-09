@@ -102,17 +102,19 @@ def _utc_now_iso() -> str:
 
 async def _activate_head(
     db: Any, prepare: PrepareFn, head: Dict[str, Any], limit: int,
-) -> str:
-    """Prepare (outside the txn) + conditionally activate one head. Returns the
-    activation outcome (``activated``/``stale``/``ineligible``/``gone``/
-    ``oversize``/``blocked``)."""
+) -> tuple[str, str | None]:
+    """Prepare (outside the txn) + conditionally activate one head. Returns
+    ``(outcome, machine_id)`` where ``machine_id`` is the carrier node id when
+    ``outcome == "activated"`` and ``None`` for every other outcome.
+    Outcomes: ``activated``/``stale``/``ineligible``/``gone``/``oversize``/
+    ``blocked``/``withdrawn``."""
     task_id = str(head["id"])
     current = head
     outcome = "stale"
     for _ in range(_PREPARE_ATTEMPTS):
         row = await asyncio.to_thread(db.get_task, task_id)
         if row is None or row.get("status") != "queued":
-            return "gone"
+            return "gone", None
         try:
             prepared = await prepare(current, row)
         except TurnObsolete as ob:
@@ -128,9 +130,9 @@ async def _activate_head(
                 )
             except Exception:  # noqa: BLE001 — raced (edited/moved); next pass re-reads
                 logger.debug("event=turn_obsolete_withdraw_race task_id=%s", task_id)
-                return "ineligible"
+                return "ineligible", None
             logger.info("event=turn_withdrawn_obsolete task_id=%s reason=%s", task_id, ob.reason)
-            return "withdrawn"
+            return "withdrawn", None
         except Exception as e:  # noqa: BLE001 — leave queued with a reason + backoff
             # [A82 pre-cutover] a typed refusal may name its own operator-
             # visible reason (``carrier_offline: <node>``).
@@ -145,7 +147,7 @@ async def _activate_head(
                 emit_turn_queue_changed(
                     str(head.get("session_id") or ""), "blocked", turn_id=task_id, status="queued",
                 )
-            return "blocked"
+            return "blocked", None
         expected_config = int(current["config_revision"])
         outcome = await asyncio.to_thread(
             lambda: db.activate_prepared_turn(
@@ -158,16 +160,17 @@ async def _activate_head(
             )
         )
         if outcome != "stale":
-            return outcome
+            machine_id_out = prepared.machine_id if outcome == "activated" else None
+            return outcome, machine_id_out
         # Revision/config moved under us: re-read the head and re-prepare.
         fresh = [
             h for h in await asyncio.to_thread(db.select_eligible_turn_heads, limit)
             if str(h["id"]) == task_id
         ]
         if not fresh:
-            return "ineligible"
+            return "ineligible", None
         current = fresh[0]
-    return outcome
+    return outcome, None
 
 
 async def run_scheduler_pass(
@@ -232,7 +235,7 @@ async def run_scheduler_pass(
                 str(head.get("session_id") or ""), "withdrawn", turn_id=task_id, status="withdrawn",
             )
             continue
-        outcome = await _activate_head(db, prepare, head, limit)
+        outcome, activated_machine_id = await _activate_head(db, prepare, head, limit)
         if outcome in ("activated", "withdrawn"):
             # [A82 Stage 6] post-commit UI invalidation (queued → Starting /
             # obsolete automation withdrawn). Blocked heads signal only on a
@@ -243,6 +246,15 @@ async def run_scheduler_pass(
             )
         if outcome == "activated":
             result.activated += 1
+            # [A103] Nudge the carrier now that the row is pending/claimable.
+            # Fire-and-forget: poll loop is the backstop; failure must not
+            # break activation.
+            if activated_machine_id:
+                try:
+                    from src.control.node_inspector import _nudge_worker as _nw
+                    asyncio.create_task(_nw(activated_machine_id, db))
+                except Exception:  # noqa: BLE001 — nudge is best-effort
+                    pass
         elif outcome == "stale":
             result.stale += 1
         elif outcome in ("oversize", "blocked"):
