@@ -46,6 +46,12 @@ Shared-medium layer (SQL tables from string literals, AST-derived): `ORPHAN_MEDI
 written), `TRUNCATED_WINDOW` (oldest-N reads of an insert-only table), `SPLIT_READERS` (tables written together by a
 focused operation but read by disjoint focused readers). `Hubs` (high fan-in nodes) are listed in `analysis_scope`
 instead of being silently excluded. Table access via helper constants or ORMs is not seen.
+Behavioural twins (`BEHAVIOURAL_TWIN`: bodies identical up to naming via an alpha-renamed AST fingerprint;
+`SAME_FOOTPRINT`: same arity, same tables, >=85% same callees, no calls between them).
+Noise handling: findings carry `tags` (e.g. `hub_medium:<table>` for media read by many functions; `same_name`
+for copied overrides) and are ordered after untagged ones. `.arch-audit/baseline.json` (`--baseline`,
+`--baseline-update`) holds reviewed acknowledgements keyed by stable finding id; they show as `known`, new
+findings stay `new`, and ids that no longer exist are reported as `stale_ids`. Nothing is hidden.
 All are candidates until a human/agent verifies semantics; legitimate variants over a shared core are flagged too.
 
 ## Coverage and limitations

@@ -22,6 +22,8 @@ FLOW: frozenset[str] = frozenset({'HANDLES', 'CALLS', 'ASYNC_CALLS', 'HTTP_CALLS
 MAX_DEPTH: int = 12
 LOW_CONFIDENCE: float = 0.3  # CBM resolution confidence below this is a name guess (e.g. suffix_match 0.09)
 MAX_FINDINGS_PER_KIND: int = 40
+FOOTPRINT_MIN_CALLEES: int = 4
+FOOTPRINT_JACCARD: float = 0.85
 FOCUS_TABLES: int = 3  # an operation/reader touching more tables than this is not one focused fact-recording step
 
 
@@ -101,8 +103,12 @@ def _dom_set(idom: dict[str, str], n: str) -> set[str]:
     return out
 
 
+HUB_MIN_READERS: int = 10  # a medium read by at least this many functions AND in the top decile is a shared hub
+
+
 def analyze(nodes: dict[str, dict[str, Any]], edges: list[dict[str, Any]], roots: list[str],
-            fanin: dict[str, int], utility_threshold: int) -> dict[str, Any]:
+            fanin: dict[str, int], utility_threshold: int,
+            twins: Optional[list[dict[str, Any]]] = None) -> dict[str, Any]:
     """Return {'findings': [...], 'scope': {...}} for the loaded graph."""
     succ: dict[str, list[str]] = defaultdict(list)
     emap: dict[tuple[str, str], dict[str, Any]] = {}
@@ -428,6 +434,9 @@ def analyze(nodes: dict[str, dict[str, Any]], edges: list[dict[str, Any]], roots
             for i, x in enumerate(ts):
                 for y in ts[i + 1:]:
                     origins[(x, y)].append(f0)
+    counts_r: list[int] = sorted(len({e['from'] for e in es}) for es in t_readers.values())
+    hub_cut: int = max(HUB_MIN_READERS, counts_r[int(len(counts_r) * 0.9)] if counts_r else HUB_MIN_READERS)
+    hubs_m: set[str] = {t for t, es in t_readers.items() if len({e['from'] for e in es}) >= hub_cut}
     split: list[tuple[int, str, str, list[str], list[str]]] = []
     for (x, y), orig in origins.items():
         focused: list[str] = [r for r in direct_r if len(direct_r[r]) <= FOCUS_TABLES]  # readers asking one focused question
@@ -441,7 +450,68 @@ def analyze(nodes: dict[str, dict[str, Any]], edges: list[dict[str, Any]], roots
              'title': f'{tname(x)} and {tname(y)} are written together but read apart',
              'detail': f'{len(origins[(x, y)])} operation(s) write both; {len(rx)} reader(s) use only {tname(x)}, '
                        f'{len(ry)} use only {tname(y)}. Check that the readers answer the same question the same way.',
+             'tags': [f'hub_medium:{tname(h)}' for h in (x, y) if h in hubs_m],
              'evidence': [{'co_writers': origins[(x, y)][:6], 'readers_only_x': rx[:8], 'readers_only_y': ry[:8]}]})
+
+    # T. Behavioural twins: bodies that are the same up to names (exact fingerprint), or that have the same arity,
+    #    the same tables and (nearly) the same callees (footprint), under different names, not calling each other.
+    tw: list[dict[str, Any]] = [t for t in (twins or []) if t['id'] in nodes]
+    exact_pairs: set[frozenset[str]] = set()
+    groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for t in tw:
+        groups[t['h']].append(t)
+    for h, ms in sorted(groups.items()):
+        if len(ms) < 2:
+            continue
+        ids: list[str] = sorted(m['id'] for m in ms)
+        exact_pairs.update(frozenset((a, b)) for i, a in enumerate(ids) for b in ids[i + 1:])
+        names: set[str] = {m['name'] for m in ms}
+        add({'id': _fid('BEHAVIOURAL_TWIN', ids), 'kind': 'BEHAVIOURAL_TWIN', 'level': 'candidate', 'anchor': ids[0],
+             'related': ids[1:],
+             'title': f'{len(ids)} functions have identical bodies up to naming'
+                      + ('' if len(names) > 1 else ' (same name: likely copied override)'),
+             'detail': 'Same operations in the same order over the same non-local names; locals, parameters and '
+                       'strings differ at most. One implementation duplicated, or a deliberate polymorphic copy.',
+             'tags': ['same_name'] if len(names) == 1 else ['renamed'],
+             'evidence': [{'twin': m['id'], 'file': m['file'], 'line': m['line'], 'nodes': m['size']} for m in ms[:8]]})
+    cand: list[dict[str, Any]] = [t for t in tw if len(t['callees']) >= FOOTPRINT_MIN_CALLEES]
+    pair_hits: list[tuple[float, dict[str, Any], dict[str, Any]]] = []
+    by_arity: dict[int, list[dict[str, Any]]] = defaultdict(list)
+    for t in cand:
+        by_arity[t['nparams']].append(t)
+    for ms in by_arity.values():
+        for i, a in enumerate(ms):
+            ca: set[str] = set(a['callees'])
+            for b in ms[i + 1:]:
+                if a['name'] == b['name'] or frozenset((a['id'], b['id'])) in exact_pairs:
+                    continue
+                if set(a['tables']) != set(b['tables']) or b['id'] in succ.get(a['id'], []) or a['id'] in succ.get(b['id'], []):
+                    continue
+                cb: set[str] = set(b['callees'])
+                jac3: float = len(ca & cb) / len(ca | cb)
+                if jac3 >= FOOTPRINT_JACCARD:
+                    pair_hits.append((jac3, a, b))
+    fp_parent: dict[str, str] = {}
+
+    def fp_find(x: str) -> str:
+        while fp_parent.setdefault(x, x) != x:
+            fp_parent[x] = fp_parent[fp_parent[x]]
+            x = fp_parent[x]
+        return x
+    for _, a, b in pair_hits:
+        fp_parent[fp_find(a['id'])] = fp_find(b['id'])
+    fp_groups: dict[str, dict[str, dict[str, Any]]] = defaultdict(dict)
+    for jac3, a, b in pair_hits:
+        fp_groups[fp_find(a['id'])].update({a['id']: a, b['id']: b})
+    for _, mem in sorted(fp_groups.items(), key=lambda kv: min(kv[1])):
+        ids2: list[str] = sorted(mem)
+        add({'id': _fid('SAME_FOOTPRINT', ids2), 'kind': 'SAME_FOOTPRINT', 'level': 'candidate', 'anchor': ids2[0],
+             'related': ids2[1:],
+             'title': f'{len(ids2)} differently named functions take the same inputs shape and use the same dependencies',
+             'detail': 'Same arity, same tables, near-identical callee sets, no calls between them. Possible parallel '
+                       'implementation of one operation, or legitimate variants over one shared core.',
+             'evidence': [{'twin': m['id'], 'file': m['file'], 'line': m['line'], 'callees': m['callees'][:12],
+                           'tables': m['tables']} for m in [mem[i] for i in ids2[:8]]]})
 
     # 7. Package dependency cycles (candidate) among loaded call edges.
     def pkg(n: str) -> Optional[str]:
@@ -462,8 +532,10 @@ def analyze(nodes: dict[str, dict[str, Any]], edges: list[dict[str, Any]], roots
                  'evidence': [{'path': [e['from'], e['to']], 'edges': _edge_ev([e['from'], e['to']], emap)},
                               {'path': [back['from'], back['to']], 'edges': _edge_ev([back['from'], back['to']], emap)}]})
 
+    for f in findings:
+        f.setdefault('tags', [])
     order: dict[str, int] = {'candidate': 0, 'fact': 1}
-    findings.sort(key=lambda f: (order[f['level']], f['kind'], f['anchor'], f['id']))
+    findings.sort(key=lambda f: (order[f['level']], any(t.startswith('hub_medium') for t in f['tags']), f['kind'], f['anchor'], f['id']))
     return {'findings': findings,
             'scope': {'roots_with_loaded_paths': len(live_roots), 'max_depth': MAX_DEPTH,
                       'counts_by_kind': dict(sorted(per_kind.items())),
