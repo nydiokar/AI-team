@@ -81,6 +81,15 @@ Only jobs that are genuinely open. Everything merged/done is in git and the disp
 
 ## Recent shift notes
 
+**2026-10-09 — A104 done: the agent inbox is the ONLY answer to "what is waiting for this agent".**
+Completions are addressed to the session that REQUESTED the work (`mesh_tasks.sender_session_id`), written in the
+child's terminal txn, delivered as one wake, acked by the wake's completion or a tagged review; bounded (5 attempts,
+then dead + alert). Read it via `db.pending_for()` only — `tests/test_a104_single_pending_source.py` fails the build if a
+second pathway (wait-group ledger, A84 outbox, `cont:` tokens, oldest-N event folds, role addressing) returns.
+`CASE_COMPLETION_OUTBOX_ENABLED` is retired. Horse Managers may send a stale `SESSION_ID` (SDK env filter, A102
+follow-up); the gateway validates it and audits `inbox.requester_unresolved`. Tests: run multi-file sets with `-n 4`
+(DB template + xdist: wide set 8m → 3m; CI 5m43s → 2m38s).
+
 **2026-10-05 — System-One (TypeSafe Jev) decision layer specified and dispatched; tied into the Governor programme.**
 Owner decision after a 3-round analysis (30+ candidates scored on impact / fit / ground truth /
 doability / safety / non-Jev-alternative). The full reasoning record is in

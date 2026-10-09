@@ -560,6 +560,9 @@ class TelemetryStore:
             if value:
                 where.append(f"{column} = ?")
                 params.append(value)
+        if status != "withdrawn":
+            # [A104 I6] Never-run (withdrawn) turns are not turns.
+            where.append("COALESCE(final_status, '') != 'withdrawn'")
         sql = "SELECT * FROM llm_turns"
         if where:
             sql += " WHERE " + " AND ".join(where)
@@ -863,7 +866,12 @@ class TelemetryStore:
             success = task.get("status") == "completed" and bool(
                 result.get("success", True)
             )
-            status = "cancelled" if managed_cancel else ("success" if success else "failed")
+            # [A104 I6] A withdrawn turn never ran: it is recorded under its own
+            # 'withdrawn' status, which no turn list / count includes.
+            status = (
+                ("withdrawn" if task.get("status") == "withdrawn" else "cancelled")
+                if managed_cancel else ("success" if success else "failed")
+            )
             invocation_id = (
                 result.get("telemetry_invocation_id")
                 or self._latest_invocation_id(candidate_id)

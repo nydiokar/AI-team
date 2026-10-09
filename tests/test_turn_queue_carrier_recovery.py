@@ -397,15 +397,15 @@ def test_P3b_conflict_detected_at_loop_reservation_returns_to_pending(db, tmp_pa
 # =========================================================================== #
 def test_P4_managed_deadline_late_reply_reaches_sink_as_late_managed():
     from src.control.turn_queue import RecoveryRequiredError
+    from src.core.turn_liveness import turn_control
 
     fake = _FakeClient()
     sess = _start_fake_session(fake)
     got: List[Any] = []
     sess._on_proactive = lambda k, o: got.append(o)
-    sess._managed_stall_sec = lambda: 0.3
     try:
         with pytest.raises(RecoveryRequiredError):
-            sess.send_managed("slow prompt")
+            sess.send("slow prompt", turn=turn_control("u-p4", stall_override=0.3))
         assert sess.is_quiescent() is False
         _emit_autonomous(sess, fake, _assistant("LATE REPLY"), _result("LATE REPLY"))
         time.sleep(0.3)
@@ -416,13 +416,15 @@ def test_P4_managed_deadline_late_reply_reaches_sink_as_late_managed():
         sess.close()
 
 
-def test_P4b_late_reply_completes_the_held_turn_via_carrier(db, tmp_path, real_claude):
+def test_P4b_late_reply_completes_the_held_turn_via_carrier(db, tmp_path, real_claude, monkeypatch):
+    import src.backends.claude_code as _cc
+    _orig_tc = _cc.turn_control
+    monkeypatch.setattr(_cc, "turn_control", lambda u, **kw: _orig_tc(u, stall_override=0.3, **kw))
     http = _ClientHTTP(TestClient(ts.app))
     w = _worker(tmp_path, http)
     w._backends = {"claude": real_claude.backend}
     real_claude.sess._on_proactive = w._deliver_proactive_turn
     real_claude.sess.session_key = "sess-9"  # production: pool key == session id
-    real_claude.sess._managed_stall_sec = lambda: 0.3
     real_claude.fake.replies["slow"] = []
     _seed_session_turn(db, "t-9", "sess-9", "slow")
     _run_one(w, "t-9")
@@ -431,7 +433,11 @@ def test_P4b_late_reply_completes_the_held_turn_via_carrier(db, tmp_path, real_c
     assert asyncio.run(w._reconcile_managed_claims()) == 0
     _emit_autonomous(real_claude.sess, real_claude.fake, _assistant("late", sid="native-late"),
                      _result("LATE ANSWER", sid="native-late"))
-    time.sleep(0.4)
+    # The late reply is spooled by the session's background reader thread: wait
+    # for it (bounded) instead of a fixed sleep, which flakes under parallel load.
+    deadline = time.monotonic() + 10.0
+    while _spooled(w) != ["t-9"] and time.monotonic() < deadline:
+        time.sleep(0.05)
     assert _spooled(w) == ["t-9"]
     asyncio.run(w._redeliver_spooled_results())
     row = _row(db, "t-9")
@@ -447,6 +453,8 @@ def test_P4b_late_reply_completes_the_held_turn_via_carrier(db, tmp_path, real_c
 # P5 / M4 — autonomous continuation is never adopted as the managed reply
 # =========================================================================== #
 def test_P5_autonomous_continuation_not_served_as_managed_reply():
+    from src.core.turn_liveness import turn_control
+
     fake = _FakeClient()
     fake.defer_echo = True  # our prompt is queued behind the autonomous turn
     sess = _start_fake_session(fake)
@@ -458,7 +466,7 @@ def test_P5_autonomous_continuation_not_served_as_managed_reply():
         out: Dict[str, Any] = {}
 
         def run():
-            out["o"] = sess.send_managed("user prompt")
+            out["o"] = sess.send("user prompt", turn=turn_control("u-p5"))
         t = threading.Thread(target=run)
         t.start()
         time.sleep(0.1)

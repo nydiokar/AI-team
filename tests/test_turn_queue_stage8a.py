@@ -225,6 +225,11 @@ def _rewind_to_42(path: str) -> None:
     # A84 carry (o): migration 44 artifacts did not exist at schema 42 — strip
     # them so a reopen re-applies 43 (and 44) cleanly from a faithful baseline.
     conn.execute("DROP TABLE IF EXISTS completion_outbox")
+    # A104: migrations 45/46 (agent inbox) did not exist at schema 42 either.
+    conn.execute("DROP TABLE IF EXISTS agent_inbox")
+    conn.execute("DROP TABLE IF EXISTS inbox_wait_filters")
+    conn.execute("DROP INDEX IF EXISTS idx_mesh_tasks_requester_open")
+    conn.execute("DROP INDEX IF EXISTS idx_sessions_continued_from")
     try:
         conn.execute("ALTER TABLE flow_runs DROP COLUMN continuation_mode")
     except sqlite3.OperationalError:

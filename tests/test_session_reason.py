@@ -7,8 +7,11 @@ READ-PATH ONLY, and never mutates the SessionStatus enum. These tests prove:
 - BUSY/terminal -> empty with ZERO DB reads,
 - node-offline detail = node id,
 - a racy/stale ledger write between reads,
-- NO N+1: a page of N sessions issues ONE list_jobs_for_sessions and bounded
-  per-manager reads (asserted by a call-count spy, not vibes),
+- NO N+1: a page of N sessions issues ONE list_jobs_for_sessions, ONE batched
+  inbox read (A104 ``inbox_waiting_for``) and bounded per-open-Case pause reads,
+  never a Case event-log fold (asserted by a call-count spy, not vibes),
+- A104: ``waiting_workers`` comes from the agent inbox and is ROLE-FREE (any
+  session with outstanding requests or undelivered messages),
 and re-runs the core cases against a REAL file-backed MeshDB.
 
 No paid CLI, no network.
@@ -57,6 +60,7 @@ class _FakeDB:
         case_events: Optional[Dict[str, List[Dict[str, Any]]]] = None,  # cid -> flow_events
         quota_paused: Optional[List[str]] = None,
         retry_paused: Optional[List[str]] = None,
+        inbox_waiting: Optional[List[str]] = None,  # sids pending_for reports waiting
     ) -> None:
         self._running = set(running_job_session_ids or [])
         # case_status None value or missing key => no flow_run row (get_flow_run None)
@@ -64,6 +68,7 @@ class _FakeDB:
         self._case_events = dict(case_events or {})
         self._quota = set(quota_paused or [])
         self._retry = set(retry_paused or [])
+        self._inbox_waiting = set(inbox_waiting or [])
         self.calls: Dict[str, int] = {}
 
     def _bump(self, name: str) -> None:
@@ -101,17 +106,19 @@ class _FakeDB:
         self._bump("transient_pause")
         return {"paused_at": "x"} if flow_run_id in self._retry else None
 
+    def inbox_waiting_for(self, session_ids: List[str]) -> Dict[str, bool]:
+        self._bump("inbox_waiting_for")
+        return {sid: sid in self._inbox_waiting for sid in session_ids}
+
     def list_flow_events(self, flow_run_id: str, limit: int = 500):
+        # A104: the reason must NEVER fold a Case event log — counted to pin 0.
         self._bump("list_flow_events")
         return list(self._case_events.get(flow_run_id, []))
 
 
 def _pending(gid: str) -> Dict[str, Any]:
+    # Legacy wait-group marker: A104 ignores it (inbox is the only wait truth).
     return {"entity_type": "wait_group", "entity_id": gid, "event_type": "worker.wait_pending"}
-
-
-def _resolved(gid: str) -> Dict[str, Any]:
-    return {"entity_type": "wait_group", "entity_id": gid, "event_type": "worker.wait_resolved"}
 
 
 def _reason_of(db: _FakeDB, session: _FakeSession) -> Optional[SessionReason]:
@@ -143,6 +150,7 @@ def test_busy_and_terminal_short_circuit_to_empty_with_zero_db_reads():
         assert db.calls.get("transient_pause", 0) == 0
         assert db.calls.get("list_flow_events", 0) == 0
         assert db.calls.get("max_flow_event_ids", 0) == 0
+        assert db.calls.get("inbox_waiting_for", 0) == 0
 
 
 # --------------------------------------------------------------------------- #
@@ -172,24 +180,33 @@ def test_paused_retry_when_no_quota():
 
 
 def test_waiting_workers_for_manager_with_unresolved_wait_group():
-    db = _FakeDB(case_status={"c1": ""}, case_events={"c1": [_pending("g1")]})
+    # A104: "unresolved wait" == pending_for(s1) reports outstanding work.
+    db = _FakeDB(case_status={"c1": ""}, case_events={"c1": [{"event_type": "flow.created"}]},
+                 inbox_waiting=["s1"])
     s = _FakeSession("s1", SessionStatus.AWAITING_INPUT, "manager", "c1")
     assert _reason_of(db, s) == SessionReason(kind="waiting_workers", confidence="high")
 
 
 def test_resolved_wait_group_is_not_waiting_workers():
-    # pending then resolved -> group not live -> falls through to open_case_idle.
-    db = _FakeDB(case_status={"c1": ""}, case_events={"c1": [_pending("g1"), _resolved("g1")]})
+    # Inbox empty for s1 -> not waiting -> open_case_idle. A legacy (unresolved)
+    # wait-group marker in the ledger is NOT wait truth any more (A104).
+    db = _FakeDB(case_status={"c1": ""}, case_events={"c1": [_pending("g1")]}, inbox_waiting=[])
     s = _FakeSession("s1", SessionStatus.AWAITING_INPUT, "manager", "c1")
     assert _reason_of(db, s) == SessionReason(kind="open_case_idle", confidence="medium")
 
 
 def test_worker_with_unresolved_wait_group_is_not_waiting_workers():
-    # waiting_workers is a MANAGER-only reason; a worker on the same case is not it.
-    db = _FakeDB(case_status={"c1": ""}, case_events={"c1": [_pending("g1")]})
+    # A104: the reason is per-SESSION, not per-Case: a worker on a Case whose
+    # Manager is waiting is NOT waiting_workers itself ...
+    db = _FakeDB(case_status={"c1": ""}, case_events={"c1": [{"event_type": "flow.created"}]},
+                 inbox_waiting=["mgr"])
     s = _FakeSession("s1", SessionStatus.AWAITING_INPUT, "worker", "c1")
     r = _reason_of(db, s)
     assert r == SessionReason(kind="open_case_idle", confidence="medium")
+    # ... but role-free: a worker that itself requested work IS waiting_workers.
+    db2 = _FakeDB(case_status={"c1": ""}, case_events={"c1": [{"event_type": "flow.created"}]},
+                  inbox_waiting=["s1"])
+    assert _reason_of(db2, s) == SessionReason(kind="waiting_workers", confidence="high")
 
 
 def test_waiting_job_when_a_running_job_exists():
@@ -251,14 +268,16 @@ def test_node_offline_detail_is_the_node_id_with_zero_db_reads():
 # Racy / stale ledger: an event written between reads
 # --------------------------------------------------------------------------- #
 def test_racy_ledger_event_written_between_watermark_and_scan():
-    # A wait-group marker lands AFTER the batch is built. The batch snapshot is
+    # A request lands in the inbox AFTER the batch is built. The batch snapshot is
     # what the page rendered; a later request re-derives and picks it up. We prove
-    # both: the snapshot is stable, and a fresh derive reflects the new event.
+    # both: the snapshot is stable, and a fresh derive reflects the new state.
     db = _FakeDB(case_status={"c1": ""}, case_events={"c1": [{"event_type": "flow.created"}]})
     s = _FakeSession("s1", SessionStatus.AWAITING_INPUT, "manager", "c1")
-    assert _reason_of(db, s) == SessionReason(kind="open_case_idle", confidence="medium")
-    # ledger races forward
-    db._case_events["c1"].append(_pending("g1"))
+    batch = build_reason_batch(db, [s])
+    assert derive_session_reason(s, batch) == SessionReason(kind="open_case_idle", confidence="medium")
+    # inbox races forward (a dispatch requested by s1)
+    db._inbox_waiting.add("s1")
+    assert derive_session_reason(s, batch) == SessionReason(kind="open_case_idle", confidence="medium")
     assert _reason_of(db, s) == SessionReason(kind="waiting_workers", confidence="high")
 
 
@@ -288,11 +307,13 @@ def test_no_n_plus_1_for_a_page_of_sessions():
     assert db.calls.get("list_jobs_for_sessions", 0) == 1
     # ONE batched watermark read for the whole page.
     assert db.calls.get("max_flow_event_ids", 0) == 1
+    # ONE batched inbox read for the whole page (A104) — never per session.
+    assert db.calls.get("inbox_waiting_for", 0) == 1
     # Per-open-case reads are bounded to the 10 open cases (managers+workers),
     # never touching the 5 BUSY sessions' cases.
     assert db.calls.get("get_flow_run", 0) == 10
-    # Wait-group scan is MANAGERS-ONLY: 5 managers, not 10.
-    assert db.calls.get("list_flow_events", 0) == 5
+    # NO Case event-log fold at all (the legacy per-manager wait-group scan).
+    assert db.calls.get("list_flow_events", 0) == 0
     # Pause reads run for every open case (manager or worker): 10 each.
     assert db.calls.get("case_quota_pause", 0) == 10
     assert db.calls.get("transient_pause", 0) == 10
@@ -333,21 +354,20 @@ def test_against_real_meshdb(tmp_path):
     # Confirm the closed-status literal actually matches MeshDB's constant.
     assert tuple(_CLOSED_CASE_STATUSES) == tuple(MeshDB._CLOSED_STATUSES)
 
-    # Manager on an open case with an unresolved wait-group => waiting_workers.
+    from tests.inbox_seed import finish_child, seed_child
+
+    # Manager on an open case with a requested child still running => waiting_workers.
     mgr_case = db.open_case("do the thing", "sess_mgr", role="manager")
-    db.append_flow_event(
-        mgr_case, "worker.wait_pending", "manager",
-        entity_type="wait_group", entity_id="wg1",
-        payload={"wait_group_id": "wg1", "condition": "ANY", "member_task_ids": []},
-    )
+    seed_child(db, mgr_case, "task_w1", requester="sess_mgr")
     mgr = _FakeSession("sess_mgr", SessionStatus.AWAITING_INPUT, "manager", mgr_case)
     assert _reason_of(db, mgr) == SessionReason(kind="waiting_workers", confidence="high")
 
-    # Same manager after the wait resolves => open_case_idle (the stuck tell).
-    db.append_flow_event(
-        mgr_case, "worker.wait_resolved", "manager",
-        entity_type="wait_group", entity_id="wg1",
-    )
+    # Child finished, its completion not yet consumed => still waiting_workers.
+    finish_child(db, "task_w1")
+    assert _reason_of(db, mgr) == SessionReason(kind="waiting_workers", confidence="high")
+
+    # Completion consumed by a tagged review => open_case_idle (the stuck tell).
+    db.append_flow_event(mgr_case, "review.accepted", "manager", entity_type="task", entity_id="task_w1")
     assert derive_session_reasons(db, [mgr])[mgr.session_id] == SessionReason(
         kind="open_case_idle", confidence="medium"
     )

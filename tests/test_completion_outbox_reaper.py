@@ -1,55 +1,65 @@
 """A84 TASK 6 — the lost-carrier reaper (bounded liveness backstop).
 
-A managed Case worker child whose carrier dies before reporting terminal would
-strand its Case Manager forever. The reaper detects such a child by the EXACT
+A REQUESTED Case worker child whose carrier dies before reporting terminal would
+strand its requester forever. The reaper detects such a child by the EXACT
 claim-lease / node-truth predicate the protocol-0 claim reaper already uses
 (``_claim_staleness_reason``), and synthesizes its terminal outcome through the
-SAME atomic outbox seam — so a LOST carrier still produces exactly one
-``completion_outbox`` row and wakes the Manager exactly once.
+SAME atomic terminal seam — so a LOST carrier still produces exactly one
+completion message and wakes the requester exactly once.
+
+[A104] Scope is REQUESTED children (``mesh_tasks.sender_session_id`` set — an
+agent's inbox waits on them) of any non-terminal Case, regardless of the Case's
+birth mode and with no outbox flag; the synthesized terminal writes the
+``agent_inbox`` row addressed to the requester.
 
 Proven here against a REAL file-backed ``MeshDB`` (no mocks), and the full
-reaper→drain path driven through the genuine ``TaskOrchestrator`` methods.
+reaper→delivery path driven through the genuine ``TaskOrchestrator`` (H3 harness).
 
 Detection (``list_stale_managed_children``):
   R01 lost carrier (node_missing, lease-expired) is detected
   R02 a fresh claim (within lease) is NOT detected
   R03 a healthy ONLINE carrier (matching incarnation, no live_state) is NOT detected
   R04 an incarnation-mismatch (restarted-in-place) carrier IS detected
-  R05 a legacy-mode Case child is NEVER detected (outbox-only)
+  R05 an UNREQUESTED child is never detected; a requested child is (scope is
+      the requester — there is no Case birth mode any more)
   R06 a closed Case child is NEVER detected (open-only)
 
 Synthesis + fence (``synthesize_managed_terminal``):
-  R10 lost carrier → synth → EXACTLY ONE outbox row, outcome 'failed', terminal
-      committed, effects_state='pending'
+  R10 lost carrier → synth → EXACTLY ONE inbox message to the requester, outcome
+      'failed', terminal committed, effects_state='pending'
   R11 late real result after synth (carrier's own token) → idempotent replay,
-      NO second outbox row, status unchanged (FENCED)
-  R12 real result BEFORE synth → synth returns 'already_terminal', one row (FENCED)
-  R13 idempotent re-scan: a second synth returns 'already_terminal', one row;
+      NO second message, status unchanged (FENCED)
+  R12 real result BEFORE synth → synth returns 'already_terminal', one message (FENCED)
+  R13 idempotent re-scan: a second synth returns 'already_terminal', one message;
       the terminal row drops out of the scan
   R14 a missing / non-managed row → 'skipped', no row
 
-Orchestrator reaper (``_reap_lost_carriers``) + drain:
-  R20 flag OFF → reaper is inert (no synth, no row)
-  R21 flag ON → reaper synthesizes the lost carrier → the real drain wakes the
-      Manager EXACTLY ONCE presenting the reaped child; ACK; re-tick no wake; a
-      late real result is fenced (no second row, no second wake)
+Orchestrator reaper (``_reap_lost_carriers``) + delivery:
+  R20b a long-running child its LIVE carrier still reports active is never reaped
+  R21 reaper synthesizes the lost carrier → the real Wake-Dispatcher wakes the
+      requester EXACTLY ONCE presenting the reaped child; ack; re-tick no wake; a
+      late real result is fenced (no second message, no second wake)
+
+Deleted with A104: R20 (reaper inert when CASE_COMPLETION_OUTBOX_ENABLED is OFF) —
+the reaper is no longer flag- or mode-gated (requested children, any Case).
 """
 from __future__ import annotations
 
 import asyncio
-import socket
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 import pytest
 
-import src.control.db as db_mod
-from src.control.db import MeshDB, continuation_task_id
+from src.control.db import MeshDB
 from src.orchestrator import TaskOrchestrator
 
-from tests.test_case_continuation import _FakeStore, _FakeSession, _continue, _reviewed
-from tests.test_completion_outbox import _seed_running_child
-from tests.test_completion_outbox_drain import _FakeOrch
+from tests.inbox_seed import seed_child
+from tests.test_agent_inbox_delivery import (  # noqa: F401 — autouse fixtures
+    _drive, _env, _fresh_allowance, _wakes,
+)
+from tests.test_case_continuation import _FakeOrch, _FakeStore, _FakeSession
+from tests.test_turn_queue_producer1 import _flags, _no_cli_spawn  # noqa: F401
 
 
 # --------------------------------------------------------------------------- #
@@ -64,7 +74,7 @@ def _db(tmp_path: Any) -> MeshDB:
 
 
 def _open_outbox_case(db: MeshDB, monkeypatch: pytest.MonkeyPatch, session_id="mgr-sess") -> str:
-    monkeypatch.setenv("CASE_COMPLETION_OUTBOX_ENABLED", "1")
+    # Name kept from A84; A104 Phase 5 deleted the outbox flag + birth-mode marker.
     return db.open_case("obj", session_id, role="manager")
 
 
@@ -79,12 +89,15 @@ def _seed_lost_child(
     claimer_incarnation: str = "inc-1",
     age_sec: int = 400,
     link_as_child: bool = True,
+    requester: Optional[str] = "mgr-sess",
 ) -> None:
-    """A protocol-1 managed Case worker child that was claimed by a carrier which
-    is now gone/stale: ``claimed_at`` is ``age_sec`` in the past and ``claimed_by``
-    is (by default) a node that does not exist ⇒ 'node_missing'."""
-    _seed_running_child(
-        db, task_id, case_id, token=token, status=status, link_as_child=link_as_child,
+    """A protocol-1 managed Case worker child, REQUESTED by ``requester`` (its
+    ``sender_session_id``), that was claimed by a carrier which is now gone/stale:
+    ``claimed_at`` is ``age_sec`` in the past and ``claimed_by`` is (by default) a
+    node that does not exist ⇒ 'node_missing'."""
+    seed_child(
+        db, case_id, task_id, requester=requester, status=status, token=token,
+        link=link_as_child,
     )
     conn = db._conn()
     conn.execute(
@@ -95,9 +108,9 @@ def _seed_lost_child(
     conn.commit()
 
 
-def _outbox_rows(db: MeshDB, case_id: str) -> list[dict[str, Any]]:
+def _inbox_rows(db: MeshDB, case_id: str) -> list[dict[str, Any]]:
     return [dict(r) for r in db._conn().execute(
-        "SELECT * FROM completion_outbox WHERE case_id = ? ORDER BY child_task_id",
+        "SELECT * FROM agent_inbox WHERE case_id = ? ORDER BY about_task_id",
         (case_id,),
     ).fetchall()]
 
@@ -152,13 +165,16 @@ def test_R04_incarnation_mismatch_is_detected(tmp_path, monkeypatch):
     assert stale[0]["_stale_reason"] == "incarnation_mismatch"
 
 
-def test_R05_legacy_case_child_never_detected(tmp_path, monkeypatch):
-    monkeypatch.delenv("CASE_COMPLETION_OUTBOX_ENABLED", raising=False)
+def test_R05_unrequested_child_never_detected_any_mode(tmp_path, monkeypatch):
+    """[A104] Scope is the requester (A104 Phase 5 deleted the Case birth-mode
+    marker): an unrequested child (no inbox waits on it) is never reaped; a
+    requested child of the same Case is."""
     db = _db(tmp_path)
     case_id = db.open_case("obj", "mgr-sess", role="manager")
-    assert db.case_continuation_mode(case_id) is None
-    _seed_lost_child(db, "w1", case_id)
+    _seed_lost_child(db, "w0", case_id, token="t0", requester=None)
     assert db.list_stale_managed_children() == []
+    _seed_lost_child(db, "w1", case_id, token="t1")
+    assert [r["id"] for r in db.list_stale_managed_children()] == ["w1"]
 
 
 def test_R06_closed_case_child_never_detected(tmp_path, monkeypatch):
@@ -172,16 +188,17 @@ def test_R06_closed_case_child_never_detected(tmp_path, monkeypatch):
 # --------------------------------------------------------------------------- #
 # Synthesis + fence                                                            #
 # --------------------------------------------------------------------------- #
-def test_R10_synth_writes_exactly_one_outbox_row(tmp_path, monkeypatch):
+def test_R10_synth_writes_exactly_one_inbox_message(tmp_path, monkeypatch):
     db = _db(tmp_path)
     case_id = _open_outbox_case(db, monkeypatch)
     _seed_lost_child(db, "w1", case_id)
     assert db.synthesize_managed_terminal("w1", reason="node_missing") == "synthesized"
-    rows = _outbox_rows(db, case_id)
+    rows = _inbox_rows(db, case_id)
     assert len(rows) == 1
-    assert rows[0]["child_task_id"] == "w1"
+    assert rows[0]["about_task_id"] == "w1"
+    assert rows[0]["recipient_session_id"] == "mgr-sess"
     assert rows[0]["outcome"] == "failed"
-    assert rows[0]["delivered_at"] is None
+    assert rows[0]["state"] == "pending"
     t = db._conn().execute(
         "SELECT status, error_class, effects_state FROM mesh_tasks WHERE id='w1'").fetchone()
     assert t["status"] == "failed"
@@ -198,8 +215,8 @@ def test_R11_late_real_result_after_synth_is_fenced(tmp_path, monkeypatch):
     # (OWN06): no exception, no re-write, NO second outbox row.
     res = db.complete_turn("w1", "carrier-tok", {"output": "late"}, status="completed")
     assert res.status == "failed"  # the synthesized terminal stands
-    assert len(_outbox_rows(db, case_id)) == 1
-    assert _outbox_rows(db, case_id)[0]["outcome"] == "failed"
+    assert len(_inbox_rows(db, case_id)) == 1
+    assert _inbox_rows(db, case_id)[0]["outcome"] == "failed"
     assert _status(db, "w1") == "failed"
 
 
@@ -209,10 +226,10 @@ def test_R12_real_result_before_synth_is_fenced(tmp_path, monkeypatch):
     _seed_lost_child(db, "w1", case_id, token="carrier-tok")
     # The carrier actually finished first.
     db.complete_turn("w1", "carrier-tok", {"output": "real"}, status="completed")
-    assert _outbox_rows(db, case_id)[0]["outcome"] == "success"
+    assert _inbox_rows(db, case_id)[0]["outcome"] == "success"
     # A racing reaper then tries to synthesize — fenced by the terminal guard.
     assert db.synthesize_managed_terminal("w1") == "already_terminal"
-    rows = _outbox_rows(db, case_id)
+    rows = _inbox_rows(db, case_id)
     assert len(rows) == 1 and rows[0]["outcome"] == "success"
     assert _status(db, "w1") == "completed"
 
@@ -224,7 +241,7 @@ def test_R13_idempotent_rescan(tmp_path, monkeypatch):
     assert db.synthesize_managed_terminal("w1") == "synthesized"
     # Second pass: the row is terminal now ⇒ no-op, no second row.
     assert db.synthesize_managed_terminal("w1") == "already_terminal"
-    assert len(_outbox_rows(db, case_id)) == 1
+    assert len(_inbox_rows(db, case_id)) == 1
     # And it has dropped out of the stale scan.
     assert db.list_stale_managed_children() == []
 
@@ -238,17 +255,6 @@ def test_R14_missing_or_nonmanaged_row_is_skipped(tmp_path, monkeypatch):
 # --------------------------------------------------------------------------- #
 # Orchestrator reaper + drain                                                  #
 # --------------------------------------------------------------------------- #
-def test_R20_reaper_inert_when_flag_off(tmp_path, monkeypatch):
-    db = _db(tmp_path)
-    case_id = _open_outbox_case(db, monkeypatch)  # Case born outbox-mode
-    _seed_lost_child(db, "w1", case_id)
-    monkeypatch.delenv("CASE_COMPLETION_OUTBOX_ENABLED", raising=False)  # flag now OFF
-    orch = _FakeOrch(_FakeStore(_FakeSession("mgr-sess")))
-    assert _reap(orch, db) == 0
-    assert _outbox_rows(db, case_id) == []
-    assert _status(db, "w1") == "running"
-
-
 def test_R20b_long_running_child_of_a_live_carrier_is_never_reaped(tmp_path, monkeypatch):
     """Regression: the reaper used a hardcoded 30 min runtime cap, so a Case
     worker turn still ACTIVE on a live carrier was synthesized `failed` after
@@ -270,33 +276,28 @@ def test_R20b_long_running_child_of_a_live_carrier_is_never_reaped(tmp_path, mon
 
 
 def test_R21_reaper_synthesizes_then_drain_wakes_once_and_fences_late(tmp_path, monkeypatch):
-    db = _db(tmp_path)
-    db.upsert_node(socket.gethostname(), "", 9001, ["claude"], 2)
-    case_id = _open_outbox_case(db, monkeypatch)
-    _seed_lost_child(db, "w1", case_id, token="carrier-tok")
+    db, o = _env(tmp_path, monkeypatch)
+    case_id = db.open_case("obj", "sess-1", role="manager")  # any birth mode, no flag
+    _seed_lost_child(db, "w1", case_id, token="carrier-tok", requester="sess-1")
 
-    # The reaper runs (flag ON) and synthesizes the lost carrier's terminal.
-    orch = _FakeOrch(_FakeStore(_FakeSession("mgr-sess")))
-    assert _reap(orch, db) == 1
-    assert ("case_worker_carrier_reaped", {
-        "task_id": "w1", "case_id": case_id, "reason": "node_missing"}) in orch.emitted
-    assert len(_outbox_rows(db, case_id)) == 1
+    # The reaper runs and synthesizes the lost carrier's terminal.
+    assert _reap(o, db) == 1
+    assert "case_worker_carrier_reaped" in o.events
+    (msg,) = _inbox_rows(db, case_id)
+    assert (msg["recipient_session_id"], msg["outcome"], msg["state"]) == ("sess-1", "failed", "pending")
 
-    # The real drain wakes the Manager EXACTLY ONCE, presenting the reaped child.
-    drain = _FakeOrch(_FakeStore(_FakeSession("mgr-sess")))
-    assert _continue(drain, db, case_id) == 1
-    assert len(drain.deliveries) == 1
-    assert "w1" in drain.deliveries[0]["description"]
-    cont_id = continuation_task_id(case_id, 1)
+    # The real Wake-Dispatcher wakes the requester EXACTLY ONCE, presenting the
+    # reaped child; the wake's completion acks the message.
+    ran = _drive(db, o)
+    assert len(ran) == 1
+    (wake,) = _wakes(db)
+    assert wake["session_id"] == "sess-1" and "w1" in wake["prompt"]
+    assert [r["state"] for r in _inbox_rows(db, case_id)] == ["acked"]
+    assert db.pending_for("sess-1", case_id=case_id).messages == []
 
-    # ACK (crash-safe consumption) marks the outbox row delivered(reason='wake').
-    db.record_continuation_consumed(case_id, cont_id, 1, ["w1"])
-    assert db.pending_case_outbox(case_id) == []
-
-    # A late REAL result from the carrier is fenced: no second row, no re-wake.
+    # A late REAL result from the carrier is fenced: no second message, no re-wake.
     res = db.complete_turn("w1", "carrier-tok", {"output": "late"}, status="completed")
     assert res.status == "failed"
-    assert len(_outbox_rows(db, case_id)) == 1
-    retick = _FakeOrch(_FakeStore(_FakeSession("mgr-sess")))
-    assert _continue(retick, db, case_id) == 0
-    assert retick.deliveries == []
+    assert len(_inbox_rows(db, case_id)) == 1
+    assert _drive(db, o) == []
+    assert len(_wakes(db)) == 1
