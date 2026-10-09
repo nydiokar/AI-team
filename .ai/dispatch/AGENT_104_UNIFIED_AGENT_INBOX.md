@@ -356,6 +356,23 @@ is still `true`, record that in TRAIL and continue; the fix does not depend on i
   preclude them (I1 has `kind`), but this job ships completions only.
 
 ## TRAIL / EVIDENCE (fill at close)
+
+### Phase 0 — D1 containment (2026-10-09T17:27Z)
+`scripts/ops_flag.sh get CASE_COMPLETION_OUTBOX_ENABLED` → `"value": false`, `"raw_value": "0"`,
+`"source": "registry"`, `"effect_scope": "birth"`, registry `set_at 2026-10-09T17:13:30Z` by
+`cifran@ops_flag.sh`. New Cases are born legacy. No Case touched. Gateway `/health` ok, build `ba77b9f`.
+Live DB (ro): schema 44; `flow_runs` legacy 10 open + 1 blocked, outbox 3 open + 1 blocked (matches CONTEXT).
+
+### Gate 1 — inventory (2026-10-09T17:55Z)
+Full table + consumer plans + live classification: **`.ai/dispatch/A104_GATE1_INVENTORY.md`** (5 read-only sweeps:
+db.py, orchestrator/session_reason/scheduler, MCP/API/worker-compat, web UI + tests, live DB ro). Reproduce with the
+`rg`/`sqlite3 ?mode=ro` commands at its top (`list_flow_events` callers = 18; `completion_outbox` refs = db 11 /
+orchestrator 2 / a84 e2e script 4; `get_session_turns` callers = 2). Packet corrections recorded there (§Packet
+corrections 1–9), notably: `task.finished` is written post-commit by the effects consumer, not in the terminal txn;
+83d10aec's accepted review sits at event #629 so the outbox tick never saw it (second I7 failure); `mcp_manager` runs
+from the Manager host's checkout (Horse, un-redeployed) so dispatch identity must also be derivable server-side
+(R1); respawn records no `continued_from` (D4 needs it). Genuine pending live: `task_b7ba302c` (4d8a46b5),
+`task_e7ae0733` (534463b6); `task_7b175284` reviewed-but-undelivered → ack.
 - Gate 1 inventory table (inline above or linked section) + reproduction `rg` commands
 - Gate 4 dry-run report path + DB backup path
 - Test modules + pass counts per gate
@@ -363,8 +380,8 @@ is still `true`, record that in TRAIL and continue; the fix does not depend on i
 
 ---
 ## Milestone (burndown)
-- [ ] D1 containment verified (flag value recorded)
-- [ ] Gate 1 — inventory complete, every row has a fate + consumer plan
+- [x] D1 containment verified (flag value recorded)
+- [x] Gate 1 — inventory complete, every row has a fate + consumer plan
 - [ ] Gate 2 — inbox schema + agent addressing, RED→GREEN tests
 - [ ] Gate 3 — all readers on `pending_for`, bounded delivery, never-run turns traceless; scenario matrix green
 - [ ] Gate 4 — migration dry-run lossless; operator go; applied with backup
