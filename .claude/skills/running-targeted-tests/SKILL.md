@@ -24,6 +24,11 @@ the rule is: plain pytest on the modules you touched, never the whole suite, nev
    Widen to the "references" set only when the change crosses a seam those tests exercise.
    `pyproject.toml` already sets `addopts = "-q"`; adding another `-q` makes it `-qq`, which
    suppresses the `N passed` summary you need as evidence.
+   **Speed:** for more than ~10 files add `-n 4` (pytest-xdist; on this 4-core Pi the A104 wide
+   set dropped 8m03s → 2m58s). A single file is faster without `-n` (worker start-up). Every
+   test's DB is seeded from a once-per-session migrated template (`tests/conftest.py`), so a
+   new DB costs ~3 ms instead of replaying every migration (~150 ms). A test that sleeps a
+   fixed time for a background thread will flake under `-n` — poll with a deadline instead.
 3. **Web UI** (`web/src/**`): from `web/`, `pnpm exec vitest related --run <files>` then
    `pnpm typecheck`. CI runs neither, so this is the only check they get.
 4. **Read failures before rerunning.** A failure in a file you didn't touch is evidence about your
