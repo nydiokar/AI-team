@@ -1,6 +1,13 @@
-"""Contract/failure tests for the candidate adapter, with no provider access."""
+"""Contract/failure tests for the candidate adapter, with no provider access.
+
+[A102] ``_run`` has ONE behaviour now: it always takes a ``_ManagedCall`` built
+from a ``TurnControl``. These tests drive it with a throwaway ``turn_control``
+(unique uuid per call) + a lightweight mock ``Runtime`` — complementing the
+full-protocol fake app-server suite in ``test_codex_managed_turns``.
+"""
 import queue
 import threading
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
@@ -8,9 +15,10 @@ from types import SimpleNamespace
 import pytest
 
 from src.backends.codex_app_server import CodexAppServerClient, CodexProtocolError, CodexRPCError
-from src.backends.codex_native import CodexBackend
+from src.backends.codex_native import CodexBackend, _ManagedCall
 from src.core.interfaces import CodingBackend
 from src.core.telemetry import TelemetryContext
+from src.core.turn_liveness import turn_control
 
 
 class Channel:
@@ -33,8 +41,14 @@ class Runtime(CodexAppServerClient):
         self.dead = False
         self.reject = ""
         self.status = "completed"
-        self.process = SimpleNamespace(pid=1)
+        self.process = SimpleNamespace(pid=1, poll=lambda: None)  # a live app-server process
         self.started = threading.Event()
+
+    @property
+    def failure(self):
+        # Transport-lost marker the unified ``_run`` consults on an ambiguous
+        # mid-turn failure (a dead process makes the stop provable).
+        return "codex_runtime_lost" if self.dead else ""
 
     def check(self):
         if self.dead:
@@ -70,6 +84,9 @@ class Runtime(CodexAppServerClient):
             self.threads[tid] = params["cwd"]
             return {"thread": {"id": tid, "cwd": params["cwd"], "status": {"type": "idle"}}}
         tid = params["threadId"]
+        if method == "thread/read":
+            # [A102] A loaded thread's native status probe before a submit.
+            return {"thread": {"id": tid, "status": {"type": "idle"}}}
         if method == "turn/start":
             turn_id = f"turn-{len(self.calls)}"
             self.active[tid] = turn_id
@@ -103,8 +120,14 @@ def native(tmp_path, monkeypatch):
     return backend, runtime, str(tmp_path)
 
 
+def _call(key):
+    # [A102] One turn's call object, carrying a throwaway TurnControl whose uuid
+    # is unique per invocation (so the write-ahead managed row never collides).
+    return _ManagedCall(turn=turn_control(uuid.uuid4().hex), session_key=key)
+
+
 def run(backend, cwd, key="gateway", native_id=None, task="task"):
-    return backend._run(cwd, "hello", native_id, key,
+    return backend._run(cwd, "hello", native_id, key, call=_call(key),
                         telemetry_context=TelemetryContext(turn_id=task, invocation_id="inv-" + task,
                                                            node_id="node", session_id=key, backend="codex"))
 
@@ -117,7 +140,9 @@ def test_generic_contract_and_exact_continuation(native):
     assert first.success and second.success
     assert first.backend_session_id == second.backend_session_id == "native-0"
     assert second.output == "native answer"
-    assert [method for method, _ in runtime.calls] == ["thread/start", "turn/start", "turn/start"]
+    # [A102] The second (loaded-thread) turn probes native status before submit.
+    assert [method for method, _ in runtime.calls] == [
+        "thread/start", "turn/start", "thread/read", "turn/start"]
     assert all(params["cwd"] == cwd for method, params in runtime.calls if method == "turn/start")
 
 
@@ -144,7 +169,7 @@ def test_codex_item_activity_and_durable_tool_telemetry_are_separate_and_once(na
         turn_id="task-codex", invocation_id="inv-codex", node_id="worker",
         session_id="session-codex", backend="codex",
     )
-    result = backend._run(cwd, "hello", None, "session-codex",
+    result = backend._run(cwd, "hello", None, "session-codex", call=_call("session-codex"),
                           telemetry_context=context, telemetry_sink=sink)
 
     assert result.success
