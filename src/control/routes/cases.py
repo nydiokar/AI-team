@@ -177,10 +177,10 @@ def build_router(
 
     @router.post("/api/cases/{case_id}/waits")
     def api_record_worker_wait(case_id: str, body: CaseWaitBody) -> JSONResponse:
-        """[A46/M3.3] Record a durable pending-wait marker for a dispatched worker
-        (``worker.wait_pending`` flow_event). Gated by ``DURABLE_RELAY_ENABLED``:
-        when OFF this route returns 404 (disabled) so flag-OFF is byte-identical.
-        The write itself is also flag-gated in the db layer (defence in depth)."""
+        """[A46 → A104 shim, D7] An un-redeployed mcp_manager calls this after every
+        Case dispatch. Nothing is recorded any more (the agent inbox addresses the
+        completion itself); the route keeps its shape and its flag gate (404 when
+        ``DURABLE_RELAY_ENABLED`` is OFF — the old client treats that as silent)."""
         from src.control.db import durable_relay_enabled
         if not durable_relay_enabled():
             raise HTTPException(status_code=404, detail="not_found")
@@ -191,13 +191,9 @@ def build_router(
 
     @router.post("/api/cases/{case_id}/waits/reconcile")
     def api_reconcile_worker_waits(case_id: str) -> JSONResponse:
-        """[A46/M3.3] Reconcile a Case's outstanding worker waits against the durable
-        ``task.finished`` events — resolve finished ones (append ``worker.wait_resolved``)
-        and report still-open ones for the Manager to re-arm. Gated by
-        ``DURABLE_RELAY_ENABLED`` (404 when OFF ⇒ byte-identical). Idempotent."""
-        from src.control.db import durable_relay_enabled
-        if not durable_relay_enabled():
-            raise HTTPException(status_code=404, detail="not_found")
+        """[A46 → A104 shim, D5] What the agent inbox holds for this Case, in the
+        legacy shape: ``resolved`` = finished, not yet consumed; ``pending`` = still
+        running. A read of ``pending_for`` — no flag gate (it writes nothing)."""
         result = orchestrator.reconcile_worker_waits(case_id, actor="manager")
         return JSONResponse(result)
 

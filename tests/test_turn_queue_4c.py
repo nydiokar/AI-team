@@ -14,9 +14,11 @@ A104 removed on purpose (tests deleted, not weakened): re-arming a withdrawn /
 stopped ``cont:`` token with ``attempt+1`` (Q10b, Q20), ``worker.wait_resolved``
 group resolution + token finalization crash window (Q03b), the unenrolled legacy
 ``submit_instruction`` wake (Q13, Q17).
+A104 Phase 5 (the pre-inbox token finalizer is deleted): Q15 (finalizer CAS
+fenced to the linked turn) is deleted with it; the settlement fence is now the
+inbox's ``delivery_turn_id``-conditioned transitions (test_agent_inbox IB08).
 """
 import asyncio
-import json
 
 import pytest
 
@@ -65,17 +67,6 @@ def _fresh(o_like, monkeypatch):
     return _wire(o)
 
 
-def _case(db, *, members=("w1",), finished=("w1",)):
-    """Pre-inbox (A82) Case seeding: a wait group + ``task.finished`` events and
-    NO inbox message. Kept for importers that build a legacy token wake on top."""
-    cid = db.open_case("ship X", "sess-1", role="manager",
-                       completion_criteria='{"round_cap": 5}')
-    db.arm_wait_group(cid, "g1", "ALL", list(members))
-    for t in finished:
-        _finish(db, cid, t)
-    return cid
-
-
 def _inbox_case(db, *, finished=("w1",), requester="sess-1"):
     """[A104] A Case whose Manager has one completion waiting in its agent inbox
     per task in ``finished`` (children it requested, driven terminal through the
@@ -87,17 +78,8 @@ def _inbox_case(db, *, finished=("w1",), requester="sess-1"):
     return cid
 
 
-def _finish(db, cid, tid):
-    db.append_flow_event(cid, "task.finished", "worker", entity_type="task",
-                         entity_id=tid, payload={"outcome": "success"})
-
-
 def _tick(o, db, cid):
     return asyncio.run(o._continue_case_once(db, cid))
-
-
-def _reconcile(o, db):
-    return asyncio.run(o._reconcile_continuation_finalizers(db))
 
 
 def _cont_rows(db):
@@ -257,8 +239,10 @@ def test_Q03_completed_wake_finalized_after_restart_counts_one_round(tmp_path, m
     assert _msg_states(db) == {"w1": "acked"}
     assert db.inbox_rounds_used(cid) == 1
     assert db.pending_for("sess-1").messages == []
-    # exactly once: no legacy token to finalize, ticks admit nothing
-    assert _reconcile(o2, db) == 0 and _tick(o2, db, cid) == 0
+    # exactly once: no legacy token exists to finalize, ticks admit nothing
+    assert not db._conn().execute(
+        "SELECT 1 FROM mesh_tasks WHERE action = 'manager_continuation'").fetchone()
+    assert _tick(o2, db, cid) == 0
     assert db.inbox_rounds_used(cid) == 1
     assert len(_cont_rows(db)) == 1
 
@@ -425,19 +409,37 @@ def test_Q09_current_wake_is_not_withdrawn(tmp_path, monkeypatch):
 # DB contract: in-txn link, reaper exclusion, index use
 # --------------------------------------------------------------------------- #
 def test_Q10_link_failure_rolls_the_admission_back(tmp_path, monkeypatch):
+    """A104: the wake claims its inbox messages INSIDE the admission txn — a
+    claim conflict (another wake already carries the message) rolls the whole
+    admission back, leaving the first claim intact. The producer-token link
+    (still used by the A82 recovery producers) rolls back the same way when the
+    token is finalized or missing."""
     db, _o = _env(tmp_path, monkeypatch)
+    _inbox_case(db)
+    (m,) = db.pending_for("sess-1").messages
+    first = db.enqueue_turn(session_id="sess-1", body="wake", turn_kind="continuation",
+                            operation_id="wake-a", inbox_message_ids=[m.message_id],
+                            require_enrolled=True)
+    with pytest.raises(tq.OwnershipConflictError):
+        db.enqueue_turn(session_id="sess-1", body="wake", turn_kind="continuation",
+                        operation_id="wake-b", inbox_message_ids=[m.message_id],
+                        require_enrolled=True)
+    assert [r["id"] for r in _cont_rows(db)] == [str(first)]
+    (m,) = db.pending_for("sess-1").messages
+    assert (m.state, m.delivery_turn_id, m.attempts) == ("delivered", str(first), 1)
+    # producer-token link: a finalized token refuses the link ⇒ nothing admitted
     db.enqueue_task("cont:x:1", session_id=None, machine_id="__manager_continuation__",
                     backend="claude", action="manager_continuation", payload={})
-    db.record_continuation_consumed("x", "cont:x:1", 1, [])
+    with db._write() as conn:
+        conn.execute("UPDATE mesh_tasks SET status = 'completed' WHERE id = 'cont:x:1'")
     with pytest.raises(tq.OwnershipConflictError):
         db.enqueue_turn(session_id="sess-1", body="wake", turn_kind="continuation",
                         operation_id="cont:x:1#1", producer_token="cont:x:1",
                         require_enrolled=True)
-    assert _managed_rows(db) == []
     with pytest.raises(tq.TurnNotFoundError):
         db.enqueue_turn(session_id="sess-1", body="wake", operation_id="k2",
                         producer_token="cont:missing:1", require_enrolled=True)
-    assert _managed_rows(db) == []
+    assert [r["id"] for r in _managed_rows(db) if r["id"] != "w1"] == [str(first)]
 
 
 def test_Q11_inbox_wake_writes_no_token_and_is_invisible_to_the_stale_claim_reaper(tmp_path, monkeypatch):
@@ -454,14 +456,23 @@ def test_Q11_inbox_wake_writes_no_token_and_is_invisible_to_the_stale_claim_reap
 
 
 def test_Q12_reconcile_and_link_lookup_use_the_partial_index(tmp_path, monkeypatch):
+    """A104: the hot inbox reads are index-served — the pending read (producer +
+    activation check) via ``idx_agent_inbox_pending``, the terminal-txn
+    settlement lookup by wake turn via ``idx_agent_inbox_turn``, and the
+    activation-time legacy-token lookup via the partial producer-link index."""
     db, _o = _env(tmp_path, monkeypatch)
-    plan = " ".join(str(tuple(r)) for r in db._conn().execute(
-        "EXPLAIN QUERY PLAN SELECT t.id FROM mesh_tasks t INDEXED BY idx_mesh_tasks_producer_link "
-        "JOIN mesh_tasks x ON x.id = t.producer_turn_id WHERE t.producer_turn_id IS NOT NULL "
-        "AND t.status = 'claimed' AND t.action = 'manager_continuation' "
-        "AND x.status IN ('completed') LIMIT 25").fetchall())
-    assert "idx_mesh_tasks_producer_link" in plan
-    assert db.reconcile_finalizers() == []  # the INDEXED BY query itself is valid
+
+    def plan(sql, args):
+        return " ".join(str(tuple(r)) for r in db._conn().execute("EXPLAIN QUERY PLAN " + sql, args).fetchall())
+    pending = plan(ib.PENDING_SQL, ("sess-1", None, None, ib.PENDING_LIMIT))
+    assert "idx_agent_inbox_pending" in pending and "SCAN agent_inbox" not in pending
+    settle = plan("SELECT message_id, attempts FROM agent_inbox "
+                  "WHERE delivery_turn_id = ? AND state = 'delivered' ORDER BY message_id", ("wake_x",))
+    assert "idx_agent_inbox_turn" in settle and "SCAN agent_inbox" not in settle
+    link = plan("SELECT * FROM mesh_tasks INDEXED BY idx_mesh_tasks_producer_link "
+                "WHERE producer_turn_id = ? AND status = 'claimed'", ("wake_x",))
+    assert "idx_mesh_tasks_producer_link" in link
+    assert db.continuation_token_for_turn("wake_x") is None  # the INDEXED BY query itself is valid
 
 
 def test_Q14_wake_dispatcher_tick_finalizes_before_evaluating(tmp_path, monkeypatch):
@@ -480,37 +491,24 @@ def test_Q14_wake_dispatcher_tick_finalizes_before_evaluating(tmp_path, monkeypa
     assert [m.about_task_id for m in db.pending_for("sess-1").carried_by(new)] == ["w2"]
 
 
-def test_Q15_finalizer_cas_is_fenced_to_the_linked_turn(tmp_path, monkeypatch):
-    """The finalizer that discharges PRE-inbox ``cont:`` tokens only acts for
-    the turn the token is linked to (token built exactly as the A82 producer did)."""
-    db, o = _env(tmp_path, monkeypatch)
-    cid = _case(db)
-    assert asyncio.run(o._continue_case_managed(
-        db, cid, o.session_store.get("sess-1"), 1,
-        {"presented_task_ids": ["w1"], "satisfied_groups": []},
-    )) == 1
-    cont_id = continuation_task_id(cid, 1)
-    payload = json.loads(db.get_task(cont_id)["payload"])
-    assert db._finalize_producer_token(cont_id, "cturn_stale", "completed", payload) is None
-    assert db._finalize_producer_token(cont_id, "cturn_stale", "withdrawn", payload) is None
-    token = db.get_task(cont_id)
-    assert token["status"] == "claimed" and token["producer_turn_id"] == _cont_rows(db)[0]["id"]
-
-
 def test_Q16_admission_racing_a_stop_never_releases_or_runs_through_the_hold(tmp_path, monkeypatch):
-    """The automation principal: a wake admitted into a session that got held
-    between the tick's hold check and admission keeps the hold and waits."""
+    """The automation principal, A104 form: a stop that lands between
+    ``_deliver_inbox``'s hold check and the wake admission (admission driven
+    directly past the check) — the wake is admitted, the hold stays, and the
+    wake waits queued after the stopped turn ends."""
     db, o = _env(tmp_path, monkeypatch)
-    cid = _case(db)
+    cid = _inbox_case(db)
     t = _running_operator_turn(db, o)
     assert o.stop_managed_session_turn(_sess())[0] is True
-    tick = db.compute_continuation_tick(cid)
-    assert asyncio.run(o._continue_case_managed(db, cid, _sess(), 1, tick)) == 1
+    ready = db.pending_for("sess-1", case_id=cid).deliverable(ib.now_iso())
+    assert asyncio.run(o._admit_inbox_wake(db, "sess-1", cid, _sess(), ready, 1)) == 1
     assert db.operator_stop_hold("sess-1") == "operator_stop"
     tok = db.get_task(t)["claim_token"]
     db.complete_turn(t, tok, {"success": False}, status="failed")
     assert _pass(db, o).activated == 0
     assert _cont_rows(db)[0]["status"] == "queued"
+    assert db.operator_stop_hold("sess-1") == "operator_stop"
+    assert _msg_states(db) == {"w1": "delivered"}
 
 
 # --------------------------------------------------------------------------- #
@@ -608,7 +606,6 @@ def test_Q19_finalizer_appends_nothing_after_flow_closed(tmp_path, monkeypatch):
     tok = _run(db, c)
     assert o.close_case(cid, outcome="cancelled", force=True).get("ok")
     db.complete_turn(c, tok, {"success": True})
-    assert _reconcile(o, db) == 0
     evs = db.list_flow_events(cid)
     closed_at = max(i for i, e in enumerate(evs)
                     if e["event_type"] in ("flow.closed", "flow.status_changed"))
@@ -699,7 +696,6 @@ def test_Q18c_pinned_wake_whose_case_closed_before_lineage_runs_standalone(tmp_p
     _pass(db, o2)
     assert db.get_task(c)["status"] == "withdrawn"
     assert _tick(o2, db, cid_a) == 0 and _tick(o2, db, cid_b) == 0
-    _reconcile(o2, db)
     assert len(db.list_flow_events(cid_a)) == ev_a
     assert len(db.list_flow_events(cid_b)) == ev_b
     assert not db.list_flow_links(flow_run_id=cid_a, entity_type="task", entity_id=c)

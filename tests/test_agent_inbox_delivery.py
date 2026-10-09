@@ -109,10 +109,7 @@ def _bulk_noise(db, cid, *, events=520, session_rows=1050):
 def test_IR01_incident_2026_10_09_wakes_exactly_once_with_only_the_worker(tmp_path, monkeypatch):
     db, o = _env(tmp_path, monkeypatch)
     _add_session(db, "w-1")
-    # The incident Cases were born in outbox mode; the inbox must not care.
-    monkeypatch.setenv("CASE_COMPLETION_OUTBOX_ENABLED", "1")
     cid = db.open_case("gpu-enable", "sess-1", role="manager")
-    monkeypatch.delenv("CASE_COMPLETION_OUTBOX_ENABLED")
     # 1. The Manager's own boot turn.
     boot = _submit(o, description="boot", source="manager_invoke", operation_id="boot")
     _finish(db, o, boot)
@@ -450,25 +447,43 @@ def test_M13_worker_to_worker_wake_reaches_the_requesting_worker(tmp_path, monke
 
 def test_M14_pre_inbox_token_wake_is_superseded_and_never_rearmed(tmp_path, monkeypatch):
     """A legacy cont: token wake queued at deploy time is withdrawn at activation
-    and its token discharged — the unbounded re-arm path is gone."""
-    from src.control.db import continuation_task_id
-    from tests.test_turn_queue_4c import _case as _legacy_case
+    ('superseded_by_inbox') and never re-armed — the unbounded re-arm path is
+    gone. The token + its linked queued wake are written directly, shaped as the
+    deleted A82 producer wrote them (A104 Phase 5: no finalizer discharges the
+    token any more — production has none left; it stays inert)."""
+    from src.control.db import (
+        CONTINUATION_ACTION, CONTINUATION_MACHINE_SENTINEL, continuation_task_id,
+        producer_turn_id,
+    )
 
     db, o = _env(tmp_path, monkeypatch)
-    cid = _legacy_case(db)
-    # Build the pre-inbox token + linked wake exactly as the A82 producer did.
-    asyncio.run(o._continue_case_managed(
-        db, cid, o.session_store.get("sess-1"), 1,
-        {"presented_task_ids": ["w1"], "satisfied_groups": []},
-    ))
+    cid = _case(db)
+    cont_id = continuation_task_id(cid, 1)
+    db.enqueue_task(cont_id, session_id=None, machine_id=CONTINUATION_MACHINE_SENTINEL,
+                    backend="claude", action=CONTINUATION_ACTION,
+                    payload={"case_id": cid, "generation": 1, "session_id": "sess-1",
+                             "presented_task_ids": ["w1"]})
+    turn_id = producer_turn_id(cont_id, "sess-1", 1)
+    db.enqueue_turn(
+        turn_id, "sess-1", "claude", "resume_session", {"prompt": "legacy wake"},
+        operation_id=f"{cont_id}#1", turn_source="system", turn_kind="continuation",
+        idempotency_scope="automation:sess-1:continuation", flow_run_id=cid,
+        machine_id="worker-a", producer_token=cont_id,
+        producer_meta={"token_id": cont_id, "turn_id": turn_id, "attempt": 1, "case_id": cid,
+                       "generation": 1, "presented_task_ids": ["w1"]},
+    )
+    assert db.continuation_token_for_turn(turn_id)["id"] == cont_id
     assert _admitted(db) == 1
+    # the activation check names the reason (the scheduler only logs it)
+    assert asyncio.run(o._managed_turn_obsolete(db.get_task(turn_id))) == "superseded_by_inbox"
     for _ in range(3):
         _tick(o)
         _pass(db, o)
     (w,) = _wakes(db)
-    assert w["status"] == "withdrawn" and _admitted(db) == 1
-    tok = db.get_task(continuation_task_id(cid, 1))
-    assert tok["status"] == "cancelled" and tok["error"] == "superseded_by_agent_inbox"
+    assert w["id"] == turn_id and w["status"] == "withdrawn" and _admitted(db) == 1
+    tok = db.get_task(cont_id)
+    assert tok["status"] == "claimed" and tok["producer_turn_id"] == turn_id  # never re-armed
+    assert db._conn().execute("SELECT COUNT(*) FROM agent_inbox").fetchone()[0] == 0
 
 
 def test_M15_pause_handlers_run_for_every_open_case_even_with_an_empty_inbox(tmp_path, monkeypatch):
