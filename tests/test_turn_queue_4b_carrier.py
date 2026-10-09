@@ -371,14 +371,13 @@ def test_K05b_used_process_cannot_take_an_unechoed_local_command(pooled_claude):
 
 
 def test_K06_backends_without_a_managed_compaction_path_fail_closed():
-    from src.backends.opencode import OpenCodeBackend, OpenCodeServerBackend
+    from src.backends.opencode import OpenCodeServerBackend
 
     # [A82 step 4a] Codex and [step 4b] OpenCodeServerBackend implement managed
-    # compaction/cancel natively; only the CLI OpenCode stays fail-closed.
+    # compaction/cancel natively; a backend that does NOT override the interface
+    # default fails closed. (The CLI OpenCode backend that was the fail-closed
+    # example was retired — A102 S1-OpenCode / R3.)
     assert OpenCodeServerBackend.run_managed_compaction is not CodingBackend.run_managed_compaction
-    for cls in (OpenCodeBackend,):
-        assert cls.run_managed_compaction is CodingBackend.run_managed_compaction
-        assert cls.cancel_managed_turn is CodingBackend.cancel_managed_turn
     fake = SimpleNamespace()
     with pytest.raises(tq.ManagedUnsupportedError):
         CodingBackend.run_managed_compaction(fake, None, None)

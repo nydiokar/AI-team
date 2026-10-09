@@ -559,16 +559,14 @@ class _UnsupportedBackend:
 
 
 def test_INT10b_worker_advertises_only_backends_with_a_managed_path(tmp_path):
-    from src.backends.opencode import OpenCodeBackend, OpenCodeServerBackend
+    from src.backends.opencode import OpenCodeServerBackend
     from src.core.interfaces import CodingBackend
 
     # [A82 step 4a] Codex (test_codex_managed_turns) and [step 4b]
     # OpenCodeServerBackend (test_opencode_managed_turns) implement the contract;
-    # only the CLI OpenCode keeps the interface default.
+    # a backend that keeps the interface default is not advertised. (The CLI
+    # OpenCode backend example was retired — A102 S1-OpenCode / R3.)
     assert OpenCodeServerBackend().supports_managed_turns() is True
-    for cls in (OpenCodeBackend,):
-        assert cls.supports_managed_turns is CodingBackend.supports_managed_turns
-        assert cls.run_managed_turn is CodingBackend.run_managed_turn
     reg = _RecordingHTTP()
     w = _worker(tmp_path, reg)
     w.cfg.backends = ["claude", "codex"]
