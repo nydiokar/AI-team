@@ -10915,17 +10915,29 @@ Generated from user description: {description}
         sender_session_id = str(meta.pop("__turn_sender_session_id", "") or "") if source == "agent_session" else ""
         sender_case_id = str(meta.get(self._ATTACH_CASE_META_KEY) or "") if sender_session_id else ""
         sender_cap_hash = str(meta.pop("__turn_sender_capability_hash", "") or "") if sender_session_id else ""
-        requester = str(meta.pop(self._TURN_REQUESTER_META_KEY, "") or "").strip()
-        requester_unresolved = False
-        if source != "automation_session" or sender_session_id:
-            requester = ""
-        elif not requester:
-            # [A104 R1] An un-redeployed mcp_manager sends no requester id:
-            # resolve it server-side, role-free (the Case member executing a turn).
+        explicit = str(meta.pop(self._TURN_REQUESTER_META_KEY, "") or "").strip()
+        requester = ""
+        requester_unresolved: Optional[Dict[str, Any]] = None
+        if source == "automation_session" and not sender_session_id:
+            # [A104 R1] Who asked for this work. A self-asserted id (mcp_manager's
+            # env) is TRUSTED ONLY IF VALID — it can be stale; otherwise resolve it
+            # server-side, role-free (the Case member executing a turn). Anything
+            # rejected or unresolvable is AUDITED, never silently dropped.
             join_case = str(meta.get(self._JOIN_CASE_META_KEY) or "").strip()
-            requester = (await asyncio.to_thread(db.resolve_dispatch_requester, join_case, sid)
-                         if join_case else None) or ""
-            requester_unresolved = bool(join_case) and not requester
+            problem = (await asyncio.to_thread(
+                db.explicit_requester_problem, explicit, sid, join_case or None,
+            )) if explicit else "absent"
+            if problem is None:
+                requester = explicit
+            else:
+                requester = (await asyncio.to_thread(db.resolve_dispatch_requester, join_case, sid)
+                             if join_case else None) or ""
+                if explicit or not requester:
+                    requester_unresolved = {
+                        "reason": "explicit_requester_rejected" if explicit else "no_executing_member",
+                        "explicit": explicit or None, "problem": problem,
+                        "resolved": requester or None, "case_id": join_case or None,
+                    }
         if source == "agent_session" and (not sender_session_id or not sender_case_id):
             raise ManagedUnsupportedError("agent send requires validated sender and Case")
         scope = f"{principal}:{sender_session_id}:{sid}:instruction" if sender_session_id else f"{principal}:{sid}:instruction"
@@ -10977,14 +10989,20 @@ Generated from user description: {description}
         )
         await self._mark_admitted_carrier_offline(admission, offline)
         if requester_unresolved and not admission.idempotent_replay:
-            # Audit only: this dispatch's completion will reach no inbox.
-            join_case = str(meta.get(self._JOIN_CASE_META_KEY) or "").strip()
-            await asyncio.to_thread(
-                db.append_flow_event, join_case, "inbox.requester_unresolved", "system",
-                entity_type="task", entity_id=str(admission),
-                payload={"target_session_id": sid},
+            # Audit: an untrusted requester id was rejected (and maybe replaced by
+            # the server-resolved one), or nobody could be resolved — in which
+            # case this completion reaches no inbox. Never silent.
+            if requester_unresolved.get("case_id"):
+                await asyncio.to_thread(
+                    db.append_flow_event, requester_unresolved["case_id"],
+                    "inbox.requester_unresolved", "system",
+                    entity_type="task", entity_id=str(admission),
+                    payload={"target_session_id": sid, **requester_unresolved},
+                )
+            logger.warning(
+                "event=inbox_requester_unresolved task_id=%s target=%s detail=%s",
+                admission, sid, requester_unresolved,
             )
-            logger.warning("event=inbox_requester_unresolved case_id=%s task_id=%s", join_case, admission)
         if admission.idempotent_replay:
             if admission.lineage_pending:
                 # Never ack a replay without lineage: wait (bounded) for the live

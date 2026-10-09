@@ -487,6 +487,20 @@ from the Manager host's checkout (Horse, un-redeployed) so dispatch identity mus
   (+ ungated reconcile route test).
 - **Targeted modules (all touched files):** wide selector set 129 files → `4 failed, 1796 passed, 9 skipped`; the 4
   are the pre-existing A102 failures on main (K06, INT10b, S8_06, S8_06c).
+
+### Post-Gate-5 live finding — untrusted requester id (2026-10-09T20:15Z)
+Live sweep after the Gate 5 deploy: Case `ae60fb45` (Manager `77cee6327097` on **Horse**) dispatched `task_dea65ca4` /
+`task_b19939d9` at 19:34/19:35 while its boot turn was running — both children carry **no requester**, no inbox row and
+**no** `inbox.requester_unresolved` event (nothing stranded: the Manager reviewed both, `review.accepted` 19:59).
+Root cause: the gateway trusted a self-asserted `requester_session_id` and silently dropped it when invalid; the
+resolver itself is correct (re-run read-only on live rows for Case `744390042cec` → its executing Manager). Likely
+source of a bad id: `claude_driver.py:942` builds the SDK env with `if k not in os.environ`, so a worker process that
+already has `SESSION_ID`/`AI_TEAM_SESSION_ID` hands the stale value to the MCP server (worker code — A102 area, D7: not
+touched here). A stale-but-open id would even MISADDRESS (RED test IB12 proved it). **Fix (gateway-only):** an explicit
+requester is trusted only if it is an open session, not the target, and a member of the dispatch's Case (Case-less:
+executing a turn); otherwise R1 resolves it; every rejection/non-resolution writes `inbox.requester_unresolved`
+`{reason, explicit, problem, resolved}` + a warning. Tests IB12 (stale → executing Manager + audit), IB13 (valid
+worker→worker requester wins), IB14 (invalid + nobody executing → audited, not silent): RED → GREEN.
 - Gate 1 inventory table (inline above or linked section) + reproduction `rg` commands
 - Gate 4 dry-run report path + DB backup path
 - Test modules + pass counts per gate
