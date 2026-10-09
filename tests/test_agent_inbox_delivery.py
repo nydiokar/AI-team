@@ -542,3 +542,53 @@ def test_M16_retry_of_a_failed_wake_carries_its_messages_no_second_wake(tmp_path
         conn.execute("UPDATE mesh_tasks SET status = 'pending' WHERE id = ?", (str(r),))  # A82's)
     _complete(db, str(r))
     assert _msg_states(db) == {"task_w1": "acked"}
+
+
+# --------------------------------------------------------------------------- #
+# Push delivery: a completion is delivered when it lands, not on the next poll
+# --------------------------------------------------------------------------- #
+class _Notifier:
+    async def notify_task_outcome(self, *a, **k):
+        return None
+
+    async def notify_completion(self, *a, **k):
+        return None
+
+
+def test_M17_completion_drain_kicks_the_dispatcher(tmp_path, monkeypatch):
+    """The gateway's completion consumer (3 s cadence) processing a finished,
+    REQUESTED child pushes the Wake-Dispatcher at once (no 30 s poll wait)."""
+    db, o = _env(tmp_path, monkeypatch)
+    o.notifier = _Notifier()
+    o._telegram_interface = None
+    cid = _case(db)
+    seed_child(db, cid, "task_w1", requester="sess-1", token="tw")
+    finish_child(db, "task_w1", token="tw")
+    assert not o._wake_kick_event().is_set()
+    asyncio.run(o._drain_managed_turn_effects_once(db))
+    assert o._wake_kick_event().is_set()
+
+
+def test_M18_kicked_loop_delivers_within_a_second_not_the_interval(tmp_path, monkeypatch):
+    db, o = _env(tmp_path, monkeypatch)
+    cid = _case(db)
+    o.running = True
+
+    async def scenario():
+        loop_task = asyncio.create_task(o._wake_dispatcher_loop(30))
+        await asyncio.sleep(0.2)                      # first (empty) tick ran; now sleeping 30 s
+        seed_finished_child(db, cid, "task_w1", requester="sess-1")
+        o._kick_wake_dispatcher()
+        for _ in range(40):
+            await asyncio.sleep(0.05)
+            if _admitted(db):
+                break
+        o.running = False
+        loop_task.cancel()
+        try:
+            await loop_task
+        except asyncio.CancelledError:
+            pass
+
+    asyncio.run(scenario())
+    assert _admitted(db) == 1, "the kick must deliver now, not after the 30 s poll interval"

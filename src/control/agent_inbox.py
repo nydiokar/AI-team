@@ -235,6 +235,15 @@ def ready_recipients(conn: sqlite3.Connection, now: str, limit: int = PENDING_LI
 # --------------------------------------------------------------------------- #
 # State transitions (all conditional ⇒ idempotent)
 # --------------------------------------------------------------------------- #
+def has_pending_about(conn: sqlite3.Connection, task_id: str) -> bool:
+    """Did ``task_id``'s terminal write a message still waiting for delivery?
+    (The push signal for the Wake-Dispatcher.)"""
+    return conn.execute(
+        "SELECT 1 FROM agent_inbox WHERE about_task_id = ? AND state = 'pending' LIMIT 1",
+        (task_id,),
+    ).fetchone() is not None
+
+
 def deliver(conn: sqlite3.Connection, message_ids: list[str], turn_id: str, now: str) -> int:
     """pending → delivered on ``turn_id`` (one admission ⇒ ``attempts + 1``).
     Returns the number of rows claimed; a concurrent claimer gets 0."""

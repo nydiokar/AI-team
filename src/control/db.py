@@ -7798,6 +7798,9 @@ class MeshDB:
         """[A104] (recipient, case) pairs with a deliverable message (backoff elapsed)."""
         return _agent_inbox.ready_recipients(self._conn(), _now(), limit)
 
+    def inbox_has_pending_about(self, task_id: str) -> bool:
+        return _agent_inbox.has_pending_about(self._conn(), task_id)
+
     def inbox_waiting_for(self, session_ids: List[str]) -> Dict[str, bool]:
         """[A104] Batched ``pending_for(sid).waiting()`` for a session list."""
         return _agent_inbox.waiting_for(self._conn(), list(session_ids))

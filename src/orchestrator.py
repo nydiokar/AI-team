@@ -1472,15 +1472,32 @@ class TaskOrchestrator(ITaskOrchestrator):
             self._wake_dispatcher_loop(interval)
         )
 
+    def _wake_kick_event(self) -> asyncio.Event:
+        """[A104] The push signal: set when a completion lands in an inbox."""
+        ev = getattr(self, "_wake_kick", None)
+        if ev is None:
+            ev = self._wake_kick = asyncio.Event()
+        return ev
+
+    def _kick_wake_dispatcher(self) -> None:
+        """Deliver NOW: a requester's completion just landed (event-driven; the
+        interval below is only a backstop for a missed signal / a crash)."""
+        self._wake_kick_event().set()
+
     async def _wake_dispatcher_loop(self, interval_sec: int) -> None:
-        logger.info("event=wake_dispatcher_started interval=%ds", interval_sec)
+        logger.info("event=wake_dispatcher_started interval=%ds (backstop; push-kicked)", interval_sec)
+        kick = self._wake_kick_event()
         try:
             while self.running:
+                kick.clear()
                 try:
                     await self._wake_dispatcher_tick_once()
                 except Exception as e:
                     logger.debug("event=wake_dispatcher_tick_failed err=%s", e)
-                await asyncio.sleep(interval_sec)
+                try:
+                    await asyncio.wait_for(kick.wait(), timeout=interval_sec)
+                except asyncio.TimeoutError:
+                    pass
         except asyncio.CancelledError:
             logger.info("event=wake_dispatcher_stopped")
             raise
@@ -12339,6 +12356,13 @@ Generated from user description: {description}
         errors = await asyncio.to_thread(
             self._apply_managed_turn_projections, db, row, task, result, case_id,
         )
+        # [A104] Push delivery: this completion was addressed to a requester —
+        # wake the dispatcher now instead of waiting for its backstop interval.
+        try:
+            if await asyncio.to_thread(db.inbox_has_pending_about, task_id):
+                self._kick_wake_dispatcher()
+        except Exception as e:  # noqa: BLE001 — the backstop tick still delivers
+            logger.debug("event=wake_kick_failed task_id=%s err=%s", task_id, e)
         attempts = int(row.get("effects_attempts") or 0)
         notify_failed = str(row.get("effects_error") or "").startswith("notify_failed")
         bumped = False
