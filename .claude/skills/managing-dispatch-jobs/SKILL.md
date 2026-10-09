@@ -29,6 +29,15 @@ script. Never edit the yaml block with sed/regex and never hand-edit `_DISPATCH_
    "Read this first", Why, TASK, ACCEPTANCE (proof, not vibes), RESERVED DECISIONS, SCOPE OUT,
    TRAIL, Milestone checklist, Closure. `docs/harness/generators/draft_packet.md` is the drafting
    procedure. ACCEPTANCE is the part reviewers hold the worker to — make each item observable.
+   **If the job replaces, unifies, migrates or retires anything** (a new path beside an old one, a
+   flag cutover, a second store/reader), add ONE ```` ```arch-contract ```` YAML block stating the end
+   state: the names the design deletes (`retired`), layering bans (`forbidden_in`), and store
+   ownership (`stores`). Copy names from the design's delete list; do not invent them. Scope it to
+   every area the old path lives in (worker, gateway, scripts, prompts), not only the area being
+   edited. Format + semantics: header of `.claude/skills/architecture-pathway-audit/scripts/contract_check.py`;
+   examples: `.claude/skills/architecture-pathway-audit/benchmark/history/*.yaml`. A stage that
+   legitimately leaves something (e.g. a shim until the next stage) gets a `waivers:` entry with a
+   reason, never a silent omission.
 5. **Dependencies**: `DS --set AGENT_<N>_<THEME> depends_on '["AGENT_94_SYSTEM_ONE_CORE_DELIVERY_SCORECARD"]'`
    (values are written raw — pass yaml literals).
 6. **Ledger**: add one row at the **top** of the DISPATCH_LOG Index table, one line only:
@@ -59,6 +68,9 @@ Only on evidence (see `reviewing-worker-deliveries`) — a closure without proof
    Tick every Milestone box that is actually true; leave the rest unticked and say why.
 2. State: `DS --set <job> evidence '["tests/test_x.py","docs/y.md"]'` (paths must exist),
    `DS --set <job> results_ref 'DISPATCH_LOG.md#A<N>'`, `DS --set <job> status done`.
+   If the packet has an `arch-contract`, `status done` runs the checker at `HEAD` and is **refused**
+   while any violation remains (it prints file:line for each). Do the missing work, or add a waiver
+   with a reason and surface it to the operator. Never delete or weaken the contract to get past it.
 3. Ledger row Status cell → `done — PR #<n> \`<sha>\`` (still one line); add the key caveat to
    the one-liner if there is one.
 4. CONTEXT.md: **remove** the job's Active Work row and any shift note it supersedes — no ✅ rows.

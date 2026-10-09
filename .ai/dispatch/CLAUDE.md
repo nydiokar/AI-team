@@ -34,6 +34,12 @@ setup per repo: `.venv/bin/python scripts/dispatch/dispatch_state.py --install-g
   (parquet/json/script). The audit flags `CLAIMED_DONE_NO_PROOF` if a `done` job's evidence is
   missing on disk. No evidence path = no automated proof; add one when you can.
 
+## End-state contract (cutovers / unifications / retirements)
+A packet that replaces or retires anything carries one ```` ```arch-contract ```` block: the names
+the design deletes, layering bans, store ownership (see `managing-dispatch-jobs`). `--set <job>
+status done` then runs `contract_check.py` at `HEAD` and **refuses** while the old path survives
+anywhere in scope. Waivers need a reason and are printed; never weaken the contract to pass.
+
 ## What each file is (don't conflate them)
 - `<job>.md` — the BRIEF (what to do) **+** its yaml state block. Your edit surface.
 - `DISPATCH_LOG.md` — **the primary, authoritative human-readable dispatch Index + per-job

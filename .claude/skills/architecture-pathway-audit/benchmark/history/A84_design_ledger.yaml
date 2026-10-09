@@ -1,0 +1,11 @@
+# Provenance: transcribed literally from docs/TBD/WORKER_COMPLETION_NOTIFY_REDESIGN.md section 7
+# ("What gets deleted / kept / added"), rows marked DELETE. Written 2026-10-09, AFTER reading A104,
+# so the choice of this job is not blind; the content is a copy of the design's own ledger, not a choice.
+# Not transcribed: compute_continuation_tick (REPLACE: the name may legitimately survive with a new body)
+# and "wait_group flow markers" (the design names no identifier for them).
+# A84 was declared DONE at 645ab38.
+scope: [src, scripts, config]
+retired:
+  - arm_wait_group          # "arm_wait_group MCP tool ... DELETE", "db.arm_wait_group ... DELETE"
+  - reconcile_worker_waits  # "reconcile_worker_waits, boot_reconcile_case re-arm: DELETE"
+  - boot_reconcile_case
