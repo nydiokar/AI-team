@@ -1,12 +1,12 @@
 ```yaml
 job_id: AGENT_104_UNIFIED_AGENT_INBOX
 created_at: "2026-10-09T17:17:51.298555+00:00"        # CANONICAL — set once at dispatch, never derive again
-status: ready              # ready | active | blocked | done | dead
-owner: ""
+status: active              # ready | active | blocked | done | dead
+owner: claude-opus-5-5 (A104 session 2026-10-09)
 depends_on: []
 results_ref: null             # -> DISPATCH_LOG.md section with the verdict prose
 evidence: []                  # artifact paths that PROVE it ran (checked to exist)
-updated_at: "2026-10-09T17:17:51.298578+00:00"
+updated_at: "2026-10-09T17:26:28.721100+00:00"
 ```
 
 # DISPATCH — 104 · One agent inbox: finish A84 properly, retire the competing "what is waiting" systems

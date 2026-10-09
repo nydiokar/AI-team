@@ -5,12 +5,12 @@
 | status | job_id | created | updated | depends_on | proof | flags |
 |---|---|---|---|---|---|---|
 | active | AGENT_102_UNIFY_BACKEND_PATHWAYS | 2026-10-08 | 2026-10-08 | — | — |  |
+| active | AGENT_104_UNIFIED_AGENT_INBOX | 2026-10-09 | 2026-10-09 | — | — |  |
 | active | AGENT_60_WARM_WORKER_IDLE_REAPER | 2026-07-30 | 2026-08-21 | — | ✓ | STALE_49d |
 | active | AGENT_65_COST_MONITORING_VISIBILITY | 2026-08-03 | 2026-08-03 | — | ✓ | STALE_66d |
 | active | AGENT_87_SESSION_RUNTIME_COORDINATOR | 2026-09-24 | 2026-09-25 | — | — |  |
 | active | AGENT_88_DATABASE_AUTHORITY_UNIFICATION | 2026-09-26 | 2026-10-01 | — | ✗MISSING |  |
 | active | AGENT_91_OPENCODE_BACKEND_PARITY | 2026-09-27 | 2026-09-27 | — | — |  |
-| ready | AGENT_104_UNIFIED_AGENT_INBOX | 2026-10-09 | 2026-10-09 | — | — |  |
 | ready | AGENT_62_RUNTIME_FLAG_REGISTRY_NONBOOLEAN | 2026-08-01 | 2026-08-03 | — | — |  |
 | ready | AGENT_63_QUOTA_COORDINATOR_INDEPENDENT_AUDIT | 2026-08-01 | 2026-08-03 | — | — |  |
 | ready | AGENT_66_FILE_EDIT_COLLISION_DETECTION | 2026-08-03 | 2026-08-03 | — | — |  |
