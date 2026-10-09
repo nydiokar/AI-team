@@ -2300,11 +2300,13 @@ class TelegramInterface:
             )
             return
         backend, repo_path = args[0].lower(), " ".join(args[1:])
-        if backend not in valid_backend_names():
-            await update.message.reply_text("❌ Backend must be 'claude', 'codex', or 'opencode-server'.")
-            return
+        # [A102] Check retired BEFORE validity: a retired backend is no longer in
+        # valid_backend_names(), so the old order returned the wrong message.
         if retired_backend_reason(backend):
             await update.message.reply_text(f"❌ {retired_backend_reason(backend)}.")
+            return
+        if backend not in valid_backend_names():
+            await update.message.reply_text("❌ Backend must be 'claude', 'codex', or 'opencode-server'.")
             return
         resolution = self._path_resolver().resolve_session_path(repo_path)
         if not resolution.ok or not resolution.resolved_path:
@@ -2465,11 +2467,13 @@ class TelegramInterface:
 
         _valid_backends = valid_backend_names()
         backend = args[0].lower()
-        if backend not in _valid_backends:
-            await update.message.reply_text("❌ Backend must be 'claude', 'codex', or 'opencode-server'.")
-            return
+        # [A102] Check retired BEFORE validity: a retired backend is no longer in
+        # _valid_backends, so the old order returned the wrong message.
         if retired_backend_reason(backend):
             await update.message.reply_text(f"❌ {retired_backend_reason(backend)}.")
+            return
+        if backend not in _valid_backends:
+            await update.message.reply_text("❌ Backend must be 'claude', 'codex', or 'opencode-server'.")
             return
 
         # Detect optional node_id: if args[1] matches a known online node treat as node

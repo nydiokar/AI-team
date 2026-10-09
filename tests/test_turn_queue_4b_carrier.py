@@ -257,7 +257,11 @@ def pooled_claude(monkeypatch):
 
     monkeypatch.setattr(cd, "_SDKSession", _Boot)
     # A mis-attributed turn must fail fast (deadline ⇒ recovery), not hang.
-    monkeypatch.setattr(_Boot, "_managed_stall_sec", lambda self: 3.0)
+    # [A102 S1] _managed_stall_sec is gone; inject the short stall through the
+    # module-level turn_control the backend shim builds every turn from.
+    import src.backends.claude_code as _cc
+    _orig_tc = _cc.turn_control
+    monkeypatch.setattr(_cc, "turn_control", lambda u, **kw: _orig_tc(u, stall_override=3.0, **kw))
     backend = ClaudeCodeBackend("sdk")
     assert backend.supports_managed_turns()
     yield SimpleNamespace(backend=backend, script=script, booted=booted)
@@ -360,20 +364,20 @@ def test_K05b_used_process_cannot_take_an_unechoed_local_command(pooled_claude):
                                   claim_token="tok", incarnation_id="inc", turn_uuid=str(uuid.uuid4()))
     assert backend.run_managed_turn(s, "first", own).success
     [first] = pooled_claude.booted
+    from src.core.turn_liveness import turn_control
     with pytest.raises(tq.OwnershipConflictError):
-        first.send_managed("/compact", local_command=True)
+        first.send("/compact", turn=turn_control("u-k05b", stall_override=3.0), local_command=True)
     assert first.fake.queries_sent == ["first"]
 
 
 def test_K06_backends_without_a_managed_compaction_path_fail_closed():
-    from src.backends.opencode import OpenCodeBackend, OpenCodeServerBackend
+    from src.backends.opencode import OpenCodeServerBackend
 
     # [A82 step 4a] Codex and [step 4b] OpenCodeServerBackend implement managed
-    # compaction/cancel natively; only the CLI OpenCode stays fail-closed.
+    # compaction/cancel natively; a backend that does NOT override the interface
+    # default fails closed. (The CLI OpenCode backend that was the fail-closed
+    # example was retired — A102 S1-OpenCode / R3.)
     assert OpenCodeServerBackend.run_managed_compaction is not CodingBackend.run_managed_compaction
-    for cls in (OpenCodeBackend,):
-        assert cls.run_managed_compaction is CodingBackend.run_managed_compaction
-        assert cls.cancel_managed_turn is CodingBackend.cancel_managed_turn
     fake = SimpleNamespace()
     with pytest.raises(tq.ManagedUnsupportedError):
         CodingBackend.run_managed_compaction(fake, None, None)
