@@ -257,7 +257,11 @@ def pooled_claude(monkeypatch):
 
     monkeypatch.setattr(cd, "_SDKSession", _Boot)
     # A mis-attributed turn must fail fast (deadline ⇒ recovery), not hang.
-    monkeypatch.setattr(_Boot, "_managed_stall_sec", lambda self: 3.0)
+    # [A102 S1] _managed_stall_sec is gone; inject the short stall through the
+    # module-level turn_control the backend shim builds every turn from.
+    import src.backends.claude_code as _cc
+    _orig_tc = _cc.turn_control
+    monkeypatch.setattr(_cc, "turn_control", lambda u, **kw: _orig_tc(u, stall_override=3.0, **kw))
     backend = ClaudeCodeBackend("sdk")
     assert backend.supports_managed_turns()
     yield SimpleNamespace(backend=backend, script=script, booted=booted)
@@ -360,8 +364,9 @@ def test_K05b_used_process_cannot_take_an_unechoed_local_command(pooled_claude):
                                   claim_token="tok", incarnation_id="inc", turn_uuid=str(uuid.uuid4()))
     assert backend.run_managed_turn(s, "first", own).success
     [first] = pooled_claude.booted
+    from src.core.turn_liveness import turn_control
     with pytest.raises(tq.OwnershipConflictError):
-        first.send_managed("/compact", local_command=True)
+        first.send("/compact", turn=turn_control("u-k05b", stall_override=3.0), local_command=True)
     assert first.fake.queries_sent == ["first"]
 
 

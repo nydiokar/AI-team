@@ -36,6 +36,7 @@ import time
 import pytest
 
 from src.backends.claude_driver import _SDKSession
+from src.core.turn_liveness import turn_control
 
 sdk = pytest.importorskip("claude_agent_sdk")
 from claude_agent_sdk import (  # noqa: E402
@@ -204,27 +205,14 @@ def _emit_autonomous(sess: _SDKSession, fake: _FakeClient, *msgs) -> None:
 
 
 class _ManagedSendMissing(Exception):
-    """Sentinel: the protocol-1 managed no-interrupt send does not exist yet."""
+    """Retained for backward-compat with callers that reference the sentinel;
+    the managed no-interrupt send is now the single ``_SDKSession.send``."""
 
 
-def _managed_send(sess: _SDKSession, message: str):
-    """Invoke the managed (protocol-1) no-interrupt send path.
-
-    A82 decision 1 requires a DISTINCT managed send that returns a typed
-    ownership conflict and NEVER calls cancel_inflight. That method does not
-    exist yet; resolve it dynamically and raise a distinct sentinel (NOT a
-    conflict-shaped error) when the contract is unimplemented so the caller
-    fails red rather than mistaking absence for a valid conflict.
-    """
-    for name in ("send_managed", "managed_send", "send_protocol1", "submit_managed_turn"):
-        fn = getattr(sess, name, None)
-        if callable(fn):
-            return fn(message)
-    raise _ManagedSendMissing(
-        "no managed no-interrupt send method on _SDKSession "
-        "(A82 decision 1: protocol-1 send must return a typed ownership "
-        "conflict without cancel_inflight; contract not implemented)"
-    )
+def _managed_send(sess: _SDKSession, message: str, *, stall: float = 0.6, turn_uuid: str = "u-managed"):
+    """[A102] The ONE send, echo-correlated, no-interrupt. ``stall`` sets the
+    no-progress window (replaces the old ``_managed_stall_sec`` monkeypatch)."""
+    return sess.send(message, turn=turn_control(turn_uuid, stall_override=stall))
 
 
 def _quiescence_oracle(sess: _SDKSession):
@@ -251,7 +239,7 @@ def test_SDK01_managed_send_lock_conflict_does_not_interrupt():
     def _first():
         started.set()
         try:
-            sess.send("hold the lock")
+            sess.send("hold the lock", turn=turn_control("u-hold", stall_override=5.0))
         except Exception:
             pass
 
@@ -265,12 +253,6 @@ def test_SDK01_managed_send_lock_conflict_does_not_interrupt():
         conflict = None
         try:
             _managed_send(sess, "second managed turn")
-        except _ManagedSendMissing:
-            # RED: the managed no-interrupt path is not implemented yet.
-            pytest.fail(
-                "managed protocol-1 send path is not implemented; A82 decision 1 "
-                "requires a typed ownership conflict without cancel_inflight"
-            )
         except Exception as e:  # noqa: BLE001
             conflict = e
 
@@ -319,7 +301,7 @@ def test_SDK02_background_result_not_served_as_explicit_reply():
 
     def _ask():
         try:
-            _ask.result = _managed_send(sess, "explicit question")
+            _ask.result = _managed_send(sess, "explicit question", stall=5.0)
         except Exception as e:  # noqa: BLE001
             _ask.result = e
 
@@ -331,7 +313,6 @@ def test_SDK02_background_result_not_served_as_explicit_reply():
         _emit_autonomous(sess, fake, _result("BACKGROUND JOB OUTPUT — not your answer"))
         time.sleep(0.3)
 
-        assert not isinstance(_ask.result, _ManagedSendMissing)
         assert getattr(_ask.result, "output", None) != "BACKGROUND JOB OUTPUT — not your answer", (
             "background result was misattributed as the explicit prompt's reply"
         )
@@ -366,7 +347,7 @@ def test_SDK03_held_native_background_task_retains_ownership():
     ]
     sess = _start_fake_session(fake)
     try:
-        r1 = sess.send("kick off background")
+        r1 = sess.send("kick off background", turn=turn_control("u-bg"))
         assert r1.output == "Launched (running in background)."
         _emit_autonomous(sess, fake, _task_updated("bg-1", "running"))
         time.sleep(0.2)
@@ -394,7 +375,7 @@ def test_SDK04a_empty_pending_alone_is_not_quiescence():
     fake.replies["start"] = [_assistant("ok"), _result("ok")]
     sess = _start_fake_session(fake)
     try:
-        sess.send("start")
+        sess.send("start", turn=turn_control("u-start"))
         _emit_autonomous(sess, fake, _task_updated("bg-9", "running"))
         time.sleep(0.2)
         assert len(sess._pending) == 0  # empty _pending
@@ -416,7 +397,7 @@ def test_SDK04b_task_finished_notification_alone_is_not_quiescence():
     fake.replies["go"] = [_assistant("dispatching"), _result("dispatched")]
     sess = _start_fake_session(fake)
     try:
-        sess.send("go")
+        sess.send("go", turn=turn_control("u-go"))
         notif = _task_notification("bg-terminal", status="completed")
         assert notif.status in TERMINAL_TASK_STATUSES
         # Task finished, THEN the agent autonomously continues (assistant text
@@ -442,7 +423,7 @@ def test_SDK04c_quiescence_requires_all_three_signals():
     fake.replies["work"] = [_assistant("done"), _result("done")]
     sess = _start_fake_session(fake)
     try:
-        sess.send("work")
+        sess.send("work", turn=turn_control("u-work"))
         _emit_autonomous(
             sess,
             fake,
@@ -470,54 +451,6 @@ def _init_frame():
     return SystemMessage(subtype="init", data={})
 
 
-def test_SDK05a_legacy_bare_result_same_tick_is_served():
-    """LEGACY `send`: a result-only reply (no init/assistant frame) is this
-    turn's answer — served exactly as before Stage 3 (M5/M6 regression)."""
-    fake = _FakeClient()
-    fake.replies["q"] = [_result("bare answer")]
-    sess = _start_fake_session(fake)
-    try:
-        t0 = time.monotonic()
-        out = sess.send("q")
-        assert out.output == "bare answer"
-        assert time.monotonic() - t0 < 2
-        assert fake.interrupts == 0
-    finally:
-        sess.close()
-
-
-def test_SDK05b_legacy_bare_result_arriving_later_is_served_no_interrupt():
-    """LEGACY `send`: a bare ResultMessage arriving many ticks after the query
-    (real CLI latency) is served to the pending legacy turn — no deadlock, no
-    timeout, never `cancel_inflight` (the Stage-3 regression the review found)."""
-    fake = _FakeClient()
-    fake.replies["slow"] = []
-    proactive: list = []
-    sess = _start_fake_session(fake)
-    sess._on_proactive = lambda key, outcome: proactive.append(outcome)
-    box: dict = {}
-
-    def _ask():
-        try:
-            box["r"] = sess.send("slow")
-        except Exception as e:  # noqa: BLE001
-            box["r"] = e
-
-    try:
-        th = threading.Thread(target=_ask, daemon=True)
-        th.start()
-        time.sleep(0.3)
-        _emit_autonomous(sess, fake, _result("late bare reply"))
-        th.join(timeout=3)
-        assert not th.is_alive(), "legacy send deadlocked on a bare result reply"
-        assert getattr(box.get("r"), "output", None) == "late bare reply"
-        assert fake.interrupts == 0
-        assert proactive == []
-        assert len(sess._pending) == 0
-    finally:
-        sess.close()
-
-
 def test_SDK06a_managed_correlated_reply_is_served():
     """MANAGED: a reply whose own response stream began (init / assistant frame)
     is served to the managed turn."""
@@ -526,8 +459,8 @@ def test_SDK06a_managed_correlated_reply_is_served():
     fake.replies["m2"] = [_assistant("working"), _result("second answer")]
     sess = _start_fake_session(fake)
     try:
-        assert sess.send_managed("m1").output == "managed answer"
-        assert sess.send_managed("m2").output == "second answer"
+        assert sess.send("m1", turn=turn_control("u-m1")).output == "managed answer"
+        assert sess.send("m2", turn=turn_control("u-m2")).output == "second answer"
         assert fake.interrupts == 0
         assert sess.is_quiescent() is True
     finally:
@@ -546,7 +479,7 @@ def test_SDK06b_managed_bare_result_closing_our_echoed_turn_is_served():
     sess._on_proactive = lambda key, outcome: proactive.append(outcome)
     try:
         t0 = time.monotonic()
-        assert sess.send_managed("bare").output == "bare managed"
+        assert sess.send("bare", turn=turn_control("u-bare")).output == "bare managed"
         assert time.monotonic() - t0 < 2
         assert proactive == [] and fake.interrupts == 0
         assert sess.is_quiescent() is True
@@ -554,7 +487,7 @@ def test_SDK06b_managed_bare_result_closing_our_echoed_turn_is_served():
         sess.close()
 
 
-def test_SDK06c_managed_deadline_raises_typed_recovery_without_interrupt(monkeypatch):
+def test_SDK06c_managed_deadline_raises_typed_recovery_without_interrupt():
     """MANAGED: deadline expiry never calls cancel_inflight (§15 dec.1); it
     raises RecoveryRequiredError and keeps the session held."""
     from src.control.turn_queue import RecoveryRequiredError
@@ -562,28 +495,26 @@ def test_SDK06c_managed_deadline_raises_typed_recovery_without_interrupt(monkeyp
     fake = _FakeClient()
     fake.replies["never"] = []
     sess = _start_fake_session(fake)
-    monkeypatch.setattr(sess, "_managed_stall_sec", lambda: 0.3)
     try:
         with pytest.raises(RecoveryRequiredError):
-            sess.send_managed("never")
+            sess.send("never", turn=turn_control("u-never", stall_override=0.3))
         assert fake.interrupts == 0
         assert sess.is_quiescent() is False
     finally:
         sess.close()
 
 
-def test_SDK06d_working_turn_longer_than_the_stall_window_is_never_cut_off(monkeypatch):
+def test_SDK06d_working_turn_longer_than_the_stall_window_is_never_cut_off():
     """A managed turn whose CLI keeps streaming messages runs to its real result;
     only a turn with NO native message for the stall window goes to recovery."""
     fake = _FakeClient()
     fake.replies["long"] = []
     sess = _start_fake_session(fake)
-    monkeypatch.setattr(sess, "_managed_stall_sec", lambda: 0.6)
     out: dict = {}
 
     def _send() -> None:
         try:
-            out["r"] = sess.send_managed("long")
+            out["r"] = sess.send("long", turn=turn_control("u-long", stall_override=0.6))
         except BaseException as e:  # noqa: BLE001
             out["exc"] = e
 
@@ -626,7 +557,7 @@ def test_SDK07_managed_quiescence_reserved_on_sdk_loop_thread():
         sess._loop.call_soon_threadsafe(_loop_ident)
         time.sleep(0.1)
         sess.is_quiescent = _spy  # type: ignore[method-assign]
-        assert sess.send_managed("r").output == "ok"
+        assert sess.send("r", turn=turn_control("u-r1")).output == "ok"
         assert seen["thread"] == seen["loop_thread"] != threading.get_ident()
         assert seen["loop_running_here"] is True
         assert seen["pending_before"] == 0
@@ -638,7 +569,7 @@ def test_SDK07_managed_quiescence_reserved_on_sdk_loop_thread():
         _emit_autonomous(sess, fake, _task_updated("bg-late", "running"))
         time.sleep(0.2)
         with pytest.raises(Exception) as ei:
-            sess.send_managed("r")
+            sess.send("r", turn=turn_control("u-r2"))
         assert "quiescent" in str(ei.value)
         assert fake.interrupts == 0
     finally:
