@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import ast
 import builtins
+import copy
+import hashlib
 import re
 from typing import Any, Iterable, Optional
 
@@ -104,6 +106,9 @@ def parse_file(source: str, rel: str) -> dict[str, Any]:
             acc: list[dict[str, Any]] = data_access(node)
             if acc:
                 facts['defs'][-1]['access'] = acc
+            fp: Optional[dict[str, Any]] = fingerprint(node)
+            if fp:
+                facts['defs'][-1]['fp'] = fp
         for dec in node.decorator_list:
             walk(dec, scope, scope_kind, cond)
             if not is_class and isinstance(dec, ast.Call) and isinstance(dec.func, ast.Attribute) \
@@ -469,6 +474,64 @@ def data_access(fn: ast.AST) -> list[dict[str, Any]]:
             a['table'] = a['table'].lower()
             uniq.append(a)
     return uniq
+
+
+MIN_FP_NODES: int = 12
+
+
+class _Rename(ast.NodeTransformer):
+    """Alpha-rename local names, drop annotations/docstrings/function names: the body's behaviour shape remains."""
+
+    def __init__(self, local: list[str]) -> None:
+        self.ids: dict[str, str] = {n: f'v{i}' for i, n in enumerate(local)}
+
+    def visit_Name(self, node: ast.Name) -> ast.AST:  # noqa: N802
+        return ast.copy_location(ast.Name(id=self.ids.get(node.id, node.id), ctx=node.ctx), node)
+
+    def visit_arg(self, node: ast.arg) -> ast.AST:
+        return ast.arg(arg=self.ids.get(node.arg, node.arg), annotation=None)
+
+    def visit_Constant(self, node: ast.Constant) -> ast.AST:  # noqa: N802
+        if isinstance(node.value, str) and not _SQL_STMT.search(node.value):
+            return ast.Constant(value='S')
+        if isinstance(node.value, str):
+            return ast.Constant(value=' '.join(node.value.lower().split()))
+        return node
+
+    def _fn(self, node: Any) -> ast.AST:
+        self.generic_visit(node)
+        node.name, node.returns, node.decorator_list = '_', None, []
+        return node
+    visit_FunctionDef = visit_AsyncFunctionDef = _fn  # noqa: N815
+
+
+def fingerprint(fn: ast.AST) -> Optional[dict[str, Any]]:
+    """Behaviour-shape fingerprint of a def: hash of the alpha-renamed body + callee set + arity.
+
+    Equal hashes mean the same operations in the same order over the same non-local names, whatever the function,
+    its locals or its parameters are called.
+    """
+    body: list[ast.stmt] = list(getattr(fn, 'body', []))
+    if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant) and isinstance(body[0].value.value, str):
+        body = body[1:]
+    wrapper: ast.Module = ast.Module(body=copy.deepcopy(body), type_ignores=[])
+    size: int = sum(1 for _ in ast.walk(wrapper))
+    if size < MIN_FP_NODES:
+        return None
+    args: ast.arguments = fn.args  # type: ignore[attr-defined]
+    params: list[str] = [a.arg for a in [*args.posonlyargs, *args.args, *args.kwonlyargs]]
+    local: list[str] = list(params)
+    for n in ast.walk(wrapper):
+        if isinstance(n, ast.Name) and isinstance(n.ctx, (ast.Store, ast.Del)) and n.id not in local:
+            local.append(n.id)
+        elif isinstance(n, ast.ExceptHandler) and n.name and n.name not in local:
+            local.append(n.name)
+    header: ast.Module = ast.Module(body=[ast.Expr(value=ast.Tuple(elts=[ast.Name(id=x, ctx=ast.Load()) for x in params],
+                                                                  ctx=ast.Load()))], type_ignores=[])
+    norm: _Rename = _Rename(local)
+    text: str = ast.dump(norm.visit(header), annotate_fields=False) + ast.dump(norm.visit(wrapper), annotate_fields=False)
+    callees: list[str] = sorted({c['name'] for c in call_sites(fn) if c['kind'] != 'dynamic' and c['name']})
+    return {'h': hashlib.sha1(text.encode()).hexdigest()[:16], 'size': size, 'nparams': len(params), 'callees': callees}
 
 
 def call_sites(fn: ast.AST) -> list[dict[str, Any]]:

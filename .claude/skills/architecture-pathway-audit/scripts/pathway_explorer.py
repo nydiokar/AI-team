@@ -33,7 +33,7 @@ from cbm_client import CBMClient, CBMError, cypher_str, find_executable  # noqa:
 from pyast_adapter import call_sites, compose_routes, find_def, module_name, parse_file, resolve_module  # noqa: E402
 from structure import FLOW, LOW_CONFIDENCE, analyze  # noqa: E402
 
-SCHEMA: int = 8
+SCHEMA: int = 9
 OUT_RELS: str = 'CALLS|ASYNC_CALLS|HTTP_CALLS|SPAWNS|CALL_REFERENCE|HANDLES|CONFIGURES|WRITES'
 NODE_FIELDS: str = '{v}.qualified_name AS q, labels({v}) AS l, {v}.name AS n, {v}.file_path AS f, ' \
                    '{v}.start_line AS s, {v}.end_line AS e'
@@ -141,6 +141,7 @@ class Engine:
         self.out: Path = out
         self.report: Path = report
         self.cbm: Optional[CBMClient] = cbm
+        self.baseline_path: Optional[Path] = None
         self.page: int = page
         self.lock: threading.RLock = threading.RLock()
         self.ready: threading.Event = threading.Event()
@@ -770,6 +771,20 @@ class Engine:
         return {'visited': len(seen), 'cache_hits': hits, 'cbm_expansions': misses, 'truncated': truncated}
 
     # ------------------------------------------------------------------ state
+    def twin_facts(self) -> list[dict[str, Any]]:
+        """Fingerprints of defs, keyed to graph node ids (needs the CBM symbol table for stable ids)."""
+        if self.cache.get('symbols') is None:
+            return []
+        out: list[dict[str, Any]] = []
+        for rel, f in sorted(self.cache['facts'].items()):
+            for d in f['defs']:
+                if d.get('fp'):
+                    n: dict[str, Any] = self.def_node(rel, d)
+                    out.append({'id': n['id'], 'name': d['name'], 'file': rel, 'line': d['line'], 'h': d['fp']['h'],
+                                'size': d['fp']['size'], 'nparams': d['fp']['nparams'], 'callees': d['fp']['callees'],
+                                'tables': sorted({a['table'] for a in d.get('access', [])})})
+        return out
+
     def medium_graph(self) -> tuple[dict[str, dict[str, Any]], list[dict[str, Any]]]:
         """Shared-medium layer: Table nodes plus READS_TABLE/WRITES_TABLE edges from every def whose SQL text names
         a table (AST-derived, independent of CBM; needs the symbol table only to reuse CBM node ids)."""
@@ -809,6 +824,29 @@ class Engine:
             edges.setdefault((e['from'], e['to'], e['type']), e)
         return nodes, list(edges.values()), [r['id'] for r in self.inventory.get('routes', [])]
 
+    def twin_nodes(self) -> dict[str, dict[str, Any]]:
+        return {t['id']: self.cache['nodes'].get(t['id']) or self.symbols()['by_qn'].get(t['id']) or
+                {'id': t['id'], 'kind': 'Function', 'label': t['name'], 'file': t['file'], 'line': t['line'],
+                 'component': t['id'].rsplit('.', 1)[0], 'source': 'ast'} for t in self.twin_facts()}
+
+    def apply_baseline(self, res: dict[str, Any]) -> None:
+        """Tag findings acknowledged in the committed baseline as known; report stale baseline ids."""
+        ack: dict[str, Any] = {}
+        if self.baseline_path and self.baseline_path.is_file():
+            try:
+                ack = {a['id']: a for a in json.loads(self.baseline_path.read_text(encoding='utf-8')).get('acknowledged', [])}
+            except (OSError, ValueError, KeyError, TypeError):
+                ack = {}
+        ids: set[str] = {f['id'] for f in res['findings']}
+        for f in res['findings']:
+            f['status'] = 'known' if f['id'] in ack else 'new'
+            if f['id'] in ack:
+                f['acknowledged'] = {k: ack[f['id']].get(k) for k in ('reason', 'owner', 'at')}
+        res['scope']['baseline'] = {'file': str(self.baseline_path) if self.baseline_path else None,
+                                    'known': sum(1 for f in res['findings'] if f['status'] == 'known'),
+                                    'new': sum(1 for f in res['findings'] if f['status'] == 'new'),
+                                    'stale_ids': sorted(set(ack) - ids)}
+
     def findings(self) -> dict[str, Any]:
         if self._findings_memo[0] == self.version:
             return self._findings_memo[1]
@@ -819,8 +857,10 @@ class Engine:
             if n['kind'] == 'Variable':
                 n['owner_kind'] = (by_qn.get(n['component']) or {}).get('kind', 'unknown')
         fan: dict[str, int] = self.cache.get('fanin') or {}
+        nodes.update(self.twin_nodes())
         res: dict[str, Any] = analyze(nodes, [e for e in edges if e['to'] not in ext], roots, fan,
-                                      self.utility_threshold())
+                                      self.utility_threshold(), self.twin_facts())
+        self.apply_baseline(res)
         self._findings_memo = (self.version, res)
         return res
 
@@ -1007,6 +1047,10 @@ def main() -> None:
     ap.add_argument('--roots', choices=('routes', 'all'), default='routes',
                     help='Sweep roots: API routes only, or also every unreferenced public callable (non-HTTP entry points)')
     ap.add_argument('--sweep-cap', type=int, default=400, help='Max nodes visited per route during a sweep')
+    ap.add_argument('--baseline', default='.arch-audit/baseline.json',
+                    help='Committed acknowledgements: {"acknowledged": [{"id","reason","owner","at"}]}; matching findings show as known')
+    ap.add_argument('--baseline-update', action='store_true',
+                    help='Acknowledge every current finding not yet in the baseline (reviewed-and-accepted snapshot), then exit')
     ap.add_argument('--refresh', action='store_true', help='Force CBM re-index and drop cached expansions')
     ap.add_argument('--refresh-routes', action='store_true', help='(compat) routes are always re-derived from changed files')
     ap.add_argument('--no-daemon', action='store_true', help='(compat, ignored) a single MCP session is always used')
@@ -1031,6 +1075,7 @@ def main() -> None:
     if a.refresh:
         eng.cache['entries'] = {}
         eng.cache['index'] = None
+    eng.baseline_path = repo / a.baseline
     changed: set[str] = eng.sync_files()
     dropped: int = eng.invalidate(changed) if eng.cache.get('index') else 0
     first: bool = not eng.cache.get('index')
@@ -1056,6 +1101,21 @@ def main() -> None:
             f'{misses} expansions fetched, {hits} cache hits, {trunc} truncated, {time.perf_counter() - t0:.1f}s')
     elif not first and not changed:
         pass
+    if a.baseline_update:
+        eng.ready.wait()
+        eng.fanin()
+        cur: dict[str, Any] = {x['id']: x for x in eng.findings()['findings']}
+        old: dict[str, Any] = json.loads(eng.baseline_path.read_text(encoding='utf-8')) if eng.baseline_path.is_file() else {}
+        have: list[dict[str, Any]] = old.get('acknowledged', [])
+        seen: set[str] = {x['id'] for x in have}
+        stamp: str = time.strftime('%Y-%m-%d')
+        have += [{'id': i, 'kind': x['kind'], 'anchor': x['anchor'], 'reason': 'baselined: reviewed, accepted for now',
+                  'owner': '', 'at': stamp} for i, x in sorted(cur.items()) if i not in seen]
+        eng.baseline_path.parent.mkdir(parents=True, exist_ok=True)
+        eng.baseline_path.write_text(json.dumps({'acknowledged': have}, indent=1), encoding='utf-8')
+        log(f'Baseline {eng.baseline_path}: {len(have)} acknowledged ({len(have) - len(seen)} added)')
+        cbm.close()
+        return
     if a.no_serve:
         eng.ready.wait()
         if not eng.ready_error:
