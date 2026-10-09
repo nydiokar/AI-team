@@ -22,7 +22,11 @@ members until every member is terminal. A terminal member without a message stil
 counts as in, so a filter can never deadlock delivery.
 
 Every function here takes an open ``sqlite3.Connection`` and is pure SQL — no
-I/O, no flag reads, no role reads.
+I/O, no flag reads. Addressing never reads a role: a message is addressed by the
+requester column alone. The ONLY role-keyed reads are the D4 rebind record
+(``rebound_wake_turns`` / ``has_rebound_pending`` / ``follow_case_rebind``: the
+Case's Manager-seat link history), which moves an EXISTING message after its
+recipient was replaced.
 """
 from __future__ import annotations
 

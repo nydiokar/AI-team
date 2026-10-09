@@ -20,8 +20,8 @@ Detection (``list_stale_managed_children``):
   R02 a fresh claim (within lease) is NOT detected
   R03 a healthy ONLINE carrier (matching incarnation, no live_state) is NOT detected
   R04 an incarnation-mismatch (restarted-in-place) carrier IS detected
-  R05 an UNREQUESTED child is never detected; a requested child of a legacy-born
-      Case is (birth mode irrelevant)
+  R05 an UNREQUESTED child is never detected; a requested child is (scope is
+      the requester — there is no Case birth mode any more)
   R06 a closed Case child is NEVER detected (open-only)
 
 Synthesis + fence (``synthesize_managed_terminal``):
@@ -74,7 +74,7 @@ def _db(tmp_path: Any) -> MeshDB:
 
 
 def _open_outbox_case(db: MeshDB, monkeypatch: pytest.MonkeyPatch, session_id="mgr-sess") -> str:
-    monkeypatch.setenv("CASE_COMPLETION_OUTBOX_ENABLED", "1")
+    # Name kept from A84; A104 Phase 5 deleted the outbox flag + birth-mode marker.
     return db.open_case("obj", session_id, role="manager")
 
 
@@ -166,13 +166,11 @@ def test_R04_incarnation_mismatch_is_detected(tmp_path, monkeypatch):
 
 
 def test_R05_unrequested_child_never_detected_any_mode(tmp_path, monkeypatch):
-    """[A104] Scope is the requester, not the Case's birth mode: an unrequested
-    child (no inbox waits on it) is never reaped; a requested child of a
-    legacy-born Case is."""
-    monkeypatch.delenv("CASE_COMPLETION_OUTBOX_ENABLED", raising=False)
+    """[A104] Scope is the requester (A104 Phase 5 deleted the Case birth-mode
+    marker): an unrequested child (no inbox waits on it) is never reaped; a
+    requested child of the same Case is."""
     db = _db(tmp_path)
     case_id = db.open_case("obj", "mgr-sess", role="manager")
-    assert db.case_continuation_mode(case_id) is None
     _seed_lost_child(db, "w0", case_id, token="t0", requester=None)
     assert db.list_stale_managed_children() == []
     _seed_lost_child(db, "w1", case_id, token="t1")
