@@ -26,7 +26,7 @@ import asyncio
 import logging
 import threading
 from contextlib import contextmanager
-from typing import Any, Callable, Dict, Generator, Optional, TypeVar
+from typing import Any, Callable, Dict, Generator, List, Optional, TypeVar
 
 from pydantic import BaseModel, Field
 
@@ -175,6 +175,9 @@ class AdmissionRequest(BaseModel):
     # [A82 Stage 5 rework] Hash of the validated sender capability (never the
     # raw token): re-checked (revoked / rotated / carrier) in the admission txn.
     sender_capability_hash: Optional[str] = Field(default=None, max_length=128, repr=False)
+    # [A104 I2] The session that REQUESTED this work (dispatch_worker): persisted
+    # as the turn's sender so its completion is addressed to that agent's inbox.
+    requester_session_id: Optional[str] = Field(default=None, max_length=256)
     machine_id: Optional[str] = Field(default=None, max_length=256)
     # Durable "lineage pending" writer token (Case lineage written after the
     # commit, then finalized under CAS); None ⇒ no post-admission lineage.
@@ -183,6 +186,9 @@ class AdmissionRequest(BaseModel):
     # linked to the admitted turn in the admission txn, with its durable facts.
     producer_token: Optional[str] = Field(default=None, max_length=256)
     producer_meta: Optional[Dict[str, Any]] = None
+    # [A104 I4] Inbox messages a wake turn carries: claimed pending → delivered
+    # in the admission txn (all or the admission rolls back).
+    inbox_message_ids: Optional[List[str]] = None
     # [A82 Stage 4d] Optional automation: a deadline after which it is
     # withdrawn (never run late) and idle-only admission (cache heartbeat).
     expires_at: Optional[str] = Field(default=None, max_length=64)
@@ -224,10 +230,12 @@ def admit_turn(
                 coalesce_key=request.coalesce_key,
                 sender_session_id=request.sender_session_id,
                 sender_capability_hash=request.sender_capability_hash,
+                requester_session_id=request.requester_session_id,
                 machine_id=request.machine_id,
                 lineage_token=request.lineage_token,
                 producer_token=request.producer_token,
                 producer_meta=request.producer_meta,
+                inbox_message_ids=request.inbox_message_ids,
                 expires_at=request.expires_at,
                 idle_only=request.idle_only,
                 parent_task_id=request.parent_task_id,
