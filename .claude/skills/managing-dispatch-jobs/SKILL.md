@@ -33,8 +33,8 @@ script. Never edit the yaml block with sed/regex and never hand-edit `_DISPATCH_
    flag cutover, a second store/reader), add ONE ```` ```arch-contract ```` YAML block stating the end
    state: the names the design deletes (`retired`), layering bans (`forbidden_in`), and store
    ownership (`stores`). Copy names from the design's delete list; do not invent them. Scope it to
-   every area the old path lives in (worker, gateway, scripts, prompts), not only the area being
-   edited. Format + semantics: header of `.claude/skills/architecture-pathway-audit/scripts/contract_check.py`;
+   every area the old path lives in (worker, gateway, scripts, prompts, **tests**), not only the area
+   being edited — a deleted name still imported by another worker's tests turns `main` red. Format + semantics: header of `.claude/skills/architecture-pathway-audit/scripts/contract_check.py`;
    examples: `.claude/skills/architecture-pathway-audit/benchmark/history/*.yaml`. A stage that
    legitimately leaves something (e.g. a shim until the next stage) gets a `waivers:` entry with a
    reason, never a silent omission.
