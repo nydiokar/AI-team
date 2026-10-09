@@ -7739,6 +7739,40 @@ class MeshDB:
             self._conn(), recipient_session_id, case_id=case_id, limit=limit,
         )
 
+    def explicit_requester_problem(
+        self, requester_session_id: str, target_session_id: str, case_id: Optional[str],
+    ) -> Optional[str]:
+        """[A104 R1] Why a SELF-ASSERTED requester id cannot be trusted, or None.
+
+        The id rides the requesting agent's process env, which can be stale (the
+        SDK env filter keeps a worker process's own ``SESSION_ID``). Valid only if
+        it is an open session, not the target, and — for a Case dispatch — a member
+        of that Case; for a Case-less dispatch it must be executing a turn right now
+        (only an executing agent can call a tool)."""
+        if not requester_session_id or requester_session_id == target_session_id:
+            return "self_or_empty"
+        conn = self._conn()
+        row = conn.execute(
+            "SELECT status FROM sessions WHERE session_id = ?", (requester_session_id,),
+        ).fetchone()
+        if row is None:
+            return "unknown_session"
+        if (row["status"] or "") in ("closed", "cancelled"):
+            return "closed_session"
+        if case_id:
+            member = conn.execute(
+                "SELECT 1 FROM flow_links WHERE flow_run_id = ? AND entity_type = 'session' "
+                "AND entity_id = ? LIMIT 1",
+                (case_id, requester_session_id),
+            ).fetchone()
+            return None if member is not None else "not_a_case_member"
+        executing = conn.execute(
+            "SELECT 1 FROM mesh_tasks WHERE session_id = ? AND queue_protocol = 1 "
+            "AND status IN ('claimed', 'running') LIMIT 1",
+            (requester_session_id,),
+        ).fetchone()
+        return None if executing is not None else "not_executing"
+
     def resolve_dispatch_requester(self, case_id: str, target_session_id: str) -> Optional[str]:
         """[A104 R1] Requester of a dispatch that carries no explicit requester id
         (an un-redeployed ``mcp_manager``): the member session of ``case_id`` that
