@@ -7705,6 +7705,7 @@ class TaskOrchestrator(ITaskOrchestrator):
         sender_session_id: Optional[str] = None,
         sender_case_id: Optional[str] = None,
         sender_capability_hash: Optional[str] = None,
+        requester_session_id: Optional[str] = None,
     ) -> str:
         """Direct runtime entrypoint for Telegram/CLI instructions.
 
@@ -7756,6 +7757,10 @@ class TaskOrchestrator(ITaskOrchestrator):
                 self._stash_task_meta(task, "__turn_sender_capability_hash", sender_capability_hash)
             if sender_case_id:
                 self._stash_task_meta(task, self._ATTACH_CASE_META_KEY, sender_case_id)
+        if requester_session_id:
+            # [A104 I2] The agent that REQUESTED this work (dispatch_worker); its
+            # completion is addressed to that agent's inbox.
+            self._stash_task_meta(task, self._TURN_REQUESTER_META_KEY, requester_session_id)
         if turn_queue_enrolled is not None:
             self._stash_task_meta(task, self._TURN_ENROLLED_META_KEY, bool(turn_queue_enrolled))
         return await self._enqueue_task(task)
@@ -11031,6 +11036,7 @@ Generated from user description: {description}
     # trigger facts; retry, respawn, file ingestion still unconverted) is
     # admitted by its own branch; anything else FAILS CLOSED for an enrolled
     # session instead of bypassing the managed queue.
+    _TURN_REQUESTER_META_KEY = "__turn_requester_session_id"
     _MANAGED_PRODUCER1_SOURCES = frozenset(
         {"web_session", "telegram_session", "runtime", "telegram", "automation_session", "agent_session",
          "manager_invoke"}
@@ -11237,6 +11243,17 @@ Generated from user description: {description}
         sender_session_id = str(meta.pop("__turn_sender_session_id", "") or "") if source == "agent_session" else ""
         sender_case_id = str(meta.get(self._ATTACH_CASE_META_KEY) or "") if sender_session_id else ""
         sender_cap_hash = str(meta.pop("__turn_sender_capability_hash", "") or "") if sender_session_id else ""
+        requester = str(meta.pop(self._TURN_REQUESTER_META_KEY, "") or "").strip()
+        requester_unresolved = False
+        if source != "automation_session" or sender_session_id:
+            requester = ""
+        elif not requester:
+            # [A104 R1] An un-redeployed mcp_manager sends no requester id:
+            # resolve it server-side, role-free (the Case member executing a turn).
+            join_case = str(meta.get(self._JOIN_CASE_META_KEY) or "").strip()
+            requester = (await asyncio.to_thread(db.resolve_dispatch_requester, join_case, sid)
+                         if join_case else None) or ""
+            requester_unresolved = bool(join_case) and not requester
         if source == "agent_session" and (not sender_session_id or not sender_case_id):
             raise ManagedUnsupportedError("agent send requires validated sender and Case")
         scope = f"{principal}:{sender_session_id}:{sid}:instruction" if sender_session_id else f"{principal}:{sid}:instruction"
@@ -11279,6 +11296,7 @@ Generated from user description: {description}
             admission_hash=admission_hash,
             sender_session_id=sender_session_id or None,
             sender_capability_hash=sender_cap_hash or None,
+            requester_session_id=requester or None,
             flow_run_id=sender_case_id or None,
             lineage_token=token,
         )
@@ -11286,6 +11304,15 @@ Generated from user description: {description}
             db, request, fleet_cap=int(config.system.max_queue_size),
         )
         await self._mark_admitted_carrier_offline(admission, offline)
+        if requester_unresolved and not admission.idempotent_replay:
+            # Audit only: this dispatch's completion will reach no inbox.
+            join_case = str(meta.get(self._JOIN_CASE_META_KEY) or "").strip()
+            await asyncio.to_thread(
+                db.append_flow_event, join_case, "inbox.requester_unresolved", "system",
+                entity_type="task", entity_id=str(admission),
+                payload={"target_session_id": sid},
+            )
+            logger.warning("event=inbox_requester_unresolved case_id=%s task_id=%s", join_case, admission)
         if admission.idempotent_replay:
             if admission.lineage_pending:
                 # Never ack a replay without lineage: wait (bounded) for the live

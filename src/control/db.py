@@ -64,6 +64,9 @@ from .turn_queue import (
     CapacityError,
     BackingStoreError,
 )
+# A104 — the agent inbox (pure SQL helpers over an open connection; no cycle:
+# agent_inbox imports only pydantic/stdlib).
+from . import agent_inbox as _agent_inbox
 if False:  # typing-only forward refs for the strict helper signatures
     from .turn_queue import ClaimToken, StartAuthorization, CompletionResult, RecoveryResolution, TurnAdmission
     from .turn_queue import TurnCancelOutcome, SessionCloseTurns, SenderCapabilityGrant, SenderIdentity
@@ -3088,6 +3091,7 @@ class MeshDB:
         turn_kind: str = "instruction",
         sender_session_id: Optional[str] = None,
         sender_capability_hash: Optional[str] = None,
+        requester_session_id: Optional[str] = None,
         idempotency_scope: Optional[str] = None,
         idempotency_key: Optional[str] = None,
         admission_hash: Optional[str] = None,
@@ -3314,6 +3318,21 @@ class MeshDB:
                         ).fetchone()[0]
                         if int(recent) >= 30:
                             raise CapacityError("sender Case fanout limit reached", retry_after=60)
+                    elif requester_session_id:
+                        # [A104 I2] The session that REQUESTED this work (a
+                        # dispatch): persisted in the same column an agent send
+                        # uses, so the terminal txn addresses the completion to
+                        # it. Never self, never an unknown/closed session — those
+                        # simply get no inbox addressing (admission proceeds).
+                        req = conn.execute(
+                            "SELECT status FROM sessions WHERE session_id = ?",
+                            (requester_session_id,),
+                        ).fetchone()
+                        if (
+                            requester_session_id != sid and req is not None
+                            and (req["status"] or "") not in ("closed", "cancelled")
+                        ):
+                            sender_session_id = requester_session_id
                     if turn_kind == "retry" and parent_task_id:
                         # A human B can commit after the producer's read-side
                         # A/B/R decision. Recheck under the SAME write
@@ -5555,7 +5574,12 @@ class MeshDB:
         terminal report a no-op (at most one row); the terminal UPDATE in the same
         txn guarantees at least one row when it commits ⇒ exactly one, or neither.
         A DB-level failure here propagates and rolls the whole terminal txn back.
+
+        [A104] First, in the same txn: the agent-inbox row addressed to whoever
+        REQUESTED this task (its persisted ``sender_session_id``) — any Case
+        mode, any role; no requester ⇒ no row.
         """
+        _agent_inbox.record_completion(conn, task_id, status, now)
         if not flow_run_id:
             return
         mode_row = conn.execute(
@@ -8216,6 +8240,37 @@ class MeshDB:
             return None
         mode = row["continuation_mode"]
         return str(mode) if mode else None
+
+    def pending_for(
+        self, recipient_session_id: str, *, case_id: Optional[str] = None,
+        limit: int = _agent_inbox.PENDING_LIMIT,
+    ) -> "_agent_inbox.PendingView":
+        """[A104 I3] THE read of "what is waiting for this agent" — see
+        :func:`src.control.agent_inbox.pending_for`."""
+        return _agent_inbox.pending_for(
+            self._conn(), recipient_session_id, case_id=case_id, limit=limit,
+        )
+
+    def resolve_dispatch_requester(self, case_id: str, target_session_id: str) -> Optional[str]:
+        """[A104 R1] Requester of a dispatch that carries no explicit requester id
+        (an un-redeployed ``mcp_manager``): the member session of ``case_id`` that
+        is EXECUTING a turn right now — only an executing agent can call a tool —
+        excluding the target and any session whose executing turn is itself a
+        dispatched/requested child. Exactly one candidate or None: never a guess,
+        never a role read."""
+        if not case_id:
+            return None
+        rows = self._conn().execute(
+            "SELECT DISTINCT t.session_id FROM flow_links l "
+            "JOIN mesh_tasks t ON t.session_id = l.entity_id "
+            "WHERE l.flow_run_id = ? AND l.entity_type = 'session' "
+            "AND t.queue_protocol = 1 AND t.status IN ('claimed', 'running') "
+            "AND t.session_id != ? AND t.sender_session_id IS NULL "
+            "AND COALESCE(json_extract(t.payload, '$.metadata.source'), '') != 'automation_session' "
+            "LIMIT 2",
+            (case_id, target_session_id or ""),
+        ).fetchall()
+        return str(rows[0]["session_id"]) if len(rows) == 1 else None
 
     def pending_case_outbox(self, case_id: str, limit: int = 256) -> List[Dict[str, Any]]:
         """Undelivered completion-outbox rows for a Case, oldest first.
@@ -11427,6 +11482,72 @@ def _get_migrations() -> List[tuple]:
                # so the old-vs-new ownership predicate is a persisted fact, not a
                # live-flag read. Additive + NULLable ⇒ legacy/control tasks and
                # pre-A84 Cases are byte-identical.
+        (45, """
+            CREATE TABLE IF NOT EXISTS agent_inbox (
+                message_id           TEXT PRIMARY KEY,
+                recipient_session_id TEXT NOT NULL,
+                sender_session_id    TEXT,
+                about_task_id        TEXT,
+                case_id              TEXT,
+                kind                 TEXT NOT NULL,
+                outcome              TEXT,
+                state                TEXT NOT NULL DEFAULT 'pending',
+                attempts             INTEGER NOT NULL DEFAULT 0,
+                next_attempt_at      TEXT,
+                delivery_turn_id     TEXT,
+                last_error           TEXT,
+                resolution           TEXT,
+                created_at           TEXT NOT NULL,
+                updated_at           TEXT NOT NULL,
+                delivered_at         TEXT,
+                acked_at             TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_agent_inbox_pending
+                ON agent_inbox(recipient_session_id, state)
+                WHERE state IN ('pending', 'delivered');
+            CREATE INDEX IF NOT EXISTS idx_agent_inbox_turn
+                ON agent_inbox(delivery_turn_id) WHERE delivery_turn_id IS NOT NULL;
+            CREATE INDEX IF NOT EXISTS idx_agent_inbox_about ON agent_inbox(about_task_id);
+            CREATE INDEX IF NOT EXISTS idx_agent_inbox_case ON agent_inbox(case_id, state);
+            CREATE TABLE IF NOT EXISTS inbox_wait_filters (
+                case_id         TEXT NOT NULL,
+                filter_id       TEXT NOT NULL,
+                condition       TEXT NOT NULL,
+                member_task_ids TEXT NOT NULL,
+                created_at      TEXT NOT NULL,
+                PRIMARY KEY (case_id, filter_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_mesh_tasks_requester_open
+                ON mesh_tasks(sender_session_id, created_at)
+                WHERE status IN ('queued', 'pending', 'claimed', 'running', 'recovery_required');
+            CREATE INDEX IF NOT EXISTS idx_sessions_continued_from
+                ON sessions(continued_from, created_at) WHERE continued_from IS NOT NULL;
+            INSERT OR IGNORE INTO agent_inbox (
+                message_id, recipient_session_id, sender_session_id, about_task_id, case_id,
+                kind, outcome, state, attempts, last_error, resolution,
+                created_at, updated_at, delivered_at, acked_at)
+            SELECT 'completion:' || o.child_task_id, COALESCE(t.sender_session_id, ''), t.session_id,
+                   o.child_task_id, o.case_id, 'completion', o.outcome,
+                   CASE WHEN o.delivered_at IS NULL THEN 'dead' ELSE 'acked' END, 0,
+                   CASE WHEN o.delivered_at IS NULL THEN 'unaddressed_pre_inbox' END,
+                   o.delivery_reason, o.created_at, COALESCE(o.delivered_at, o.created_at),
+                   o.delivered_at, o.delivered_at
+              FROM completion_outbox o LEFT JOIN mesh_tasks t ON t.id = o.child_task_id
+        """),  # A104: the agent inbox — ONE store answering "what is waiting for
+               # this agent". Addressed to the REQUESTER session (the child's
+               # ``mesh_tasks.sender_session_id``), Case id = provenance only.
+               # ``state`` pending → delivered (a wake carrying it was admitted,
+               # attempts+1) → acked (that wake completed, or a tagged review) |
+               # dead (reason in ``last_error``). The partial pending index serves
+               # ``pending_for``; the turn index serves settlement. Every
+               # ``completion_outbox`` row is carried over: delivered ⇒ acked;
+               # undelivered ⇒ dead('unaddressed_pre_inbox') because A84 rows were
+               # addressed to a Case, not an agent — the A104 Phase 4 migration
+               # re-seeds the genuine ones from the ledger. ``inbox_wait_filters``
+               # holds the D2 ALL conditions; ``idx_mesh_tasks_requester_open``
+               # serves outstanding requests; ``idx_sessions_continued_from``
+               # serves the D4 successor lookup. ``completion_outbox`` itself is
+               # left in place until A104 Phase 5.
     ]
 
 
