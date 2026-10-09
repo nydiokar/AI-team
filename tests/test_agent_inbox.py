@@ -23,6 +23,7 @@ IB08 state transitions are conditional (idempotent) and attempts are bounded (D3
 IB09 an agent→agent send is a request: its completion lands in the sender's inbox
 IB10 migration keeps every ``completion_outbox`` row (none silently dropped)
 """
+import json
 import sqlite3
 
 import pytest
@@ -366,3 +367,56 @@ def test_IB11_http_requester_field_is_honoured_only_for_automation(monkeypatch):
     asyncio.run(api._submit_managed_instruction(_Orch(), body, session, None, principal="automation"))
     asyncio.run(api._submit_managed_instruction(_Orch(), body, session, None, principal=None))
     assert seen == ["mgr-1", None]
+
+
+# IB12–IB14: a self-asserted requester is validated, never silently dropped ---- #
+def _unresolved(db, cid):
+    return [e for e in db.list_flow_events_of_types(cid, ["inbox.requester_unresolved"])]
+
+
+def test_IB12_stale_explicit_requester_falls_back_to_the_executing_member(tmp_path, monkeypatch):
+    """Live 2026-10-09 (Case ae60fb45): a Manager's mcp_manager can carry a STALE
+    SESSION_ID (the SDK env filter keeps the worker process's own value). A requester
+    that is not a member of the dispatch's Case is rejected — audited — and the
+    executing Case member is used instead."""
+    db, o = _env(tmp_path, monkeypatch)
+    _add_session(db, "w-1")
+    _add_session(db, "stale-sess")            # open, but not in this Case
+    cid = db.open_case("ship X", "sess-1", role="manager")
+    mgr = _submit(o, description="operator: go", operation_id="op-1")
+    _pass(db, o)
+    _run(db, mgr)
+    child = _dispatch(o, "w-1", cid, requester="stale-sess", op="d-1")
+    row = db._conn().execute("SELECT sender_session_id FROM mesh_tasks WHERE id = ?", (str(child),)).fetchone()
+    assert row["sender_session_id"] == "sess-1"
+    (ev,) = _unresolved(db, cid)
+    assert json.loads(ev["payload_json"])["reason"] == "explicit_requester_rejected"
+
+
+def test_IB13_valid_explicit_worker_requester_wins_over_server_resolution(tmp_path, monkeypatch):
+    """Worker→worker inside a Case while the Manager is also executing: the explicit
+    (valid, member) requester is the asking worker — role-free, never overridden."""
+    db, o = _env(tmp_path, monkeypatch)
+    for sid in ("w-1", "w-2"):
+        _add_session(db, sid)
+    cid = db.open_case("ship X", "sess-1", role="manager")
+    _dispatch(o, "w-1", cid, requester="sess-1", op="d-1")      # w-1 joins the Case
+    mgr = _submit(o, description="operator: go", operation_id="op-1")
+    _pass(db, o)
+    _run(db, mgr)                                                # Manager executing too
+    second = _dispatch(o, "w-2", cid, requester="w-1", op="d-2")
+    row = db._conn().execute("SELECT sender_session_id FROM mesh_tasks WHERE id = ?", (str(second),)).fetchone()
+    assert row["sender_session_id"] == "w-1"
+    assert _unresolved(db, cid) == []
+
+
+def test_IB14_invalid_requester_and_nobody_executing_is_audited_not_silent(tmp_path, monkeypatch):
+    db, o = _env(tmp_path, monkeypatch)
+    _add_session(db, "w-1")
+    cid = db.open_case("ship X", "sess-1", role="manager")
+    child = _dispatch(o, "w-1", cid, requester="no-such-session", op="d-1")
+    row = db._conn().execute("SELECT sender_session_id FROM mesh_tasks WHERE id = ?", (str(child),)).fetchone()
+    assert row["sender_session_id"] is None
+    (ev,) = _unresolved(db, cid)
+    payload = json.loads(ev["payload_json"])
+    assert payload["reason"] == "explicit_requester_rejected" and payload["explicit"] == "no-such-session"
