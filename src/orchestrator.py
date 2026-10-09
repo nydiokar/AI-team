@@ -23,8 +23,7 @@ ARCHITECTURE — data flow
                                       _write_artifacts()
                                       _emit_event() / _emit_turn_telemetry()
 
-  Autonomous (M3.4)   ──► _wake_dispatcher_loop() ──► _continue_case_once()
-                                                   ──► _finalize_continuation()
+  Autonomous (M3.4)   ──► _wake_dispatcher_loop() ──► _deliver_inbox()   (A104 agent inbox)
 
 SECTIONS (in source order)
 --------------------------
@@ -57,7 +56,7 @@ FEATURE FLAGS (runtime-gated, all default OFF unless noted)
   MANAGER_ROLE_ENABLED        — enable M3 Manager role boot via /api/manager
   REVIEW_EMITTER_ENABLED      — emit review.* events on record_review()
   CASE_CONTINUATION_ENABLED   — wake-dispatcher autonomous continuation (M3.4)
-  DURABLE_RELAY_ENABLED       — persist worker.wait_pending markers for crash recovery
+  DURABLE_RELAY_ENABLED       — gates the boot-reconcile reply (A104: an inbox read)
   HARNESS_LEVEL3_GUARD        — admission gate for level-3 harness tasks
   QUOTA_COORDINATOR_ENABLED   — observe-only quota/session-window coordinator
   APP_METRICS_ENABLED         — host/request metrics sampler (default ON; 'false' disables)
@@ -1350,25 +1349,6 @@ class TaskOrchestrator(ITaskOrchestrator):
                     error_class="restart_interrupted", once=True,
                 )
 
-        # [recovery-wait-resolution] Final safety net: the recovery/reaper paths
-        # that terminalise a task without emitting `task.finished` are the only way
-        # an armed wait can be stranded, and they all run around a restart. Reconcile
-        # EVERY open Case's waits against task truth once here, so the durable task
-        # state alone is sufficient to wake a Manager — independent of which path
-        # finalised the worker. Bounded (open Cases only) and idempotent.
-        if db is not None:
-            try:
-                for case in db.list_open_cases():
-                    cid = case.get("flow_run_id")
-                    if cid:
-                        backfilled = db.backfill_missing_task_finished(cid)
-                        if backfilled:
-                            self._emit_event(
-                                "recovery_wait_backfill", None,
-                                {"case_id": cid, "task_ids": backfilled},
-                            )
-            except Exception as e:
-                logger.warning("event=recovery_wait_backfill_failed err=%s", e)
 
     async def _recover_completed_session(self, session: Any, task_row: Dict[str, Any]) -> None:
         """Restore a session whose task completed in DB while the gateway was down."""
@@ -1451,26 +1431,21 @@ class TaskOrchestrator(ITaskOrchestrator):
         )
 
     # ===========================================================================
-    # WAKE DISPATCHER — AUTONOMOUS CASE CONTINUATION  (M3.4)
+    # WAKE DISPATCHER — AUTONOMOUS CASE CONTINUATION  (M3.4 → A104 agent inbox)
     # Flag: CASE_CONTINUATION_ENABLED (default OFF ⇒ loop never starts).
     #
-    # Allows a Manager to arm a wait-group over a dispatch set; when all members
-    # finish the harness schedules ONE deterministic continuation row in
-    # mesh_tasks (sentinel machine_id __manager_continuation__), atomically
-    # claims it, and delivers ONE coalesced proactive review turn to the live
-    # Manager session.  Bounded by round_cap; on exhaustion → flow.interrupted.
+    # A finished child's completion is a message in the REQUESTER's agent inbox
+    # (written in the child's terminal txn). Each tick delivers every recipient's
+    # ready messages as ONE coalesced wake turn (claimed pending → delivered in the
+    # admission txn); the wake's own terminal txn acks them, a withdrawal returns
+    # them (bounded: 5 attempts, backoff, then dead + operator alert). The producer
+    # and the activation check read the SAME function, ``pending_for``.
+    # Bounded by round_cap; on exhaustion → flow.interrupted.
     #
     # Entry: _start_wake_dispatcher() (called from start())
-    # Tick:  _wake_dispatcher_tick_once() → _continue_case_once() per open case
-    # Land:  _finalize_continuation() → _notify_proactive_turn()
+    # Tick:  _wake_dispatcher_tick_once() → pause pass per open Case
+    #        → _deliver_inbox() per ready (recipient, Case) → _admit_inbox_wake()
     # Kill:  interrupt_case() → sets case status=blocked, skipped next tick
-    #
-    # FUTURE EXTRACTION → CaseContinuationEngine (own file/class)
-    #   Prerequisite: A54 (durable reconstruction) + A55 (crash-respawn) landed
-    #   and proven live.  Do NOT extract mid-M3.4 — A54/A55 still touch these
-    #   methods directly.  When stable, inject via:
-    #     self._db_factory, self.session_store, self.notifier,
-    #     self._notify_proactive_turn (callback), self._finalize_continuation.
     # ===========================================================================
 
     _CONTINUATION_TERMINAL_STATUSES = ("completed", "failed", "failed_node_offline")
@@ -1533,10 +1508,6 @@ class TaskOrchestrator(ITaskOrchestrator):
             # producer-link / pause-mark indexes, not an all-Case scan.
             # [A82 Stage 4c] Also runs BEFORE Cases are evaluated, so this tick
             # sees the counted round / re-armed token.
-            try:
-                await self._reconcile_continuation_finalizers(db)
-            except Exception as e:
-                logger.warning("event=continuation_finalizer_reconcile_failed err=%s", e)
             try:
                 await self._reconcile_managed_recovery(db)
             except Exception as e:
@@ -2186,162 +2157,6 @@ class TaskOrchestrator(ITaskOrchestrator):
         await asyncio.to_thread(db.inbox_mark_alerted, [m.message_id for m in dead])
         return len(dead)
 
-    async def _continue_case_managed(
-        self, db, case_id: str, session: Any, generation: int, tick: Dict[str, Any],
-    ) -> int:
-        """[A82 Stage 4c] Producer 3 for an ENROLLED Manager. The generation-N
-        token row (``cont:{case}:{N}``, protocol 0, sentinel) is the durable
-        trigger identity; it is linked to a deterministic managed turn in the
-        admission transaction, so a crash between the token write and admission
-        (or anywhere after) replays to the SAME id — never a second turn. A token
-        already linked (in flight / queued) or finalized is owned by the durable
-        finalizer (``MeshDB.reconcile_finalizers``). Returns 1 iff THIS call
-        admitted a new turn."""
-        from src.control.db import (
-            CONTINUATION_ACTION, CONTINUATION_MACHINE_SENTINEL, continuation_task_id,
-            producer_turn_id,
-        )
-        from src.control.turn_queue import TurnQueueError
-
-        session_id = str(session.session_id)
-        cont_id = continuation_task_id(case_id, generation)
-        token = await asyncio.to_thread(db.get_task, cont_id)
-        if token is not None and (
-            token.get("producer_turn_id") or str(token.get("status") or "") != "pending"
-        ):
-            return 0
-        presented = list(tick.get("presented_task_ids") or [])
-        retired = [g["wait_group_id"] for g in tick.get("satisfied_groups", []) if g.get("retire")]
-        if token is None:
-            await asyncio.to_thread(
-                lambda: db.enqueue_task(
-                    cont_id,
-                    session_id=None,
-                    machine_id=CONTINUATION_MACHINE_SENTINEL,
-                    backend=(session.backend or "claude"),
-                    action=CONTINUATION_ACTION,
-                    payload={"case_id": case_id, "generation": generation,
-                             "session_id": session_id, "presented_task_ids": presented},
-                )
-            )
-        attempt = await asyncio.to_thread(
-            db.producer_token_attempt, cont_id, session_id,
-            token.get("payload") if token else None,
-        )
-        task = self._make_task(
-            description=self._render_wake_turn(case_id, presented),
-            session_id=session_id,
-            cwd=session.repo_path,
-            source="manager_continuation",
-        )
-        self._stash_task_meta(task, self._TURN_ENROLLED_META_KEY, True)
-        self._stash_task_meta(task, self._ATTACH_CASE_META_KEY, case_id)
-        self._stash_task_meta(task, self._TURN_PRODUCER_META_KEY, {
-            "token_id": cont_id,
-            "turn_id": producer_turn_id(cont_id, session_id, attempt),
-            "attempt": attempt,
-            "case_id": case_id,
-            "generation": generation,
-            "presented_task_ids": presented,
-            "retired_group_ids": retired,
-        })
-        try:
-            admission = await self._enqueue_task(task)
-        except (TurnQueueError, HarnessAdmissionBlocked) as e:
-            # Nothing linked (the link is in the admission txn): the token stays
-            # pending and the next tick replays to the same deterministic id.
-            logger.warning("event=managed_wake_refused case=%s err=%s", case_id, e)
-            return 0
-        if getattr(admission, "idempotent_replay", False) or getattr(admission, "status", "") == "withdrawn":
-            return 0
-        self._emit_event(
-            "case_continuation_delivered", None,
-            {"case_id": case_id, "generation": generation, "managed": True,
-             "presented_task_ids": presented, "continuation_id": cont_id,
-             "turn_id": str(admission)},
-        )
-        return 1
-
-    def _compute_outbox_tick(self, db, case_id: str) -> Dict[str, Any]:
-        """[A84 carry (o)] The continuation tick for an 'outbox'-mode Case, shaped
-        exactly like ``compute_continuation_tick`` so every downstream guard of
-        ``_continue_case_once`` (round cap, late-manager binding, crash-respawn,
-        the deterministic cont-id + atomic single-flight claim, enrolled vs legacy
-        wake) runs UNCHANGED.
-
-        Satisfaction = any undelivered outbox row. All undelivered children are
-        presented in ONE coalesced wake (``pending_case_outbox`` is index-served
-        and ``limit``-bounded — §7 request-size). The generation is the existing
-        continuation watermark + 1, so the SAME deterministic cont-id dedup that
-        collapses racing ticks and serialises rounds applies verbatim: a second
-        tick before the round finalizes computes the same generation ⇒ same id ⇒
-        loses the atomic claim; a child that arrives mid-round is presented only
-        on the next round (after the delivered-mark lands at finalize).
-
-        Out-of-band review suppression: a child the Manager already reviewed is
-        discharged to ``delivered(reason='reviewed_in_turn')`` with NO wake — the
-        obligation is met, so it must neither wake nor strand. This runs the
-        delivered-mark eagerly (idempotent, delivered_at-guarded), matching the
-        legacy ``retire_only`` review-drain.
-        """
-        pending = db.pending_case_outbox(case_id)
-        reviewed = db.reviewed_task_ids(case_id)
-        present: List[str] = []
-        suppressed: List[str] = []
-        for row in pending:
-            tid = str(row["child_task_id"])
-            (suppressed if tid in reviewed else present).append(tid)
-        if suppressed:
-            db.mark_case_outbox_delivered(case_id, suppressed, "reviewed_in_turn")
-            self._emit_event(
-                "case_outbox_review_suppressed", None,
-                {"case_id": case_id, "child_task_ids": suppressed},
-            )
-        _consumed, completed_rounds, _high = db.continuation_watermark(case_id)
-        return {
-            "satisfied": bool(present),
-            "presented_task_ids": present,
-            "satisfied_groups": [],
-            "retire_only_groups": [],
-            "generation_next": completed_rounds + 1,
-            "completed_rounds": completed_rounds,
-        }
-
-    async def _withdraw_rebound_continuation(
-        self, db, case_id: str, generation: int, manager_sid: str,
-    ) -> bool:
-        """[A82 Stage 4c rework] If the generation's token is linked to a managed
-        wake still QUEUED on a session that is no longer the Case's Manager,
-        withdraw it (automation row — never touches a stop hold) and finalize
-        (re-arm) the token now, so THIS tick can wake the rebound Manager on
-        either path. A claimed/running wake is left to finish (the finalizer
-        consumes it). Returns True iff a wake was withdrawn."""
-        from src.control.db import continuation_task_id
-        from src.control.turn_queue import TurnQueueError
-
-        token = await asyncio.to_thread(db.get_task, continuation_task_id(case_id, generation))
-        linked = str((token or {}).get("producer_turn_id") or "")
-        if not linked or str(token.get("status") or "") != "claimed":
-            return False
-        turn = await asyncio.to_thread(db.get_task, linked)
-        if (
-            turn is None or str(turn.get("status") or "") != "queued"
-            or str(turn.get("session_id") or "") == str(manager_sid)
-        ):
-            return False
-        try:
-            await asyncio.to_thread(
-                lambda: db.withdraw_turn(
-                    linked, int(turn["revision"]), actor="scheduler:obsolete:manager_rebound",
-                )
-            )
-        except TurnQueueError:
-            return False  # raced (activated/edited): the finalizer owns it
-        logger.info("event=managed_wake_withdrawn_rebound case=%s turn=%s new_manager=%s",
-                    case_id, linked, manager_sid)
-        await self._reconcile_continuation_finalizers(db)
-        return True
-
     async def _reconcile_managed_recovery(self, db) -> int:
         """[A82 Stage 4e] Durable, restart-safe producer 5/7 bookkeeping, run at
         the top of every Wake-Dispatcher tick BEFORE Cases are evaluated:
@@ -2455,24 +2270,6 @@ class TaskOrchestrator(ITaskOrchestrator):
                      "reason": reason},
                 )
         return reaped
-
-    async def _reconcile_continuation_finalizers(self, db) -> int:
-        """[A82 Stage 4c] Durable, restart-safe finalization of managed wake turns
-        (round accounting + wait-group resolution + token finalize from the turn's
-        terminal outcome). No read at all while nothing is enrolled."""
-        if db.any_session_enrolled() is False:
-            return 0
-        items = await asyncio.to_thread(db.reconcile_finalizers)
-        for item in items:
-            consumed = item.get("outcome") == "consumed"
-            self._emit_event(
-                "case_continuation_consumed" if consumed else "case_continuation_rearmed", None,
-                {"case_id": item.get("case_id"), "generation": item.get("generation"),
-                 "consumed_task_ids": item.get("presented_task_ids") if consumed else [],
-                 "continuation_id": item.get("token_id"), "turn_id": item.get("turn_id"),
-                 "turn_status": item.get("turn_status")},
-            )
-        return len(items)
 
     def _render_wake_turn(self, case_id: Optional[str], presented: List[str]) -> str:
         """Compose the ONE coalesced Case-level wake message. Presents ALL
@@ -3650,10 +3447,7 @@ class TaskOrchestrator(ITaskOrchestrator):
         if not paused_task_id:
             paused_task_id = str((pause or {}).get("paused_task_id") or "")
         if not paused_task_id:
-            resumes = sum(
-                1 for e in db.list_flow_events(case_id, limit=1000)
-                if e.get("event_type") == "flow.quota_resumed"
-            )
+            resumes = db.count_flow_events(case_id, "flow.quota_resumed")
             paused_task_id = f"manual:{resumes}"
         session_id = db.case_manager_session_id(case_id)
         if not session_id:
@@ -3711,9 +3505,8 @@ class TaskOrchestrator(ITaskOrchestrator):
 
         try:
             if chosen == "fresh_manager":
-                generation = int(
-                    db.compute_continuation_tick(case_id).get("generation_next") or 1
-                )
+                # [A104] the round about to run = completed wake rounds + 1.
+                generation = int(db.inbox_rounds_used(case_id)) + 1
                 spawned = await self._do_respawn_manager_for_case(
                     db, case_id, generation, session_id,
                 )
@@ -4186,63 +3979,6 @@ class TaskOrchestrator(ITaskOrchestrator):
             "delivered autonomously by the harness after a crash-respawn."
         )
 
-    async def _finalize_continuation(
-        self,
-        case_id: str,
-        continuation_id: str,
-        generation: int,
-        presented: List[str],
-        retired_group_ids: List[str],
-        wake_task_id: Optional[str],
-        session_id: str,
-    ) -> None:
-        """Wait for the proactive wake turn to return, then HARNESS-record the
-        consumed watermark (the transport ACK). Because consumption is written
-        ONLY here (never by the LLM), a crash before this point leaves the row
-        'claimed' → reaped → redelivered (at-least-once)."""
-        from src.control.db import get_db
-        try:
-            db = get_db()
-        except Exception:
-            db = None
-        if db is None:
-            return
-        # Bound the wait so a wedged turn never leaks this task forever.
-        deadline = time.time() + float(config.system.task_timeout or 1800)
-        # The IDLE fallback (below) must not fire in the window BEFORE the wake turn
-        # flips the session BUSY, or we would record consumption prematurely. Only
-        # trust "session is IDLE ⇒ turn returned" once we have observed it go BUSY.
-        seen_busy = False
-        while self.running and time.time() < deadline:
-            await asyncio.sleep(2)
-            row = db.get_task(wake_task_id) if wake_task_id else None
-            if row is not None:
-                if row.get("status") in self._CONTINUATION_TERMINAL_STATUSES:
-                    break
-                continue
-            # In-process (non-mesh) turn with no mesh_tasks row: consider it returned
-            # only after we saw the session go BUSY and then settle back to a waiting
-            # state (IDLE or AWAITING_INPUT — a Manager that finished a turn lands in
-            # AWAITING_INPUT, never IDLE) with the wake task no longer active.
-            sess = self.session_store.get(session_id)
-            if sess is None:
-                continue
-            if sess.status == SessionStatus.BUSY:
-                seen_busy = True
-                continue
-            if seen_busy and sess.status in (
-                SessionStatus.IDLE, SessionStatus.AWAITING_INPUT,
-            ) and (not wake_task_id or wake_task_id not in self.active_tasks):
-                break
-        db.record_continuation_consumed(
-            case_id, continuation_id, generation, presented, retired_group_ids,
-        )
-        self._emit_event(
-            "case_continuation_consumed", None,
-            {"case_id": case_id, "generation": generation,
-             "consumed_task_ids": presented, "continuation_id": continuation_id},
-        )
-
     async def _escalate_case_continuation_cap(
         self, case_id: str, cap: int, generation: int,
     ) -> None:
@@ -4267,10 +4003,7 @@ class TaskOrchestrator(ITaskOrchestrator):
         instead of a silent no-op. Isolated: a notify/db failure must never crash
         the tick."""
         try:
-            already = any(
-                e.get("event_type") == "case.manager_unavailable"
-                for e in db.list_flow_events(case_id)
-            )
+            already = db.has_flow_event(case_id, "case.manager_unavailable")
             if already:
                 return
             db.append_flow_event(
@@ -4348,11 +4081,9 @@ class TaskOrchestrator(ITaskOrchestrator):
         # a second kill, even with a different reason label, must not double-write /
         # double-escalate. (round_cap_exhausted is the Wake-Dispatcher's own escalation
         # and is deliberately excluded so a kill after a cap-escalation still fires.)
-        already = any(
-            e.get("event_type") == "flow.interrupted"
-            and (_event_payload(e) or {}).get("reason") != "round_cap_exhausted"
-            for e in db.list_flow_events(case_id)
-        )
+        already = db.count_flow_events(
+            case_id, "flow.interrupted", exclude_reason="round_cap_exhausted",
+        ) > 0
 
         # Cancel the in-flight WORKER tasks joined to this Case. A dispatched worker
         # task is linked entity_type='task', role='task', created_by='manager' (the
@@ -4368,9 +4099,8 @@ class TaskOrchestrator(ITaskOrchestrator):
         try:
             for link in db.list_flow_links(
                 flow_run_id=case_id, entity_type="task", role="task",
+                created_by="manager", limit=1000,
             ):
-                if str(link.get("created_by") or "") != "manager":
-                    continue
                 tid = str(link.get("entity_id") or "").strip()
                 if tid and self.cancel_task(tid):
                     cancelled.append(tid)
@@ -4581,9 +4311,8 @@ class TaskOrchestrator(ITaskOrchestrator):
                 try:
                     for link in db.list_flow_links(
                         flow_run_id=case_id, entity_type="task", role="task",
+                        created_by="manager", limit=1000,
                     ):
-                        if str(link.get("created_by") or "") != "manager":
-                            continue
                         tid = str(link.get("entity_id") or "").strip()
                         if tid:
                             self.cancel_task(tid)
@@ -6512,9 +6241,9 @@ class TaskOrchestrator(ITaskOrchestrator):
     # close_case()             — guard-checked close (open children, unresolved
     #                            rework, completion_criteria all checked first)
     # record_review()          — emit review.accepted / review.rework_requested
-    # record_worker_wait()     — append worker.wait_pending marker
-    # arm_wait_group()         — M3.4 register a wait-group on the Case
-    # reconcile_worker_waits() — resolve outstanding waits against task.finished
+    # record_worker_wait()     — A104 no-op shim (the inbox records the obligation)
+    # arm_wait_group()         — A104 shim: store a D2 delivery filter
+    # reconcile_worker_waits() — A104 shim: what pending_for holds for the Case
     # _close_worker_session_on_case_close() — best-effort warm-worker cleanup
     #
     # Affiliation helpers (_set/_clear/_persist/_resolve) keep session↔case
@@ -6700,7 +6429,10 @@ class TaskOrchestrator(ITaskOrchestrator):
         _MIN_ATTESTATION_CHARS = 40
         if actor == "manager" and manager_advancement_gate_enabled():
             try:
-                events = db.list_flow_events(flow_run_id)
+                events = db.list_flow_events_of_types(
+                    flow_run_id,
+                    ["task.dispatch_voided", "task.dispatched", "review.rework_requested"],
+                )
             except Exception:
                 events = []
             # [A82 Stage 4b] A dispatch whose child Case was voided because its
@@ -6809,10 +6541,10 @@ class TaskOrchestrator(ITaskOrchestrator):
         ``{"ok": False, "reason": "invalid_verdict"}`` for an unknown verdict.
 
         When ``task_id`` is supplied the verdict is TAGGED to that worker task
-        (``entity_type='task'``). Beyond richer per-worker audit, a tagged review is
-        read by the Wake-Dispatcher as a consumption signal: a finish the Manager
-        reviewed out-of-band (e.g. during an operator poke) is no longer re-surfaced
-        as a redundant continuation wake (see ``compute_continuation_tick``). Omitting
+        (``entity_type='task'``). Beyond richer per-worker audit, a tagged review
+        consumes that task's agent-inbox message in the same txn (A104): a finish the
+        Manager reviewed out-of-band (e.g. during an operator poke) is never
+        re-surfaced as a redundant continuation wake. Omitting
         ``task_id`` records a Case-level review exactly as before (no behaviour change).
         """
         from src.control.db import get_db, REVIEW_VERDICT_EVENT_TYPES
@@ -6922,14 +6654,9 @@ class TaskOrchestrator(ITaskOrchestrator):
         timeout: Optional[float] = None,
         actor: str = "manager",
     ) -> Dict[str, Any]:
-        """[A46/M3.3] Orchestrator seam — record a durable pending-wait marker for a
-        dispatched worker so a resumed Manager can reconcile its outstanding waits.
-
-        Mirrors the ``record_review`` seam: gets the db via ``get_db()`` and appends
-        the append-only ``worker.wait_pending`` marker (flag-gated in the db layer).
-        Returns ``{"ok": True, "event_id"}`` (event_id may be None when
-        ``DURABLE_RELAY_ENABLED`` is OFF ⇒ no marker written), or
-        ``{"ok": False, "reason": "db_unavailable"}``.
+        """[A46 → A104 shim] Kept for un-redeployed callers; writes nothing (the
+        agent inbox records the obligation at dispatch + terminal). Returns
+        ``{"ok": True, "event_id": None}`` or ``{"ok": False, "reason": "db_unavailable"}``.
         """
         from src.control.db import get_db
         db = get_db()
@@ -7580,8 +7307,9 @@ class TaskOrchestrator(ITaskOrchestrator):
     ) -> None:
         """Emit the SINGLE durable terminal fact (``task.finished``) for a task.
 
-        This is the one signal the wake-dispatcher reads to resolve a Manager's
-        wait-group (``compute_continuation_tick``). EVERY path that terminalises a
+        It is the Case's AUDIT record of the outcome (A104: no pending state is
+        derived from it — the requester's inbox row is written in the terminal
+        txn). EVERY path that terminalises a
         task must funnel through here so the ledger fact can never diverge from the
         task's real outcome: the live result path (``_flow_terminal_outcome``),
         restart recovery (``_recover_completed_session``) and the reattach path all
