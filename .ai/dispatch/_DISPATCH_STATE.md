@@ -34,6 +34,7 @@
 | unknown | A101_O1_FINDINGS_RESUME_DECISION | ? | ? | — | — | BAD_STATUS |
 | unknown | A101_SESSION_BLOCKING_STATE_DIAGNOSIS | ? | ? | — | — | BAD_STATUS |
 | unknown | A104_GATE1_INVENTORY | ? | ? | — | — | BAD_STATUS |
+| unknown | A104_PHASE4_MIGRATION_REPORT | ? | ? | — | — | BAD_STATUS |
 | unknown | A82_E2E_CERTIFICATION | ? | ? | — | — | BAD_STATUS |
 | unknown | A82_MULTIBACKEND_VALIDATION | ? | ? | — | — | BAD_STATUS |
 | unknown | A82_STAGE8A_BACKEND_AUDIT | ? | ? | — | — | BAD_STATUS |
