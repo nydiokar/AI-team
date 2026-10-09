@@ -1,28 +1,27 @@
 """
-OpenCode backends — CLI and server modes.
+OpenCode server backend (OpenCodeServerBackend).
 
-CLI mode (OpenCodeBackend):
-  First turn:  opencode run --dir <repo> --format json --title <title> "<prompt>"
-  Resume turn: opencode run --dir <repo> --format json --session <session_id> "<prompt>"
-
-Server mode (OpenCodeServerBackend):
   Manages a persistent `opencode serve` subprocess and talks to it via HTTP.
   POST /session → create session
   POST /session/{id}/message → blocking send + receive (returns full message with parts)
   POST /session/{id}/abort  → cancel running generation
   DELETE /session/{id}      → close session
 
-  Advantages over CLI: no cold-start per turn, no stdout parsing, clean HTTP JSON,
+  Advantages: no cold-start per turn, no stdout parsing, clean HTTP JSON,
   token/cost data in responses, `session.diff` events, abort support.
 
-Both are synchronous — called via asyncio.to_thread() by the orchestrator.
+Synchronous — called via asyncio.to_thread() by the carrier/orchestrator.
+
+[A102 S1-OpenCode] One turn body (``_send_message``), driven by the carrier's
+``TurnControl``; no turn-wait policy lives here. The retired OpenCode CLI
+backend (``OpenCodeBackend``, operator-retired 2026-10-02, R3) was deleted.
 """
 import hashlib
 import json
 import logging
 import os
-import queue
 import re
+import uuid
 import shutil
 import socket
 import sqlite3
@@ -41,9 +40,8 @@ _NO_WINDOW = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
 from src.core.process_utils import (
     ensure_node_on_path, process_gone_proof, process_identity, terminate_many_popen,
 )
-from src.core.interfaces import CodingBackend, ExecutionResult, Session
-from src.core.turn_liveness import ProgressClock, TurnLimits, turn_limits
-from src.core.telemetry import TelemetryContext, telemetry_subprocess_env
+from src.core.interfaces import CodingBackend, ExecutionResult, Session, SessionStatus
+from src.core.turn_liveness import TurnControl, TurnLimits, turn_control
 
 logger = logging.getLogger(__name__)
 
@@ -106,6 +104,37 @@ def _git_changed_files(cwd: str) -> List[str]:
     return files
 
 
+def _auto_commit(cwd: str, label: str) -> None:
+    """Stage all changes and commit so the working tree is clean for the next run."""
+    try:
+        add = subprocess.run(
+            ["git", "add", "-A"],
+            cwd=cwd,
+            capture_output=True,
+            timeout=30,
+            creationflags=_NO_WINDOW,
+        )
+        if add.returncode != 0:
+            logger.warning("event=opencode_auto_commit_add_failed cwd=%s", cwd)
+            return
+        msg = f"chore(opencode): auto-commit after task [{label}]"
+        commit = subprocess.run(
+            ["git", "commit", "-m", msg],
+            cwd=cwd,
+            capture_output=True,
+            timeout=30,
+            creationflags=_NO_WINDOW,
+        )
+        if commit.returncode == 0:
+            logger.info("event=opencode_auto_committed cwd=%s label=%s", cwd, label)
+        else:
+            # Nothing to commit is fine (returncode 1 with "nothing to commit")
+            stderr = commit.stderr.decode(errors="replace").strip()
+            if "nothing to commit" not in stderr:
+                logger.warning("event=opencode_auto_commit_failed cwd=%s stderr=%s", cwd, stderr)
+    except Exception as e:
+        logger.warning("event=opencode_auto_commit_exception cwd=%s err=%s", cwd, e)
+
 
 # Markers opencode emits (in stdout JSON events or on stderr) when its own
 # permission system blocks a tool call. These mean the agent was *prevented*
@@ -164,739 +193,6 @@ def _looks_intent_only(output: str) -> bool:
     if len(text) > 600:
         return False
     return any(text.startswith(p) for p in _INTENT_ONLY_PREFIXES)
-
-
-class OpenCodeBackend(CodingBackend):
-    """OpenCode CLI backend."""
-
-    def __init__(self) -> None:
-        self._exe = shutil.which("opencode") or "opencode"
-        self._session_procs: Dict[str, subprocess.Popen] = {}
-        self._oneoff_procs: set = set()
-        self._proc_lock = threading.Lock()
-
-    # ------------------------------------------------------------------
-    # CodingBackend interface
-    # ------------------------------------------------------------------
-
-    def create_session(self, session: Session, *, telemetry_context=None, telemetry_sink=None) -> ExecutionResult:
-        return self._run(
-            cwd=session.repo_path,
-            message=session.last_user_message,
-            session_id=None,
-            title=session.session_id,   # use gateway session ID as title for traceability
-            model=self._session_model(session),
-            agent=self._session_agent(session),
-            session_key=session.session_id,
-            telemetry_context=telemetry_context,
-        )
-
-    def resume_session(self, session: Session, message: str, *, telemetry_context=None, telemetry_sink=None) -> ExecutionResult:
-        oc_session_id = session.backend_session_id
-        if not oc_session_id:
-            # No session ID — fall back to a fresh session rather than dead-ending.
-            logger.warning(
-                "event=opencode_cli_resume_no_id gateway_session=%s — falling back to create_session",
-                session.session_id,
-            )
-            session.last_user_message = message
-            return self.create_session(
-                session,
-                telemetry_context=telemetry_context,
-                telemetry_sink=telemetry_sink,
-            )
-        return self._run(
-            cwd=session.repo_path,
-            message=message,
-            session_id=oc_session_id,
-            title=None,
-            model=self._session_model(session),
-            agent=self._session_agent(session),
-            session_key=session.session_id,
-            telemetry_context=telemetry_context,
-        )
-
-    def run_oneoff(self, cwd: str, message: str, *, telemetry_context=None, telemetry_sink=None) -> ExecutionResult:
-        return self._run(
-            cwd=cwd,
-            message=message,
-            session_id=None,
-            title=None,
-            model=None,
-            agent=None,
-            session_key=None,
-            telemetry_context=telemetry_context,
-        )
-
-    def cancel(self, session: Session) -> None:
-        with self._proc_lock:
-            proc = self._session_procs.get(session.session_id)
-        if proc is not None:
-            terminate_many_popen([proc])
-
-    def close(self, session: Session) -> None:
-        pass
-
-    def terminate_active_processes(self) -> None:
-        with self._proc_lock:
-            procs = list(self._session_procs.values()) + list(self._oneoff_procs)
-        terminate_many_popen(procs)
-
-    # ------------------------------------------------------------------
-    # Core run
-    # ------------------------------------------------------------------
-
-    def _run(
-        self,
-        cwd: str,
-        message: str,
-        session_id: Optional[str],
-        title: Optional[str],
-        model: Optional[str],
-        agent: Optional[str],
-        session_key: Optional[str],
-        telemetry_context: Optional[TelemetryContext] = None,
-    ) -> ExecutionResult:
-        start = time.time()
-
-        # --- git safety pre-checks ---
-        pre_check = self._pre_run_git_check(cwd)
-        if pre_check is not None:
-            return pre_check
-
-        # --- repo-level lock ---
-        repo_lock = _get_repo_lock(cwd)
-        if not repo_lock.acquire(blocking=False):
-            return ExecutionResult(
-                success=False,
-                output="",
-                errors=[
-                    f"Another OpenCode task is already running against repo: {cwd}. "
-                    "Concurrent mutations are not allowed. Wait for the current task to finish."
-                ],
-            )
-
-        try:
-            return self._run_locked(
-                cwd=cwd,
-                message=message,
-                session_id=session_id,
-                title=title,
-                model=model,
-                agent=agent,
-                session_key=session_key,
-                start=start,
-                telemetry_context=telemetry_context,
-            )
-        finally:
-            repo_lock.release()
-
-    def _run_locked(
-        self,
-        cwd: str,
-        message: str,
-        session_id: Optional[str],
-        title: Optional[str],
-        model: Optional[str],
-        agent: Optional[str],
-        session_key: Optional[str],
-        start: float,
-        telemetry_context: Optional[TelemetryContext] = None,
-    ) -> ExecutionResult:
-        # Cost guard: blocked under test mode unless OpenCode e2e is opted in.
-        from src.core.test_guard import assert_live_calls_allowed
-        assert_live_calls_allowed("opencode")
-        cmd = self._build_cmd(
-            cwd=cwd,
-            message=message,
-            session_id=session_id,
-            title=title,
-            model=model,
-            agent=agent,
-        )
-
-        try:
-            from config import config as _cfg
-            inactivity_sec = max(60, int(getattr(_cfg.system, "inactivity_timeout_sec", 36000)))
-            oc_cfg = getattr(_cfg, "opencode", None)
-            collect_diff = bool(getattr(oc_cfg, "collect_diff", True)) if oc_cfg else True
-        except Exception:
-            inactivity_sec = 36000
-            collect_diff = True
-
-        logger.info(
-            "event=opencode_run cmd=%s cwd=%s session_id=%s session_key=%s",
-            cmd,
-            cwd,
-            session_id or "(new)",
-            session_key or "(oneoff)",
-        )
-
-        proc: Optional[subprocess.Popen] = None
-        proc_env = ensure_node_on_path()
-        if session_key:
-            proc_env["SESSION_ID"] = session_key
-        proc_env.update(telemetry_subprocess_env(telemetry_context))
-
-        try:
-            proc = subprocess.Popen(
-                cmd,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                cwd=cwd or None,
-                env=proc_env,
-                creationflags=_NO_WINDOW,
-            )
-            self._register_process(proc, session_key)
-
-            stdout_q: queue.Queue = queue.Queue()
-            stderr_q: queue.Queue = queue.Queue()
-            _SENTINEL = object()
-
-            def _reader(pipe: Any, q: queue.Queue) -> None:
-                try:
-                    for raw_line in pipe:
-                        q.put(raw_line)
-                finally:
-                    q.put(_SENTINEL)
-
-            stdout_thread = threading.Thread(target=_reader, args=(proc.stdout, stdout_q), daemon=True)
-            stderr_thread = threading.Thread(target=_reader, args=(proc.stderr, stderr_q), daemon=True)
-            stdout_thread.start()
-            stderr_thread.start()
-
-            stdout_lines: List[bytes] = []
-            stderr_lines: List[bytes] = []
-            stdout_done = False
-            stderr_done = False
-            killed_for_inactivity = False
-
-            while not (stdout_done and stderr_done):
-                if not stdout_done:
-                    try:
-                        item = stdout_q.get(timeout=inactivity_sec)
-                        if item is _SENTINEL:
-                            stdout_done = True
-                        else:
-                            stdout_lines.append(item)
-                    except queue.Empty:
-                        logger.warning(
-                            "opencode inactivity timeout after %.0fs (no stdout) — terminating pid=%s",
-                            inactivity_sec,
-                            proc.pid,
-                        )
-                        killed_for_inactivity = True
-                        terminate_many_popen([proc])
-                        stdout_done = True
-
-                if not stderr_done:
-                    while True:
-                        try:
-                            item = stderr_q.get_nowait()
-                            if item is _SENTINEL:
-                                stderr_done = True
-                                break
-                            stderr_lines.append(item)
-                        except queue.Empty:
-                            break
-
-            # Flush remaining output
-            for q_ref, lines_ref, already_done, wait in (
-                (stdout_q, stdout_lines, stdout_done, False),
-                (stderr_q, stderr_lines, stderr_done, True),
-            ):
-                if already_done:
-                    continue
-                if not wait:
-                    while True:
-                        try:
-                            item = q_ref.get_nowait()
-                            if item is not _SENTINEL:
-                                lines_ref.append(item)
-                        except queue.Empty:
-                            break
-                else:
-                    while True:
-                        try:
-                            item = q_ref.get(timeout=5.0)
-                            if item is _SENTINEL:
-                                break
-                            lines_ref.append(item)
-                        except queue.Empty:
-                            break
-
-            stdout_thread.join(timeout=5.0)
-            stderr_thread.join(timeout=5.0)
-
-            try:
-                proc.wait(timeout=10.0)
-            except subprocess.TimeoutExpired:
-                pass
-            returncode = proc.returncode if proc.returncode is not None else -1
-
-            stdout = b"".join(stdout_lines).decode(errors="replace")
-            stderr = b"".join(stderr_lines).decode(errors="replace")
-            elapsed = time.time() - start
-
-            if killed_for_inactivity:
-                elapsed_min = int(elapsed // 60)
-                inactivity_min = int(inactivity_sec // 60)
-                return ExecutionResult(
-                    success=False,
-                    output="",
-                    errors=[
-                        f"OpenCode process killed after {inactivity_min}m of inactivity "
-                        f"(total elapsed: {elapsed_min}m). The process produced no output — "
-                        f"it may have been waiting for input or hung on a tool call. "
-                        f"Adjust GATEWAY_INACTIVITY_TIMEOUT_SEC (currently {inactivity_sec}) to tune this."
-                    ],
-                    execution_time=elapsed,
-                    raw_stdout=stdout,
-                    raw_stderr=stderr,
-                )
-
-            result = self._parse(stdout, stderr, returncode, elapsed, known_session_id=session_id or "")
-
-            # Session ID fallback: if the run started a new session and we still
-            # don't have an ID, query the session list to recover it.
-            if not result.backend_session_id and session_id is None and returncode == 0:
-                recovered = self._recover_session_id(cwd=cwd, title=title)
-                if recovered:
-                    result.backend_session_id = recovered
-                    logger.info("event=opencode_session_id_recovered id=%s", recovered)
-                else:
-                    logger.warning(
-                        "event=opencode_session_id_missing cwd=%s title=%s — marking needs_manual_attention",
-                        cwd,
-                        title,
-                    )
-                    result.errors = list(result.errors or []) + [
-                        "OpenCode session ID could not be extracted from output or session list. "
-                        "Status: needs_manual_attention — continuation is blocked until the session ID is resolved."
-                    ]
-                    result.success = False
-
-            # Post-run git diff collection
-            if collect_diff and cwd:
-                result.files_modified = _git_changed_files(cwd)
-                diff_stat = _run_git(cwd, ["diff", "--stat", "HEAD"]) or ""
-                diff = _run_git(cwd, ["diff", "HEAD"]) or ""
-                if result.parsed_output is None:
-                    result.parsed_output = {}
-                if isinstance(result.parsed_output, dict):
-                    result.parsed_output["git_diff_stat"] = diff_stat
-                    result.parsed_output["git_diff"] = diff
-
-                # Un-flag a suspect "permission_block": if the run actually
-                # modified files, real work happened — the rejected permission
-                # was incidental, not a dead-end. The gate in _parse runs before
-                # git state is known, so we correct it here.
-                if (
-                    not result.success
-                    and result.error_class == "permission_block"
-                    and (result.files_modified or diff.strip())
-                ):
-                    logger.info(
-                        "event=opencode_suspect_cleared reason=files_modified files=%s",
-                        result.files_modified,
-                    )
-                    result.success = True
-                    result.error_class = ""
-                    # Drop the dead-end error we added in _parse.
-                    result.errors = [
-                        e for e in (result.errors or [])
-                        if "dead-end" not in e.lower()
-                    ]
-
-            # Auto-commit so the working tree is clean for subsequent runs.
-            # OpenCode enforces a clean tree before each run; without this the
-            # second task in the same session will always fail.
-            if result.success and cwd and _git_changed_files(cwd):
-                commit_label = session_key or title or "opencode-task"
-                self._auto_commit(cwd, commit_label)
-
-            return result
-
-        except Exception as e:
-            return ExecutionResult(
-                success=False,
-                output="",
-                errors=[str(e)],
-                execution_time=time.time() - start,
-            )
-        finally:
-            if proc is not None:
-                self._unregister_process(proc, session_key)
-
-    # ------------------------------------------------------------------
-    # Command builder
-    # ------------------------------------------------------------------
-
-    def _build_cmd(
-        self,
-        cwd: str,
-        message: str,
-        session_id: Optional[str],
-        title: Optional[str],
-        model: Optional[str],
-        agent: Optional[str],
-    ) -> List[str]:
-        """Build the opencode run argument list. Never shell-concatenates."""
-        cmd = [self._exe, "run", "--dir", cwd, "--format", "json"]
-
-        if model:
-            cmd += ["--model", model]
-        if agent:
-            cmd += ["--agent", agent]
-
-        if session_id:
-            cmd += ["--session", session_id]
-        elif title:
-            cmd += ["--title", title]
-
-        cmd.append(message)
-        return cmd
-
-    # ------------------------------------------------------------------
-    # Output parser
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def _parse(stdout: str, stderr: str, returncode: int, elapsed: float, known_session_id: str = "") -> ExecutionResult:
-        success = returncode == 0
-        backend_session_id = known_session_id or ""
-        output = ""
-        parsed_output: Optional[Dict[str, Any]] = None
-        parsed_errors: List[str] = []
-        # Track step_finish reasons to detect interrupted/truncated generation.
-        # Normal reasons: "stop" (natural end), "tool-calls" (tool invocation).
-        # "unknown" means the model generation was cut off mid-response.
-        step_finish_reasons: List[str] = []
-
-        # OpenCode emits newline-delimited JSON events.
-        # Known session ID fields: "sessionID", "session_id", "id" (inside a session object).
-        for raw_line in stdout.splitlines():
-            line = raw_line.strip()
-            if not line or not line.startswith("{"):
-                continue
-            try:
-                event: Dict[str, Any] = json.loads(line)
-            except Exception:
-                continue
-
-            # Session ID extraction — try multiple field shapes defensively.
-            for field in ("sessionID", "session_id", "session"):
-                val = event.get(field)
-                if isinstance(val, str) and val:
-                    backend_session_id = val
-                    break
-                if isinstance(val, dict):
-                    for sub in ("id", "sessionID", "session_id"):
-                        sub_val = val.get(sub)
-                        if isinstance(sub_val, str) and sub_val:
-                            backend_session_id = sub_val
-                            break
-
-            event_type = event.get("type", "") or event.get("event", "")
-
-            # Real OpenCode event schema (v1.x):
-            #   type="text"  → part.text contains the assistant text chunk
-            #   type="message"/"assistant"/"content" → legacy/generic shapes
-            part = event.get("part") if isinstance(event.get("part"), dict) else {}
-            if event_type == "text":
-                chunk = part.get("text") or ""
-                if isinstance(chunk, str) and chunk.strip():
-                    output = (output + chunk) if output else chunk
-            elif event_type in ("message", "assistant", "content"):
-                for key in ("content", "text", "message", "output"):
-                    val = event.get(key) or part.get(key)
-                    if isinstance(val, str) and val.strip():
-                        output = val.strip()
-                        break
-            elif event_type == "step_finish":
-                reason = part.get("reason") or event.get("reason") or ""
-                if reason:
-                    step_finish_reasons.append(reason)
-
-            # Error events
-            if event_type in ("error",):
-                msg = event.get("message") or event.get("error") or part.get("message") or ""
-                if isinstance(msg, str) and msg:
-                    parsed_errors.append(msg)
-
-            parsed_output = event  # keep last event for diagnostics
-
-        if not output:
-            output = stdout.strip()
-
-        # Detect truncated generation: step_finish with reason="unknown" and partial output.
-        # OpenCode exits 0 but the model was interrupted before completing its response.
-        truncated = any(r == "unknown" for r in step_finish_reasons) and bool(output)
-        if truncated:
-            logger.warning(
-                "event=opencode_truncated_output step_finish_reasons=%s output_len=%d",
-                step_finish_reasons,
-                len(output),
-            )
-            output = output + "\n\n_(Note: the response above was cut off — OpenCode reported an interrupted generation. The full reply may be missing.)_"
-
-        errors: List[str] = []
-        if not success:
-            if stderr and stderr.strip():
-                errors.append(stderr.strip())
-            if parsed_errors:
-                errors.extend(parsed_errors)
-            if not errors:
-                errors.append(f"opencode exited with code {returncode}")
-
-        # Suspect-run / dead-end detection. opencode can exit 0 having done no
-        # real work because it hit a permission wall (e.g. it tried to read a
-        # path outside the repo and opencode auto-rejected it) and then gave up.
-        # Such a run reports success with optimistic, intent-only text ("Working
-        # autonomously...", "Starting with...") and zero side effects — which is
-        # indistinguishable from a real success unless we look. Flip it to a
-        # failure so the orchestrator retries / surfaces it instead of relaying
-        # a false "it's going to work" to the user.
-        error_class = ""
-        if success:
-            blocked = _detect_permission_block(stdout, stderr)
-            if blocked:
-                no_side_effects = (
-                    not any(r == "stop" for r in step_finish_reasons)  # never reached a natural end
-                )
-                intent_only = _looks_intent_only(output)
-                if no_side_effects and intent_only:
-                    success = False
-                    error_class = "permission_block"
-                    errors.append(
-                        "OpenCode stopped early on an auto-rejected permission "
-                        f"({blocked}) and produced only intent-only text without "
-                        "completing the work. This is a dead-end, not a success. "
-                        "Widen the opencode permission/allowed paths or keep the "
-                        "agent's actions inside the repo."
-                    )
-
-        return ExecutionResult(
-            success=success,
-            output=output,
-            backend_session_id=backend_session_id,
-            errors=errors,
-            execution_time=elapsed,
-            raw_stdout=stdout,
-            raw_stderr=stderr,
-            parsed_output=parsed_output,
-            return_code=returncode,
-            error_class=error_class,
-        )
-
-    # ------------------------------------------------------------------
-    # Session ID recovery via session list
-    # ------------------------------------------------------------------
-
-    def _recover_session_id(self, cwd: str, title: Optional[str]) -> Optional[str]:
-        """Query `opencode session list` and match the most recent session for this repo/title."""
-        try:
-            result = subprocess.run(
-                [self._exe, "session", "list", "--format", "json", "--max-count", "10"],
-                capture_output=True,
-                text=True, encoding="utf-8", errors="replace",
-                timeout=15,
-                creationflags=_NO_WINDOW,
-            )
-            if result.returncode != 0:
-                return None
-        except Exception:
-            return None
-
-        cwd_resolved = str(Path(cwd).resolve())
-
-        # Output may be a JSON array or newline-delimited JSON objects.
-        raw = result.stdout.strip()
-        sessions: List[Dict[str, Any]] = []
-        if raw.startswith("["):
-            try:
-                sessions = json.loads(raw)
-            except Exception:
-                pass
-        else:
-            for line in raw.splitlines():
-                line = line.strip()
-                if line.startswith("{"):
-                    try:
-                        sessions.append(json.loads(line))
-                    except Exception:
-                        pass
-
-        if not sessions:
-            return None
-
-        # Score each session: title match > path match > most recent
-        def _score(s: Dict[str, Any]) -> int:
-            score = 0
-            s_title = str(s.get("title") or "")
-            s_path = str(s.get("path") or s.get("dir") or s.get("cwd") or "")
-            if title and s_title and s_title == title:
-                score += 10
-            if cwd_resolved and s_path:
-                try:
-                    if str(Path(s_path).resolve()) == cwd_resolved:
-                        score += 5
-                except Exception:
-                    pass
-            return score
-
-        ranked = sorted(sessions, key=lambda s: (_score(s), s.get("createdAt") or s.get("created_at") or ""), reverse=True)
-        best = ranked[0]
-        for field in ("id", "sessionID", "session_id"):
-            val = best.get(field)
-            if isinstance(val, str) and val:
-                return val
-        return None
-
-    # ------------------------------------------------------------------
-    # Auto-commit helper
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def _auto_commit(cwd: str, label: str) -> None:
-        """Stage all changes and commit so the working tree is clean for the next run."""
-        try:
-            add = subprocess.run(
-                ["git", "add", "-A"],
-                cwd=cwd,
-                capture_output=True,
-                timeout=30,
-                creationflags=_NO_WINDOW,
-            )
-            if add.returncode != 0:
-                logger.warning("event=opencode_auto_commit_add_failed cwd=%s", cwd)
-                return
-            msg = f"chore(opencode): auto-commit after task [{label}]"
-            commit = subprocess.run(
-                ["git", "commit", "-m", msg],
-                cwd=cwd,
-                capture_output=True,
-                timeout=30,
-                creationflags=_NO_WINDOW,
-            )
-            if commit.returncode == 0:
-                logger.info("event=opencode_auto_committed cwd=%s label=%s", cwd, label)
-            else:
-                # Nothing to commit is fine (returncode 1 with "nothing to commit")
-                stderr = commit.stderr.decode(errors="replace").strip()
-                if "nothing to commit" not in stderr:
-                    logger.warning("event=opencode_auto_commit_failed cwd=%s stderr=%s", cwd, stderr)
-        except Exception as e:
-            logger.warning("event=opencode_auto_commit_exception cwd=%s err=%s", cwd, e)
-
-    # ------------------------------------------------------------------
-    # Git pre-run check
-    # ------------------------------------------------------------------
-
-    def _pre_run_git_check(self, cwd: str) -> Optional[ExecutionResult]:
-        """Return an error ExecutionResult if the repo fails basic safety checks."""
-        if not cwd:
-            return ExecutionResult(
-                success=False,
-                output="",
-                errors=["repo_path is required for OpenCode runs."],
-            )
-        p = Path(cwd)
-        if not p.exists():
-            return ExecutionResult(
-                success=False,
-                output="",
-                errors=[f"Repository path does not exist: {cwd}"],
-            )
-        if not p.is_dir():
-            return ExecutionResult(
-                success=False,
-                output="",
-                errors=[f"Repository path is not a directory: {cwd}"],
-            )
-        # Verify it is a git repo
-        toplevel = _run_git(cwd, ["rev-parse", "--show-toplevel"])
-        if toplevel is None:
-            return ExecutionResult(
-                success=False,
-                output="",
-                errors=[f"Path is not inside a Git repository: {cwd}"],
-            )
-
-        # Allowed root check — reuse the existing config value (claude.allowed_root).
-        # OpenCode can override this with OPENCODE_ALLOWED_ROOT if needed.
-        try:
-            import os
-            oc_root = os.getenv("OPENCODE_ALLOWED_ROOT") or os.getenv("CLAUDE_ALLOWED_ROOT")
-            if oc_root:
-                resolved = p.resolve()
-                allowed = Path(oc_root).resolve()
-                if not (resolved == allowed or allowed in resolved.parents):
-                    return ExecutionResult(
-                        success=False,
-                        output="",
-                        errors=[f"Repository path {cwd} is outside the allowed root: {oc_root}"],
-                    )
-        except Exception:
-            pass
-
-        return None
-
-    # ------------------------------------------------------------------
-    # Process registry helpers
-    # ------------------------------------------------------------------
-
-    def _register_process(self, proc: subprocess.Popen, session_key: Optional[str]) -> None:
-        stale: Optional[subprocess.Popen] = None
-        with self._proc_lock:
-            if session_key:
-                stale = self._session_procs.get(session_key)
-                self._session_procs[session_key] = proc
-            else:
-                self._oneoff_procs.add(proc)
-        if stale is not None and stale is not proc:
-            terminate_many_popen([stale])
-
-    def _unregister_process(self, proc: subprocess.Popen, session_key: Optional[str]) -> None:
-        with self._proc_lock:
-            if session_key:
-                current = self._session_procs.get(session_key)
-                if current is proc:
-                    self._session_procs.pop(session_key, None)
-            else:
-                self._oneoff_procs.discard(proc)
-
-    # ------------------------------------------------------------------
-    # Helpers to read model/agent from session metadata
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def _session_model(session: Session) -> Optional[str]:
-        # Resolve via the shared catalog logic: session.model → config default →
-        # catalog default. (Previously read a dead task_history["opencode_model"]
-        # key that nothing ever wrote — see MODEL_PICKER_PLAN.md R2.)
-        try:
-            from config.models import resolve_model
-            return resolve_model(session)
-        except Exception:
-            try:
-                from config import config as _cfg
-                return getattr(_cfg.opencode, "default_model", None) or None
-            except Exception:
-                return None
-
-    @staticmethod
-    def _session_agent(session: Session) -> Optional[str]:
-        meta = session.task_history[-1] if session.task_history else {}
-        explicit = meta.get("opencode_agent") or None
-        if explicit:
-            return explicit
-        try:
-            from config import config as _cfg
-            return getattr(_cfg.opencode, "default_agent", None) or None
-        except Exception:
-            return None
 
 
 # ---------------------------------------------------------------------------
@@ -1056,7 +352,6 @@ class OpenCodeServerBackend(CodingBackend):
         self._repo_capacity = threading.BoundedSemaphore(8)
         self._server_slots = threading.BoundedSemaphore(8)
         self._server_slot_keys: set[str] = set()
-        self._active_cancel: Dict[str, threading.Event] = {}
         # [A82 Step 4b] managed-turn bookkeeping (memory only).
         self._managed: Dict[str, _ManagedTurn] = {}          # turn_uuid -> attempt
         self._armed_cancels: set[str] = set()                # cancels for not-yet-seen turns
@@ -1079,126 +374,69 @@ class OpenCodeServerBackend(CodingBackend):
     # CodingBackend interface
     # ------------------------------------------------------------------
 
-    def create_session(self, session: Session, *, telemetry_context=None, telemetry_sink=None) -> ExecutionResult:
-        start = time.time()
-        key = self._server_key(session.repo_path)
-        err = self._ensure_server(key, session.repo_path)
-        if err:
-            return ExecutionResult(success=False, output="", errors=[err], execution_time=time.time() - start)
+    def create_session(self, session: Session, *, turn: TurnControl,
+                        telemetry_context=None, telemetry_sink=None) -> ExecutionResult:
+        """Start the native session (if needed) and run the first prompt
+        (``session.last_user_message``) tagged with ``turn.turn_uuid``. One body:
+        ``_send_message`` resolves/creates the native session behind every gate."""
+        return self._send_message(session, session.last_user_message, turn=turn, kind="turn",
+                                  telemetry_context=telemetry_context, telemetry_sink=telemetry_sink)
 
-        agent = self._session_agent(session) or "build"
-        model_id, provider_id = self._parse_model(self._session_model(session))
+    def resume_session(self, session: Session, message: str, *, turn: TurnControl,
+                       telemetry_context=None, telemetry_sink=None) -> ExecutionResult:
+        """Continue the native session: submit ``message`` tagged with
+        ``turn.turn_uuid``; busy ⇒ typed conflict before submit; lost ack ⇒
+        reconcile by id (never resubmit); only OUR correlated reply is returned;
+        expiry/unattributable ⇒ ``RecoveryRequiredError`` with late delivery via
+        the proactive sink."""
+        return self._send_message(session, message, turn=turn, kind="turn",
+                                  telemetry_context=telemetry_context, telemetry_sink=telemetry_sink)
 
-        create_body: Dict[str, Any] = {
-            "title": session.session_id,
-            "agent": agent,
-        }
-
-        oc_session, err = self._http(key, "POST", "/session", create_body)
-        if err:
-            return ExecutionResult(success=False, output="", errors=[err], execution_time=time.time() - start)
-
-        oc_session_id: str = oc_session.get("id", "")
-        if not oc_session_id:
-            return ExecutionResult(
-                success=False, output="", errors=["Server returned session without ID"],
-                execution_time=time.time() - start,
-            )
-
-        # NOTE: do NOT PATCH /session/{id} to set the model. On opencode 1.16.2
-        # that PATCH is a silent no-op that leaves the session in a corrupt state
-        # (providerID="big-pickle", modelID="") and then 500s at message time
-        # (ProviderModelNotFoundError). The supported way is to pass the model
-        # inline in the message body, which _send_message does.
-        session.backend_session_id = oc_session_id
-        result = self._send_message(
-            key=key,
-            oc_session_id=oc_session_id,
-            message=session.last_user_message,
-            cwd=session.repo_path,
-            start=start,
-            model_id=model_id,
-            provider_id=provider_id,
-            telemetry_context=telemetry_context,
-            telemetry_sink=telemetry_sink,
+    def run_oneoff(self, cwd: str, message: str, *, turn: Optional[TurnControl] = None,
+                   telemetry_context=None, telemetry_sink=None) -> ExecutionResult:
+        """[R1] A throwaway ``Session`` + :meth:`create_session` with its own
+        ``turn_control``. The temporary native session is deleted afterwards."""
+        sess = Session(
+            session_id=f"oneoff-{uuid.uuid4().hex[:12]}", backend="opencode-server",
+            repo_path=cwd, status=SessionStatus.IDLE, created_at="", updated_at="",
+            last_user_message=message,
         )
-        if result.error_class in {"capacity_exceeded", "repo_busy", "event_stream_unavailable"}:
-            # These failures occur before prompt submission, so this newly
-            # created empty session has no resumable user history to preserve.
-            self._http(key, "DELETE", f"/session/{oc_session_id}")
-            session.backend_session_id = ""
-            result.backend_session_id = ""
-        return result
-
-    def resume_session(self, session: Session, message: str, *, telemetry_context=None, telemetry_sink=None) -> ExecutionResult:
-        start = time.time()
-        oc_session_id = session.backend_session_id
-        key = self._server_key(session.repo_path)
-
-        # A missing native identity cannot safely resume this conversation. Do not
-        # silently replace it with a blank session and lose continuity.
-        if not oc_session_id:
-            return ExecutionResult(False, "", errors=["OpenCode native session ID is missing; conversation cannot be resumed safely."], error_class="session_identity_missing")
-
-        err = self._ensure_server(key, session.repo_path)
-        if err:
-            return ExecutionResult(success=False, output="", errors=[err], execution_time=time.time() - start)
-
-        # Verify the session still exists (server may have restarted and lost it).
-        info, sess_err = self._http(key, "GET", f"/session/{oc_session_id}")
-        if sess_err or not info.get("id"):
-            return ExecutionResult(False, "", backend_session_id=oc_session_id,
-                errors=[sess_err or "Saved OpenCode session no longer exists; refusing to create a blank replacement."],
-                error_class="session_unavailable", execution_time=time.time() - start)
-
-        model_id, provider_id = self._parse_model(self._session_model(session))
-        result = self._send_message(
-            key=key,
-            oc_session_id=oc_session_id,
-            message=message,
-            cwd=session.repo_path,
-            start=start,
-            model_id=model_id,
-            provider_id=provider_id,
-            telemetry_context=telemetry_context,
-            telemetry_sink=telemetry_sink,
-        )
-        return result
-
-    def run_oneoff(self, cwd: str, message: str, *, telemetry_context=None, telemetry_sink=None) -> ExecutionResult:
-        start = time.time()
-        key = self._server_key(cwd)
-        err = self._ensure_server(key, cwd)
-        if err:
-            return ExecutionResult(success=False, output="", errors=[err], execution_time=time.time() - start)
-
-        body: Dict[str, Any] = {"title": "oneoff", "agent": "build"}
-
-        oc_session, err = self._http(key, "POST", "/session", body)
-        if err:
-            return ExecutionResult(success=False, output="", errors=[err], execution_time=time.time() - start)
-
-        oc_session_id = oc_session.get("id", "")
-        result = self._send_message(key=key, oc_session_id=oc_session_id, message=message, cwd=cwd, start=start,
-                                    telemetry_context=telemetry_context, telemetry_sink=telemetry_sink)
-
+        if turn is None:
+            turn = turn_control(str(uuid.uuid4()))
+        result = self.create_session(sess, turn=turn,
+                                     telemetry_context=telemetry_context, telemetry_sink=telemetry_sink)
+        oc_id = sess.backend_session_id
         # One-off sessions have no caller-owned resume handle, so delete this
-        # explicitly temporary session after successful completion. Failed turns
-        # remain available for diagnostics.
-        if (result.success or result.error_class in {"capacity_exceeded", "repo_busy", "event_stream_unavailable"}) and oc_session_id:
-            self._http(key, "DELETE", f"/session/{oc_session_id}")
+        # explicitly temporary session after it completed (or was never submitted).
+        if oc_id and (result.success or result.error_class in
+                      {"capacity_exceeded", "repo_busy", "event_stream_unavailable"}):
+            self._http(self._server_key(cwd), "DELETE", f"/session/{oc_id}")
         result.backend_session_id = ""
         return result
 
-    def cancel(self, session: Session) -> None:
-        oc_id = session.backend_session_id
-        key = self._server_key(session.repo_path)
+    def cancel(self, session: Session, turn_uuid: str) -> bool:
+        """Cancel exactly ``turn_uuid``: arm it when it has not begun here; abort
+        only while its message is the running one; refuse (False, disarmed) when
+        another message is running — never abort someone else's turn."""
+        if not turn_uuid:
+            return False
         with self._lock:
-            cancel_event = self._active_cancel.get(oc_id)
-        if cancel_event is not None:
-            cancel_event.set()
-        if oc_id and self._base_urls.get(key):
-            self._http(key, "POST", f"/session/{oc_id}/abort")
+            entry = self._managed.get(turn_uuid)
+            if entry is None:
+                self._armed_cancels.add(turn_uuid)
+                return True
+            entry.cancel_armed = True
+            phase = entry.phase
+        if phase == "reserved":
+            return True        # the pre-submit check refuses to submit it
+        delivered = self._abort_if_ours(entry)
+        if delivered is False:
+            with self._lock:
+                entry.cancel_armed = False
+            return False
+        if phase == "held":
+            return bool(delivered)  # no live waiter to deliver it later
+        return True            # delivered, or armed for when ours is running
 
     def close(self, session: Session) -> None:
         # OpenCode DELETE removes the session and all its data. Ordinary close
@@ -1212,45 +450,14 @@ class OpenCodeServerBackend(CodingBackend):
                     entry.forgotten = True
         return None
 
-    def compact_session(self, session: Session) -> ExecutionResult:
-        start = time.time()
-        oc_id = session.backend_session_id
-        if not oc_id:
-            return ExecutionResult(False, "", errors=["OpenCode native session ID is missing."],
-                                   error_class="session_identity_missing")
-        key = self._server_key(session.repo_path)
-        err = self._ensure_server(key, session.repo_path)
-        if err:
-            return ExecutionResult(False, "", backend_session_id=oc_id, errors=[err],
-                                   error_class="server_unavailable", execution_time=time.time() - start)
-        model_id, provider_id = self._parse_model(self._session_model(session))
-        if not provider_id or not model_id:
-            providers, provider_err = self._http(key, "GET", "/config/providers", timeout=10)
-            defaults = providers.get("default") if isinstance(providers, dict) else None
-            if not provider_err and isinstance(defaults, dict) and defaults:
-                provider_id, model_id = next(iter(defaults.items()))
-        if not provider_id or not model_id:
-            return ExecutionResult(False, "", backend_session_id=oc_id,
-                errors=["OpenCode has no selected or configured default model for native compaction."],
-                error_class="model_unavailable", execution_time=time.time() - start)
-        body = {"providerID": provider_id, "modelID": model_id}
-        repo_lock = _get_repo_lock(session.repo_path)
-        if not self._repo_capacity.acquire(blocking=False):
-            return ExecutionResult(False, "", backend_session_id=oc_id,
-                errors=["OpenCode server capacity is full."], error_class="capacity_exceeded")
-        if not repo_lock.acquire(blocking=False):
-            self._repo_capacity.release()
-            return ExecutionResult(False, "", backend_session_id=oc_id,
-                errors=["Another OpenCode task is already running against this repo."], error_class="repo_busy")
-        try:
-            summarized, err = self._http(key, "POST", f"/session/{oc_id}/summarize", body)
-        finally:
-            repo_lock.release()
-            self._repo_capacity.release()
-        if err is None and summarized is False:
-            err = "OpenCode did not complete native session summarization."
-        return ExecutionResult(not err, "", backend_session_id=oc_id, errors=[err] if err else [],
-                               error_class="server_error" if err else "", execution_time=time.time() - start)
+    def compact_session(self, session: Session, *, turn: TurnControl,
+                        telemetry_context=None, telemetry_sink=None) -> ExecutionResult:
+        """One compaction (native ``POST /session/{id}/summarize``) as one managed
+        turn owned by ``turn``: not quiescent ⇒ typed conflict before submit; an
+        unattributable outcome ⇒ ``RecoveryRequiredError``. Its socket timeout is
+        ``turn.remaining()`` — no config wall clock lives here."""
+        return self._send_message(session, "", turn=turn, kind="compaction",
+                                  telemetry_context=telemetry_context, telemetry_sink=telemetry_sink)
 
     def terminate_active_processes(self) -> None:
         with self._lock:
@@ -1312,74 +519,30 @@ class OpenCodeServerBackend(CodingBackend):
         events is never given up on)."""
         return None
 
-    def _managed_compaction_timeout_sec(self) -> float:
-        """Socket timeout of the synchronous ``/summarize`` call (it streams no
-        progress, so it keeps a bounded per-call limit)."""
-        try:
-            from config import config as _cfg
-            return float(max(1, int(getattr(_cfg.opencode, "timeout_seconds", 1800))))
-        except Exception:
-            return 1800.0
-
+    # ------------------------------------------------------------------
+    # [A102 S1] Deprecated carrier shims — one line each, building a TurnControl
+    # and calling the natural method. S2 deletes these (the carrier will build
+    # turn_control(...) itself); the carrier is unchanged in S1.
+    # ------------------------------------------------------------------
     def run_managed_turn(self, session: Session, message: str, ownership: Any, *,
                          telemetry_context: Any = None, telemetry_sink: Any = None,
                          on_process: Any = None) -> ExecutionResult:
-        return self._run_managed("turn", session, message, ownership, telemetry_context,
-                                 telemetry_sink, on_process)
+        return self.resume_session(session, message, turn=self._turn_from(ownership, on_process),
+                                   telemetry_context=telemetry_context, telemetry_sink=telemetry_sink)
 
     def run_managed_compaction(self, session: Session, ownership: Any, *,
                                telemetry_context: Any = None, telemetry_sink: Any = None,
                                on_process: Any = None) -> ExecutionResult:
-        """Native ``POST /session/{id}/summarize`` (synchronous; server-chosen
-        ids, so the compaction message is identified as the new user message
-        carrying a ``compaction`` part that did not exist before submit)."""
-        return self._run_managed("compaction", session, "", ownership, telemetry_context,
-                                 telemetry_sink, on_process)
+        return self.compact_session(session, turn=self._turn_from(ownership, on_process),
+                                    telemetry_context=telemetry_context, telemetry_sink=telemetry_sink)
 
-    def _run_managed(self, kind: str, session: Session, message: str, ownership: Any,
-                     telemetry_context: Any, telemetry_sink: Any, on_process: Any) -> ExecutionResult:
-        from src.control.turn_queue import (
-            OwnershipConflictError, RecoveryRequiredError, TurnQueueError,
-        )
-
-        if (getattr(ownership, "session_id", "") or "") != (session.session_id or ""):
-            raise OwnershipConflictError("managed ownership does not match the session",
-                                         task_id=getattr(ownership, "task_id", None))
-        turn_uuid = str(getattr(ownership, "turn_uuid", "") or "")
-        if not turn_uuid:
-            raise OwnershipConflictError("managed OpenCode turn requires a turn_uuid (attribution key)",
-                                         task_id=getattr(ownership, "task_id", None))
-        start = time.time()
-        entry = _ManagedTurn(turn_uuid=turn_uuid, session_id=session.session_id or "", kind=kind,
-                             message_id=managed_message_id(turn_uuid) if kind == "turn" else "")
-        keep = False
-        try:
-            if kind == "turn":
-                return self._managed_turn_body(entry, session, message, start, telemetry_context,
-                                               telemetry_sink, on_process)
-            return self._managed_compaction_body(entry, session, start, on_process)
-        except TurnQueueError as e:
-            recovery = isinstance(e, RecoveryRequiredError)
-            keep = recovery and entry.phase != "reserved"
-            if keep:
-                with self._lock:
-                    entry.phase = "held"
-                    late = kind == "turn" and bool(entry.message_id) and self._proactive_sink is not None
-                    entry.late_pending = late
-                if late:
-                    threading.Thread(target=self._capture_late, args=(entry, session, start),
-                                     name=f"opencode-late-{turn_uuid[:12]}", daemon=True).start()
-            logger.warning("event=opencode_managed_%s kind=%s turn=%s err=%s",
-                           "recovery" if recovery else "conflict", kind, turn_uuid, e)
-            return ExecutionResult(
-                False, "", backend_session_id=entry.oc_session_id or session.backend_session_id or "",
-                errors=[str(e)], error_class="recovery_required" if recovery else "managed_conflict",
-                execution_time=time.time() - start)
-        finally:
-            if not keep:
-                with self._lock:
-                    if self._managed.get(turn_uuid) is entry:
-                        self._managed.pop(turn_uuid, None)
+    def _turn_from(self, ownership: Any, on_process: Any) -> TurnControl:
+        """[A102 S1] The carrier's per-turn TurnControl from the legacy args. The
+        stall window stays overridable via ``_managed_stall_sec`` (a test hook);
+        limits otherwise come from the shared :func:`turn_control` / turn_limits."""
+        return turn_control(str(getattr(ownership, "turn_uuid", "") or ""),
+                            ownership=ownership, on_process=on_process,
+                            stall_override=self._managed_stall_sec())
 
     def _capture_late(self, entry: _ManagedTurn, session: Session, start: float) -> None:
         """[A82 step 4 rework, m4] A held turn's real reply (parented to OUR
@@ -1388,9 +551,13 @@ class OpenCodeServerBackend(CodingBackend):
         (mirrors the Claude/Codex late-delivery contract). The session stays
         non-quiescent until this attempt was made. Never aborts."""
         response: Dict[str, Any] = {}
+        # The late window is its own TurnControl (no event reader feeds it, so no
+        # touches): it expires only after _LATE_CAPTURE_SEC with no reply.
+        late_turn = TurnControl(turn_uuid=entry.turn_uuid,
+                                limits=TurnLimits(stall_sec=self._LATE_CAPTURE_SEC,
+                                                  hard_cap_sec=self._LATE_CAPTURE_SEC))
         try:
-            response = self._managed_wait(entry, TurnLimits(stall_sec=self._LATE_CAPTURE_SEC,
-                                                            hard_cap_sec=self._LATE_CAPTURE_SEC))
+            response = self._await_reply(entry, late_turn)
         except Exception as e:  # noqa: BLE001 — server lost / never recorded / window over
             logger.info("event=opencode_managed_late_capture_ended turn=%s why=%s", entry.turn_uuid, e)
         try:
@@ -1518,9 +685,10 @@ class OpenCodeServerBackend(CodingBackend):
         lock.release()
         self._repo_capacity.release()
 
-    def _managed_presubmit(self, entry: _ManagedTurn, on_process: Any, require_idle: bool = True) -> None:
+    def _managed_presubmit(self, entry: _ManagedTurn, turn: TurnControl, require_idle: bool = True) -> None:
         """Idle gate + process identity. Raises a typed conflict unless the
-        native session is provably idle (unknown ⇒ refuse; never abort)."""
+        native session is provably idle (unknown ⇒ refuse; never abort). Reports
+        the backend process identity to ``turn.on_process`` BEFORE submit."""
         from src.control.turn_queue import OwnershipConflictError
 
         status = self._native_status(entry.key, entry.oc_session_id) if require_idle else "idle"
@@ -1531,74 +699,121 @@ class OpenCodeServerBackend(CodingBackend):
         if proc is not None and proc.poll() is None:
             ident = process_identity(proc.pid)
             entry.server_identity = dict(ident)
-            if callable(on_process):
-                on_process(dict(ident))
+            if turn.on_process is not None:
+                turn.on_process(dict(ident))
 
-    def _managed_turn_body(self, entry: _ManagedTurn, session: Session, message: str, start: float,
-                           telemetry_context: Any, telemetry_sink: Any, on_process: Any) -> ExecutionResult:
-        from src.control.turn_queue import OwnershipConflictError, RecoveryRequiredError
+    def _send_message(self, session: Session, message: str, *, turn: TurnControl, kind: str = "turn",
+                      telemetry_context: Any = None, telemetry_sink: Any = None) -> ExecutionResult:
+        """[A102 S1] The ONE OpenCode turn body, driven by the carrier's
+        ``TurnControl``. Attribution: the user message is submitted under
+        ``managed_message_id(turn.turn_uuid)``; the result is ONLY the assistant
+        reply whose ``parentID`` is that id. Never interrupts — a busy/unknown
+        session is a pre-submit ``OwnershipConflictError``; ambiguity (lost ack,
+        expiry, server death) is ``RecoveryRequiredError`` and the native turn is
+        left running, its late reply captured through the proactive sink. The
+        turn is given up on only when ``turn.expired()`` is non-empty — no wall
+        clock and no timeout config read live here."""
+        from src.control.turn_queue import (
+            OwnershipConflictError, RecoveryRequiredError, TurnQueueError,
+        )
 
-        early = self._managed_native_session(entry, session, start)
-        if early is not None:
-            return early
-        self._managed_reserve(entry)
-        lock = self._managed_acquire(session)
+        ownership = turn.ownership
+        if ownership is not None and (getattr(ownership, "session_id", "") or "") != (session.session_id or ""):
+            raise OwnershipConflictError("managed ownership does not match the session",
+                                         task_id=getattr(ownership, "task_id", None))
+        turn_uuid = turn.turn_uuid
+        if not turn_uuid:
+            raise OwnershipConflictError("OpenCode turn requires a turn_uuid (attribution key)",
+                                         task_id=getattr(ownership, "task_id", None))
+        start = time.time()
+        entry = _ManagedTurn(turn_uuid=turn_uuid, session_id=session.session_id or "", kind=kind,
+                             message_id=managed_message_id(turn_uuid) if kind == "turn" else "")
+        keep = False
         try:
-            if not entry.oc_session_id:
-                early = self._managed_create_native(entry, session, start)
-                if early is not None:
-                    return early
-            key, oc_id, mid = entry.key, entry.oc_session_id, entry.message_id
-            existing = self._message_exists(key, oc_id, mid)
-            if existing is None:
-                raise OwnershipConflictError("could not verify the managed message id before submit")
-            # Re-bind (our id already recorded ⇒ an earlier invocation of THIS
-            # attempt submitted it): no idle gate, never resubmitted.
-            self._managed_presubmit(entry, on_process, require_idle=not existing)
-            if not existing:
-                if entry.cancel_armed:
+            if kind != "turn":
+                return self._managed_compaction_body(entry, session, turn, start)
+            early = self._managed_native_session(entry, session, start)
+            if early is not None:
+                return early
+            self._managed_reserve(entry)
+            lock = self._managed_acquire(session)
+            try:
+                if not entry.oc_session_id:
+                    early = self._managed_create_native(entry, session, start)
+                    if early is not None:
+                        return early
+                key, oc_id, mid = entry.key, entry.oc_session_id, entry.message_id
+                existing = self._message_exists(key, oc_id, mid)
+                if existing is None:
+                    raise OwnershipConflictError("could not verify the managed message id before submit")
+                # Re-bind (our id already recorded ⇒ an earlier invocation of THIS
+                # attempt submitted it): no idle gate, never resubmitted.
+                self._managed_presubmit(entry, turn, require_idle=not existing)
+                if not existing and entry.cancel_armed:
                     return ExecutionResult(False, "", backend_session_id=oc_id,
                                            errors=["Managed turn cancelled before submission."],
                                            error_class="cancelled", execution_time=time.time() - start)
-            stop_reader = threading.Event()
-            reader_ready = threading.Event()
-            progress: Dict[str, Any] = {"at": time.monotonic()}  # bumped by the event reader
-            activity = threading.Thread(
-                target=self._read_activity_events,
-                args=(key, oc_id, telemetry_context, telemetry_sink, stop_reader, reader_ready,
-                      progress),
-                name=f"opencode-events-{oc_id[:12]}", daemon=True)
-            activity.start()
-            reader_ready.wait(timeout=2)
-            try:
-                if not reader_ready.is_set():
-                    if existing:
-                        raise RecoveryRequiredError("OpenCode event stream unavailable while re-binding the attempt")
+                stop_reader = threading.Event()
+                reader_ready = threading.Event()
+                state: Dict[str, Any] = {}  # event-reader telemetry bookkeeping
+                activity = threading.Thread(
+                    target=self._read_activity_events,
+                    args=(key, oc_id, telemetry_context, telemetry_sink, stop_reader, reader_ready,
+                          turn, state),
+                    name=f"opencode-events-{oc_id[:12]}", daemon=True)
+                activity.start()
+                reader_ready.wait(timeout=2)
+                try:
+                    if not reader_ready.is_set():
+                        if existing:
+                            raise RecoveryRequiredError("OpenCode event stream unavailable while re-binding the attempt")
+                        return ExecutionResult(False, "", backend_session_id=oc_id,
+                            errors=["OpenCode event stream did not connect; turn was not submitted."],
+                            error_class="event_stream_unavailable", execution_time=time.time() - start)
+                    with self._lock:
+                        entry.phase = "submitted"
+                        entry.submitted_at = time.monotonic()
+                    if not existing:
+                        refused = self._submit(entry, session, message)
+                        if refused:
+                            return ExecutionResult(False, "", backend_session_id=oc_id, errors=[refused],
+                                                   error_class="provider_error", execution_time=time.time() - start)
+                    response = self._await_reply(entry, turn)
+                finally:
+                    stop_reader.set()
+                    activity.join(timeout=2)
+                elapsed = time.time() - start
+                if entry.cancel_delivered:
                     return ExecutionResult(False, "", backend_session_id=oc_id,
-                        errors=["OpenCode event stream did not connect; turn was not submitted."],
-                        error_class="event_stream_unavailable", execution_time=time.time() - start)
-                with self._lock:
-                    entry.phase = "submitted"
-                    entry.submitted_at = time.monotonic()
-                if not existing:
-                    refused = self._managed_submit(entry, session, message)
-                    if refused:
-                        return ExecutionResult(False, "", backend_session_id=oc_id, errors=[refused],
-                                               error_class="provider_error", execution_time=time.time() - start)
-                response = self._managed_wait(entry, turn_limits(self._managed_stall_sec()), progress)
+                                           errors=["OpenCode managed turn cancelled."], error_class="cancelled",
+                                           execution_time=elapsed)
+                result = self._managed_outcome(response, session, oc_id, elapsed, telemetry_context, telemetry_sink)
+                _clear_native(entry.session_id, oc_id)  # [m7] the terminal result carries the id now
+                return result
             finally:
-                stop_reader.set()
-                activity.join(timeout=2)
-            elapsed = time.time() - start
-            if entry.cancel_delivered:
-                return ExecutionResult(False, "", backend_session_id=oc_id,
-                                       errors=["OpenCode managed turn cancelled."], error_class="cancelled",
-                                       execution_time=elapsed)
-            result = self._managed_outcome(response, session, oc_id, elapsed, telemetry_context, telemetry_sink)
-            _clear_native(entry.session_id, oc_id)  # [m7] the terminal result carries the id now
-            return result
+                self._managed_release(lock)
+        except TurnQueueError as e:
+            recovery = isinstance(e, RecoveryRequiredError)
+            keep = recovery and entry.phase != "reserved"
+            if keep:
+                with self._lock:
+                    entry.phase = "held"
+                    late = kind == "turn" and bool(entry.message_id) and self._proactive_sink is not None
+                    entry.late_pending = late
+                if late:
+                    threading.Thread(target=self._capture_late, args=(entry, session, start),
+                                     name=f"opencode-late-{turn_uuid[:12]}", daemon=True).start()
+            logger.warning("event=opencode_managed_%s kind=%s turn=%s err=%s",
+                           "recovery" if recovery else "conflict", kind, turn_uuid, e)
+            return ExecutionResult(
+                False, "", backend_session_id=entry.oc_session_id or session.backend_session_id or "",
+                errors=[str(e)], error_class="recovery_required" if recovery else "managed_conflict",
+                execution_time=time.time() - start)
         finally:
-            self._managed_release(lock)
+            if not keep:
+                with self._lock:
+                    if self._managed.get(turn_uuid) is entry:
+                        self._managed.pop(turn_uuid, None)
 
     def _managed_outcome(self, response: Dict[str, Any], session: Session, oc_id: str, elapsed: float,
                          telemetry_context: Any, telemetry_sink: Any) -> ExecutionResult:
@@ -1615,7 +830,7 @@ class OpenCodeServerBackend(CodingBackend):
             result.errors = ["OpenCode finished this turn without a reply."] + list(result.errors or [])
         return result
 
-    def _managed_submit(self, entry: _ManagedTurn, session: Session, message: str) -> Optional[str]:
+    def _submit(self, entry: _ManagedTurn, session: Session, message: str) -> Optional[str]:
         """POST prompt_async under our deterministic id. A lost/failed ack is
         reconciled by that id; never resubmitted, never aborted. Returns a
         refusal message iff OpenCode definitively rejected the request (4xx and
@@ -1644,26 +859,23 @@ class OpenCodeServerBackend(CodingBackend):
         raise RecoveryRequiredError(f"OpenCode prompt acceptance is ambiguous ({err}); "
                                     "message id not found in native history")
 
-    def _managed_wait(self, entry: _ManagedTurn, limits: TurnLimits,
-                      progress: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    def _await_reply(self, entry: _ManagedTurn, turn: TurnControl) -> Dict[str, Any]:
         """Wait for OUR terminal reply. Returns the correlated assistant message
-        (``{}`` ⇒ our turn ended without one). No native progress for
-        ``limits.stall_sec`` (``progress["at"]``, bumped by the event reader) or
-        the hard cap / lost server ⇒ typed recovery; the native turn is never
-        interrupted for it."""
+        (``{}`` ⇒ our turn ended without one). The turn is given up on only when
+        ``turn.expired()`` is non-empty — no native progress for the stall window
+        (the event reader ``turn.touch()``es every native event, so a long but
+        working turn is never cut off) or the hard cap / lost server ⇒ typed
+        recovery; the native turn is never interrupted for it."""
         from src.control.turn_queue import RecoveryRequiredError
 
         key, oc_id, mid = entry.key, entry.oc_session_id, entry.message_id
-        clock = ProgressClock()
         idle_polls = 0
         while True:
             if entry.forgotten:
                 return {}  # [m4] terminal server-side: nothing to deliver
             if entry.cancel_armed and not entry.cancel_delivered:
                 self._abort_if_ours(entry)
-            if progress is not None:
-                clock.observe(float(progress.get("at") or 0.0))
-            expiry = clock.expiry(limits)
+            expiry = turn.expired()
             if expiry:
                 raise RecoveryRequiredError(f"OpenCode managed turn {expiry} "
                                             f"({'no native progress' if expiry == 'stalled' else 'hard cap'}) "
@@ -1690,8 +902,8 @@ class OpenCodeServerBackend(CodingBackend):
                         raise RecoveryRequiredError("OpenCode never recorded the managed prompt")
             time.sleep(self._MANAGED_POLL_SEC)
 
-    def _managed_compaction_body(self, entry: _ManagedTurn, session: Session, start: float,
-                                 on_process: Any) -> ExecutionResult:
+    def _managed_compaction_body(self, entry: _ManagedTurn, session: Session, turn: TurnControl,
+                                 start: float) -> ExecutionResult:
         from src.control.turn_queue import RecoveryRequiredError
 
         early = self._managed_native_session(entry, session, start)
@@ -1716,7 +928,7 @@ class OpenCodeServerBackend(CodingBackend):
                 from src.control.turn_queue import OwnershipConflictError
                 raise OwnershipConflictError("could not snapshot native history before compaction")
             entry.known_ids = [str((m.get("info") or {}).get("id")) for m in history if isinstance(m, dict)]
-            self._managed_presubmit(entry, on_process)
+            self._managed_presubmit(entry, turn)
             if entry.cancel_armed:
                 return ExecutionResult(False, "", backend_session_id=oc_id,
                                        errors=["Managed compaction cancelled before submission."],
@@ -1724,9 +936,11 @@ class OpenCodeServerBackend(CodingBackend):
             with self._lock:
                 entry.phase = "submitted"
                 entry.submitted_at = time.monotonic()
+            # One compaction; its socket timeout is turn.remaining() (streams no
+            # progress), never a config wall clock.
             summarized, err = self._http(key, "POST", f"/session/{oc_id}/summarize",
                                          {"providerID": provider_id, "modelID": model_id},
-                                         timeout=int(self._managed_compaction_timeout_sec()))
+                                         timeout=max(1, int(turn.remaining())))
             if entry.cancel_delivered:
                 return ExecutionResult(False, "", backend_session_id=oc_id,
                                        errors=["OpenCode managed compaction cancelled."],
@@ -1838,38 +1052,12 @@ class OpenCodeServerBackend(CodingBackend):
         if not key:
             return False
         if not self._base_urls.get(key):
-            try:
-                if not session.repo_path or self._ensure_server(key, session.repo_path):
-                    return False
-            except Exception:
-                return False  # e.g. live-call guard / spawn failure ⇒ unknown
+            # A quiescence probe must NOT start a server. No live server for this
+            # repo ⇒ its native state is unknown ⇒ not quiescent (fail closed).
+            return False
         return self._native_status(key, oc_id) == "idle"
 
-    def cancel_managed_turn(self, session: Session, turn_uuid: str) -> bool:
-        """Cancel exactly ``turn_uuid``: arm it when it has not begun here; abort
-        only while its message is the running one; refuse (False, disarmed)
-        when another message is running — never abort someone else's turn."""
-        if not turn_uuid:
-            return False
-        with self._lock:
-            entry = self._managed.get(turn_uuid)
-            if entry is None:
-                self._armed_cancels.add(turn_uuid)
-                return True
-            entry.cancel_armed = True
-            phase = entry.phase
-        if phase == "reserved":
-            return True        # the pre-submit check refuses to submit it
-        delivered = self._abort_if_ours(entry)
-        if delivered is False:
-            with self._lock:
-                entry.cancel_armed = False
-            return False
-        if phase == "held":
-            return bool(delivered)  # no live waiter to deliver it later
-        return True            # delivered, or armed for when ours is running
-
-    def forget_managed_turn(self, session: Session, turn_uuid: str) -> bool:
+    def forget_turn(self, session: Session, turn_uuid: str) -> bool:
         """Drop a HELD attempt (or an armed cancel) the carrier learned is
         terminal server-side. An attempt whose call is still running here is
         not dropped — its own waiter ends it (reply / deadline)."""
@@ -1884,183 +1072,19 @@ class OpenCodeServerBackend(CodingBackend):
         return dropped or armed
 
     # ------------------------------------------------------------------
-    # Core message send
+    # [A102 S1] Deprecated carrier shims (S2 deletes these).
     # ------------------------------------------------------------------
+    def cancel_managed_turn(self, session: Session, turn_uuid: str) -> bool:
+        return self.cancel(session, turn_uuid)
 
-    def _send_message(
-        self,
-        key: str,
-        oc_session_id: str,
-        message: str,
-        cwd: str,
-        start: float,
-        model_id: Optional[str] = None,
-        provider_id: Optional[str] = None,
-        telemetry_context=None,
-        telemetry_sink=None,
-    ) -> ExecutionResult:
-        lock = _get_repo_lock(cwd)
-        if not self._repo_capacity.acquire(blocking=False):
-            return ExecutionResult(False, "", backend_session_id=oc_session_id,
-                                   errors=["OpenCode server capacity is full."], error_class="capacity_exceeded")
-        if not lock.acquire(blocking=False):
-            self._repo_capacity.release()
-            return ExecutionResult(False, "", backend_session_id=oc_session_id,
-                                   errors=[f"Another OpenCode task is already running against repo: {cwd}."],
-                                   error_class="repo_busy")
-        try:
-            return self._send_message_locked(key, oc_session_id, message, cwd, start, model_id, provider_id,
-                                             telemetry_context, telemetry_sink)
-        finally:
-            lock.release()
-            self._repo_capacity.release()
-
-    def _send_message_locked(
-        self, key: str, oc_session_id: str, message: str, cwd: str, start: float,
-        model_id: Optional[str], provider_id: Optional[str], telemetry_context: Any,
-        telemetry_sink: Any,
-    ) -> ExecutionResult:
-        try:
-            from config import config as _cfg
-            # The existing OpenCode setting is the hard request ceiling.
-            timeout = int(getattr(_cfg.opencode, "timeout_seconds", 1800))
-        except Exception:
-            timeout = 1800
-
-        body: Dict[str, Any] = {"parts": [{"type": "text", "text": message}]}
-        message_id = f"msg_{os.urandom(12).hex()}"
-        body["messageID"] = message_id
-        # Set the model inline in the message body — the only reliable way on
-        # opencode 1.16.2 (PATCH /session is a no-op that corrupts model state).
-        # Only sent when we have a concrete model id; otherwise opencode resolves
-        # it from the agent/global config (which already defaults correctly).
-        if model_id:
-            body["model"] = {"providerID": provider_id or "opencode", "modelID": model_id}
-        stop_reader = threading.Event()
-        reader_ready = threading.Event()
-        cancel_event = threading.Event()
-        last_progress = {"at": time.monotonic()}
-        with self._lock:
-            self._active_cancel[oc_session_id] = cancel_event
-        activity_thread = threading.Thread(
-            target=self._read_activity_events,
-            args=(key, oc_session_id, telemetry_context, telemetry_sink, stop_reader, reader_ready, last_progress),
-            name=f"opencode-events-{oc_session_id[:12]}", daemon=True,
-        )
-        activity_thread.start()
-        reader_ready.wait(timeout=2)
-        if not reader_ready.is_set():
-            stop_reader.set()
-            activity_thread.join(timeout=2)
-            with self._lock:
-                self._active_cancel.pop(oc_session_id, None)
-            return ExecutionResult(False, "", backend_session_id=oc_session_id,
-                errors=["OpenCode event stream did not connect; turn was not submitted."],
-                error_class="event_stream_unavailable", execution_time=time.time() - start)
-        response: Dict[str, Any] = {}
-        err: Optional[str] = None
-        turn_deadline = time.monotonic() + max(1, timeout)
-        try:
-            _, err = self._http(key, "POST", f"/session/{oc_session_id}/prompt_async", body,
-                                timeout=min(30, max(1, timeout)))
-            if err:
-                # The request may have reached OpenCode even if its acceptance
-                # response was lost. Reconcile by the exact client message ID
-                # before deciding whether to abort; never blindly resubmit.
-                accepted_history, reconcile_err = self._http(
-                    key, "GET", f"/session/{oc_session_id}/message?limit=100", timeout=10)
-                accepted = self._message_was_accepted(accepted_history, message_id)
-                if accepted:
-                    err = None
-                else:
-                    self._http(key, "POST", f"/session/{oc_session_id}/abort", timeout=5)
-                    if reconcile_err:
-                        err = f"Prompt acceptance was ambiguous and history reconciliation failed: {reconcile_err}"
-                    else:
-                        err = "Prompt acceptance was ambiguous; request was not safely confirmed."
-            deadline = turn_deadline
-            try:
-                from config import config as _cfg
-                configured_stall = max(60, int(getattr(_cfg.system, "inactivity_timeout_sec", 36000)))
-                stall_timeout = min(configured_stall, max(30, timeout // 2))
-            except Exception:
-                stall_timeout = 36000
-            next_poll = 0.0
-            terminal_error = ""
-            while err is None:
-                now = time.monotonic()
-                if cancel_event.is_set():
-                    err = "OpenCode turn cancelled."
-                    break
-                if last_progress.get("error"):
-                    err = last_progress["error"]
-                    self._http(key, "POST", f"/session/{oc_session_id}/abort", timeout=5)
-                    break
-                if now >= deadline:
-                    err = f"OpenCode hard timeout after {timeout}s."
-                    self._http(key, "POST", f"/session/{oc_session_id}/abort", timeout=5)
-                    break
-                if now - last_progress["at"] >= stall_timeout:
-                    err = f"OpenCode inactivity timeout after {stall_timeout}s."
-                    self._http(key, "POST", f"/session/{oc_session_id}/abort", timeout=5)
-                    break
-                if now < next_poll:
-                    cancel_event.wait(min(0.25, next_poll - now))
-                    continue
-                next_poll = now + 1.0
-                states, poll_err = self._http(key, "GET", "/session/status", timeout=5)
-                if poll_err:
-                    err = poll_err
-                    break
-                # OpenCode 1.18.x omits idle sessions from this map; the live
-                # `/session/status` response is `{}` once a turn has finished.
-                # Treat an absent key as idle and reconcile history below. A
-                # present status entry remains authoritative (including busy).
-                status_present = isinstance(states, dict) and oc_session_id in states
-                status = states.get(oc_session_id, {}) if isinstance(states, dict) else {}
-                state = status.get("type") if isinstance(status, dict) else status
-                if not status_present:
-                    state = "idle"
-                if state == "error":
-                    terminal_error = str(status.get("error") or "OpenCode session reported an error")
-                    break
-                if state in ("idle", "error"):
-                    history, history_err = self._http(key, "GET", f"/session/{oc_session_id}/message?limit=100", timeout=10)
-                    if history_err:
-                        err = history_err
-                        break
-                    response = self._find_correlated_response(history, message_id)
-                    if response:
-                        break
-                    if state == "error":
-                        err = terminal_error
-                        break
-                    # Status can briefly report idle while an accepted async
-                    # prompt is entering the session queue. Keep reconciling;
-                    # only a correlated assistant message is terminal success.
-            if terminal_error and not err:
-                err = terminal_error
-        finally:
-            stop_reader.set()
-            activity_thread.join(timeout=2)
-            with self._lock:
-                self._active_cancel.pop(oc_session_id, None)
-
-        elapsed = time.time() - start
-
-        if err:
-            return ExecutionResult(False, "", backend_session_id=oc_session_id, errors=[err],
-                execution_time=elapsed,
-                error_class="cancelled" if "cancelled" in err.lower() else "timeout" if "timeout" in err.lower() else "transport_error" if "unreachable" in err.lower() else "malformed_event" if "event stream malformed" in err.lower() else "provider_error")
-
-        return self._turn_result(response, cwd, oc_session_id, elapsed, telemetry_context, telemetry_sink)
+    def forget_managed_turn(self, session: Session, turn_uuid: str) -> bool:
+        return self.forget_turn(session, turn_uuid)
 
     def _turn_result(
         self, response: Dict[str, Any], cwd: str, oc_session_id: str, elapsed: float,
         telemetry_context: Any, telemetry_sink: Any,
     ) -> ExecutionResult:
-        """Build the ExecutionResult for a terminal correlated OpenCode reply
-        (shared by the legacy and the managed send paths)."""
+        """Build the ExecutionResult for a terminal correlated OpenCode reply."""
         output, errors, finish = self._parse_message_response(response)
 
         if finish in ("stop", "tool-calls"):
@@ -2114,7 +1138,7 @@ class OpenCodeServerBackend(CodingBackend):
 
         # Auto-commit so the working tree is clean for the next run.
         if success and cwd and files_modified:
-            OpenCodeBackend._auto_commit(cwd, oc_session_id)
+            _auto_commit(cwd, oc_session_id)
             files_modified = []  # consumed by the commit
 
         return ExecutionResult(
@@ -2130,9 +1154,13 @@ class OpenCodeServerBackend(CodingBackend):
 
     def _read_activity_events(
         self, key: str, oc_session_id: str, telemetry_context: Any, telemetry_sink: Any,
-        stop: threading.Event, ready: threading.Event, last_progress: Dict[str, Any],
+        stop: threading.Event, ready: threading.Event, turn: TurnControl,
+        reader_state: Dict[str, Any],
     ) -> None:
-        """Read bounded OpenCode SSE frames and forward only safe structural labels."""
+        """Read bounded OpenCode SSE frames and forward only safe structural
+        labels. Every native event of OUR turn calls ``turn.touch()`` so a long
+        but working turn is never given up on (its stall clock keeps resetting);
+        ``reader_state`` carries the tool-telemetry bookkeeping."""
         base_url = self._base_urls.get(key, "")
         if not base_url:
             return
@@ -2146,7 +1174,7 @@ class OpenCodeServerBackend(CodingBackend):
                         while not stop.is_set():
                             line = response.readline(262145)
                             if len(line) > 262144:
-                                last_progress["error"] = "OpenCode event stream malformed: frame exceeds 256 KiB."
+                                reader_state["error"] = "OpenCode event stream malformed: frame exceeds 256 KiB."
                                 return
                             if not line:
                                 break
@@ -2154,20 +1182,20 @@ class OpenCodeServerBackend(CodingBackend):
                                 continue
                             raw = line[5:].strip()
                             if len(raw) > 262144:
-                                last_progress["error"] = "OpenCode event stream malformed: payload exceeds 256 KiB."
+                                reader_state["error"] = "OpenCode event stream malformed: payload exceeds 256 KiB."
                                 return
                             try:
                                 envelope = json.loads(raw)
                             except (UnicodeDecodeError, json.JSONDecodeError):
-                                last_progress["error"] = "OpenCode event stream malformed: invalid JSON."
+                                reader_state["error"] = "OpenCode event stream malformed: invalid JSON."
                                 return
                             event = envelope.get("payload", envelope) if isinstance(envelope, dict) else {}
                             if not isinstance(event, dict):
-                                last_progress["error"] = "OpenCode event stream malformed: payload is not an object."
+                                reader_state["error"] = "OpenCode event stream malformed: payload is not an object."
                                 return
                             props = event.get("properties") or {}
                             if not isinstance(props, dict):
-                                last_progress["error"] = "OpenCode event stream malformed: event properties are not an object."
+                                reader_state["error"] = "OpenCode event stream malformed: event properties are not an object."
                                 return
                             raw_part = props.get("part")
                             native_id = props.get("sessionID") or props.get("sessionId")
@@ -2176,19 +1204,19 @@ class OpenCodeServerBackend(CodingBackend):
                             if native_id != oc_session_id:
                                 continue
                             if raw_part is not None and not isinstance(raw_part, dict):
-                                last_progress["error"] = "OpenCode event stream malformed: message part is not an object."
+                                reader_state["error"] = "OpenCode event stream malformed: message part is not an object."
                                 return
                             part = raw_part or {}
                             name = event.get("type", "")
                             if not isinstance(name, str) or not name:
-                                last_progress["error"] = "OpenCode event stream malformed: missing event type."
+                                reader_state["error"] = "OpenCode event stream malformed: missing event type."
                                 return
                             activity_category = ""
                             activity_tool = ""
                             if name == "session.status":
                                 status = props.get("status") or {}
                                 if not isinstance(status, dict):
-                                    last_progress["error"] = "OpenCode event stream malformed: session status is not an object."
+                                    reader_state["error"] = "OpenCode event stream malformed: session status is not an object."
                                     return
                                 activity_category = "backend_busy" if status.get("type") == "busy" else ""
                             elif name == "message.part.updated":
@@ -2197,7 +1225,7 @@ class OpenCodeServerBackend(CodingBackend):
                                     safe_tool = re.sub(r"[^A-Za-z0-9_.:-]", "_", str(tool))[:60] or "tool"
                                     state = part.get("state") or {}
                                     if not isinstance(state, dict):
-                                        last_progress["error"] = "OpenCode event stream malformed: tool state is not an object."
+                                        reader_state["error"] = "OpenCode event stream malformed: tool state is not an object."
                                         return
                                     tool_status = state.get("status")
                                     activity_tool = {
@@ -2212,7 +1240,7 @@ class OpenCodeServerBackend(CodingBackend):
                                         else ""
                                     )
                                     self._emit_tool_telemetry(telemetry_context, telemetry_sink, safe_tool,
-                                        str(part.get("callID") or part.get("id") or ""), tool_status, last_progress)
+                                        str(part.get("callID") or part.get("id") or ""), tool_status, reader_state)
                                 elif part.get("type") == "text":
                                     activity_category = "writing"
                             elif name == "session.idle":
@@ -2220,11 +1248,11 @@ class OpenCodeServerBackend(CodingBackend):
                             elif name == "permission.asked":
                                 activity_category = "waiting_permission"
                             elif name == "session.error":
-                                last_progress["error"] = "OpenCode reported a session error."
+                                reader_state["error"] = "OpenCode reported a session error."
                             if name == "message.part.updated":
                                 # Any streamed part of OUR session (text, reasoning, a tool
                                 # starting / streaming output / finishing) is native progress.
-                                last_progress["at"] = time.monotonic()
+                                turn.touch()
                             activity_key = (activity_category, activity_tool)
                             if activity_category and activity_key != last_activity:
                                 from src.core.activity import publish_activity
@@ -2268,13 +1296,6 @@ class OpenCodeServerBackend(CodingBackend):
                         return {}
                 return item
         return {}
-
-    def _message_was_accepted(self, history: Any, message_id: str) -> bool:
-        return isinstance(history, list) and any(
-            isinstance(item, dict) and isinstance(item.get("info"), dict)
-            and item["info"].get("id") == message_id
-            for item in history[-100:]
-        )
 
     def _emit_tool_telemetry(
         self, context: Any, sink: Any, tool_name: str, tool_call_id: str, state: Any,
@@ -2617,16 +1638,34 @@ class OpenCodeServerBackend(CodingBackend):
             return {}, f"Request failed ({method} {path}): {e}"
 
     # ------------------------------------------------------------------
-    # Helpers (reuse from CLI backend)
+    # Helpers to read model/agent from session metadata
     # ------------------------------------------------------------------
 
     @staticmethod
     def _session_model(session: Session) -> Optional[str]:
-        return OpenCodeBackend._session_model(session)
+        # Resolve via the shared catalog logic: session.model → config default →
+        # catalog default.
+        try:
+            from config.models import resolve_model
+            return resolve_model(session)
+        except Exception:
+            try:
+                from config import config as _cfg
+                return getattr(_cfg.opencode, "default_model", None) or None
+            except Exception:
+                return None
 
     @staticmethod
     def _session_agent(session: Session) -> Optional[str]:
-        return OpenCodeBackend._session_agent(session)
+        meta = session.task_history[-1] if session.task_history else {}
+        explicit = meta.get("opencode_agent") or None
+        if explicit:
+            return explicit
+        try:
+            from config import config as _cfg
+            return getattr(_cfg.opencode, "default_agent", None) or None
+        except Exception:
+            return None
 
     @staticmethod
     def _parse_model(model_str: Optional[str]) -> tuple:
