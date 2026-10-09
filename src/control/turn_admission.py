@@ -175,6 +175,9 @@ class AdmissionRequest(BaseModel):
     # [A82 Stage 5 rework] Hash of the validated sender capability (never the
     # raw token): re-checked (revoked / rotated / carrier) in the admission txn.
     sender_capability_hash: Optional[str] = Field(default=None, max_length=128, repr=False)
+    # [A104 I2] The session that REQUESTED this work (dispatch_worker): persisted
+    # as the turn's sender so its completion is addressed to that agent's inbox.
+    requester_session_id: Optional[str] = Field(default=None, max_length=256)
     machine_id: Optional[str] = Field(default=None, max_length=256)
     # Durable "lineage pending" writer token (Case lineage written after the
     # commit, then finalized under CAS); None ⇒ no post-admission lineage.
@@ -224,6 +227,7 @@ def admit_turn(
                 coalesce_key=request.coalesce_key,
                 sender_session_id=request.sender_session_id,
                 sender_capability_hash=request.sender_capability_hash,
+                requester_session_id=request.requester_session_id,
                 machine_id=request.machine_id,
                 lineage_token=request.lineage_token,
                 producer_token=request.producer_token,

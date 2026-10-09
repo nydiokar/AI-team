@@ -1061,3 +1061,27 @@ def test_bootstrap_inserts_repo_root_on_sys_path():
         )
     finally:
         sys.path[:] = saved
+
+
+def test_dispatch_worker_sends_its_own_session_as_requester(monkeypatch):
+    """[A104 I2] The MCP server runs inside the requesting agent's session: its
+    SESSION_ID is sent as the requester, so the completion reaches THAT inbox."""
+    seen = {}
+
+    def fake_request(method, path, payload=None, timeout=20.0, headers=None):
+        if path == "/api/instructions":
+            seen["payload"] = payload
+        return {"task_id": "t1", "session": None}
+
+    monkeypatch.setattr(mcp_manager, "_api_request", fake_request)
+    monkeypatch.delenv("AI_TEAM_SESSION_ID", raising=False)
+    monkeypatch.setenv("SESSION_ID", "mgr-sess")
+    mcp_manager._dispatch_worker({"objective": "do x", "session_id": "s1"})
+    assert seen["payload"]["requester_session_id"] == "mgr-sess"
+    # Never self-addressed, never invented when the env carries no session.
+    monkeypatch.setenv("SESSION_ID", "s1")
+    mcp_manager._dispatch_worker({"objective": "do x", "session_id": "s1"})
+    assert "requester_session_id" not in seen["payload"]
+    monkeypatch.delenv("SESSION_ID")
+    mcp_manager._dispatch_worker({"objective": "do x", "session_id": "s1"})
+    assert "requester_session_id" not in seen["payload"]

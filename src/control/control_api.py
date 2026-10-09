@@ -207,6 +207,11 @@ async def _submit_managed_instruction(
             ),
             parent_flow_run_id=body.parent_flow_run_id,
             join_case_id=body.case_id,
+            requester_session_id=(
+                body.requester_session_id
+                if (principal or "").strip().lower() == AUTOMATION_PRINCIPAL
+                else None
+            ),
             extra_metadata=_instruction_extra_metadata(body),
             operation_id=idempotency_key,
             turn_queue_enrolled=True,
@@ -349,6 +354,12 @@ class InstructionBody(BaseModel):
     # for a Manager dispatching into its own Case. Attach only happens when
     # HARNESS_FLOW_DRIVE is ON; absent/None on every normal request ⇒ byte-identical.
     case_id: Optional[str] = None
+    # [A104 I2] The ai-team session that REQUESTED this work (mcp_manager
+    # dispatch_worker sends its own SESSION_ID). Only honoured on an automation
+    # dispatch; a completion is then addressed to that session's inbox. Absent on
+    # every operator request and on an un-redeployed mcp_manager (the gateway then
+    # resolves the requester server-side, role-free).
+    requester_session_id: Optional[str] = Field(default=None, max_length=128)
     # [Session-fork] Verbatim digest of the marked messages carried over from a
     # forked session. When present it is injected ONCE, fence-defused and re-clamped
     # (keeping the most recent tail) as a reference-only `<prior_context>` block on
