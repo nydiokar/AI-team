@@ -486,11 +486,14 @@ def test_AUTH05b_codex_rotation_reattaches_loaded_thread(tmp_path, monkeypatch):
     backend.provision_sender_capability("k", "first-capability-0123456789abcdef")
     first = run(backend, str(tmp_path), key="k")
     run(backend, str(tmp_path), key="k", native_id=first.backend_session_id, task="t2")
-    assert [m for m, _ in runtime.calls] == ["thread/start", "turn/start", "turn/start"]
+    # [A102] The unified turn body probes native status (thread/read) before a
+    # submit onto an already-loaded thread; the capability is unchanged so the
+    # thread is NOT re-attached.
+    assert [m for m, _ in runtime.calls] == ["thread/start", "turn/start", "thread/read", "turn/start"]
     backend.provision_sender_capability("k", "second-capability-0123456789abcdef")
     run(backend, str(tmp_path), key="k", native_id=first.backend_session_id, task="t3")
     methods = [m for m, _ in runtime.calls]
-    assert methods[3:] == ["thread/unsubscribe", "thread/resume", "turn/start"]
+    assert methods[4:] == ["thread/unsubscribe", "thread/resume", "turn/start"]
     resumed = [p for m, p in runtime.calls if m == "thread/resume"][0]
     assert resumed["config"][f"mcp_servers.{name}.env"][agent_sender.CAPABILITY_ENV] == (
         "second-capability-0123456789abcdef")

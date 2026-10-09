@@ -28,21 +28,20 @@ from src.backends.codex_app_server import (
 )
 from src.backends.codex_ownership import CodexOwnership
 from src.control.telemetry_sink import NullTelemetrySink
-from src.core.interfaces import CodingBackend, ExecutionResult, Session
+from src.core.interfaces import CodingBackend, ExecutionResult, Session, SessionStatus
 from src.core.process_utils import (ensure_node_on_path, process_gone_proof, process_identity,
                                      resolve_codex_executable)
 from src.core.telemetry import EMITTER_PROCESS_INSTANCE_ID, TelemetryContext
-from src.core.turn_liveness import ProgressClock, turn_limits
+from src.core.turn_liveness import ProgressClock, TurnControl, turn_control
 from src.core.telemetry_adapters.codex import CodexTelemetryAdapter
 
 logger = logging.getLogger(__name__)
 MAX_OUTPUT = 8 * 1024 * 1024
-MAX_TURN_SECONDS = 36000
-# [A82 step 4a] The managed caller's NO-PROGRESS window (None ⇒ the shared
-# ``turn_limits`` default): a turn whose app-server keeps streaming events is
-# never given up on. Expiry NEVER interrupts: the turn is held for recovery and
-# its eventual reply binds to its turn uuid only.
-MANAGED_STALL_SECONDS: float | None = None
+# [A102] No turn-wait policy lives here any more: how long a running turn is
+# awaited (the NO-PROGRESS window) is decided by the carrier and handed over in
+# the ``TurnControl`` (``turn.expired()`` / ``turn.remaining()``). A turn whose
+# app-server keeps streaming events is never given up on; expiry NEVER
+# interrupts — the turn is held for recovery and its reply binds to its uuid.
 # Native thread states in which no turn of OURS runs: "notLoaded" (this carrier's
 # app-server does not hold it) and "gone" (that app-server process is dead).
 _QUIET_STATES = frozenset({"idle", "systemError", "notLoaded", "gone"})
@@ -152,17 +151,31 @@ class _Unattributable(Exception):
 
 
 class _ManagedCall(BaseModel):
-    """One managed invocation: the submit/abandon decision is atomic under
-    ``lock`` so a deadline either prevents submission or knows it happened."""
+    """One turn invocation's mutable submit/abandon state, bound to the carrier's
+    :class:`TurnControl` (identity, ownership fencing, progress clock, limits).
+    The submit/abandon decision is atomic under ``lock`` so a deadline either
+    prevents submission or knows it happened. ``turn_uuid`` / ``on_process`` /
+    ``progress`` read straight off ``turn`` so the clock the ``_run`` reader
+    ``touch()``es is the SAME one the carrier's ``turn.expired()`` waits on."""
     model_config = ConfigDict(arbitrary_types_allowed=True)
-    turn_uuid: str
+    turn: TurnControl
     session_key: str = ""
-    on_process: Callable[[dict], Any] | None = None
     lock: Any = Field(default_factory=threading.Lock)  # a threading.Lock
     submitted: bool = False
     abandoned: bool = False
     forgotten: bool = False
-    progress: ProgressClock = Field(default_factory=ProgressClock)  # touched per native event
+
+    @property
+    def turn_uuid(self) -> str:
+        return self.turn.turn_uuid
+
+    @property
+    def on_process(self) -> Callable[[dict], Any] | None:
+        return self.turn.on_process
+
+    @property
+    def progress(self) -> ProgressClock:
+        return self.turn.progress
 
 
 class _Hold(BaseModel):
@@ -293,30 +306,69 @@ class CodexBackend(CodingBackend):
             self._execution_cancels.setdefault(task_id, threading.Event())
 
     def cancel_execution(self, task_id: str) -> None:
+        # [A102 S1] Retained for the gateway-local execution path in the
+        # orchestrator (outside this worker's files); S2 deletes it once that
+        # path routes cancellation through :meth:`cancel`.
         with self._lock:
             event = self._execution_cancels.get(task_id)
             if event is not None:
                 event.set()
 
-    def create_session(self, session: Session, *, telemetry_context=None, telemetry_sink=None) -> ExecutionResult:
-        return self._run(session.repo_path, session.last_user_message, session.backend_session_id or None,
-                         session.session_id, _resolve_model(session), _resolve_effort(session),
-                         telemetry_context, telemetry_sink)
+    def create_session(self, session: Session, *, turn: TurnControl | None = None,
+                        telemetry_context=None, telemetry_sink=None) -> ExecutionResult:
+        """Start the native session if needed and run the first prompt
+        (``session.last_user_message``) tagged with ``turn.turn_uuid``."""
+        return self._run_turn(session, session.last_user_message, turn,
+                              telemetry_context, telemetry_sink, compact=False)
 
-    def resume_session(self, session: Session, message: str, *, telemetry_context=None, telemetry_sink=None) -> ExecutionResult:
-        return self._run(session.repo_path, message, session.backend_session_id or None,
-                         session.session_id, _resolve_model(session), _resolve_effort(session),
-                         telemetry_context, telemetry_sink)
+    def resume_session(self, session: Session, message: str, *, turn: TurnControl | None = None,
+                       telemetry_context=None, telemetry_sink=None) -> ExecutionResult:
+        """Submit ``message`` on the native session tagged with ``turn.turn_uuid``
+        (busy ⇒ typed conflict before submit; never interrupts)."""
+        return self._run_turn(session, message, turn,
+                              telemetry_context, telemetry_sink, compact=False)
 
     def run_oneoff(self, cwd: str, message: str, *, telemetry_context=None, telemetry_sink=None) -> ExecutionResult:
-        return self._run(cwd, message, None, None, telemetry_context=telemetry_context,
-                         telemetry_sink=telemetry_sink)
+        """[A102 R1] A thin wrapper: a throwaway ``Session`` + ``create_session``
+        with its own ``turn_control`` (production refuses gateway-local one-offs,
+        so this is consolidation only — one body per operation)."""
+        session = Session(session_id="", backend="codex", repo_path=cwd,
+                          status=SessionStatus.IDLE, created_at="", updated_at="",
+                          last_user_message=message)
+        return self.create_session(session, turn=turn_control(uuid.uuid4().hex),
+                                   telemetry_context=telemetry_context, telemetry_sink=telemetry_sink)
 
-    def cancel(self, session: Session) -> None:
+    def cancel(self, session: Session, turn_uuid: str | None = None) -> bool:
+        """[A102] The single turn-cancel seam (collapses the four Codex cancel
+        mechanisms). With ``turn_uuid``: cancel EXACTLY that turn — arm it (a
+        not-yet-submitted turn is then never submitted), signal its live run
+        (whose loop interrupts only its OWN native turn id), and interrupt a held
+        turn's native id. Abort only that turn if running; arm if not started;
+        refuse (no-op) otherwise. Without ``turn_uuid`` (session-wide shutdown /
+        the S1 gateway-local graceful-cancel path, plus :meth:`close`): signal
+        the session's active turn. Returns whether a cancel was armed/delivered."""
+        if turn_uuid is None:
+            with self._lock:
+                active = self._active.get(session.session_id)
+                if active is not None:
+                    active.cancel.set()
+                return active is not None
+        if not turn_uuid:
+            return False
         with self._lock:
-            active = self._active.get(session.session_id)
-            if active:
-                active.cancel.set()
+            self._armed[turn_uuid] = None
+            while len(self._armed) > 256:
+                self._armed.pop(next(iter(self._armed)))
+            for active in self._active.values():
+                if active.turn_uuid == turn_uuid:
+                    active.cancel.set()
+            hold = next((h for h in self._held.values() if h.turn_uuid == turn_uuid), None)
+        if hold is not None and hold.client is not None and hold.native_turn_id:
+            try:
+                hold.client.interrupt(hold.thread_id, hold.native_turn_id)
+            except CodexProtocolError:
+                pass  # Completion may already be queued; native status settles the hold.
+        return True
 
     def close(self, session: Session) -> None:
         self.cancel(session)
@@ -357,10 +409,11 @@ class CodexBackend(CodingBackend):
             self._loaded.clear()
             self._sender_attached.clear()
 
-    def compact_session(self, session: Session) -> ExecutionResult:
-        # Native compaction is a mutation and must use the same ownership path.
-        return self._run(session.repo_path, "", session.backend_session_id or None,
-                         session.session_id, compact=True)
+    def compact_session(self, session: Session, *, turn: TurnControl | None = None,
+                        telemetry_context=None, telemetry_sink=None) -> ExecutionResult:
+        """Native compaction run as ONE turn under ``turn.turn_uuid`` (same
+        ownership/liveness contract as :meth:`resume_session`)."""
+        return self._run_turn(session, "", turn, telemetry_context, telemetry_sink, compact=True)
 
     def list_models(self) -> list[dict[str, JsonValue]]:
         response = self._runtime().list_models()
@@ -386,32 +439,44 @@ class CodexBackend(CodingBackend):
         """Carrier sink for late managed replies (bound by turn uuid there)."""
         self._proactive_sink = sink
 
+    # [A102 S1] Deprecated managed-twin shims. The managed semantics now live in
+    # the natural methods above; these remain ONLY so the worker carrier
+    # (src/worker/agent.py, unchanged in S1) keeps working until S2 deletes them.
+    # Each builds the carrier ``TurnControl`` and calls the natural method.
     def run_managed_turn(self, session: Session, message: str, ownership: Any, *, telemetry_context=None,
                          telemetry_sink=None, on_process=None) -> ExecutionResult:
-        return self._run_managed(session, message, ownership, telemetry_context, telemetry_sink,
-                                 on_process, compact=False)
+        return self.resume_session(session, message, telemetry_context=telemetry_context, telemetry_sink=telemetry_sink,
+                                   turn=turn_control(ownership.turn_uuid, ownership=ownership, on_process=on_process))
 
     def run_managed_compaction(self, session: Session, ownership: Any, *, telemetry_context=None,
                                telemetry_sink=None, on_process=None) -> ExecutionResult:
-        """Native ``thread/compact/start`` as one managed turn (same contract)."""
-        return self._run_managed(session, "", ownership, telemetry_context, telemetry_sink,
-                                 on_process, compact=True)
+        return self.compact_session(session, telemetry_context=telemetry_context, telemetry_sink=telemetry_sink,
+                                    turn=turn_control(ownership.turn_uuid, ownership=ownership, on_process=on_process))
 
-    def _run_managed(self, session: Session, message: str, ownership: Any, telemetry_context,
-                     telemetry_sink, on_process, *, compact: bool) -> ExecutionResult:
+    def _run_turn(self, session: Session, message: str, turn: TurnControl | None, telemetry_context,
+                  telemetry_sink, *, compact: bool) -> ExecutionResult:
+        """Run ONE turn: submit ``message`` (or a compaction) tagged with the
+        turn uuid on a worker thread, and await progress under ``turn``'s clock.
+        Gives up only when ``turn.expired()`` (typed recovery, never an
+        interrupt/abort); an abandoned turn keeps running and delivers its real
+        reply late through the proactive sink. A caller with no ``turn`` (the S1
+        gateway-local path / a one-off) gets a self-owned ``turn_control``."""
         from src.control.turn_queue import ManagedUnsupportedError, OwnershipConflictError
 
         if not self.supports_managed_turns():
             raise ManagedUnsupportedError("codex app-server is not available on this carrier",
                                           backend=type(self).__name__)
-        if (ownership.session_id or "") != (session.session_id or ""):
+        if turn is None:
+            turn = turn_control(uuid.uuid4().hex)
+        ownership = turn.ownership
+        if ownership is not None and (ownership.session_id or "") != (session.session_id or ""):
             raise OwnershipConflictError("managed ownership does not match the session",
                                          task_id=ownership.task_id)
-        turn_uuid: str = getattr(ownership, "turn_uuid", None) or ""
+        turn_uuid: str = turn.turn_uuid
         if not turn_uuid:
             raise OwnershipConflictError("managed Codex turn needs the carrier turn uuid",
-                                         task_id=ownership.task_id)
-        call = _ManagedCall(turn_uuid=turn_uuid, session_key=session.session_id or "", on_process=on_process)
+                                         task_id=getattr(ownership, "task_id", None))
+        call = _ManagedCall(turn=turn, session_key=session.session_id or "")
         box: dict[str, Any] = {}
 
         def target() -> None:
@@ -419,7 +484,7 @@ class CodexBackend(CodingBackend):
                 try:
                     result = self._run(session.repo_path, message, session.backend_session_id or None,
                                        session.session_id, _resolve_model(session), _resolve_effort(session),
-                                       telemetry_context, telemetry_sink, compact=compact, managed=call)
+                                       telemetry_context, telemetry_sink, compact=compact, call=call)
                 except BaseException as exc:  # surfaced to the caller if it still waits
                     with call.lock:
                         box["error"] = exc
@@ -441,9 +506,8 @@ class CodexBackend(CodingBackend):
             self._calls[turn_uuid] = call
         worker = threading.Thread(target=target, name="codex-managed-turn", daemon=True)
         worker.start()
-        limits = turn_limits(MANAGED_STALL_SECONDS)
-        while worker.is_alive() and not call.progress.expiry(limits):
-            worker.join(max(0.01, min(1.0, call.progress.remaining(limits))))
+        while worker.is_alive() and not turn.expired():
+            worker.join(max(0.01, min(1.0, turn.remaining())))
         with call.lock:
             if "error" in box:
                 raise box["error"]
@@ -472,28 +536,15 @@ class CodexBackend(CodingBackend):
         except Exception:
             logger.warning("event=codex_managed_late_result_sink_failed turn_uuid=%s", turn_uuid)
 
+    # [A102 S1] Deprecated managed-twin shims (S2 deletes them; the carrier
+    # still calls them in S1).
     def cancel_managed_turn(self, session: Session, turn_uuid: str) -> bool:
-        """Cancel EXACTLY ``turn_uuid``: arm it (a not-yet-submitted turn is then
-        never submitted) and signal its live run, whose loop interrupts only
-        its own native turn id (at once, or when ``turn/start`` answers)."""
-        if not turn_uuid:
-            return False
-        with self._lock:
-            self._armed[turn_uuid] = None
-            while len(self._armed) > 256:
-                self._armed.pop(next(iter(self._armed)))
-            for active in self._active.values():
-                if active.turn_uuid == turn_uuid:
-                    active.cancel.set()
-            hold = next((h for h in self._held.values() if h.turn_uuid == turn_uuid), None)
-        if hold is not None and hold.client is not None and hold.native_turn_id:
-            try:
-                hold.client.interrupt(hold.thread_id, hold.native_turn_id)
-            except CodexProtocolError:
-                pass  # Completion may already be queued; native status settles the hold.
-        return True
+        return self.cancel(session, turn_uuid)
 
     def forget_managed_turn(self, session: Session, turn_uuid: str) -> bool:
+        return self.forget_turn(session, turn_uuid)
+
+    def forget_turn(self, session: Session, turn_uuid: str) -> bool:
         """Drop the wait for ``turn_uuid`` (its row is terminal server-side): no
         late delivery; a held attempt's hold (and its late route) is dropped and
         its ownership released. Quiescence still follows native truth — a turn
@@ -748,7 +799,7 @@ class CodexBackend(CodingBackend):
     def _run(self, cwd: str, message: str, resume_id: str | None, session_key: str | None,
              model: str | None = None, effort: str | None = None,
              telemetry_context: TelemetryContext | None = None, telemetry_sink=None,
-             *, compact: bool = False, managed: _ManagedCall | None = None) -> ExecutionResult:
+             *, compact: bool = False, call: _ManagedCall) -> ExecutionResult:
         from src.core.test_guard import assert_live_calls_allowed
         assert_live_calls_allowed("codex")
         started = time.monotonic()
@@ -756,9 +807,7 @@ class CodexBackend(CodingBackend):
         if len(message.encode()) > 1024 * 1024:
             return ExecutionResult(False, "", native_id, errors=["codex_input_too_large"])
         if not self._capacity.acquire(blocking=False):
-            if managed is not None:
-                return _managed_conflict(native_id, "codex_capacity_exceeded")
-            return ExecutionResult(False, "", native_id, errors=["codex_capacity_exceeded"])
+            return _managed_conflict(native_id, "codex_capacity_exceeded")
         task_id = telemetry_context.turn_id if telemetry_context else uuid.uuid4().hex
         key = session_key or f"oneoff-{task_id}"
         sink = telemetry_sink or NullTelemetrySink()
@@ -786,25 +835,22 @@ class CodexBackend(CodingBackend):
                 self.prepare_execution(task_id)
                 active = ActiveTurn(session_id=key, task_id=task_id,
                                     cancel=self._execution_cancels[task_id],
-                                    turn_uuid=managed.turn_uuid if managed else "")
+                                    turn_uuid=call.turn_uuid)
                 self._active[key] = active
             ownership = CodexOwnership()
             workspace = str(Path(cwd or os.getcwd()).resolve(strict=True))
-            if managed is not None:
-                # [A82 step 4a] The app-server that will run the turn is known
-                # BEFORE ownership: its identity is the only basis on which a
-                # successor may clear this owner's no-TTL rows.
-                client = self._runtime()
-                identity = process_identity(client.process.pid)
-                if not self._settle_hold(key):
-                    raise _NotSubmitted("codex_managed_turn_held")
-            elif not self._settle_hold(key):
-                raise CodexProtocolError("codex_thread_busy")  # [M1] a held legacy turn still runs
+            # [A82 step 4a] The app-server that will run the turn is known BEFORE
+            # ownership: its identity is the only basis on which a successor may
+            # clear this owner's no-TTL rows.
+            client = self._runtime()
+            identity = process_identity(client.process.pid)
+            if not self._settle_hold(key):
+                raise _NotSubmitted("codex_managed_turn_held")
             try:
                 try:
                     native_id = ownership.acquire(key, native_id, workspace, process=identity or None)
                 except RuntimeError as exc:
-                    if not (managed is not None and str(exc).startswith("codex_thread_busy")
+                    if not (str(exc).startswith("codex_thread_busy")
                             and ownership.clear_dead_owners(key, ownership.thread_id or native_id,
                                                             process_gone_proof)):
                         raise
@@ -812,17 +858,13 @@ class CodexBackend(CodingBackend):
             except RuntimeError as exc:
                 # Durable gateway ownership failures are expected adapter
                 # outcomes, not an unclassified implementation exception.
-                if managed is not None and str(exc).startswith("codex_thread_busy"):
+                if str(exc).startswith("codex_thread_busy"):
                     raise _NotSubmitted("codex_thread_busy") from exc
                 raise CodexProtocolError(str(exc)) from exc
             if compact and not native_id:
                 raise CodexProtocolError("codex_compaction_requires_existing_thread")
             if active.cancel.is_set() or ownership.cancelled(task_id):
-                if managed is not None:
-                    raise _NotSubmitted("cancelled before submission")
-                terminal = True
-                return ExecutionResult(False, "", native_id, errors=["cancelled"])
-            client = client if managed is not None else self._runtime()
+                raise _NotSubmitted("cancelled before submission")
             if native_id in self._loaded and self._sender_attached.get(native_id) != self._sender_tokens.get(key):
                 # [A82 Stage 5] The session's sender capability changed: re-attach
                 # (no turn is active for this key) so its tool config is current.
@@ -838,14 +880,13 @@ class CodexBackend(CodingBackend):
                 ownership.record_thread(native_id)
                 if str(Path(thread["cwd"]).resolve()) != workspace:
                     raise CodexProtocolError("codex_workspace_mismatch")
-                if thread["status"]["type"] not in (_SUBMITTABLE_STATES if managed else ("idle",)):
-                    raise _NotSubmitted("codex_thread_not_idle") if managed else CodexProtocolError(
-                        "codex_thread_not_idle")
+                if thread["status"]["type"] not in _SUBMITTABLE_STATES:
+                    raise _NotSubmitted("codex_thread_not_idle")
                 self._loaded[native_id] = workspace
                 self._sender_attached[native_id] = self._sender_tokens.get(key)
             elif self._loaded[native_id] != workspace:
                 raise CodexProtocolError("codex_workspace_mismatch")
-            elif managed is not None:
+            else:
                 # Never submit onto native work: only an idle (or last-turn
                 # errored) thread on this app-server accepts a managed turn.
                 status = self._native_status(client, native_id)
@@ -861,12 +902,8 @@ class CodexBackend(CodingBackend):
             if adapter:
                 emit(adapter.coverage_events())
             if active.cancel.is_set() or ownership.cancelled(task_id):
-                if managed is not None:
-                    raise _NotSubmitted("cancelled before submission")
-                terminal = True
-                return ExecutionResult(False, "", native_id, errors=["cancelled"])
-            if managed is not None:
-                self._managed_submit_gate(managed, ownership, active, native_id, identity, compact)
+                raise _NotSubmitted("cancelled before submission")
+            self._managed_submit_gate(call, ownership, active, native_id, identity, compact)
             mutation_submitted = True
             release_safe = False
             start_reply: queue.Queue[dict] = queue.Queue(1)
@@ -875,7 +912,7 @@ class CodexBackend(CodingBackend):
                     client.compact(native_id, on_late=start_reply.put_nowait)
                 else:
                     response = client.start_turn(native_id, message, workspace, model, effort,
-                                                 managed.turn_uuid if managed else None,
+                                                 call.turn_uuid,
                                                  on_late=start_reply.put_nowait)
             except CodexRPCTimeout as exc:
                 awaiting_reply = start_reply  # [M1] the prompt may still be accepted, late
@@ -883,8 +920,7 @@ class CodexBackend(CodingBackend):
                 raise
             if not compact:
                 active.turn_id = response["turn"]["id"]
-                if managed is not None:
-                    ownership.bind_native_turn(managed.turn_uuid, active.turn_id)
+                ownership.bind_native_turn(call.turn_uuid, active.turn_id)
             active.status = "inProgress"
             interrupted_at: float | None = None
             next_cancel_poll = 0.0
@@ -894,8 +930,8 @@ class CodexBackend(CodingBackend):
                     next_cancel_poll = now + 1
                     if ownership.cancelled(task_id):
                         active.cancel.set()
-                if now - started > MAX_TURN_SECONDS and managed is None:
-                    active.cancel.set()  # Managed: the caller's deadline holds; never interrupts.
+                # No wall-clock cut-off here: the caller's ``turn`` deadline holds
+                # and NEVER interrupts; only an explicit cancel interrupts.
                 if active.cancel.is_set() and active.turn_id and interrupted_at is None:
                     interrupted_at = now
                     try:
@@ -911,8 +947,7 @@ class CodexBackend(CodingBackend):
                     event = channel.get()
                 except queue.Empty:
                     continue
-                if managed is not None:
-                    managed.progress.touch()
+                call.progress.touch()  # [A102] every native event feeds the carrier's clock
                 method = event["method"]
                 params = event["params"]
                 turn_id = params.get("turnId")
@@ -920,13 +955,12 @@ class CodexBackend(CodingBackend):
                     turn_id = params["turn"]["id"]
                     if compact and not active.turn_id and method == "turn/started":
                         active.turn_id = turn_id
-                        if managed is not None:
-                            ownership.bind_native_turn(managed.turn_uuid, turn_id)
+                        ownership.bind_native_turn(call.turn_uuid, turn_id)
                 if turn_id and turn_id != active.turn_id:
                     raise CodexProtocolError("codex_turn_identity_mismatch")
-                if (managed is not None and method == "item/started"
+                if (method == "item/started"
                         and params["item"].get("type") == "userMessage"
-                        and params["item"].get("clientId") not in (None, managed.turn_uuid)):
+                        and params["item"].get("clientId") not in (None, call.turn_uuid)):
                     raise CodexProtocolError("codex_turn_identity_mismatch")  # not our prompt
                 if method == "thread/tokenUsage/updated":
                     native_usage = params["tokenUsage"]
@@ -970,8 +1004,7 @@ class CodexBackend(CodingBackend):
                     terminal = True
                     release_safe = True
                     active.status = turn["status"]
-                    if managed is not None:
-                        ownership.finish_managed(managed.turn_uuid, active.status)
+                    ownership.finish_managed(call.turn_uuid, active.status)
                     diagnostic = {"status": active.status, "error": turn.get("error"), "usage": usage}
                     errors = [] if active.status == "completed" else [
                         "cancelled" if active.status == "interrupted" else "codex_turn_failed"]
@@ -991,19 +1024,18 @@ class CodexBackend(CodingBackend):
                 diagnostic = {"error": exc.error}
             else:
                 diagnostic = {"error": str(exc)}
-            if managed is not None:
-                outcome, hold = self._managed_failure(exc, managed, ownership, client, active, native_id,
-                                                      mutation_submitted, terminal)
-                if hold and ownership is not None and active is not None:
-                    release_safe = False
-                    with self._lock:
-                        self._held[key] = _Hold(ownership=ownership, client=client, thread_id=native_id,
-                                                turn_uuid=managed.turn_uuid, native_turn_id=active.turn_id,
-                                                late_reply=awaiting_reply, late_id=awaiting_id)
-                    return outcome
-                if outcome is not None:
-                    release_safe = True  # nothing of ours runs (never submitted / provably stopped)
-                    return outcome
+            outcome, hold = self._managed_failure(exc, call, ownership, client, active, native_id,
+                                                  mutation_submitted, terminal)
+            if hold and ownership is not None and active is not None:
+                release_safe = False
+                with self._lock:
+                    self._held[key] = _Hold(ownership=ownership, client=client, thread_id=native_id,
+                                            turn_uuid=call.turn_uuid, native_turn_id=active.turn_id,
+                                            late_reply=awaiting_reply, late_id=awaiting_id)
+                return outcome
+            if outcome is not None:
+                release_safe = True  # nothing of ours runs (never submitted / provably stopped)
+                return outcome
             # Transport ambiguity must not release a mutation-capable runtime.
             if client and not terminal and getattr(client, "failure", ""):
                 client.close()  # transport already lost: closing makes the stop provable
