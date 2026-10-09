@@ -14,7 +14,9 @@ updated_at: "2026-10-09T17:17:51.298578+00:00"
 **Level:** 3 (schema migration + live data migration, >5 files, crosses the gateway↔worker
 boundary, changes the Manager's tool surface) · **Type:** code (+ one live data migration)
 **Authored:** 2026-10-09 · **Status of this packet:** ready — commissioned by the operator
-2026-10-09 to be handed off. The gates marked **[OPERATOR]** below still need an explicit go.
+2026-10-09. **All decisions are made (see DECISIONS); there is nothing to ask the operator.**
+Execute end to end. The only hard stop is the repo rule "never restart a worker", and this job
+needs no worker restart.
 **Depends on:** — (coordinate with **A102**: it is in flight in `src/backends/`, `src/worker/`
 and parts of `src/orchestrator.py`. Rebase on `main` often and never carry its edits.)
 **Branch:** `feat/unified-agent-inbox`. Ship it as a short chain of PRs, one per phase gate
@@ -164,7 +166,7 @@ leaving them as two readers is **not** acceptable. That is how this incident was
     exhausted).
   - Consumption is the message's state. There is no separate watermark or token arithmetic.
 - **I5 Bounded delivery.** A wake that is withdrawn, refused or fails returns its messages to
-  `pending` with `attempts+1` and backoff. After N attempts (R3) the message goes `dead`, an
+  `pending` with `attempts+1` and backoff. After N attempts (D3: N=5) the message goes `dead`, an
   operator-visible alert is raised, and the push seam is reused. Nothing re-admits forever.
 - **I6 Never-run work leaves no trace in fact stores.** A withdrawn or never-activated turn
   writes no `flow_links`, no `flow_events` and no `llm_turns` row. If telemetry must record it,
@@ -174,13 +176,14 @@ leaving them as two readers is **not** acceptable. That is how this incident was
   append-only log. Fix `list_flow_events` callers and `get_session_turns` (newest window,
   never-run rows excluded in SQL, index-served).
 - **I8 Wait conditions are filters, not ledgers.** If "wake me only when ALL of {a,b,c} are in"
-  survives (R2), it is a delivery condition stored with the inbox and evaluated over inbox
+  survives (D2: it does), it is a delivery condition stored with the inbox and evaluated over inbox
   rows. It is not a second ledger in `flow_events`.
 
 ## TASK (phases; each ends at a gate — do not start the next phase until the gate's proof is in the packet)
 
-**Phase 0 — Containment [OPERATOR].** Do not change anything here without the operator's go.
-Present the options in R1 and record the decision and its timestamp in TRAIL.
+**Phase 0 — Containment (decided, D1).** Verify `scripts/ops_flag.sh get
+CASE_COMPLETION_OUTBOX_ENABLED` reads `false` (the operator switches it off on 2026-10-09). If it
+is still `true`, record that in TRAIL and continue; the fix does not depend on it. Touch no Case.
 
 **Phase 1 — Full consumer inventory (read-only, written into this packet before any code).**
 1. Enumerate every **writer** and **reader** of pending/waiting/consumed state, in a table:
@@ -225,7 +228,7 @@ Present the options in R1 and record the decision and its timestamp in TRAIL.
 1. Wake producer, activation check, finalizer and session reason move first, as one PR, so
    they cannot diverge even transiently.
 2. Then brief, close gate, boot reconcile (keep the **server endpoint signature** stable for
-   un-redeployed workers), heartbeat liveness, the web views and the MCP tools (R5).
+   un-redeployed workers), heartbeat liveness, the web views and the MCP tools (D5).
 3. Add the attempt cap, backoff, dead-letter and alert (I5). Withdrawal must call the state
    machine and must never re-arm silently.
 4. Stop never-run turns from writing links, events and telemetry (I6).
@@ -235,17 +238,17 @@ Present the options in R1 and record the decision and its timestamp in TRAIL.
     `pending_for` and the number of wakes admitted:
     - worker finishes while the recipient is idle, busy (an operator turn in flight), dead and
       respawned, or the gateway restarts mid-delivery;
-    - two workers under an ALL condition (if R2 keeps it);
+    - two workers under an ALL condition (D2);
     - an out-of-band tagged review acks without a wake;
     - an operator message interleaves before the wake;
     - the Case is closed with pending messages → `dead(case_closed)`;
-    - the recipient is rebound or replaced → R4 behaviour;
+    - the recipient is rebound or replaced → D4 behaviour;
     - a wake withdrawn N times → exactly N admissions, then `dead` + alert;
     - a Case with >500 events and >1,000 session rows still wakes and renders correctly.
   - One test asserts the producer and activation predicates are the **same function**: the
     activation check calls `pending_for`, enforced by a call-graph or monkeypatch assertion.
 
-**Phase 4 — Live data migration [OPERATOR go for the apply].**
+**Phase 4 — Live data migration (pre-approved, D8).**
 1. Write the migration script with `--dry-run` (default) and `--apply`. It does three things:
    - **Seed pending rows** for every open or blocked Case, legacy included, from the
      ledger: dispatched children that finished and were not reviewed or consumed. This is the
@@ -257,9 +260,10 @@ Present the options in R1 and record the decision and its timestamp in TRAIL.
 2. Dry-run on a **copy** of the prod DB (`sqlite3 … ".backup"` into scratch). Emit a per-Case
    diff report covering pending before/after, rows killed and tokens discharged. Every genuine
    completion must end up `pending` or `acked`; none may be lost.
-3. **[OPERATOR]** Apply only after a fresh DB backup (`deploying-the-gateway` skill: DB backup
-   when migrations apply) and an operator go. Record the backup path.
-- **Gate 4:** the dry-run report is in TRAIL, and so is the operator's go.
+3. Apply only after (a) the dry-run report shows **zero genuine completions lost** and (b) a fresh
+   DB backup (`deploying-the-gateway` skill: DB backup when migrations apply). Record the backup
+   path. If (a) fails, stop and fix the script; do not apply a lossy migration.
+- **Gate 4:** the dry-run report and the backup path are in TRAIL.
 
 **Phase 5 — Remove what the inbox superseded (only rows whose Gate 1 consumer plan is satisfied).**
 1. Delete or stub the following, each tied to its Gate 1 row:
@@ -268,8 +272,8 @@ Present the options in R1 and record the decision and its timestamp in TRAIL.
    - the wait-group fold readers;
    - the `CASE_COMPLETION_OUTBOX_ENABLED` birth flag and the `continuation_mode` routing.
 2. Keep `flow_events` writes as audit only.
-3. Keep compatibility shims for anything an un-redeployed worker calls. Removing them is a
-   follow-up after a worker redeploy **[OPERATOR — never restart a worker yourself]**.
+3. Keep compatibility shims for anything an un-redeployed worker calls (D7). Do not remove them
+   in this job, and never restart a worker.
 4. Fix I7 for every remaining `list_flow_events` caller and for `get_session_turns`.
 - **Gate 5:**
   - `rg` proves zero remaining readers of the removed symbols outside the shims, and every test
@@ -314,30 +318,33 @@ Present the options in R1 and record the decision and its timestamp in TRAIL.
 7. **No role addressing.** `rg -n "case_role" ` over the new inbox code finds no addressing
    decision based on role, and a worker→worker test proves it.
 
-## RESERVED DECISIONS (surface, do not guess)
-- **R1 — Containment before the fix [OPERATOR].** Options:
-  - (a) flip `CASE_COMPLETION_OUTBOX_ENABLED` OFF (`scripts/ops_flag.sh`; birth-scoped, so it
-    only stops new Cases being born into the loop);
-  - (b) close the stray auto-Case `312ef564…` (its only "pending" item is the Manager's own boot
-    turn);
-  - (c) leave it as is until Phase 4.
-  - Default if nobody decides: (c), with nothing touched.
-- **R2 — Keep "wake when ALL/NAMED members are in"?** The design doc said delete; A84 said keep.
-  Default: keep it as an I8 delivery filter **only if** Gate 1 shows a live caller depends on
-  it. Otherwise delete it.
-- **R3 — Attempt cap N and backoff.** Default N=5, exponential from 30 s, then `dead` + alert.
-- **R4 — Re-addressing when the recipient session is replaced** (respawn / A98 fresh fork /
-  rebind). Default: follow the recorded lineage (`continued_from` / the rebind record) to the
-  successor session. This is role-free. With no successor, the message goes `dead(recipient_gone)`
-  + alert.
-- **R5 — Manager tool surface** (`arm_wait_group`, `reconcile_waits`, `wait_for_worker`).
-  Default: keep the names as thin shims over the inbox for one release, update the tool texts,
-  and remove them in a follow-up. Live Manager prompts reference them.
-- **R6 — Junk data cleanup** (1,560 withdrawn rows; ~1,300 links/events per looping Case).
-  Default: leave them and exclude them from reads (I6/I7). Delete or archive only with an
-  **[OPERATOR]** go.
-- **R7 — Worker redeploy** needed to drop the compatibility shims. **[OPERATOR]**; never restart
-  a worker yourself.
+## DECISIONS (made by the operator's delegate, 2026-10-09 — do not reopen)
+- **D1 — Containment.** `CASE_COMPLETION_OUTBOX_ENABLED` goes OFF now, so new Cases are born on
+  the old wait-group path. That path is self-consistent and handled 545 Cases. No Case is
+  closed. The two looping Cases (`312ef564…`, `83d10aec…`) keep writing harmless junk (no paid
+  tokens) until Phase 4 discharges their tokens.
+- **D2 — "Wake when ALL of these are in" is kept**, as an I8 delivery filter stored with the inbox.
+  It is not a ledger in `flow_events`. Managers use it today (e.g. `preflight` ALL) to avoid one
+  wake per parallel worker.
+- **D3 — Delivery bound.** At most 5 attempts per message, with exponential backoff from 30 s.
+  Then `dead(attempts_exhausted)` and an operator-visible alert through the existing push seam.
+- **D4 — Replaced recipient.** Follow the recorded lineage (`continued_from` / the rebind
+  record) to the successor session. This is role-free. With no successor, the message goes
+  `dead(recipient_gone)` + alert.
+- **D5 — Manager tools.** `arm_wait_group`, `reconcile_waits` and `wait_for_worker` stay as thin
+  shims over the inbox: `arm_wait_group` sets the D2 filter, and the other two read
+  `pending_for`. Update their texts and the `dispatch_worker` reply text to match. Removing them
+  is out of scope.
+- **D6 — Junk data.** Delete nothing. The withdrawn rows and junk links/events stay in the DB;
+  I6/I7 make every read ignore them.
+- **D7 — Workers.** No worker redeploy or restart in this job. Every gateway endpoint a worker
+  calls keeps its signature and behaviour (compatibility shims). Shim removal is a follow-up
+  for whenever workers are next redeployed for other reasons.
+- **D8 — Migration apply is pre-approved** once the dry-run proves zero genuine completions lost
+  and a fresh DB backup exists.
+- **D9 — PR chain.** One PR per gate (Gates 2, 3, 5 carry code; Gate 4 carries the migration
+  script). Self-merge each when green. Deploy the gateway after Gate 4's apply and again after
+  Gate 5.
 
 ## SCOPE OUT
 - A102 backend unification (create/resume/compact/cancel bodies, TurnControl). Do not touch
@@ -350,13 +357,13 @@ Present the options in R1 and record the decision and its timestamp in TRAIL.
 
 ## TRAIL / EVIDENCE (fill at close)
 - Gate 1 inventory table (inline above or linked section) + reproduction `rg` commands
-- Gate 4 dry-run report path + operator go timestamp + DB backup path
+- Gate 4 dry-run report path + DB backup path
 - Test modules + pass counts per gate
 - Deploy tag (`deploy/<stamp>-<sha>`) + live acceptance outputs
 
 ---
 ## Milestone (burndown)
-- [ ] R1 containment decision recorded
+- [ ] D1 containment verified (flag value recorded)
 - [ ] Gate 1 — inventory complete, every row has a fate + consumer plan
 - [ ] Gate 2 — inbox schema + agent addressing, RED→GREEN tests
 - [ ] Gate 3 — all readers on `pending_for`, bounded delivery, never-run turns traceless; scenario matrix green
