@@ -53,7 +53,6 @@ Only jobs that are genuinely open. Everything merged/done is in git and the disp
 
 | Job | Packet | Depends on | Status | What it is |
 |---|---|---|---|---|
-| **A104** | `AGENT_104_UNIFIED_AGENT_INBOX.md` | — (coordinate with A102) | **ready** — Level 3, all decisions made; hand off as-is | One agent-addressed inbox as the ONLY answer to "what is waiting for this agent"; retire the wait-group ledger / continuation-token / outbox split that looped every outbox Case on 2026-10-09 (Manager never woke). Lossless migration of open Cases; worker-compat shims. |
 | **A102** | `AGENT_102_UNIFY_BACKEND_PATHWAYS.md` | PR #205 (S0) | **ACTIVE** — S1 Claude/Codex/OpenCode workers in parallel worktrees, then S2 carrier cleanup | Finish A82 below the admission layer: each backend gets ONE body per operation under its natural name (`create_session`/`resume_session`/`compact_session`/`cancel`); `run_managed_*` twins, `if managed` branches, per-backend wall clocks, flags, OpenCode CLI and PrintResume deleted; carrier alone decides turn limits (`TurnControl`). |
 | **A82** | `AGENT_82_SESSION_TURN_QUEUE.md` | — | **DONE** — full arc 0→8b merged + LIVE (`prod-0d593c6`, schema 43); convergence cutoff shipped (PR #199) + live-smoke neutral | Unified durable turn queue COMPLETE: born-managed sessions, single admission authority, legacy *admission/session-execution* branches deleted (Stage 8b) — **correction 2026-10-08:** 8b touched no `src/backends/` or `src/worker/` file; backend-level duplicate paths remain → A102. Proven live: FIFO, Codex + opencode-server managed turns, agent-source send. Follow-ups (non-blocking): re-home `manager_loop_integration` wiring proof; verify `GATEWAY_UPLOAD_MAX_MB`; **A84 carry (o)** Case-outbox; **A101** in-session blocking-state surfacing (active). Cert: `A82_E2E_CERTIFICATION.md`. |
 | **A94** | `AGENT_94_SYSTEM_ONE_CORE_DELIVERY_SCORECARD.md` | — | ready (Level 3) | S1 core + decision log + replay baseline + advisory wake scorecard. Operator inputs: read-only controller DB copy, `TYPESAFE_API_KEY`. |
@@ -81,6 +80,15 @@ Only jobs that are genuinely open. Everything merged/done is in git and the disp
 ---
 
 ## Recent shift notes
+
+**2026-10-09 — A104 done: the agent inbox is the ONLY answer to "what is waiting for this agent".**
+Completions are addressed to the session that REQUESTED the work (`mesh_tasks.sender_session_id`), written in the
+child's terminal txn, delivered as one wake, acked by the wake's completion or a tagged review; bounded (5 attempts,
+then dead + alert). Read it via `db.pending_for()` only — `tests/test_a104_single_pending_source.py` fails the build if a
+second pathway (wait-group ledger, A84 outbox, `cont:` tokens, oldest-N event folds, role addressing) returns.
+`CASE_COMPLETION_OUTBOX_ENABLED` is retired. Horse Managers may send a stale `SESSION_ID` (SDK env filter, A102
+follow-up); the gateway validates it and audits `inbox.requester_unresolved`. Tests: run multi-file sets with `-n 4`
+(DB template + xdist: wide set 8m → 3m; CI 5m43s → 2m38s).
 
 **2026-10-05 — System-One (TypeSafe Jev) decision layer specified and dispatched; tied into the Governor programme.**
 Owner decision after a 3-round analysis (30+ candidates scored on impact / fit / ground truth /

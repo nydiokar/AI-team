@@ -5,7 +5,6 @@
 | status | job_id | created | updated | depends_on | proof | flags |
 |---|---|---|---|---|---|---|
 | active | AGENT_102_UNIFY_BACKEND_PATHWAYS | 2026-10-08 | 2026-10-08 | — | — |  |
-| active | AGENT_104_UNIFIED_AGENT_INBOX | 2026-10-09 | 2026-10-09 | — | — |  |
 | active | AGENT_60_WARM_WORKER_IDLE_REAPER | 2026-07-30 | 2026-08-21 | — | ✓ | STALE_49d |
 | active | AGENT_65_COST_MONITORING_VISIBILITY | 2026-08-03 | 2026-08-03 | — | ✓ | STALE_66d |
 | active | AGENT_87_SESSION_RUNTIME_COORDINATOR | 2026-09-24 | 2026-09-25 | — | — |  |
@@ -33,8 +32,6 @@
 | blocked | AGENT_96_SYSTEM_ONE_DELIVERY_BOUNCE | 2026-10-05 | 2026-10-05 | AGENT_94_SYSTEM_ONE_CORE_DELIVERY_SCORECARD | — |  |
 | unknown | A101_O1_FINDINGS_RESUME_DECISION | ? | ? | — | — | BAD_STATUS |
 | unknown | A101_SESSION_BLOCKING_STATE_DIAGNOSIS | ? | ? | — | — | BAD_STATUS |
-| unknown | A104_GATE1_INVENTORY | ? | ? | — | — | BAD_STATUS |
-| unknown | A104_PHASE4_MIGRATION_REPORT | ? | ? | — | — | BAD_STATUS |
 | unknown | A82_E2E_CERTIFICATION | ? | ? | — | — | BAD_STATUS |
 | unknown | A82_MULTIBACKEND_VALIDATION | ? | ? | — | — | BAD_STATUS |
 | unknown | A82_STAGE8A_BACKEND_AUDIT | ? | ? | — | — | BAD_STATUS |
@@ -44,6 +41,7 @@
 | unknown | A99_TURN_QUEUE_UI_PROPOSAL | ? | ? | — | — | BAD_STATUS |
 | done | AGENT_100_A82_STAGE8B_LEGACY_CUTOFF | 2026-10-07 | 2026-10-07 | — | ✓ |  |
 | done | AGENT_101_SESSION_BLOCKING_STATE_SURFACING | 2026-10-07 | 2026-10-07 | — | ✓ |  |
+| done | AGENT_104_UNIFIED_AGENT_INBOX | 2026-10-09 | 2026-10-09 | — | ✓ |  |
 | done | AGENT_10_M3_CLAUDE_TELEMETRY | 2026-07-03 | 2026-08-03 | — | ✓ |  |
 | done | AGENT_11_MESH_AFFINITY_ROUTING | 2026-07-03 | 2026-08-03 | — | ✓ |  |
 | done | AGENT_12_HARNESS_SELFTEST | 2026-07-03 | 2026-08-03 | — | ✓ |  |
@@ -90,7 +88,7 @@
 | done | AGENT_59_ACTIVITY_FORWARDER_TESTS | 2026-07-30 | 2026-08-03 | — | ✓ |  |
 | done | AGENT_61_QUOTA_COORDINATOR_FINALIZATION | 2026-07-31 | 2026-08-03 | — | ✓ |  |
 | done | AGENT_64_HARNESS_DOC_DRIFT_RECONCILIATION | 2026-08-01 | 2026-08-03 | — | ✓ |  |
-| done | AGENT_67_MESH_SECURITY_REVIEW_THREAT_MODEL | 2026-08-03 | 2026-08-05 | — | ✗MISSING | CLAIMED_DONE_NO_PROOF |
+| done | AGENT_67_MESH_SECURITY_REVIEW_THREAT_MODEL | 2026-08-03 | 2026-08-05 | — | ✓ |  |
 | done | AGENT_69_DISPATCH_STATE_HARDENING | 2026-08-04 | 2026-08-04 | — | ✓ |  |
 | done | AGENT_70 | 2026-08-04 | 2026-08-04 | — | ✓ |  |
 | done | AGENT_76_SKILLS_LIBRARY_O1 | 2026-08-08 | 2026-10-06 | — | ✓ |  |
