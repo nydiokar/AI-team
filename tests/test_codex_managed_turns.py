@@ -32,6 +32,7 @@ from src.backends.codex_native import CodexBackend
 from src.backends.codex_ownership import CodexOwnership
 from src.control.turn_queue import ManagedTurnOwnership
 from src.core.interfaces import Session, SessionStatus
+from src.core.turn_liveness import turn_control
 from src.core.process_utils import process_gone_proof, process_identity
 
 FAKE_APP_SERVER = r'''#!/usr/bin/env python3
@@ -302,6 +303,35 @@ def owners(home: Path) -> list[tuple]:
 
 
 # --------------------------------------------------------------------------- #
+# [A102] Drive the NATURAL backend methods. ``turn_control`` carries the carrier
+# ownership + identity + the per-turn stall-window (``stall``, replacing the old
+# ``MANAGED_STALL_SECONDS`` monkeypatch — policy is now the carrier's, never a
+# backend constant).
+# --------------------------------------------------------------------------- #
+def _tc(ownership: ManagedTurnOwnership, *, on_process=None, stall: float | None = None):
+    return turn_control(ownership.turn_uuid, ownership=ownership, on_process=on_process, stall_override=stall)
+
+
+def run_turn(backend, session, message, ownership, *, on_process=None, stall=None,
+             telemetry_context=None, telemetry_sink=None):
+    return backend.resume_session(session, message, telemetry_context=telemetry_context,
+                                  telemetry_sink=telemetry_sink,
+                                  turn=_tc(ownership, on_process=on_process, stall=stall))
+
+
+def run_compaction(backend, session, ownership, *, on_process=None, stall=None):
+    return backend.compact_session(session, turn=_tc(ownership, on_process=on_process, stall=stall))
+
+
+def cancel_turn(backend, session, turn_uuid):
+    return backend.cancel(session, turn_uuid)
+
+
+def drop_turn(backend, session, turn_uuid):
+    return backend.forget_turn(session, turn_uuid)
+
+
+# --------------------------------------------------------------------------- #
 # Capability + happy path: attribution by write-ahead mapping, identity first
 # --------------------------------------------------------------------------- #
 def test_capability_and_attributed_turn_with_process_identity_before_submit(h):
@@ -314,7 +344,7 @@ def test_capability_and_attributed_turn_with_process_identity_before_submit(h):
         seen.append(dict(ident))
 
     ownership = own()
-    result = h.backend.run_managed_turn(h.session(), "hello", ownership, on_process=on_process)
+    result = run_turn(h.backend, h.session(), "hello", ownership, on_process=on_process)
     assert result.success, result.errors
     assert result.output == "native answer"
     thread_id = result.backend_session_id
@@ -341,7 +371,7 @@ def test_mismatched_ownership_session_refused_before_anything_runs(h):
     from src.control.turn_queue import OwnershipConflictError
 
     with pytest.raises(OwnershipConflictError):
-        h.backend.run_managed_turn(h.session("sess-1"), "hi", own("other"))
+        run_turn(h.backend, h.session("sess-1"), "hi", own("other"))
     assert h.requests("turn/start") == []
 
 
@@ -351,10 +381,10 @@ def test_mismatched_ownership_session_refused_before_anything_runs(h):
 def test_in_flight_turn_refuses_second_managed_turn_without_interrupt(h):
     h.ctl(hold=h.release_path)
     first = own(turn_uuid="uuid-first")
-    th, box = run_bg(h.backend.run_managed_turn, h.session(), "first", first)
+    th, box = run_bg(run_turn, h.backend, h.session(), "first", first)
     wait_for(lambda: len(h.requests("turn/start")) == 1)
     assert h.backend.is_quiescent(h.session()) is False
-    second = h.backend.run_managed_turn(h.session(), "second", own(turn_uuid="uuid-second"))
+    second = run_turn(h.backend, h.session(), "second", own(turn_uuid="uuid-second"))
     assert second.success is False and second.error_class == "managed_conflict"
     assert any("not_submitted" in e for e in second.errors)
     assert h.requests("turn/interrupt") == []
@@ -369,14 +399,14 @@ def test_in_flight_turn_refuses_second_managed_turn_without_interrupt(h):
 @pytest.mark.parametrize("where", ["attach", "loaded"])
 def test_native_thread_not_idle_is_a_typed_conflict_before_submit(h, where):
     if where == "loaded":
-        warm = h.backend.run_managed_turn(h.session(), "warm", own())
+        warm = run_turn(h.backend, h.session(), "warm", own())
         assert warm.success
         native = warm.backend_session_id
         h.ctl(read_status="active")
     else:
         native = ""
         h.ctl(attach_status="active")
-    result = h.backend.run_managed_turn(h.session(native=native), "hello", own())
+    result = run_turn(h.backend, h.session(native=native), "hello", own())
     assert result.error_class == "managed_conflict"
     assert len(h.requests("turn/start")) == (1 if where == "loaded" else 0)
     assert h.requests("turn/interrupt") == []
@@ -388,7 +418,7 @@ def test_native_thread_not_idle_is_a_typed_conflict_before_submit(h, where):
 # --------------------------------------------------------------------------- #
 def test_foreign_turn_event_is_recovery_required_and_never_interrupts(h):
     h.ctl(foreign_event=True)
-    result = h.backend.run_managed_turn(h.session(), "hello", own(turn_uuid="uuid-f"))
+    result = run_turn(h.backend, h.session(), "hello", own(turn_uuid="uuid-f"))
     assert result.success is False and result.error_class == "recovery_required"
     assert h.requests("turn/interrupt") == []
     pid = h.requests("turn/start")[0]["pid"]
@@ -404,7 +434,7 @@ def test_foreign_turn_event_is_recovery_required_and_never_interrupts(h):
 
 def test_wrong_client_id_echo_is_recovery_required(h):
     h.ctl(client_id_override="someone-else", hold=h.release_path)
-    result = h.backend.run_managed_turn(h.session(), "hello", own(turn_uuid="uuid-mine"))
+    result = run_turn(h.backend, h.session(), "hello", own(turn_uuid="uuid-mine"))
     assert result.error_class == "recovery_required"
     assert h.requests("turn/interrupt") == []
 
@@ -412,7 +442,7 @@ def test_wrong_client_id_echo_is_recovery_required(h):
 def test_delayed_turn_start_response_still_attributes_exactly(h):
     h.ctl(start_delay=0.6)
     ownership = own(turn_uuid="uuid-delay")
-    result = h.backend.run_managed_turn(h.session(), "hello", ownership)
+    result = run_turn(h.backend, h.session(), "hello", ownership)
     assert result.success, result.errors
     row = managed_rows(h.home)[0]
     assert row["state"] == "completed" and row["native_turn_id"].startswith("turn-")
@@ -421,7 +451,7 @@ def test_delayed_turn_start_response_still_attributes_exactly(h):
 def test_turn_start_response_deadline_is_recovery_required(h, monkeypatch):
     monkeypatch.setattr(app_server_mod, "RPC_TIMEOUT", 0.3)
     h.ctl(start_delay=2)
-    result = h.backend.run_managed_turn(h.session(), "hello", own(turn_uuid="uuid-late"))
+    result = run_turn(h.backend, h.session(), "hello", own(turn_uuid="uuid-late"))
     assert result.error_class == "recovery_required"
     row = managed_rows(h.home)[0]
     assert row["native_turn_id"] == "", "native id never learned"
@@ -431,7 +461,7 @@ def test_crash_between_submit_and_response_is_recovery_and_never_resubmitted(h):
     h.ctl(die_before_response=True)
     idents: list[dict] = []
     ownership = own(turn_uuid="uuid-crash")
-    result = h.backend.run_managed_turn(h.session(), "hello", ownership, on_process=idents.append)
+    result = run_turn(h.backend, h.session(), "hello", ownership, on_process=idents.append)
     assert result.error_class == "recovery_required"
     assert process_gone_proof(idents[0]) is not None, "app-server death is provable"
     row = managed_rows(h.home)[0]
@@ -441,7 +471,7 @@ def test_crash_between_submit_and_response_is_recovery_and_never_resubmitted(h):
     assert h.backend.is_quiescent(h.session()) is True
     # A replay of the SAME attempt is never blindly re-submitted.
     h.ctl()
-    again = h.backend.run_managed_turn(h.session(), "hello", ownership)
+    again = run_turn(h.backend, h.session(), "hello", ownership)
     assert again.error_class == "recovery_required"
     assert len(h.requests("turn/start")) == 1
 
@@ -449,7 +479,7 @@ def test_crash_between_submit_and_response_is_recovery_and_never_resubmitted(h):
 def test_app_server_death_mid_turn_is_attributable_failure_with_process_proof(h):
     h.ctl(die_mid_turn=True)
     idents: list[dict] = []
-    result = h.backend.run_managed_turn(h.session(), "hello", own(turn_uuid="uuid-die"),
+    result = run_turn(h.backend, h.session(), "hello", own(turn_uuid="uuid-die"),
                                         on_process=idents.append)
     assert result.success is False and result.error_class != "recovery_required"
     assert "codex_runtime_lost" in " ".join(result.errors)
@@ -462,13 +492,12 @@ def test_app_server_death_mid_turn_is_attributable_failure_with_process_proof(h)
 # --------------------------------------------------------------------------- #
 # Deadline: no interrupt; late reply binds to the turn uuid only
 # --------------------------------------------------------------------------- #
-def test_deadline_holds_without_interrupt_and_late_result_binds_to_turn_uuid(h, monkeypatch):
-    assert h.backend.run_managed_turn(h.session(), "warm", own()).success  # app-server up
-    monkeypatch.setattr(native_mod, "MANAGED_STALL_SECONDS", 0.5)
+def test_deadline_holds_without_interrupt_and_late_result_binds_to_turn_uuid(h):
+    assert run_turn(h.backend, h.session(), "warm", own()).success  # app-server up
     late: list[tuple[str, Any]] = []
     h.backend.set_proactive_sink(lambda sid, outcome: late.append((sid, outcome)))
     h.ctl(hold=h.release_path, output="late answer")
-    result = h.backend.run_managed_turn(h.session(), "hello", own(turn_uuid="uuid-held"))
+    result = run_turn(h.backend, h.session(), "hello", own(turn_uuid="uuid-held"), stall=0.5)
     assert result.error_class == "recovery_required"
     assert h.requests("turn/interrupt") == []
     assert h.backend.is_quiescent(h.session()) is False
@@ -481,15 +510,14 @@ def test_deadline_holds_without_interrupt_and_late_result_binds_to_turn_uuid(h, 
     wait_for(lambda: h.backend.is_quiescent(h.session()))
 
 
-def test_working_turn_longer_than_the_stall_window_is_never_cut_off(h, monkeypatch):
+def test_working_turn_longer_than_the_stall_window_is_never_cut_off(h):
     """A managed turn whose app-server keeps streaming events runs to its real
     result; only a turn with NO native event for the window goes to recovery."""
-    assert h.backend.run_managed_turn(h.session(), "warm", own()).success  # app-server up
-    monkeypatch.setattr(native_mod, "MANAGED_STALL_SECONDS", 0.6)
+    assert run_turn(h.backend, h.session(), "warm", own()).success  # app-server up
     h.ctl(hold=h.release_path, output="long answer", progress_every=0.2)
     out: dict = {}
     th = threading.Thread(target=lambda: out.update(
-        r=h.backend.run_managed_turn(h.session(), "hello", own(turn_uuid="uuid-long"))), daemon=True)
+        r=run_turn(h.backend, h.session(), "hello", own(turn_uuid="uuid-long"), stall=0.6)), daemon=True)
     th.start()
     time.sleep(1.8)  # 3x the stall window
     assert out == {}, f"a progressing turn was given up on: {out}"
@@ -499,25 +527,23 @@ def test_working_turn_longer_than_the_stall_window_is_never_cut_off(h, monkeypat
     assert h.requests("turn/interrupt") == []
 
 
-def test_forget_drops_late_delivery_but_quiescence_follows_native_truth(h, monkeypatch):
-    assert h.backend.run_managed_turn(h.session(), "warm", own()).success  # app-server up
-    monkeypatch.setattr(native_mod, "MANAGED_STALL_SECONDS", 0.5)
+def test_forget_drops_late_delivery_but_quiescence_follows_native_truth(h):
+    assert run_turn(h.backend, h.session(), "warm", own()).success  # app-server up
     late: list = []
     h.backend.set_proactive_sink(lambda sid, outcome: late.append(outcome))
     h.ctl(hold=h.release_path)
-    result = h.backend.run_managed_turn(h.session(), "hello", own(turn_uuid="uuid-forget"))
+    result = run_turn(h.backend, h.session(), "hello", own(turn_uuid="uuid-forget"), stall=0.5)
     assert result.error_class == "recovery_required"
-    assert h.backend.forget_managed_turn(h.session(), "uuid-forget") is True
+    assert drop_turn(h.backend, h.session(), "uuid-forget") is True
     assert h.backend.is_quiescent(h.session()) is False, "native work still runs"
     h.release()
     wait_for(lambda: h.backend.is_quiescent(h.session()))
     time.sleep(0.2)
     assert late == []
-    assert h.backend.forget_managed_turn(h.session(), "uuid-unknown") is False
+    assert drop_turn(h.backend, h.session(), "uuid-unknown") is False
 
 
 def test_deadline_before_submission_is_not_submitted(h, monkeypatch):
-    monkeypatch.setattr(native_mod, "MANAGED_STALL_SECONDS", 0.0)
     gate = threading.Event()
     real = CodexOwnership.acquire
 
@@ -526,7 +552,7 @@ def test_deadline_before_submission_is_not_submitted(h, monkeypatch):
         return real(self, *a, **k)
 
     monkeypatch.setattr(CodexOwnership, "acquire", slow_acquire)
-    result = h.backend.run_managed_turn(h.session(), "hello", own(turn_uuid="uuid-pre"))
+    result = run_turn(h.backend, h.session(), "hello", own(turn_uuid="uuid-pre"), stall=0.0)
     assert result.error_class == "managed_conflict"
     gate.set()
     wait_for(lambda: h.backend.is_quiescent(h.session()))
@@ -539,12 +565,12 @@ def test_deadline_before_submission_is_not_submitted(h, monkeypatch):
 def test_cancel_interrupts_exactly_that_turn(h):
     h.ctl(hold=h.release_path)
     a, b = own("sess-a", "uuid-a"), own("sess-b", "uuid-b")
-    th_a, box_a = run_bg(h.backend.run_managed_turn, h.session("sess-a"), "a", a)
-    th_b, box_b = run_bg(h.backend.run_managed_turn, h.session("sess-b"), "b", b)
+    th_a, box_a = run_bg(run_turn, h.backend, h.session("sess-a"), "a", a)
+    th_b, box_b = run_bg(run_turn, h.backend, h.session("sess-b"), "b", b)
     wait_for(lambda: len(h.requests("turn/start")) == 2)
     wait_for(lambda: all(r["native_turn_id"] for r in managed_rows(h.home)))
     native_a = {r["turn_uuid"]: r["native_turn_id"] for r in managed_rows(h.home)}["uuid-a"]
-    assert h.backend.cancel_managed_turn(h.session("sess-a"), "uuid-a") is True
+    assert cancel_turn(h.backend, h.session("sess-a"), "uuid-a") is True
     th_a.join(10)
     interrupts = h.requests("turn/interrupt")
     assert [i["params"]["turnId"] for i in interrupts] == [native_a]
@@ -557,9 +583,9 @@ def test_cancel_interrupts_exactly_that_turn(h):
 
 def test_cancel_unknown_turn_never_cancels_another(h):
     h.ctl(hold=h.release_path)
-    th, box = run_bg(h.backend.run_managed_turn, h.session(), "x", own(turn_uuid="uuid-live"))
+    th, box = run_bg(run_turn, h.backend, h.session(), "x", own(turn_uuid="uuid-live"))
     wait_for(lambda: len(h.requests("turn/start")) == 1)
-    h.backend.cancel_managed_turn(h.session(), "uuid-other")
+    cancel_turn(h.backend, h.session(), "uuid-other")
     time.sleep(0.3)
     assert h.requests("turn/interrupt") == []
     h.release()
@@ -568,17 +594,17 @@ def test_cancel_unknown_turn_never_cancels_another(h):
 
 
 def test_cancel_armed_before_start_never_submits(h):
-    assert h.backend.cancel_managed_turn(h.session(), "uuid-armed") is True
-    result = h.backend.run_managed_turn(h.session(), "x", own(turn_uuid="uuid-armed"))
+    assert cancel_turn(h.backend, h.session(), "uuid-armed") is True
+    result = run_turn(h.backend, h.session(), "x", own(turn_uuid="uuid-armed"))
     assert result.error_class == "managed_conflict"
     assert h.requests("turn/start") == []
 
 
 def test_cancel_during_delayed_turn_start_interrupts_when_turn_id_known(h):
     h.ctl(start_delay=0.5, hold=h.release_path)
-    th, box = run_bg(h.backend.run_managed_turn, h.session(), "x", own(turn_uuid="uuid-d"))
+    th, box = run_bg(run_turn, h.backend, h.session(), "x", own(turn_uuid="uuid-d"))
     wait_for(lambda: len(h.requests("turn/start")) == 1)
-    assert h.backend.cancel_managed_turn(h.session(), "uuid-d") is True
+    assert cancel_turn(h.backend, h.session(), "uuid-d") is True
     th.join(10)
     assert box["result"].errors == ["cancelled"]
     assert len(h.requests("turn/interrupt")) == 1
@@ -588,17 +614,17 @@ def test_cancel_during_delayed_turn_start_interrupts_when_turn_id_known(h):
 # Managed compaction
 # --------------------------------------------------------------------------- #
 def test_managed_compaction_same_contract(h):
-    warm = h.backend.run_managed_turn(h.session(), "warm", own())
+    warm = run_turn(h.backend, h.session(), "warm", own())
     native = warm.backend_session_id
     ownership = own(turn_uuid="uuid-compact")
-    result = h.backend.run_managed_compaction(h.session(native=native), ownership)
+    result = run_compaction(h.backend, h.session(native=native), ownership)
     assert result.success, result.errors
     assert result.backend_session_id == native
     row = {r["turn_uuid"]: r for r in managed_rows(h.home)}["uuid-compact"]
     assert row["kind"] == "compaction" and row["native_turn_id"].startswith("cmp-")
     assert row["state"] == "completed"
     h.ctl(read_status="active")
-    refused = h.backend.run_managed_compaction(h.session(native=native), own())
+    refused = run_compaction(h.backend, h.session(native=native), own())
     assert refused.error_class == "managed_conflict"
     assert len(h.requests("thread/compact/start")) == 1
 
@@ -608,7 +634,7 @@ def test_managed_compaction_same_contract(h):
 # --------------------------------------------------------------------------- #
 def test_quiescence_unknown_native_status_is_busy(h):
     h.ctl(foreign_event=True)
-    result = h.backend.run_managed_turn(h.session(), "hello", own())
+    result = run_turn(h.backend, h.session(), "hello", own())
     assert result.error_class == "recovery_required"
     h.ctl(read_error=True)
     assert h.backend.is_quiescent(h.session()) is False
@@ -638,7 +664,7 @@ def test_successor_never_steals_a_live_owner(h):
     try:
         successor = h.make()
         assert successor.is_quiescent(h.session(native=thread)) is False
-        result = successor.run_managed_turn(h.session(native=thread), "hi", own())
+        result = run_turn(successor, h.session(native=thread), "hi", own())
         assert result.error_class == "managed_conflict"
         assert h.requests("turn/start") == []
         assert owners(h.home), "live owner untouched"
@@ -653,7 +679,7 @@ def test_successor_with_process_proof_clears_no_ttl_owner(h):
     assert successor.is_quiescent(h.session(native=thread)) is True
     states = {r["turn_uuid"]: r["state"] for r in managed_rows(h.home)}
     assert states["uuid-prev"] == "stopped"
-    result = successor.run_managed_turn(h.session(native=thread), "hi", own(turn_uuid="uuid-next"))
+    result = run_turn(successor, h.session(native=thread), "hi", own(turn_uuid="uuid-next"))
     assert result.success, result.errors
     assert result.backend_session_id == thread
 
@@ -663,7 +689,7 @@ def test_legacy_owner_without_identity_is_unknown_and_busy(h):
     legacy.acquire("sess-1", "thr-legacy", str(Path(h.repo).resolve()))
     successor = h.make()
     assert successor.is_quiescent(h.session(native="thr-legacy")) is False
-    assert successor.run_managed_turn(h.session(native="thr-legacy"), "x", own()).error_class == "managed_conflict"
+    assert run_turn(successor, h.session(native="thr-legacy"), "x", own()).error_class == "managed_conflict"
 
 
 # --------------------------------------------------------------------------- #
@@ -672,7 +698,7 @@ def test_legacy_owner_without_identity_is_unknown_and_busy(h):
 def test_sender_capability_reaches_thread_config_and_never_disk(h):
     token = "cap-" + uuid.uuid4().hex
     assert h.backend.provision_sender_capability("sess-1", token) is True
-    result = h.backend.run_managed_turn(h.session(), "hello", own())
+    result = run_turn(h.backend, h.session(), "hello", own())
     assert result.success, result.errors
     config = h.requests("thread/start")[0]["params"]["config"]
     assert config["mcp_servers.ai_team_sender.env"]["AI_TEAM_SENDER_CAPABILITY"] == token
@@ -691,7 +717,7 @@ def test_sender_capability_reaches_thread_config_and_never_disk(h):
 def _held_neighbour(h) -> tuple[threading.Thread, dict, int]:
     """Session A holds a managed turn natively in flight on the shared app-server."""
     h.ctl(hold=h.release_path)
-    th_a, box_a = run_bg(h.backend.run_managed_turn, h.session("sess-a"), "a",
+    th_a, box_a = run_bg(run_turn, h.backend, h.session("sess-a"), "a",
                          own("sess-a", "uuid-a", task="t-a"))
     wait_for(lambda: any(r["turn_uuid"] == "uuid-a" and r["native_turn_id"] for r in managed_rows(h.home)))
     return th_a, box_a, h.backend._client.process.pid
@@ -715,7 +741,7 @@ def test_M1_slow_turn_start_of_one_session_never_kills_a_neighbour(h, monkeypatc
     th_a, box_a, pid = _held_neighbour(h)
     monkeypatch.setattr(app_server_mod, "RPC_TIMEOUT", 0.3)
     h.ctl(hold=h.release_path, start_delay=1.5)
-    res_b = h.backend.run_managed_turn(h.session("sess-b"), "b", own("sess-b", "uuid-b", task="t-b"))
+    res_b = run_turn(h.backend, h.session("sess-b"), "b", own("sess-b", "uuid-b", task="t-b"))
     assert res_b.error_class == "recovery_required"
     assert h.backend.is_quiescent(h.session("sess-b")) is False, "B's prompt may still run: held"
     _neighbour_survives(h, th_a, box_a, pid)
@@ -729,7 +755,7 @@ def test_M1_slow_turn_start_of_one_session_never_kills_a_neighbour(h, monkeypatc
 
 
 def test_M1_slow_thread_read_in_quiescence_probe_never_kills_a_neighbour(h, monkeypatch):
-    assert h.backend.run_managed_turn(h.session("sess-b"), "warm", own("sess-b", task="t-w")).success
+    assert run_turn(h.backend, h.session("sess-b"), "warm", own("sess-b", task="t-w")).success
     th_a, box_a, pid = _held_neighbour(h)
     monkeypatch.setattr(app_server_mod, "RPC_TIMEOUT", 0.3)
     h.ctl(hold=h.release_path, read_delay=1.0)
@@ -741,12 +767,12 @@ def test_M1_slow_thread_read_in_quiescence_probe_never_kills_a_neighbour(h, monk
 
 def test_M1_slow_interrupt_never_kills_the_shared_app_server(h, monkeypatch):
     th_a, box_a, pid = _held_neighbour(h)
-    th_b, box_b = run_bg(h.backend.run_managed_turn, h.session("sess-b"), "b",
+    th_b, box_b = run_bg(run_turn, h.backend, h.session("sess-b"), "b",
                          own("sess-b", "uuid-b", task="t-b"))
     wait_for(lambda: len(managed_rows(h.home)) == 2 and all(r["native_turn_id"] for r in managed_rows(h.home)))
     monkeypatch.setattr(app_server_mod, "INTERRUPT_TIMEOUT", 0.3, raising=False)
     h.ctl(hold=h.release_path, interrupt_delay=5.5)  # beyond the legacy 5 s interrupt deadline
-    assert h.backend.cancel_managed_turn(h.session("sess-b"), "uuid-b") is True
+    assert cancel_turn(h.backend, h.session("sess-b"), "uuid-b") is True
     th_b.join(15)
     assert box_b["result"].errors == ["cancelled"], "the interrupt is confirmed natively, late"
     _neighbour_survives(h, th_a, box_a, pid)
@@ -767,12 +793,12 @@ def test_M1_legacy_turn_start_deadline_never_kills_a_managed_neighbour(h, monkey
 
 def test_m1_turn_refused_after_write_ahead_is_rebeginnable(h):
     session = h.session()
-    assert h.backend.cancel_managed_turn(session, "uuid-requeued") is True
-    first = h.backend.run_managed_turn(session, "x", own(turn_uuid="uuid-requeued"))
+    assert cancel_turn(h.backend, session, "uuid-requeued") is True
+    first = run_turn(h.backend, session, "x", own(turn_uuid="uuid-requeued"))
     assert first.error_class == "managed_conflict"
     assert {r["turn_uuid"]: r["state"] for r in managed_rows(h.home)} == {"uuid-requeued": "not_submitted"}
     # The carrier requeues the provably-unsent attempt; the next claim runs it.
-    again = h.backend.run_managed_turn(session, "x", own(turn_uuid="uuid-requeued"))
+    again = run_turn(h.backend, session, "x", own(turn_uuid="uuid-requeued"))
     assert again.success, again.errors
     assert len(h.requests("turn/start")) == 1
     assert {r["turn_uuid"]: r["state"] for r in managed_rows(h.home)} == {"uuid-requeued": "completed"}
@@ -801,9 +827,8 @@ def test_m2_cutover_sweep_clears_identityless_owner_only_when_its_process_is_gon
     assert h.make().is_quiescent(h.session(native="thr-legacy")) is True
 
 
-def test_m3_session_stays_busy_until_late_reply_delivery_was_attempted(h, monkeypatch):
-    assert h.backend.run_managed_turn(h.session(), "warm", own()).success
-    monkeypatch.setattr(native_mod, "MANAGED_STALL_SECONDS", 0.5)
+def test_m3_session_stays_busy_until_late_reply_delivery_was_attempted(h):
+    assert run_turn(h.backend, h.session(), "warm", own()).success
     in_sink, release_sink = threading.Event(), threading.Event()
     seen: list[bool] = []
 
@@ -814,7 +839,7 @@ def test_m3_session_stays_busy_until_late_reply_delivery_was_attempted(h, monkey
 
     h.backend.set_proactive_sink(sink)
     h.ctl(hold=h.release_path)
-    result = h.backend.run_managed_turn(h.session(), "x", own(turn_uuid="uuid-late"))
+    result = run_turn(h.backend, h.session(), "x", own(turn_uuid="uuid-late"), stall=0.5)
     assert result.error_class == "recovery_required"
     h.release()
     assert in_sink.wait(10)
@@ -831,7 +856,7 @@ def test_m5_capability_probe_refuses_an_app_server_without_the_managed_protocol(
     h.ctl(**{missing: True})
     assert h.backend.supports_managed_turns() is False
     with pytest.raises(ManagedUnsupportedError):
-        h.backend.run_managed_turn(h.session(), "x", own())
+        run_turn(h.backend, h.session(), "x", own())
     assert h.requests() == [], "the probe is offline: no app-server protocol traffic"
 
 
@@ -844,14 +869,14 @@ def test_m5_capability_probe_is_cached_per_binary(h):
 @pytest.mark.parametrize("where", ["attach", "loaded"])
 def test_m5_system_error_thread_is_submittable_on_attach_and_loaded_alike(h, where):
     if where == "loaded":
-        warm = h.backend.run_managed_turn(h.session(), "warm", own())
+        warm = run_turn(h.backend, h.session(), "warm", own())
         assert warm.success
         native = warm.backend_session_id
         h.ctl(read_status="systemError")
     else:
         native = ""
         h.ctl(attach_status="systemError")
-    result = h.backend.run_managed_turn(h.session(native=native), "hello", own())
+    result = run_turn(h.backend, h.session(native=native), "hello", own())
     assert result.success, result.errors
 
 
@@ -861,7 +886,7 @@ def test_token_audit_sender_token_only_travels_in_the_mcp_env_thread_config(h, c
     caplog.set_level(logging.DEBUG)
     token = "cap-" + uuid.uuid4().hex
     assert h.backend.provision_sender_capability("sess-1", token) is True
-    result = h.backend.run_managed_turn(h.session(), "hello", own())
+    result = run_turn(h.backend, h.session(), "hello", own())
     assert result.success, result.errors
     carrying = []
     for request in h.requests():
@@ -887,7 +912,7 @@ def test_token_audit_sender_token_only_travels_in_the_mcp_env_thread_config(h, c
 def test_N2_pre_submit_thread_start_timeout_is_not_submitted_and_requeues(h, monkeypatch):
     monkeypatch.setattr(app_server_mod, "RPC_TIMEOUT", 0.3)
     h.ctl(attach_delay=1.0)
-    result = h.backend.run_managed_turn(h.session(), "x", own(turn_uuid="uuid-n2"))
+    result = run_turn(h.backend, h.session(), "x", own(turn_uuid="uuid-n2"))
     assert result.error_class == "managed_conflict", result.errors
     assert h.requests("turn/start") == []
     assert owners(h.home) == [], "nothing of ours runs: ownership released"
@@ -895,7 +920,7 @@ def test_N2_pre_submit_thread_start_timeout_is_not_submitted_and_requeues(h, mon
     assert client is not None and client.failure == "" and client.process.poll() is None
     h.ctl()
     wait_for(lambda: not client.late)  # the late thread/start reply drained (dropped)
-    again = h.backend.run_managed_turn(h.session(), "x", own(turn_uuid="uuid-n2"))
+    again = run_turn(h.backend, h.session(), "x", own(turn_uuid="uuid-n2"))
     assert again.success, again.errors
     assert len(h.requests("turn/start")) == 1
 
@@ -906,11 +931,11 @@ def test_N1_hung_app_server_forget_drops_hold_and_late_id_and_recycle_unwedges(h
     monkeypatch.setattr(app_server_mod, "RPC_TIMEOUT", 0.3)
     monkeypatch.setattr(native_mod, "UNRESPONSIVE_AFTER_SEC", 1.0)
     h.ctl(start_delay=30)  # the fake's request loop is wedged: nothing is answered
-    result = h.backend.run_managed_turn(h.session(), "x", own(turn_uuid="uuid-h"))
+    result = run_turn(h.backend, h.session(), "x", own(turn_uuid="uuid-h"))
     assert result.error_class == "recovery_required"
     client = h.backend._client
     ident = process_identity(client.process.pid)
-    assert h.backend.forget_managed_turn(h.session(), "uuid-h") is True
+    assert drop_turn(h.backend, h.session(), "uuid-h") is True
     assert h.backend._held == {}, "operator forget must drop the hold"
     assert client.late == {}, "operator forget must drop the late id's route"
     assert h.backend.is_quiescent(h.session()) is False, "the unanswered prompt may still be accepted"
@@ -919,7 +944,7 @@ def test_N1_hung_app_server_forget_drops_hold_and_late_id_and_recycle_unwedges(h
     assert process_gone_proof(ident) is not None, "recycle = provable process death"
     assert owners(h.home) == []
     h.ctl()
-    after = h.backend.run_managed_turn(h.session(), "y", own(turn_uuid="uuid-next"))
+    after = run_turn(h.backend, h.session(), "y", own(turn_uuid="uuid-next"))
     assert after.success, after.errors
     assert h.backend._client is not client
 
@@ -928,7 +953,7 @@ def test_N1_held_turn_on_a_hung_app_server_resolves_by_recycle_without_forget(h,
     monkeypatch.setattr(app_server_mod, "RPC_TIMEOUT", 0.3)
     monkeypatch.setattr(native_mod, "UNRESPONSIVE_AFTER_SEC", 1.0)
     h.ctl(start_delay=30)
-    assert h.backend.run_managed_turn(h.session(), "x", own(turn_uuid="uuid-h2")).error_class \
+    assert run_turn(h.backend, h.session(), "x", own(turn_uuid="uuid-h2")).error_class \
         == "recovery_required"
     assert h.backend.is_quiescent(h.session()) is False
     time.sleep(1.1)
@@ -942,7 +967,7 @@ def test_N1_unresponsive_app_server_is_never_recycled_under_a_live_neighbour_tur
     monkeypatch.setattr(app_server_mod, "RPC_TIMEOUT", 0.3)
     monkeypatch.setattr(native_mod, "UNRESPONSIVE_AFTER_SEC", 0.5)
     h.ctl(hold=h.release_path, start_delay=2.0)
-    res_b = h.backend.run_managed_turn(h.session("sess-b"), "b", own("sess-b", "uuid-b", task="t-b"))
+    res_b = run_turn(h.backend, h.session("sess-b"), "b", own("sess-b", "uuid-b", task="t-b"))
     assert res_b.error_class == "recovery_required"
     time.sleep(0.6)
     assert h.backend._client.unresponsive(0.5)
@@ -972,12 +997,12 @@ def _forgotten_unanswered(h, monkeypatch, start_delay: float) -> tuple[CodexBack
     monkeypatch.setattr(app_server_mod, "RPC_TIMEOUT", 0.3)
     h.ctl(start_delay=start_delay)  # A's app-server answers turn/start late (or never)
     a = h.backend
-    result = a.run_managed_turn(h.session(), "x", own(turn_uuid="uuid-a"))
+    result = run_turn(a, h.session(), "x", own(turn_uuid="uuid-a"))
     assert result.error_class == "recovery_required"
     tid = CodexOwnership().thread_for("sess-1") or result.backend_session_id
     b = h.make()  # successor incarnation / another carrier on the same CODEX_HOME
     assert b.is_quiescent(h.session(native=tid)) is False
-    assert a.forget_managed_turn(h.session(), "uuid-a") is True
+    assert drop_turn(a, h.session(), "uuid-a") is True
     return a, b, tid
 
 
@@ -994,20 +1019,19 @@ def test_F1_forget_keeps_the_fence_while_the_submission_is_unanswered_on_a_live_
     assert owners(h.home) == []
     assert b.is_quiescent(h.session(native=tid)) is True
     h.ctl()
-    assert b.run_managed_turn(h.session(native=tid), "y", own(turn_uuid="uuid-b", task="t-2")).success
+    assert run_turn(b, h.session(native=tid), "y", own(turn_uuid="uuid-b", task="t-2")).success
     starts = [(x["pid"], x["params"].get("threadId")) for x in h.requests("turn/start")]
     assert [s for s in starts if s[1] == tid and s[0] == a._client.process.pid] == [(a._client.process.pid, tid)]
     assert len([s for s in starts if s[1] == tid]) == 2, "B ran only after A's turn ended — never concurrently"
 
 
-def test_F1_forget_keeps_the_fence_while_the_native_turn_runs(h, monkeypatch):
-    assert h.backend.run_managed_turn(h.session(), "warm", own()).success
-    monkeypatch.setattr(native_mod, "MANAGED_STALL_SECONDS", 0.5)
+def test_F1_forget_keeps_the_fence_while_the_native_turn_runs(h):
+    assert run_turn(h.backend, h.session(), "warm", own()).success
     h.ctl(hold=h.release_path)
-    result = h.backend.run_managed_turn(h.session(), "hello", own(turn_uuid="uuid-run"))
+    result = run_turn(h.backend, h.session(), "hello", own(turn_uuid="uuid-run"), stall=0.5)
     assert result.error_class == "recovery_required"
     tid = result.backend_session_id
-    assert h.backend.forget_managed_turn(h.session(), "uuid-run") is True
+    assert drop_turn(h.backend, h.session(), "uuid-run") is True
     b = h.make()
     assert owners(h.home) != []
     assert b.is_quiescent(h.session(native=tid)) is False, "A's native turn still runs"
@@ -1034,4 +1058,34 @@ def test_F1_successor_quiescent_once_the_forgotten_holders_app_server_dies(h, mo
     process.wait(timeout=10)
     assert b.is_quiescent(h.session(native=tid)) is True, "process proof clears the dead owner"
     h.ctl()
-    assert b.run_managed_turn(h.session(native=tid), "y", own(turn_uuid="uuid-b", task="t-2")).success
+    assert run_turn(b, h.session(native=tid), "y", own(turn_uuid="uuid-b", task="t-2")).success
+
+
+# --------------------------------------------------------------------------- #
+# [A102 S1] The natural methods ARE the one managed path; the deprecated
+# ``*_managed_*`` twins survive only as one-line shims for the S1 carrier.
+# --------------------------------------------------------------------------- #
+def test_create_session_runs_the_first_prompt_under_the_turn_uuid(h):
+    ownership = own(turn_uuid="uuid-create")
+    session = h.session()
+    session.last_user_message = "first prompt"
+    result = h.backend.create_session(session, turn=_tc(ownership))
+    assert result.success, result.errors
+    start = h.requests("turn/start")[0]
+    assert start["params"]["clientUserMessageId"] == "uuid-create"
+    assert start["params"]["input"][0]["text"] == "first prompt"
+
+
+def test_deprecated_shims_delegate_to_the_natural_methods(h):
+    first = h.backend.run_managed_turn(h.session(), "hi", own(turn_uuid="uuid-shim"))  # → resume_session
+    assert first.success, first.errors
+    native = first.backend_session_id
+    assert h.requests("turn/start")[0]["params"]["clientUserMessageId"] == "uuid-shim"
+    compact = h.backend.run_managed_compaction(h.session(native=native),  # → compact_session
+                                               own(turn_uuid="uuid-shim-c"))
+    assert compact.success, compact.errors
+    assert {r["turn_uuid"]: r["kind"] for r in managed_rows(h.home)}["uuid-shim-c"] == "compaction"
+    assert h.backend.cancel_managed_turn(h.session(), "uuid-armed-shim") is True  # → cancel (arm)
+    armed = h.backend.run_managed_turn(h.session(), "x", own(turn_uuid="uuid-armed-shim"))
+    assert armed.error_class == "managed_conflict"
+    assert h.backend.forget_managed_turn(h.session(), "uuid-unknown-shim") is False  # → forget_turn
