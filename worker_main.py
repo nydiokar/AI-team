@@ -15,6 +15,23 @@ import os
 import sys
 from pathlib import Path
 
+# [A102] Scrub any agent-identity vars inherited from the parent process.
+# When the worker is restarted from inside an agent turn (e.g. a PM2/OOM restart
+# triggered while an agent is running), the child process inherits that agent's
+# SESSION_ID/TURN_ID/etc.  Every session subsequently served by this worker would
+# then inherit the dead identity — misaddressing MCP tool calls and losing watched-
+# job notifications.  Purge them here, once, before any session is ever served.
+# codex_native.py mirrors this discipline for the Codex runtime (see line ~292).
+_STALE_AGENT_VARS = (
+    "SESSION_ID",
+    "AI_TEAM_SESSION_ID",
+    "AI_TEAM_TURN_ID",
+    "AI_TEAM_INVOCATION_ID",
+    "CLAUDECODE",
+)
+for _var in _STALE_AGENT_VARS:
+    os.environ.pop(_var, None)
+
 # Match main.py: append (not prepend) src so we don't shadow third-party
 # packages (e.g. telegram) that share a top-level name with our modules.
 src_path = Path(__file__).parent / "src"
