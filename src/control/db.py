@@ -2878,8 +2878,8 @@ class MeshDB:
         Bounded by ``limit`` (§7 request-size: the coalesce fan-in and the per-tick
         synthesis batch are capped; the count of concurrently-claimed managed
         children is already small, bounded by live workers). Scopes to
-        ``continuation_mode = 'outbox'`` + non-terminal Case status, so legacy Cases
-        and closed Cases are never touched. Returns ``{id, flow_run_id,
+        [A104] REQUESTED children (``sender_session_id`` set — someone's inbox is
+        waiting on them) of a non-terminal Case; closed Cases are never touched. Returns ``{id, flow_run_id,
         _stale_reason}`` dicts (ids + reason only — no large result bodies loaded).
         """
         try:
@@ -2899,7 +2899,7 @@ class MeshDB:
                   AND t.status IN ('claimed', 'running', 'recovery_required')
                   AND t.claimed_at IS NOT NULL
                   AND t.flow_run_id IS NOT NULL
-                  AND f.continuation_mode = 'outbox'
+                  AND t.sender_session_id IS NOT NULL
                   AND COALESCE(f.status, '') NOT IN ({placeholders})
                 ORDER BY t.claimed_at ASC
                 LIMIT ?
@@ -3106,6 +3106,7 @@ class MeshDB:
         lineage_lease_sec: float = 30.0,
         producer_token: Optional[str] = None,
         producer_meta: Optional[Dict[str, Any]] = None,
+        inbox_message_ids: Optional[List[str]] = None,
         idle_only: bool = False,
         external_waiting: int = 0,
         fleet_cap: Optional[int] = None,
@@ -3443,6 +3444,19 @@ class MeshDB:
                         conn, producer_token, admitted["task_id"],
                         str(admitted["status"]), producer_meta, now,
                     )
+                if turn_kind == "retry" and parent_task_id and not admitted["idempotent_replay"]:
+                    # [A104] A retry of a failed wake carries that wake's messages.
+                    _agent_inbox.inherit_retry(conn, parent_task_id, admitted["task_id"], now)
+                if inbox_message_ids and not admitted["idempotent_replay"]:
+                    # [A104 I4] The wake carries these inbox messages: claim them
+                    # pending → delivered IN the admission txn (single-flight — a
+                    # racing producer that lost any of them rolls back).
+                    ids = sorted({str(m) for m in inbox_message_ids})
+                    if _agent_inbox.deliver(conn, ids, admitted["task_id"], now) != len(ids):
+                        raise OwnershipConflictError(
+                            "inbox messages already claimed by another wake",
+                            task_id=admitted["task_id"],
+                        )
         except TurnQueueError:
             raise
         except sqlite3.IntegrityError as e:
@@ -4077,6 +4091,14 @@ class MeshDB:
                 )
                 if audit_reason:
                     _insert_watched_job_withdrawal_audit(conn, task_id, audit_reason, now)
+                # [A104 I5] A withdrawn wake returns its messages to pending
+                # (attempts already counted at delivery; dead at the cap) — never
+                # a silent re-arm. A rebind withdrawal is not a delivery failure:
+                # refunded, no backoff (the messages follow the new seat holder).
+                _agent_inbox.settle_turn(
+                    conn, task_id,
+                    "rebound" if actor.endswith(":manager_rebound") else "withdrawn", now,
+                )
                 return True
         except TurnQueueError:
             raise
@@ -5580,6 +5602,9 @@ class MeshDB:
         mode, any role; no requester ⇒ no row.
         """
         _agent_inbox.record_completion(conn, task_id, status, now)
+        # [A104 I4] If THIS task is a wake carrying messages: completed ⇒ acked,
+        # anything else ⇒ back to pending (bounded) — same txn as the terminal.
+        _agent_inbox.settle_turn(conn, task_id, status, now)
         if not flow_run_id:
             return
         mode_row = conn.execute(
@@ -6310,16 +6335,22 @@ class MeshDB:
         # `usage_json` (summary) are the fields that are consumed.
         rows = self._conn().execute(
             """
-            SELECT id AS task_id, prompt, reply_text,
-                   files_modified_json, usage_json, status, result, action,
-                   created_at, completed_at
-            FROM mesh_tasks
-            WHERE session_id = ?
-            ORDER BY created_at ASC
-            LIMIT ?
+            SELECT * FROM (
+                SELECT id AS task_id, prompt, reply_text,
+                       files_modified_json, usage_json, status, result, action,
+                       created_at, completed_at
+                FROM mesh_tasks
+                WHERE session_id = ?
+                  AND status NOT IN ('queued', 'withdrawn')
+                ORDER BY created_at DESC
+                LIMIT ?
+            ) ORDER BY created_at ASC
             """,
             (session_id, limit),
         ).fetchall()
+        # [A104 I7] The NEWEST ``limit`` turns (returned oldest→newest), never-run
+        # rows (queued / withdrawn) excluded in SQL before the window is cut — an
+        # oldest-N window hid the latest reply once a session passed the limit.
         return [dict(r) for r in rows]
 
     def get_session_turns_tail(self, session_id: str, limit: int = 3) -> List[Dict[str, Any]]:
@@ -6651,6 +6682,9 @@ class MeshDB:
                 # [A82 Stage 5 rework] A Manager-seat rebind revokes the
                 # superseded Manager's sender capability in the same txn.
                 _revoke_superseded_manager_caps(conn, _now(), flow_run_id)
+                # [A104 D4] ...and the replaced seat holder's pending messages of
+                # this Case follow the rebind record to the new holder.
+                _agent_inbox.follow_case_rebind(conn, flow_run_id, _now())
             if cur.rowcount:
                 return int(cur.lastrowid)
             # Already existed (unique conflict ignored) — return the existing id.
@@ -7061,6 +7095,8 @@ class MeshDB:
                     (now, now, CONTINUATION_MACHINE_SENTINEL, f":{flow_run_id}:"),
                 )
                 n = int(cur.rowcount or 0)
+                # [A104 I4] Undelivered messages of a closed Case are dead.
+                _agent_inbox.kill_case(conn, flow_run_id, "case_closed", now)
             if n:
                 logger.info(
                     "event=case_close_cancelled_dispatch_tokens case=%s count=%d",
@@ -7103,7 +7139,28 @@ class MeshDB:
                 (flow_run_id, event_type, actor, from_state, to_state,
                  entity_type, entity_id, payload_json, _now()),
             )
+            if event_type.startswith("review.") and entity_type == "task" and entity_id:
+                # [A104 I4] A tagged review of a task consumes the message about
+                # it — same txn, no wake needed.
+                _agent_inbox.ack_about_task(conn, entity_id, _now(), reason="reviewed")
             return int(cur.lastrowid)
+
+    def has_flow_event(
+        self, flow_run_id: str, event_type: str, reason: Optional[str] = None,
+        entity_id: Optional[str] = None,
+    ) -> bool:
+        """[A104 I7] Existence of one fact in a Case's event log by a TARGETED query
+        (type, optional ``payload.reason`` / ``entity_id``) — never inferred from an
+        oldest-N window, however long the log."""
+        sql = "SELECT 1 FROM flow_events WHERE flow_run_id = ? AND event_type = ?"
+        args: List[Any] = [flow_run_id, event_type]
+        if reason is not None:
+            sql += " AND json_extract(payload_json, '$.reason') = ?"
+            args.append(reason)
+        if entity_id is not None:
+            sql += " AND entity_id = ?"
+            args.append(entity_id)
+        return self._conn().execute(sql + " LIMIT 1", args).fetchone() is not None
 
     def list_flow_events(
         self,
@@ -7461,38 +7518,14 @@ class MeshDB:
         timeout: Optional[float] = None,
         actor: str = "manager",
     ) -> Optional[int]:
-        """[A46] Record a durable pending-wait marker for a dispatched worker.
-
-        Appends an append-only ``worker.wait_pending`` flow_event keyed to
-        (flow_run_id, task_id) so a Manager that crashes/restarts mid-wait can
-        RECONCILE which workers it was still waiting on from the ledger, not from
-        lost in-process ``wait_for_worker`` memory.
-
-        Flag-gated by ``durable_relay_enabled()`` (default OFF ⇒ returns None,
-        writes nothing — byte-identical). Idempotent: if an unresolved pending
-        marker already exists for this (case, task) it is NOT duplicated and the
-        existing event id is returned. Returns the (new or existing) event id, or
-        None when the flag is OFF.
-        """
-        if not durable_relay_enabled():
-            return None
-        # Idempotent: a pending marker is "live" only until a later resolve for
-        # the same task clears it — so scan in order and keep the last relevant one.
-        existing: Optional[Dict[str, Any]] = None
-        for e in self.list_flow_events(flow_run_id):
-            if e.get("entity_id") != task_id:
-                continue
-            if e.get("event_type") == "worker.wait_pending":
-                existing = e
-            elif e.get("event_type") == "worker.wait_resolved":
-                existing = None
-        if existing is not None:
-            return int(existing["id"])
-        return self.append_flow_event(
-            flow_run_id, "worker.wait_pending", actor,
-            entity_type="task", entity_id=task_id,
-            payload={"task_id": task_id, "timeout": timeout},
-        )
+        """[A46 → A104 shim] Formerly appended a per-task ``worker.wait_pending``
+        ledger marker. The agent inbox now records the obligation by itself (the
+        child's requester is stamped at dispatch; its completion row is written in
+        the terminal txn), so nothing needs recording here. Kept — signature and
+        200 response — because an un-redeployed ``mcp_manager`` calls
+        ``POST /api/cases/{id}/waits`` after every Case dispatch (A104 D7).
+        Returns None (no marker written)."""
+        return None
 
     def reconcile_worker_waits(
         self,
@@ -7500,66 +7533,21 @@ class MeshDB:
         *,
         actor: str = "manager",
     ) -> Dict[str, Any]:
-        """[A46] Reconcile a Case's outstanding worker waits after a restart.
-
-        Reads the durable ledger and, for each ``worker.wait_pending`` marker not
-        yet matched by a ``worker.wait_resolved``, checks whether the worker's turn
-        has finished (a durable ``task.finished`` event for the same task):
-          * finished  ⇒ append a ``worker.wait_resolved`` marker (RESOLVED) so the
-            wait is cleared from the ledger;
-          * still open ⇒ report it as PENDING (the Manager re-arms a fresh bounded
-            ``wait_for_worker`` for it).
-
-        Idempotent: a wait already resolved is skipped, so a crash DURING reconcile
-        + a re-run is a no-op on already-resolved waits (no duplicate markers).
-        Flag-gated by ``durable_relay_enabled()`` (OFF ⇒ ``{"ok": False,
-        "reason": "durable_relay_disabled"}``, no write). Returns ``{"ok",
-        "resolved": [{task_id, outcome}], "pending": [{task_id, timeout}]}``.
-        """
-        if not durable_relay_enabled():
-            return {"ok": False, "reason": "durable_relay_disabled"}
-
-        # [recovery-wait-resolution] Reconcile the ledger from TASK TRUTH first: if a
-        # member task reached a terminal state via a path that never emitted
-        # ``task.finished`` (restart recovery, reapers), backfill the missing fact so
-        # the scan below can resolve the wait. Idempotent; a no-op when every member
-        # already has its event.
-        self.backfill_missing_task_finished(flow_run_id, actor=actor)
-
-        pending_markers: Dict[str, Dict[str, Any]] = {}
-        resolved_tasks: set = set()
-        finished: Dict[str, str] = {}
-        for e in self.list_flow_events(flow_run_id):
-            et = e.get("event_type")
-            tid = e.get("entity_id")
-            if not tid:
-                continue
-            if et == "worker.wait_pending":
-                pending_markers[tid] = e
-            elif et == "worker.wait_resolved":
-                resolved_tasks.add(tid)
-            elif et == "task.finished":
-                finished[tid] = str(_event_outcome(e) or "success")
-
-        resolved_out: List[Dict[str, Any]] = []
-        pending_out: List[Dict[str, Any]] = []
-        for tid, marker in pending_markers.items():
-            if tid in resolved_tasks:
-                continue  # already reconciled — idempotent skip
-            if tid in finished:
-                self.append_flow_event(
-                    flow_run_id, "worker.wait_resolved", actor,
-                    entity_type="task", entity_id=tid,
-                    payload={"task_id": tid, "outcome": finished[tid]},
-                )
-                resolved_out.append({"task_id": tid, "outcome": finished[tid]})
-            else:
-                pl = _event_payload(marker)
-                pending_out.append({
-                    "task_id": tid,
-                    "timeout": pl.get("timeout") if isinstance(pl, dict) else None,
-                })
-        return {"ok": True, "resolved": resolved_out, "pending": pending_out}
+        """[A46 → A104 shim over ``pending_for``] What a resuming Manager must act
+        on in this Case, in the legacy response shape (D5/D7):
+          * ``resolved`` — finished children whose completion is still waiting to
+            be consumed (inbox messages pending / in flight);
+          * ``pending`` — requested children still running.
+        Read-only: consumption happens by a tagged review or a completed wake."""
+        if self.get_flow_run(flow_run_id) is None:
+            return {"ok": False, "reason": "unknown_case", "resolved": [], "pending": []}
+        view = _agent_inbox.case_pending(self._conn(), flow_run_id)
+        resolved = [
+            {"task_id": m.about_task_id, "outcome": m.outcome or "success"}
+            for m in view.messages if m.about_task_id
+        ]
+        pending = [{"task_id": t} for t in view.outstanding_task_ids]
+        return {"ok": True, "reason": None, "resolved": resolved, "pending": pending}
 
     def backfill_missing_task_finished(
         self,
@@ -7684,51 +7672,38 @@ class MeshDB:
         *,
         actor: str = "manager",
     ) -> Optional[int]:
-        """[M3.4] Arm a Manager wait-group as a durable ``worker.wait_pending`` marker.
+        """[M3.4 → A104 shim, D2/D5] Store a delivery FILTER with the inbox: an
+        ``ALL`` (or ``NAMED``) group holds the completions of its members until
+        every member is terminal, then they are delivered in ONE wake. ``ANY`` is
+        the inbox default (each completion is delivered as it lands) and stores
+        nothing that holds. Not a ledger: one ``inbox.filter_armed`` audit event.
 
-        ``condition`` ∈ {ANY, ALL, NAMED} (case-insensitive; anything else ⇒ ANY).
-        The group is a single group-scoped ``worker.wait_pending`` flow_event
-        (``entity_type='wait_group'``, ``entity_id=wait_group_id``) carrying
-        ``{wait_group_id, condition, member_task_ids}`` — the enriched payload the
-        Wake-Dispatcher derives group state from. Distinct from A46's per-task
-        ``worker.wait_pending`` markers (those stay untouched).
-
-        Idempotent per (case, wait_group_id): if an unresolved group marker already
-        exists it is NOT duplicated and its event id is returned. Flag-gated by
-        ``case_continuation_enabled()`` (OFF ⇒ returns None, writes nothing).
-        """
+        Idempotent per (case, wait_group_id) (an upsert). Flag-gated by
+        ``case_continuation_enabled()`` like before (OFF ⇒ None, nothing written).
+        Returns the audit event id."""
         if not case_continuation_enabled():
             return None
         cond = str(condition or "ANY").upper()
-        if cond not in ("ANY", "ALL", "NAMED"):
-            cond = "ANY"
-        # Idempotency: a group marker is "live" until a later resolve for the same
-        # group clears it — scan in order and keep the last relevant one.
-        existing: Optional[Dict[str, Any]] = None
-        for e in self.list_flow_events(flow_run_id):
-            if e.get("entity_type") != "wait_group" or e.get("entity_id") != wait_group_id:
-                continue
-            if e.get("event_type") == "worker.wait_pending":
-                existing = e
-            elif e.get("event_type") == "worker.wait_resolved":
-                existing = None
-        if existing is not None:
-            event_id = int(existing["id"])
-        else:
-            event_id = self.append_flow_event(
-                flow_run_id, "worker.wait_pending", actor,
-                entity_type="wait_group", entity_id=wait_group_id,
-                payload={
-                    "wait_group_id": wait_group_id,
-                    "condition": cond,
-                    "member_task_ids": list(member_task_ids or []),
-                },
-            )
+        cond = "ALL" if cond in ("ALL", "NAMED") else "ANY"
+        members = [str(m) for m in (member_task_ids or []) if m]
+        self.inbox_arm_filter(flow_run_id, wait_group_id, cond, members)
+        event_id = self.append_flow_event(
+            flow_run_id, "inbox.filter_armed", actor,
+            entity_type="wait_group", entity_id=wait_group_id,
+            payload={"wait_group_id": wait_group_id, "condition": cond,
+                     "member_task_ids": members},
+        )
         try:
-            session_id = self.case_manager_session_id(flow_run_id)
-            if session_id:
+            # Keep the requester's cache warm while it waits on the group: the
+            # owner is the session that requested the members (role-free).
+            row = self._conn().execute(
+                "SELECT sender_session_id FROM mesh_tasks WHERE id IN (%s) "
+                "AND sender_session_id IS NOT NULL LIMIT 1" % ",".join("?" * len(members)),
+                members,
+            ).fetchone() if members else None
+            if row is not None and row["sender_session_id"]:
                 self.ensure_cache_heartbeat_owner(
-                    session_id,
+                    str(row["sender_session_id"]),
                     reason="case_wait_group",
                     owner_type="wait_group",
                     owner_id=f"{flow_run_id}:{wait_group_id}",
@@ -8096,22 +8071,23 @@ class MeshDB:
                         conn, case_id, presented, "wake", now,
                     )
             return dict(item, outcome="consumed") if won else None
-        rearmed = dict(payload)
-        rearmed.pop("turn_id", None)
-        rearmed["attempt"] = _token_attempt(payload) + 1
-        with self._managed_write("rearm_producer_token") as conn:
+        # [A104 I5] A withdrawn / cancelled legacy wake is NEVER re-armed: the
+        # agent inbox owns delivery (its messages went back to pending, bounded,
+        # in the withdrawal txn). The pre-inbox token is discharged — the
+        # unbounded re-arm here was the 2026-10-09 wake loop.
+        with self._managed_write("discharge_producer_token") as conn:
             conn.execute(
                 """
                 UPDATE mesh_tasks
-                SET status = 'pending', claimed_by = NULL, claimed_at = NULL,
-                    producer_turn_id = NULL, payload = ?, updated_at = ?
+                SET status = 'cancelled', error = 'superseded_by_agent_inbox',
+                    completed_at = ?, updated_at = ?
                 WHERE id = ? AND status = 'claimed' AND producer_turn_id = ?
                   AND COALESCE(queue_protocol, 0) = 0
                 """,
-                (json.dumps(rearmed), now, token_id, turn_id),
+                (now, now, token_id, turn_id),
             )
             won = conn.execute("SELECT changes()").fetchone()[0] > 0
-        return dict(item, outcome="rearmed") if won else None
+        return dict(item, outcome="discharged") if won else None
 
     def reconcile_heartbeat_finalizers(self, limit: int = 25) -> List[Dict[str, Any]]:
         """[A82 Stage 4d] Durable finalization of cache-heartbeat leases linked
@@ -8271,6 +8247,66 @@ class MeshDB:
             (case_id, target_session_id or ""),
         ).fetchall()
         return str(rows[0]["session_id"]) if len(rows) == 1 else None
+
+    def inbox_ready_recipients(self, limit: int = _agent_inbox.PENDING_LIMIT) -> List[Tuple[str, Optional[str]]]:
+        """[A104] (recipient, case) pairs with a deliverable message (backoff elapsed)."""
+        return _agent_inbox.ready_recipients(self._conn(), _now(), limit)
+
+    def inbox_waiting_for(self, session_ids: List[str]) -> Dict[str, bool]:
+        """[A104] Batched ``pending_for(sid).waiting()`` for a session list."""
+        return _agent_inbox.waiting_for(self._conn(), list(session_ids))
+
+    def inbox_rounds_used(self, case_id: str) -> int:
+        return _agent_inbox.rounds_used(self._conn(), case_id)
+
+    def inbox_successor(self, session_id: str) -> Optional[str]:
+        return _agent_inbox.successor_of(self._conn(), session_id)
+
+    def inbox_readdress(self, from_session_id: str, to_session_id: str) -> int:
+        with self._write() as conn:
+            return _agent_inbox.readdress(conn, from_session_id, to_session_id, _now())
+
+    def inbox_follow_case_rebind(self, case_id: str) -> int:
+        """[A104 D4] Withdraw queued wakes stranded on a replaced Manager seat
+        (their messages return, refunded) and move the Case's pending messages
+        of replaced seat holders to the current one. Returns rows moved."""
+        conn = self._conn()
+        stranded = _agent_inbox.rebound_wake_turns(conn, case_id)
+        for turn_id in stranded:
+            try:
+                self.withdraw_turn(turn_id, actor="scheduler:obsolete:manager_rebound")
+            except TurnQueueError:
+                pass  # raced (activated / withdrawn): settlement owns it
+        if not stranded and not _agent_inbox.has_rebound_pending(conn, case_id):
+            return 0  # the steady state: no write lock taken
+        with self._write() as conn:
+            return _agent_inbox.follow_case_rebind(conn, case_id, _now())
+
+    def inbox_kill_case(self, case_id: str, reason: str) -> int:
+        with self._write() as conn:
+            return _agent_inbox.kill_case(conn, case_id, reason, _now())
+
+    def inbox_kill_recipient(self, session_id: str, reason: str) -> List[str]:
+        with self._write() as conn:
+            return _agent_inbox.kill_recipient(conn, session_id, reason, _now())
+
+    def inbox_sweep_settled(self) -> "_agent_inbox.SettleResult":
+        with self._write() as conn:
+            return _agent_inbox.sweep_settled(conn, _now())
+
+    def inbox_unalerted_dead(self, limit: int = 50) -> List["_agent_inbox.InboxMessage"]:
+        return _agent_inbox.unalerted_dead(self._conn(), limit)
+
+    def inbox_mark_alerted(self, message_ids: List[str]) -> int:
+        with self._write() as conn:
+            return _agent_inbox.mark_alerted(conn, list(message_ids), _now())
+
+    def inbox_arm_filter(self, case_id: str, filter_id: str, condition: str, member_task_ids: List[str]) -> None:
+        with self._write() as conn:
+            _agent_inbox.arm_filter(conn, case_id, filter_id, condition, list(member_task_ids), _now())
+
+    def inbox_list_filters(self, case_id: str) -> List[Dict[str, Any]]:
+        return _agent_inbox.list_filters(self._conn(), case_id)
 
     def pending_case_outbox(self, case_id: str, limit: int = 256) -> List[Dict[str, Any]]:
         """Undelivered completion-outbox rows for a Case, oldest first.
@@ -8753,8 +8789,9 @@ class MeshDB:
                     raise OwnershipConflictError("dead Manager was stopped during respawn", case_id=case_id)
             conn.execute(
                 "UPDATE sessions SET current_case_id = ?, case_role = 'manager', "
+                "continued_from = COALESCE(continued_from, ?), "
                 "updated_at = ? WHERE session_id = ?",
-                (case_id, now, sid),
+                (case_id, dead_session_id or None, now, sid),
             )
             if conn.execute("SELECT changes()").fetchone()[0] == 0:
                 raise TurnNotFoundError("respawned session row missing", session_id=sid)
@@ -8769,6 +8806,9 @@ class MeshDB:
                 (case_id, sid, now),
             )
             _revoke_superseded_manager_caps(conn, now, case_id)  # [A82 Stage 5 rework]
+            # [A104 D4] Lineage is recorded (continued_from above) and the dead
+            # Manager's pending messages of this Case follow the rebind.
+            _agent_inbox.follow_case_rebind(conn, case_id, now)
             seen = conn.execute(
                 "SELECT id FROM flow_events WHERE flow_run_id = ? AND event_type = "
                 "'case.manager_respawned' AND entity_type = 'session' AND entity_id = ? LIMIT 1",
@@ -8996,145 +9036,80 @@ class MeshDB:
     # ------------------------------------------------------------------
 
     def get_case_brief(self, case_id: str) -> Optional[Dict[str, Any]]:
-        """[A54] The full working state of a Case, reconstructed from the DB ALONE.
+        """[A54 → A104] The full working state of a Case, reconstructed from the DB.
 
-        A single BOUNDED read set (CLAUDE.md §8 — no N+1 per worker): the Case row
-        (:func:`get_flow_run`), its links (:func:`list_flow_links` — one JOIN'd
-        query), its events (:func:`list_flow_events` — one query), the continuation
-        watermark and the derived wait-group satisfaction (:func:`compute_continuation_tick`,
-        itself a bounded pass over the same events + continuation rows). Every worker
-        field is bucketed from those already-fetched lists in memory — NOT re-queried
-        per worker.
+        Pending/waiting state comes from the agent inbox (``case_pending`` — the
+        union of ``pending_for`` over the Case's agents); no oldest-N event window
+        is read (I7). Bounded reads: the Case row, its requested children (one
+        query, newest 256), the newest review verdicts (one query), the filters.
 
-        Returns ``None`` for an unknown Case. The shape:
-          * ``case_id`` / ``objective`` / ``status`` / ``current_stage``
-          * ``completion_criteria`` — the human criteria list (dual-shape unpacked)
-          * ``round_cap`` / ``rounds_used`` / ``rounds_remaining`` — the M3.4
-            continuation backstop and how much of it is spent
-          * ``workers`` — one entry per DISPATCHED worker (flow_link entity_type='task',
-            role='task', created_by='manager'): ``{task_id, session_id, finished,
-            outcome, latest_review}`` (session from the worker session link if any;
-            ``latest_review`` is the newest review.* verdict TAGGED to this task, else
-            None — reviews are Case-level today so most tasks carry None here)
-          * ``latest_review`` — the newest Case-level review.* verdict (verdict + reason
-            + event_type), or None
-          * ``open_waits`` / ``ready_waits`` — per-task A46 waits still pending vs.
-            finished-but-unresolved (from the wait markers + task.finished)
-          * ``wait_groups`` — every ARMED (unresolved) wait-group and its live
-            satisfaction state derived by ``compute_continuation_tick``:
+        Shape (unchanged keys — the Manager tool and respawn prompt read them):
+          * ``case_id`` / ``objective`` / ``status`` / ``current_stage`` /
+            ``completion_criteria``
+          * ``round_cap`` / ``rounds_used`` (completed wake rounds) / ``rounds_remaining``
+          * ``workers`` — one entry per requested child of the Case:
+            ``{task_id, finished, outcome, latest_review}``
+          * ``worker_session_ids`` / ``latest_review``
+          * ``open_waits`` — requested children still running
+          * ``ready_waits`` — finished children whose completion is not yet consumed
+          * ``wait_groups`` — the D2 delivery filters
             ``{wait_group_id, condition, members, satisfied, presented_task_ids, retire}``
-
-        Read-only; introduces no new table/column. Never raises on a well-formed id —
-        an unknown Case is ``None``.
-        """
+        Returns ``None`` for an unknown Case."""
         row = self.get_flow_run(case_id)
         if row is None:
             return None
-
-        # ---- ONE bounded read of each substrate list (no per-worker fanout) ----
-        links = self.list_flow_links(flow_run_id=case_id)
-        events = self.list_flow_events(case_id)
-
-        # Index events ONCE into the buckets the brief needs.
-        finished: Dict[str, str] = {}          # task_id -> outcome
-        wait_pending_tasks: set = set()        # A46 per-task pending markers
-        wait_resolved_tasks: set = set()       # A46 per-task resolved markers
-        review_by_task: Dict[str, Dict[str, Any]] = {}   # task_id -> latest review.* (tagged)
+        conn = self._conn()
+        view = _agent_inbox.case_pending(conn, case_id)
+        ready = sorted({str(m.about_task_id) for m in view.messages if m.about_task_id})
+        children = conn.execute(
+            "SELECT id, status FROM mesh_tasks WHERE flow_run_id = ? AND ("
+            "sender_session_id IS NOT NULL OR id IN (SELECT entity_id FROM flow_links "
+            "WHERE flow_run_id = ? AND entity_type = 'task' AND role = 'task' "
+            "AND created_by = 'manager')) ORDER BY created_at DESC LIMIT 256",
+            (case_id, case_id),
+        ).fetchall()
+        review_by_task: Dict[str, Dict[str, Any]] = {}
         latest_case_review: Optional[Dict[str, Any]] = None
-        for e in events:
-            et = e.get("event_type")
-            etype = e.get("entity_type")
-            eid = e.get("entity_id")
-            if et == "task.finished" and eid:
-                finished[eid] = _event_outcome(e) or "success"
-            elif et == "worker.wait_pending" and etype == "task" and eid:
-                wait_pending_tasks.add(eid)
-            elif et == "worker.wait_resolved" and etype == "task" and eid:
-                wait_resolved_tasks.add(eid)
-            elif et in _REVIEW_EVENT_TYPES:
-                pl = _event_payload(e) or {}
-                verdict_rec = {
-                    "verdict": pl.get("verdict"),
-                    "reason": pl.get("reason"),
-                    "event_type": et,
-                }
-                # Newest wins (events are id-ascending, so overwrite as we go).
-                latest_case_review = verdict_rec
-                if eid:  # a review TAGGED to a specific worker task (forward-compat)
-                    review_by_task[eid] = verdict_rec
-
-        # ---- Dispatched workers (entity_type='task', role='task', by='manager') ----
-        # Worker sessions ride the entity_type='session', role='worker' links; index
-        # them ONCE by nothing (there is no task↔session key on the link), so we expose
-        # the set separately rather than guess a mapping.
-        worker_session_ids: List[str] = [
-            str(l.get("entity_id"))
-            for l in links
-            if l.get("entity_type") == "session" and l.get("role") == "worker" and l.get("entity_id")
-        ]
+        for e in conn.execute(
+            "SELECT event_type, entity_type, entity_id, payload_json FROM flow_events "
+            "WHERE flow_run_id = ? AND event_type LIKE 'review.%' ORDER BY id DESC LIMIT 500",
+            (case_id,),
+        ).fetchall():
+            if e["event_type"] not in _REVIEW_EVENT_TYPES:
+                continue
+            pl = _event_payload(dict(e)) or {}
+            rec = {"verdict": pl.get("verdict"), "reason": pl.get("reason"),
+                   "event_type": e["event_type"]}
+            if latest_case_review is None:
+                latest_case_review = rec  # newest first
+            if e["entity_type"] == "task" and e["entity_id"] and e["entity_id"] not in review_by_task:
+                review_by_task[str(e["entity_id"])] = rec
+        live = ("queued", "pending", "claimed", "running", "recovery_required")
         workers: List[Dict[str, Any]] = []
-        for l in links:
-            if l.get("entity_type") != "task" or l.get("role") != "task":
-                continue
-            if str(l.get("created_by") or "") != "manager":
-                continue
-            tid = str(l.get("entity_id") or "")
-            if not tid:
-                continue
+        for c in reversed(children):
+            tid, st = str(c["id"]), str(c["status"] or "")
+            done = st not in live
             workers.append({
                 "task_id": tid,
-                "finished": tid in finished,
-                "outcome": finished.get(tid),
+                "finished": done,
+                "outcome": (("success" if st == "completed" else st) if done else None),
                 "latest_review": review_by_task.get(tid),
             })
-
-        # ---- A46 per-task waits: open (pending, not resolved, not finished) vs ready
-        # (finished but the wait not yet resolved — the Manager should reconcile it).
-        open_waits: List[str] = []
-        ready_waits: List[str] = []
-        for tid in wait_pending_tasks:
-            if tid in wait_resolved_tasks:
-                continue
-            if tid in finished:
-                ready_waits.append(tid)
-            else:
-                open_waits.append(tid)
-
-        # ---- Armed wait-groups + live satisfaction (reuse the M3.4 derivation) ----
-        tick = self.compute_continuation_tick(case_id)
-        sat_by_gid = {g["wait_group_id"]: g for g in tick.get("satisfied_groups", [])}
-        # Enumerate the ARMED (unresolved) groups from the same event pass.
-        armed_groups: Dict[str, Dict[str, Any]] = {}
-        resolved_groups: set = set()
-        for e in events:
-            if e.get("entity_type") != "wait_group":
-                continue
-            gid = e.get("entity_id")
-            if not gid:
-                continue
-            if e.get("event_type") == "worker.wait_pending":
-                pl = _event_payload(e) or {}
-                armed_groups[gid] = {
-                    "wait_group_id": gid,
-                    "condition": str(pl.get("condition", "ANY")).upper(),
-                    "members": list(pl.get("member_task_ids") or []),
-                }
-            elif e.get("event_type") == "worker.wait_resolved":
-                resolved_groups.add(gid)
-        wait_groups: List[Dict[str, Any]] = []
-        for gid, g in armed_groups.items():
-            if gid in resolved_groups:
-                continue  # discharged — not a live obligation
-            sat = sat_by_gid.get(gid)
-            wait_groups.append({
-                **g,
-                "satisfied": sat is not None,
-                "presented_task_ids": list(sat.get("presented", [])) if sat else [],
-                "retire": bool(sat.get("retire")) if sat else False,
-            })
-
+        worker_session_ids = [
+            str(r["entity_id"]) for r in conn.execute(
+                "SELECT entity_id FROM flow_links WHERE flow_run_id = ? AND entity_type = 'session' "
+                "AND role = 'worker' ORDER BY id",
+                (case_id,),
+            ).fetchall()
+        ]
+        wait_groups = [
+            {**g, "presented_task_ids": [t for t in g["members"] if t in ready], "retire": False}
+            for g in _agent_inbox.list_filters(conn, case_id)
+        ]
+        for g in wait_groups:
+            g.pop("created_at", None)
         round_cap = self.case_round_cap(case_id)
-        rounds_used = int(tick.get("completed_rounds", 0))
+        rounds_used = _agent_inbox.rounds_used(conn, case_id)
         return {
             "case_id": case_id,
             "objective": row.get("objective_lock") or row.get("objective"),
@@ -9147,8 +9122,8 @@ class MeshDB:
             "workers": workers,
             "worker_session_ids": worker_session_ids,
             "latest_review": latest_case_review,
-            "open_waits": sorted(open_waits),
-            "ready_waits": sorted(ready_waits),
+            "open_waits": sorted(view.outstanding_task_ids),
+            "ready_waits": ready,
             "wait_groups": wait_groups,
         }
 
@@ -9158,63 +9133,17 @@ class MeshDB:
         *,
         actor: str = "manager",
     ) -> Dict[str, Any]:
-        """[A54] Boot-time reconstruction hook: a Manager resuming onto an existing
-        OPEN Case reconciles its outstanding worker waits AND re-arms its live
-        wait-groups from the ledger — so it wakes with its FULL obligation set,
-        not the empty in-process state a fresh boot starts with.
-
-        IDEMPOTENT by construction (running it twice writes NO duplicate markers):
-          * ``reconcile_worker_waits`` (A46) skips already-resolved waits;
-          * re-arming replays each still-armed group through ``arm_wait_group``,
-            which is idempotent per (case, wait_group_id) — an existing unresolved
-            group marker is returned, never duplicated.
-
-        Flag-gated: no-ops (``{"ok": False, "reason": ...}``) when the durable relay
-        is OFF (reconcile has nothing to do) — group re-arm additionally needs
-        continuation ON, but ``arm_wait_group`` self-gates so a flags-mixed state is
-        safe. Returns ``{"ok", "reconciled": {...}, "rearmed": [wait_group_id, ...]}``.
-        """
+        """[A54 → A104 shim, D7 frozen shape] A Manager booting onto an OPEN Case
+        used to re-derive its obligations from the ledger and re-arm its groups.
+        The inbox is durable by itself (messages and filters survive restarts), so
+        nothing is re-armed; the reply reports what ``pending_for`` holds for the
+        Case, in the shape an un-redeployed worker reads (``ok`` / ``reason`` /
+        ``reconciled.resolved`` / ``rearmed``). Still gated on the durable-relay
+        flag exactly like before (the worker pre-gates on the same flag row)."""
         if not durable_relay_enabled():
-            # Nothing durable to reconcile ⇒ byte-identical no-op.
             return {"ok": False, "reason": "durable_relay_disabled"}
-
         reconciled = self.reconcile_worker_waits(case_id, actor=actor)
-
-        # Re-arm every STILL-ARMED (unresolved) wait-group from the ledger. Replaying
-        # arm_wait_group with the SAME (gid, condition, members) is idempotent — the
-        # existing unresolved marker is returned, so a double-boot writes nothing new.
-        armed: Dict[str, Dict[str, Any]] = {}
-        resolved: set = set()
-        for e in self.list_flow_events(case_id):
-            if e.get("entity_type") != "wait_group":
-                continue
-            gid = e.get("entity_id")
-            if not gid:
-                continue
-            if e.get("event_type") == "worker.wait_pending":
-                pl = _event_payload(e) or {}
-                armed[gid] = {
-                    "condition": str(pl.get("condition", "ANY")).upper(),
-                    "members": list(pl.get("member_task_ids") or []),
-                }
-            elif e.get("event_type") == "worker.wait_resolved":
-                resolved.add(gid)
-        rearmed: List[str] = []
-        for gid, g in armed.items():
-            if gid in resolved:
-                continue
-            self.arm_wait_group(
-                case_id, gid, g["condition"], g["members"], actor=actor,
-            )
-            rearmed.append(gid)
-        return {"ok": True, "reconciled": reconciled, "rearmed": rearmed}
-
-    # ------------------------------------------------------------------
-    # Approvals (Move H) — durable approval gate. A pending approval is a
-    # promise of a NOT-yet-dispatched action; resolving it is what triggers
-    # dispatch. Persisting it here is what lets it survive a gateway restart
-    # (an in-memory asyncio.Event would not) and rebuild the pending queue.
-    # ------------------------------------------------------------------
+        return {"ok": True, "reconciled": reconciled, "rearmed": []}
 
     def create_approval(
         self,
@@ -10072,6 +10001,7 @@ class MeshDB:
             f"""
             SELECT session_id, COUNT(*) AS turn_count
             FROM llm_turns WHERE session_id IN ({placeholders})
+              AND COALESCE(final_status, '') != 'withdrawn'
             GROUP BY session_id
             """,
             list(session_ids),
@@ -11548,6 +11478,16 @@ def _get_migrations() -> List[tuple]:
                # serves outstanding requests; ``idx_sessions_continued_from``
                # serves the D4 successor lookup. ``completion_outbox`` itself is
                # left in place until A104 Phase 5.
+        (46, """
+            ALTER TABLE agent_inbox ADD COLUMN alerted_at TEXT;
+            UPDATE agent_inbox SET alerted_at = updated_at WHERE state = 'dead';
+            CREATE INDEX IF NOT EXISTS idx_agent_inbox_dead_unalerted
+                ON agent_inbox(updated_at) WHERE state = 'dead' AND alerted_at IS NULL
+        """),  # A104 I5: a message that goes dead (attempts exhausted, recipient
+               # gone) raises ONE operator-visible alert; ``alerted_at`` records it
+               # (rows already dead at this migration — carried-over A84 rows — are
+               # not alertable). The partial index keeps the per-tick scan empty
+               # in the steady state.
     ]
 
 

@@ -707,13 +707,16 @@ def test_R7_cancelled_managed_turn_closes_its_telemetry_turn(tg: _Env) -> None:
 
 
 def test_R7b_withdrawn_managed_turn_closes_its_telemetry_turn(tg: _Env) -> None:
+    """The withdrawn turn's telemetry turn is closed (not left running). [A104 I6]
+    It reconciles to its own final_status 'withdrawn' (was 'cancelled') so a turn
+    that never ran is excluded from turn lists/counts."""
     from src.control.telemetry_store import TelemetryStore
 
     tid = tg.create("withdraw me", "op-wt")
     _accept_telemetry(tg, tid)
     tg.gw.withdraw_turn(tid, int(tg.row(tid)["revision"]), actor="operator")
     tg.drain()
-    assert TelemetryStore(tg.gw).get_turn(tid)["final_status"] == "cancelled"
+    assert TelemetryStore(tg.gw).get_turn(tid)["final_status"] == "withdrawn"
     assert tg.notifier.calls == []
 
 

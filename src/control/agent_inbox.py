@@ -73,6 +73,7 @@ class InboxMessage(BaseModel):
     delivery_turn_id: Optional[str] = None
     created_at: str
     held: bool = False
+    last_error: Optional[str] = None
 
 
 class PendingView(BaseModel):
@@ -256,7 +257,18 @@ def settle_turn(conn: sqlite3.Connection, turn_id: str, status: str, now: str) -
     ).fetchall()
     for r in rows:
         mid, attempts = str(r["message_id"]), int(r["attempts"] or 0)
-        if status == "completed":
+        if status == "rebound":
+            # The wake's seat was rebound before it ran: not a delivery failure —
+            # the attempt is refunded and the message is immediately re-deliverable
+            # (it then follows the rebind record to the new holder).
+            conn.execute(
+                "UPDATE agent_inbox SET state = 'pending', attempts = MAX(attempts - 1, 0), "
+                "next_attempt_at = NULL, last_error = 'wake_rebound', updated_at = ? "
+                "WHERE message_id = ? AND state = 'delivered' AND delivery_turn_id = ?",
+                (now, mid, turn_id),
+            )
+            result.returned.append(mid)
+        elif status == "completed":
             conn.execute(
                 "UPDATE agent_inbox SET state = 'acked', acked_at = ?, resolution = 'wake', updated_at = ? "
                 "WHERE message_id = ? AND state = 'delivered' AND delivery_turn_id = ?",
@@ -280,6 +292,20 @@ def settle_turn(conn: sqlite3.Connection, turn_id: str, status: str, now: str) -
     return result
 
 
+def inherit_retry(conn: sqlite3.Connection, failed_turn_id: str, retry_turn_id: str, now: str) -> int:
+    """A retry R of a failed wake A (quota / transient recovery) re-delivers A's
+    prompt, so R carries A's messages that went back to pending at A's failure
+    (one admission ⇒ attempts+1) — otherwise the inbox would admit a second wake
+    for the same completions next to R."""
+    cur = conn.execute(
+        "UPDATE agent_inbox SET state = 'delivered', delivery_turn_id = ?, delivered_at = ?, "
+        "attempts = attempts + 1, updated_at = ? "
+        "WHERE delivery_turn_id = ? AND state = 'pending' AND attempts < ?",
+        (retry_turn_id, now, now, failed_turn_id, MAX_ATTEMPTS),
+    )
+    return cur.rowcount
+
+
 def ack_about_task(conn: sqlite3.Connection, task_id: str, now: str, *, reason: str) -> int:
     """A tagged review of ``task_id`` consumes its message without a wake."""
     cur = conn.execute(
@@ -291,10 +317,12 @@ def ack_about_task(conn: sqlite3.Connection, task_id: str, now: str, *, reason: 
 
 
 def kill_case(conn: sqlite3.Connection, case_id: str, reason: str, now: str) -> int:
+    """A closed Case's undelivered messages are moot: dead, and NOT alertable
+    (closing was a deliberate decision — I5 alerts only on delivery failure)."""
     cur = conn.execute(
-        "UPDATE agent_inbox SET state = 'dead', last_error = ?, updated_at = ? "
+        "UPDATE agent_inbox SET state = 'dead', last_error = ?, updated_at = ?, alerted_at = ? "
         "WHERE case_id = ? AND state IN ('pending', 'delivered')",
-        (reason, now, case_id),
+        (reason, now, now, case_id),
     )
     return cur.rowcount
 
@@ -371,7 +399,185 @@ def list_filters(conn: sqlite3.Connection, case_id: str) -> list[dict[str, objec
         ).fetchone()[0]
         out.append({
             "wait_group_id": f["filter_id"], "condition": f["condition"], "members": members,
-            "satisfied": int(live) == 0 if f["condition"] == "ALL" else True,
+            "satisfied": int(live) == 0 if f["condition"] == "ALL" else int(live) < len(members),
             "created_at": f["created_at"],
         })
     return out
+
+
+# --------------------------------------------------------------------------- #
+# Delivery support (A104 Gate 3)
+# --------------------------------------------------------------------------- #
+def wake_turn_id(recipient_session_id: str, messages: list[InboxMessage]) -> str:
+    """Deterministic wake turn id for one delivery attempt of ``messages``: a
+    racing producer computes the same id (the admission dedups) and a new
+    attempt (attempts advanced) gets a new id."""
+    import hashlib
+
+    basis = "\0".join(
+        [recipient_session_id] + sorted(f"{m.message_id}#{m.attempts}" for m in messages)
+    )
+    return "wake_" + hashlib.sha256(basis.encode()).hexdigest()[:24]
+
+
+def waiting_for(conn: sqlite3.Connection, recipient_session_ids: list[str]) -> dict[str, bool]:
+    """Batched projection of ``pending_for(sid).waiting()`` for many sessions (the
+    session list) — same predicates, two grouped index-served reads, no N+1."""
+    sids = sorted({s for s in recipient_session_ids if s})
+    out: dict[str, bool] = {s: False for s in sids}
+    if not sids:
+        return out
+    marks = _placeholders(len(sids))
+    for r in conn.execute(
+        "SELECT DISTINCT recipient_session_id FROM agent_inbox INDEXED BY idx_agent_inbox_pending "
+        f"WHERE recipient_session_id IN ({marks}) AND state IN ('pending', 'delivered') AND state = 'pending'",
+        sids,
+    ).fetchall():
+        out[str(r[0])] = True
+    for r in conn.execute(
+        "SELECT DISTINCT sender_session_id FROM mesh_tasks INDEXED BY idx_mesh_tasks_requester_open "
+        f"WHERE sender_session_id IN ({marks}) "
+        "AND status IN ('queued', 'pending', 'claimed', 'running', 'recovery_required')",
+        sids,
+    ).fetchall():
+        out[str(r[0])] = True
+    return out
+
+
+def rebound_wake_turns(conn: sqlite3.Connection, case_id: str) -> list[str]:
+    """Queued wake turns of ``case_id`` whose recipient's Manager seat was rebound
+    (a newer seat link exists): they must be withdrawn so their messages follow."""
+    rows = conn.execute(
+        "SELECT DISTINCT t.id, t.session_id FROM agent_inbox i INDEXED BY idx_agent_inbox_case "
+        "JOIN mesh_tasks t ON t.id = i.delivery_turn_id "
+        "WHERE i.case_id = ? AND i.state = 'delivered' AND t.status = 'queued'",
+        (case_id,),
+    ).fetchall()
+    if not rows:
+        return []
+    current = conn.execute(
+        "SELECT entity_id FROM flow_links WHERE flow_run_id = ? AND entity_type = 'session' "
+        "AND role = 'manager' ORDER BY id DESC LIMIT 1",
+        (case_id,),
+    ).fetchone()
+    seats = {str(r[0]) for r in conn.execute(
+        "SELECT entity_id FROM flow_links WHERE flow_run_id = ? AND entity_type = 'session' "
+        "AND role = 'manager'", (case_id,),
+    ).fetchall()}
+    holder = str(current["entity_id"]) if current is not None else ""
+    return [str(r["id"]) for r in rows if str(r["session_id"]) in seats and str(r["session_id"]) != holder]
+
+
+def has_rebound_pending(conn: sqlite3.Connection, case_id: str) -> bool:
+    """Read-only probe: does a pending message of ``case_id`` sit with a replaced
+    Manager-seat holder?"""
+    return conn.execute(
+        "SELECT 1 FROM agent_inbox WHERE case_id = ? AND state = 'pending' "
+        "AND recipient_session_id IN (SELECT entity_id FROM flow_links WHERE flow_run_id = ? "
+        "AND entity_type = 'session' AND role = 'manager') "
+        "AND recipient_session_id != COALESCE((SELECT entity_id FROM flow_links WHERE flow_run_id = ? "
+        "AND entity_type = 'session' AND role = 'manager' ORDER BY id DESC LIMIT 1), '') LIMIT 1",
+        (case_id, case_id, case_id),
+    ).fetchone() is not None
+
+
+def follow_case_rebind(conn: sqlite3.Connection, case_id: str, now: str) -> int:
+    """D4 (rebind record): when a Case's Manager seat was rebound, the pending
+    messages of THAT Case addressed to a replaced seat holder follow the seat to
+    its current holder. Reads the rebind record (the newest seat link), never
+    decides addressing for a fresh message."""
+    current = conn.execute(
+        "SELECT entity_id FROM flow_links WHERE flow_run_id = ? AND entity_type = 'session' "
+        "AND role = 'manager' ORDER BY id DESC LIMIT 1",
+        (case_id,),
+    ).fetchone()
+    if current is None:
+        return 0
+    cur = conn.execute(
+        "UPDATE agent_inbox SET recipient_session_id = ?, updated_at = ? "
+        "WHERE case_id = ? AND state = 'pending' AND recipient_session_id != ? "
+        "AND recipient_session_id IN (SELECT entity_id FROM flow_links WHERE flow_run_id = ? "
+        "AND entity_type = 'session' AND role = 'manager')",
+        (current["entity_id"], now, case_id, current["entity_id"], case_id),
+    )
+    return cur.rowcount
+
+
+def rounds_used(conn: sqlite3.Connection, case_id: str) -> int:
+    """Completed wake rounds of a Case = distinct wake turns that acked a message."""
+    row = conn.execute(
+        "SELECT COUNT(DISTINCT delivery_turn_id) FROM agent_inbox "
+        "WHERE case_id = ? AND state = 'acked' AND resolution = 'wake'",
+        (case_id,),
+    ).fetchone()
+    return int(row[0] or 0)
+
+
+def sweep_settled(conn: sqlite3.Connection, now: str, limit: int = PENDING_LIMIT) -> SettleResult:
+    """Crash-safe backstop: settle messages still ``delivered`` on a wake turn that
+    is already terminal (a terminal path that did not settle in its own txn)."""
+    total = SettleResult()
+    for r in conn.execute(
+        "SELECT DISTINCT i.delivery_turn_id, t.status FROM agent_inbox i INDEXED BY idx_agent_inbox_pending "
+        "JOIN mesh_tasks t ON t.id = i.delivery_turn_id "
+        "WHERE i.state IN ('pending', 'delivered') AND i.state = 'delivered' "
+        "AND t.status NOT IN ('queued', 'pending', 'claimed', 'running', 'recovery_required') LIMIT ?",
+        (max(1, int(limit)),),
+    ).fetchall():
+        part = settle_turn(conn, str(r["delivery_turn_id"]), str(r["status"]), now)
+        total.acked += part.acked
+        total.returned += part.returned
+        total.dead += part.dead
+    return total
+
+
+def unalerted_dead(conn: sqlite3.Connection, limit: int = 50) -> list[InboxMessage]:
+    rows = conn.execute(
+        "SELECT message_id, recipient_session_id, sender_session_id, about_task_id, case_id, kind, outcome, "
+        "state, attempts, next_attempt_at, delivery_turn_id, created_at, last_error "
+        "FROM agent_inbox INDEXED BY idx_agent_inbox_dead_unalerted "
+        "WHERE state = 'dead' AND alerted_at IS NULL ORDER BY updated_at LIMIT ?",
+        (max(1, int(limit)),),
+    ).fetchall()
+    return [
+        InboxMessage(
+            message_id=r["message_id"], recipient_session_id=r["recipient_session_id"],
+            sender_session_id=r["sender_session_id"], about_task_id=r["about_task_id"],
+            case_id=r["case_id"], kind=r["kind"], outcome=r["outcome"], state=r["state"],
+            attempts=int(r["attempts"] or 0), ready_at=r["next_attempt_at"],
+            delivery_turn_id=r["delivery_turn_id"], created_at=r["created_at"],
+            last_error=r["last_error"],
+        )
+        for r in rows
+    ]
+
+
+def mark_alerted(conn: sqlite3.Connection, message_ids: list[str], now: str) -> int:
+    if not message_ids:
+        return 0
+    cur = conn.execute(
+        f"UPDATE agent_inbox SET alerted_at = ? WHERE alerted_at IS NULL AND message_id IN ({_placeholders(len(message_ids))})",
+        (now, *message_ids),
+    )
+    return cur.rowcount
+
+
+def case_pending(conn: sqlite3.Connection, case_id: str) -> PendingView:
+    """What is waiting in one Case, for every agent addressed in it: the union of
+    ``pending_for(recipient, case_id=case_id)`` over the Case's recipients (the
+    addressees of its open messages and the requesters of its open children).
+    Composed from ``pending_for`` — not a second read of pending state."""
+    recipients = sorted({str(r[0]) for r in conn.execute(
+        "SELECT DISTINCT recipient_session_id FROM agent_inbox WHERE case_id = ? "
+        "AND state IN ('pending', 'delivered') "
+        "UNION SELECT DISTINCT sender_session_id FROM mesh_tasks WHERE flow_run_id = ? "
+        "AND sender_session_id IS NOT NULL "
+        "AND status IN ('queued', 'pending', 'claimed', 'running', 'recovery_required')",
+        (case_id, case_id),
+    ).fetchall() if r[0]})
+    merged = PendingView(recipient_session_id="*", case_id=case_id)
+    for sid in recipients[:PENDING_LIMIT]:
+        view = pending_for(conn, sid, case_id=case_id)
+        merged.messages.extend(view.messages)
+        merged.outstanding_task_ids.extend(view.outstanding_task_ids)
+    return merged

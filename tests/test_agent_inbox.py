@@ -116,15 +116,25 @@ def test_IB01_incident_shape_only_the_dispatched_worker_reaches_the_requester(tm
 
 
 def test_IB01b_a_wake_turn_completion_produces_no_row(tmp_path, monkeypatch):
-    """The Case's continuation (wake) turn is system work, not a request."""
-    from tests.test_turn_queue_4c import _case, _cont_rows, _tick
+    """The wake turn that DELIVERS a message is system work, not a request: its
+    completion acks the message it carried and adds NO new inbox row."""
+    import asyncio
+
+    from tests.inbox_seed import seed_finished_child
 
     db, o = _env(tmp_path, monkeypatch)
-    cid = _case(db)
-    assert _tick(o, db, cid) == 1
-    (wake,) = _cont_rows(db)
+    cid = db.open_case("ship X", "sess-1", role="manager")
+    seed_finished_child(db, cid, "child-1", requester="sess-1")
+    (msg,) = _inbox(db)
+    assert asyncio.run(o._wake_dispatcher_tick_once()) == 1
+    wakes = [dict(r) for r in db._conn().execute(
+        "SELECT * FROM mesh_tasks WHERE queue_protocol = 1 AND turn_kind = 'continuation'").fetchall()]
+    (wake,) = wakes
+    assert _inbox(db)[0]["state"] == "delivered"
     _finish(db, o, wake["id"])
-    assert _inbox(db) == []
+    rows = _inbox(db)
+    assert [r["message_id"] for r in rows] == [msg["message_id"]]  # no new row
+    assert rows[0]["state"] == "acked" and rows[0]["delivery_turn_id"] == wake["id"]
 
 
 # IB02 ---------------------------------------------------------------------- #

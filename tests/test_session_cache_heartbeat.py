@@ -10,6 +10,7 @@ from src.control.db import (
 from src.core.interfaces import Session, SessionStatus
 from src.core.interfaces import Task, TaskPriority, TaskStatus, TaskType
 from src.orchestrator import TaskOrchestrator
+from tests.inbox_seed import seed_child
 from tests.stage8a_legacy import enqueue_pre_cutover, unenrolled
 
 
@@ -262,14 +263,10 @@ def test_quota_paused_case_skips_due_heartbeat(tmp_path, monkeypatch) -> None:
     session = _session()
     db.upsert_session(session)
     case_id = db.create_flow_run("task_case", "execution")
-    db.append_flow_event(
-        case_id,
-        "worker.wait_pending",
-        "manager",
-        entity_type="wait_group",
-        entity_id="wg",
-        payload={"wait_group_id": "wg", "condition": "ALL", "member_task_ids": ["worker-task"]},
-    )
+    # [A104] The owner stays live while the Case's D2 filter still holds: a real
+    # requested member task is still running, so the ALL filter is unsatisfied.
+    seed_child(db, case_id, "worker-task", requester="sess_hb")
+    db.inbox_arm_filter(case_id, "wg", "ALL", ["worker-task"])
     db.append_flow_event(
         case_id,
         "flow.quota_paused",
