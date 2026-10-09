@@ -1,0 +1,21 @@
+# Provenance: transcribed from .ai/dispatch/AGENT_104_UNIFIED_AGENT_INBOX.md (on main after Gate 4, 4d85613),
+# written 2026-10-09 and committed BEFORE the first run (frozen). Only identifiers the packet itself names:
+#   Phase 5.1 deletions: compute_continuation_tick satisfaction, continuation_watermark consumption, retire_only,
+#                        the outbox/legacy mode branch, CASE_COMPLETION_OUTBOX_ENABLED birth flag, continuation_mode.
+#   I3 + ACCEPTANCE 1:   pending_for(...) is the ONLY reader of pending state -> sole SELECT reader of agent_inbox
+#                        (table name taken from the Gate 2 migration; the packet only says "evolved from
+#                        completion_outbox").
+# Not transcribed (no identifier in the packet): "wait-group fold readers", I6 never-run traces, I7 windows,
+# ACCEPTANCE 7 role addressing. D5 tools (arm_wait_group, reconcile_waits, wait_for_worker) stay as shims, so they
+# are deliberately NOT retired here. D7 worker-endpoint shims are not pre-waived: the packet names none.
+scope: [src, scripts, config, tests, web/src]
+retired:
+  - compute_continuation_tick
+  - continuation_watermark
+  - CASE_COMPLETION_OUTBOX_ENABLED
+  - continuation_mode
+retired_patterns:
+  - '^retire_only'        # retire_only / retire_only_groups ("retire_only" drain)
+stores:
+  agent_inbox:
+    readers: ['*::pending_for']
