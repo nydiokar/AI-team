@@ -1,20 +1,22 @@
 """
-A46 / M3.3 — durable worker-wait relay tests (db layer).
+A46 / M3.3 — durable worker-wait relay tests (db layer), A104 inbox shims.
 
 ``wait_for_worker`` is a pure in-process poll: a Manager/gateway crash mid-wait
-loses it. A46 records the wait intent as an append-only ``worker.wait_pending``
-marker at dispatch and reconciles outstanding waits against the already-durable
-``task.finished`` event, so a resumed Manager recovers its waits from the ledger,
-not from lost memory.
+loses it. A46 recorded the wait intent as a ``worker.wait_pending`` ledger marker;
+A104 replaced that ledger with the agent inbox — the child's requester is stamped
+at dispatch and its completion row is written in the child's terminal txn — so the
+obligation is durable without any marker.
 
-  * flag OFF ⇒ byte-identical (no ``worker.wait_*`` events written; reconcile no-ops).
-  * ``record_worker_wait`` is idempotent (no duplicate pending marker per task).
-  * ``reconcile_worker_waits`` resolves a finished worker (appends
-    ``worker.wait_resolved``), leaves an open worker PENDING, and is idempotent
-    across re-runs (crash-during-reconcile safe).
+  * ``record_worker_wait`` is a no-op shim (returns None, writes no event) whatever
+    the flag.
+  * ``reconcile_worker_waits`` is a READ-ONLY view over ``pending_for``: ``resolved``
+    = finished children whose completion is still unconsumed, ``pending`` = requested
+    children still running. Re-runs are identical (nothing is written); a tagged
+    ``review.*`` event about the task consumes it.
 """
 
 from src.control.db import MeshDB
+from tests.inbox_seed import seed_child, seed_finished_child
 
 
 def _db(tmp_path) -> MeshDB:
@@ -27,14 +29,6 @@ def _on(monkeypatch) -> None:
 
 def _off(monkeypatch) -> None:
     monkeypatch.delenv("DURABLE_RELAY_ENABLED", raising=False)
-
-
-def _finished(db: MeshDB, case_id: str, task_id: str, outcome: str = "success") -> None:
-    db.append_flow_event(
-        case_id, "task.finished", "worker",
-        entity_type="task", entity_id=task_id,
-        payload={"outcome": outcome},
-    )
 
 
 def _events(db: MeshDB, case_id: str, event_type: str) -> list:
@@ -52,32 +46,33 @@ def test_record_worker_wait_noop_when_flag_off(tmp_path, monkeypatch):
 
 
 def test_reconcile_disabled_when_flag_off(tmp_path, monkeypatch):
+    """A104: reconcile is a read-only view over the inbox, no longer flag-gated —
+    flag OFF still reports the Case truth and writes nothing. (Only
+    ``boot_reconcile_case`` stays gated on DURABLE_RELAY_ENABLED.)"""
     _off(monkeypatch)
     db = _db(tmp_path)
     fid = db.open_case("obj", "sess-1")
-    assert db.reconcile_worker_waits(fid) == {"ok": False, "reason": "durable_relay_disabled"}
+    seed_finished_child(db, fid, "task_done", requester="sess-1")
+    before = len(db.list_flow_events(fid))
+    out = db.reconcile_worker_waits(fid)
+    assert out["ok"] is True
+    assert out["resolved"] == [{"task_id": "task_done", "outcome": "success"}]
+    assert len(db.list_flow_events(fid)) == before
+    assert db.reconcile_worker_waits("no-such-case")["ok"] is False
 
 
 # --- record_worker_wait -----------------------------------------------------
 
 def test_record_worker_wait_writes_pending_marker(tmp_path, monkeypatch):
+    """A104 shim: even flag ON, no ``worker.wait_pending`` marker is written —
+    the inbox records the obligation from the requester stamp. Repeat calls
+    stay no-ops (the old per-task idempotency has nothing left to dedupe)."""
     _on(monkeypatch)
     db = _db(tmp_path)
     fid = db.open_case("obj", "sess-1")
-    eid = db.record_worker_wait(fid, "task_1", timeout=120.0)
-    assert isinstance(eid, int)
-    pend = _events(db, fid, "worker.wait_pending")
-    assert len(pend) == 1 and pend[0]["entity_id"] == "task_1"
-
-
-def test_record_worker_wait_idempotent(tmp_path, monkeypatch):
-    _on(monkeypatch)
-    db = _db(tmp_path)
-    fid = db.open_case("obj", "sess-1")
-    first = db.record_worker_wait(fid, "task_1")
-    again = db.record_worker_wait(fid, "task_1")
-    assert first == again  # same event id — no duplicate pending marker
-    assert len(_events(db, fid, "worker.wait_pending")) == 1
+    assert db.record_worker_wait(fid, "task_1", timeout=120.0) is None
+    assert db.record_worker_wait(fid, "task_1") is None
+    assert _events(db, fid, "worker.wait_pending") == []
 
 
 # --- reconcile --------------------------------------------------------------
@@ -86,54 +81,54 @@ def test_reconcile_resolves_finished_and_keeps_open(tmp_path, monkeypatch):
     _on(monkeypatch)
     db = _db(tmp_path)
     fid = db.open_case("obj", "sess-1")
-    db.record_worker_wait(fid, "task_done")
-    db.record_worker_wait(fid, "task_open", timeout=90.0)
-    _finished(db, fid, "task_done", outcome="success")
+    seed_finished_child(db, fid, "task_done", requester="sess-1")
+    seed_child(db, fid, "task_open", requester="sess-1")
 
     out = db.reconcile_worker_waits(fid)
     assert out["ok"] is True
     assert [r["task_id"] for r in out["resolved"]] == ["task_done"]
     assert out["resolved"][0]["outcome"] == "success"
     assert [p["task_id"] for p in out["pending"]] == ["task_open"]
-    assert out["pending"][0]["timeout"] == 90.0
-    # a worker.wait_resolved marker was appended for the finished task ONLY.
-    assert [e["entity_id"] for e in _events(db, fid, "worker.wait_resolved")] == ["task_done"]
+    # read-only: no legacy wait markers are written.
+    assert _events(db, fid, "worker.wait_resolved") == []
+    assert _events(db, fid, "worker.wait_pending") == []
 
 
 def test_reconcile_idempotent_across_reruns(tmp_path, monkeypatch):
+    """Reconcile never consumes: re-runs return the same unconsumed completion
+    (crash-during-reconcile safe by construction). A tagged review consumes it."""
     _on(monkeypatch)
     db = _db(tmp_path)
     fid = db.open_case("obj", "sess-1")
-    db.record_worker_wait(fid, "task_done")
-    _finished(db, fid, "task_done")
+    seed_finished_child(db, fid, "task_done", requester="sess-1")
 
     first = db.reconcile_worker_waits(fid)
     second = db.reconcile_worker_waits(fid)
     assert [r["task_id"] for r in first["resolved"]] == ["task_done"]
-    assert second["resolved"] == [] and second["pending"] == []  # already reconciled
-    assert len(_events(db, fid, "worker.wait_resolved")) == 1  # no duplicate marker
+    assert second == first
+    db.append_flow_event(fid, "review.accepted", "manager", entity_type="task", entity_id="task_done")
+    third = db.reconcile_worker_waits(fid)
+    assert third["resolved"] == [] and third["pending"] == []
 
 
 def test_reconcile_carries_failed_outcome(tmp_path, monkeypatch):
     _on(monkeypatch)
     db = _db(tmp_path)
     fid = db.open_case("obj", "sess-1")
-    db.record_worker_wait(fid, "task_fail")
-    _finished(db, fid, "task_fail", outcome="error")
+    seed_finished_child(db, fid, "task_fail", requester="sess-1", status="failed")
     out = db.reconcile_worker_waits(fid)
-    assert out["resolved"][0] == {"task_id": "task_fail", "outcome": "error"}
+    assert out["resolved"][0] == {"task_id": "task_fail", "outcome": "failed"}
 
 
 def test_record_after_resolve_starts_a_fresh_wait(tmp_path, monkeypatch):
-    """A resolve CLEARS the pending state, so a later dispatch of a new task is a
-    fresh, independent pending marker (idempotency is per unresolved wait)."""
+    """Once a completion is consumed (tagged review), a later dispatch of a new
+    task is a fresh, independent outstanding request."""
     _on(monkeypatch)
     db = _db(tmp_path)
     fid = db.open_case("obj", "sess-1")
-    db.record_worker_wait(fid, "task_a")
-    _finished(db, fid, "task_a")
-    db.reconcile_worker_waits(fid)  # resolves task_a
-    db.record_worker_wait(fid, "task_b")  # a different task, still open
+    seed_finished_child(db, fid, "task_a", requester="sess-1")
+    db.append_flow_event(fid, "review.accepted", "manager", entity_type="task", entity_id="task_a")
+    seed_child(db, fid, "task_b", requester="sess-1", token="tok-b")
     out = db.reconcile_worker_waits(fid)
     assert [p["task_id"] for p in out["pending"]] == ["task_b"]
     assert out["resolved"] == []

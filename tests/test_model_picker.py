@@ -171,17 +171,10 @@ def test_resolve_advisory_passes_unknown_through():
 
 
 # --------------------------------------------------------------------------- backend model propagation
-def test_claude_build_cmd_model_placement():
-    # _build_cmd now lives only on ClaudePrintResumeDriver (single source of truth).
-    from src.backends.claude_driver import ClaudePrintResumeDriver
-    b = ClaudePrintResumeDriver()
-    fresh = b._build_cmd(None, "sid", "opus")
-    assert fresh[fresh.index("--model") + 1] == "opus"
-    resume = b._build_cmd("rid", None, "sonnet")
-    assert "--resume" in resume and resume[resume.index("--model") + 1] == "sonnet"
-    assert "--model" not in b._build_cmd(None, "sid", None)
-
-
+# [A102/R2] test_claude_build_cmd_{model,effort}_placement removed: the Claude
+# print/resume CLI driver (ClaudePrintResumeDriver) and its `_build_cmd` were
+# deleted — the SDK driver passes model/effort via ClaudeAgentOptions, not a CLI
+# flag. The SDK driver is the only Claude driver now.
 def test_codex_app_server_turn_forwards_model_and_effort():
     from src.backends.codex_app_server import CodexAppServerClient
 
@@ -208,13 +201,6 @@ def test_codex_app_server_turn_forwards_model_and_effort():
             30.0,
         )
     ]
-
-
-def test_claude_build_cmd_effort_placement():
-    from src.backends.claude_driver import ClaudePrintResumeDriver
-    b = ClaudePrintResumeDriver()
-    cmd = b._build_cmd(None, "sid", "opus", "high")
-    assert cmd[cmd.index("--effort") + 1] == "high"
 
 
 # --------------------------------------------------------------------------- persistence

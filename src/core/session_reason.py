@@ -97,34 +97,9 @@ class _ReasonBatch:
     case_retry_paused: frozenset
     # case_id -> True if the Case exists AND is not in a closed status.
     open_cases: frozenset
-
-
-def _is_manager(session: Session) -> bool:
-    return str(getattr(session, "case_role", "") or "") == "manager"
-
-
-def _case_has_unresolved_wait_group(db: Any, case_id: str) -> bool:
-    """True iff the Case has a wait-group whose last event is `worker.wait_pending`.
-
-    Reuses the EXACT bounded fold the heartbeat uses in
-    ``orchestrator._cache_heartbeat_owner_live`` (``case_wait_group`` branch):
-    one bounded ``list_flow_events`` read, folding pending/resolved per group.
-    We do NOT add a new full-log scan (the #145/#147 lesson). Any group left in
-    the `pending` terminal state ⇒ an unresolved wait.
-    """
-    group_live: Dict[str, bool] = {}
-    for event in db.list_flow_events(case_id):
-        if event.get("entity_type") != "wait_group":
-            continue
-        gid = event.get("entity_id")
-        if not gid:
-            continue
-        etype = event.get("event_type")
-        if etype == "worker.wait_pending":
-            group_live[gid] = True
-        elif etype == "worker.wait_resolved":
-            group_live[gid] = False
-    return any(group_live.values())
+    # [A104 I3] sessions for which ``pending_for`` reports work outstanding
+    # (requests still running, or messages not yet delivered) — any role.
+    waiting_sessions: frozenset = frozenset()
 
 
 def build_reason_batch(db: Any, sessions: List[Session]) -> _ReasonBatch:
@@ -133,8 +108,8 @@ def build_reason_batch(db: Any, sessions: List[Session]) -> _ReasonBatch:
     Bounded-read contract (spec §5 — safety-critical):
     - ONE ``list_jobs_for_sessions(ids)`` for the whole page (already N+1-safe).
     - role/case straight off the already-loaded session rows (no per-row read).
-    - pause + wait-group reads done ONLY for the managers on the page whose Case
-      is OPEN, watermark-gated via ``db.max_flow_event_ids`` so a Case with no
+    - pause reads done ONLY for open Cases on the page; `waiting_workers` from the agent inbox (A104)
+      — Cases watermark-gated via ``db.max_flow_event_ids`` so a Case with no
       events is skipped without a per-Case scan.
     - NO cross-session materialization, NO N+1, and NEVER on a timer / loop.
 
@@ -156,23 +131,31 @@ def build_reason_batch(db: Any, sessions: List[Session]) -> _ReasonBatch:
             pass
 
     # Candidate cases from the loaded rows (no read): any waiting session with a
-    # current_case_id. Managers additionally get a wait-group read.
+    # current_case_id.
     case_ids: set = set()
-    manager_case_ids: set = set()
+    waiting_ids: List[str] = []
     for s in sessions:
         if s.status not in _WAIT_STATES:
             continue
+        waiting_ids.append(s.session_id)
         cid = str(getattr(s, "current_case_id", "") or "")
-        if not cid:
-            continue
-        case_ids.add(cid)
-        if _is_manager(s):
-            manager_case_ids.add(cid)
+        if cid:
+            case_ids.add(cid)
+
+    # (1b) [A104 I3] What is waiting for each session comes from the agent inbox
+    # (the batched projection of ``pending_for``) — two grouped, index-served
+    # reads for the whole page, never a Case event-log fold, never a role read.
+    waiting_sessions: set = set()
+    if waiting_ids:
+        try:
+            waiting_sessions = {sid for sid, w in db.inbox_waiting_for(waiting_ids).items() if w}
+        except Exception:
+            waiting_sessions = set()
 
     open_cases: set = set()
     case_quota_paused: set = set()
     case_retry_paused: set = set()
-    case_waiting_workers: Dict[str, bool] = {}
+    case_waiting_workers: Dict[str, bool] = {}  # kept for the batch shape; unused
 
     if case_ids:
         # (2) Watermark: one batched MAX(id) per Case (index-served, O(1)/Case).
@@ -212,12 +195,6 @@ def build_reason_batch(db: Any, sessions: List[Session]) -> _ReasonBatch:
                 except Exception:
                     pass
 
-            # Wait-group read: managers only, and only if the Case has events.
-            if cid in manager_case_ids and has_events:
-                try:
-                    case_waiting_workers[cid] = _case_has_unresolved_wait_group(db, cid)
-                except Exception:
-                    case_waiting_workers[cid] = False
 
     return _ReasonBatch(
         running_job_sessions=frozenset(running_job_sessions),
@@ -225,6 +202,7 @@ def build_reason_batch(db: Any, sessions: List[Session]) -> _ReasonBatch:
         case_quota_paused=frozenset(case_quota_paused),
         case_retry_paused=frozenset(case_retry_paused),
         open_cases=frozenset(open_cases),
+        waiting_sessions=frozenset(waiting_sessions),
     )
 
 
@@ -260,8 +238,9 @@ def derive_session_reason(session: Session, batch: _ReasonBatch) -> Optional[Ses
     # 2. paused_retry
     if case_id and case_id in batch.case_retry_paused:
         return SessionReason(kind="paused_retry", confidence="high")
-    # 3. waiting_workers — manager with an unresolved wait-group.
-    if _is_manager(session) and case_id and batch.case_waiting_workers.get(case_id):
+    # 3. waiting_workers — ``pending_for`` reports requests this session made
+    #    that are still running, or messages for it not yet delivered.
+    if session.session_id in batch.waiting_sessions:
         return SessionReason(kind="waiting_workers", confidence="high")
     # 4. waiting_job — a `jobs` row for this session is `running`.
     if session.session_id in batch.running_job_sessions:

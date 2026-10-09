@@ -16,6 +16,7 @@ import logging
 import os
 import subprocess
 import time
+import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -24,16 +25,13 @@ _NO_WINDOW = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
 from src.core.process_utils import ensure_node_on_path
 from src.core.interfaces import CodingBackend, ExecutionResult, Session
 from src.core.telemetry import TelemetryContext, new_telemetry_id, telemetry_subprocess_env
+from src.core.turn_liveness import TurnControl, turn_control
 
 logger = logging.getLogger(__name__)
 
-# Shared helpers live in claude_driver (single source of truth).
-from src.backends.claude_driver import (  # noqa: E402
-    _extract_output,
-    _extract_text_blocks,
-    _mcp_jobs_configured,
-    _parse_print_resume,
-)
+# Shared helper lives in claude_driver (single source of truth for stream-json
+# parsing — kept for the backend `_parse` delegator + telemetry retry tests).
+from src.backends.claude_driver import _parse_print_resume  # noqa: E402
 
 
 def _resolve_model(session: Session) -> Optional[str]:
@@ -188,34 +186,16 @@ class ClaudeCodeBackend(CodingBackend):
     as fallback). The driver choice is made once at construction time and applies
     to all sessions managed by this backend instance.
 
-    The existing _run/_build_cmd methods are kept for run_oneoff and for the
-    test suite that asserts on _build_cmd output. New multi-turn session calls
-    go through the driver boundary.
+    All turns go through the driver boundary (single turn pipeline, A102).
     """
 
     def __init__(self, driver_type: str = "auto"):
-        # "auto" means defer to config; explicit values bypass config
-        if driver_type == "auto":
-            try:
-                from config import config as _cfg
-                driver_type = getattr(_cfg.claude, "driver_type", "sdk")
-            except Exception:
-                driver_type = "sdk"
-        from src.backends.claude_driver import build_driver, ClaudePrintResumeDriver
-        self._driver = build_driver(driver_type)
-        active = self._driver.driver_type()
-        if active == "print_resume":
-            logger.warning(
-                "event=backend_degraded driver=print_resume "
-                "— ClaudeCodeBackend is running on the LEGACY CLI driver. "
-                "Long sessions burn tokens on context reconstruction, are not "
-                "persistent, and are subject to inactivity timeouts. "
-                "Verify claude_agent_sdk is installed in the venv or set CLAUDE_DRIVER_TYPE=sdk."
-            )
-        else:
-            logger.info("event=backend_init driver=%s", active)
-        # Fallback driver: one-off calls go through this, not a legacy _run.
-        self._fallback = ClaudePrintResumeDriver()
+        # [A102/R2] The SDK continuous driver is the ONE Claude driver; the
+        # legacy print/resume CLI driver and driver selection were deleted.
+        # `driver_type` is accepted for signature compatibility and ignored.
+        from src.backends.claude_driver import ClaudeSDKClientDriver
+        self._driver = ClaudeSDKClientDriver()
+        logger.info("event=backend_init driver=sdk")
 
     def _maybe_emit_telemetry(
         self,
@@ -227,9 +207,8 @@ class ClaudeCodeBackend(CodingBackend):
 
         Uses ClaudeStreamJsonAdapter to parse the NDJSON lines collected in
         result.raw_stdout and sends the resulting events through telemetry_sink.
-        Called at the boundary of each public execution method so it covers both
-        the SDK driver path (ClaudeSDKClientDriver) and the legacy CLI path
-        (ClaudePrintResumeDriver / run_oneoff).
+        Called at the boundary of each public execution method so it covers
+        every turn on the SDK driver (ClaudeSDKClientDriver), including one-offs.
 
         Contract:
         - Never raises into the caller (spec §8.2).
@@ -266,22 +245,28 @@ class ClaudeCodeBackend(CodingBackend):
             )
 
     def _log_driver_turn(self, action: str, session_id: str) -> None:
-        """Log which driver is handling this turn — WARNING when legacy CLI is active."""
-        active = self._driver.driver_type()
-        if active == "print_resume":
-            logger.warning(
-                "event=legacy_driver_active action=%s session_id=%s driver=print_resume "
-                "— using LEGACY CLI driver, not SDK. Sessions are stateless; long turns "
-                "reconstruct full context from disk (token-heavy). "
-                "Check that claude_agent_sdk is installed and CLAUDE_DRIVER_TYPE=sdk.",
-                action, session_id,
-            )
-        else:
-            logger.info("event=driver_turn action=%s session_id=%s driver=%s", action, session_id, active)
+        logger.info("event=driver_turn action=%s session_id=%s driver=sdk", action, session_id)
 
-    def create_session(self, session: Session, *, telemetry_context=None, telemetry_sink=None) -> ExecutionResult:
+    def _finish(self, session: Session, result: ExecutionResult, before_snapshot: Dict[str, Dict[str, str]], telemetry_context, telemetry_sink) -> ExecutionResult:
+        """Shared post-turn processing for the session ops: observe driver /
+        cache state, diff the worktree, and emit telemetry."""
+        self._observe_driver_state(session, result)
+        result = self._observe_cache_health(session, result)
+        if session.repo_path:
+            after_snapshot = _snapshot_worktree(session.repo_path)
+            result.file_changes = _compute_turn_changes(session.repo_path, before_snapshot, after_snapshot)
+            result.files_modified = [item["path"] for item in result.file_changes]
+        self._maybe_emit_telemetry(result, telemetry_context, telemetry_sink)
+        return result
+
+    def create_session(self, session: Session, *, turn: Optional[TurnControl] = None, telemetry_context=None, telemetry_sink=None) -> ExecutionResult:
+        """[A102] Start the native session if needed and run the first prompt
+        (``session.last_user_message``), tagged with ``turn.turn_uuid`` for echo
+        correlation. ``turn`` carries the carrier's liveness policy; a synthesized
+        one is used only by the legacy in-process caller (S2 removes it)."""
         from src.core.test_guard import assert_live_calls_allowed
         assert_live_calls_allowed("claude")
+        turn = turn or turn_control(str(uuid.uuid4()))
         self._log_driver_turn("create_session", session.session_id or "")
         proc_env = self._build_proc_env(session.session_id, telemetry_context)
         before_snapshot = _snapshot_worktree(session.repo_path) if session.repo_path else {}
@@ -289,81 +274,60 @@ class ClaudeCodeBackend(CodingBackend):
         result = self._driver.start_session(
             session,
             session.last_user_message,
+            turn=turn,
             model=_resolve_model(session),
             telemetry_context=telemetry_context,
             proc_env=proc_env,
         )
-        self._observe_driver_state(session, result)
-        result = self._observe_cache_health(session, result)
-        if session.repo_path:
-            after_snapshot = _snapshot_worktree(session.repo_path)
-            result.file_changes = _compute_turn_changes(session.repo_path, before_snapshot, after_snapshot)
-            result.files_modified = [item["path"] for item in result.file_changes]
-        self._maybe_emit_telemetry(result, telemetry_context, telemetry_sink)
-        return result
+        return self._finish(session, result, before_snapshot, telemetry_context, telemetry_sink)
 
-    def resume_session(self, session: Session, message: str, *, telemetry_context=None, telemetry_sink=None) -> ExecutionResult:
-        # Guards are checked BEFORE the live-call gate so they work in test mode too.
-        self._log_driver_turn("resume_session", session.session_id or "")
-
-        # Guard: if session was lost after worker restart, don't silently resume
-        # via print/resume into stale context.
-        if session.driver_status == "lost" and self._driver.driver_type() != "print_resume":
-            return ExecutionResult(
-                success=False,
-                output="",
-                errors=[
-                    "Claude session was lost after a worker restart and cannot be resumed "
-                    "by the continuous driver. Start a new session or explicitly request "
-                    "fallback resume."
-                ],
-                error_class="session_lost",
-            )
-
-        # Guard: if cache is unhealthy twice, block silent print/resume continuation
-        if (
-            session.cache_health == "unhealthy"
-            and session.cache_unhealthy_count >= 2
-            and self._driver.driver_type() == "print_resume"
-        ):
-            return ExecutionResult(
-                success=False,
-                output="",
-                errors=[
-                    f"Claude session cache is unhealthy ({session.cache_unhealthy_count} times). "
-                    "Context is being fully recreated every turn, burning subscription quota. "
-                    "Start a new session to reset cache health."
-                ],
-                error_class="cache_unhealthy",
-            )
-
+    def resume_session(self, session: Session, message: str, *, turn: Optional[TurnControl] = None, telemetry_context=None, telemetry_sink=None) -> ExecutionResult:
+        """[A102] Resume the live session with ``message``: busy/not quiescent ⇒
+        typed ``OwnershipConflictError`` before submit (never interrupt); submit
+        tagged with ``turn.turn_uuid``; lost ack ⇒ reconcile by id, never
+        resubmit; return only OUR correlated reply; expiry or unattributable
+        result ⇒ ``RecoveryRequiredError`` with a late result delivered via the
+        proactive sink. (All of that is enforced by the driver's single send.)"""
         from src.core.test_guard import assert_live_calls_allowed
         assert_live_calls_allowed("claude")
+        turn = turn or turn_control(str(uuid.uuid4()))
+        self._log_driver_turn("resume_session", session.session_id or "")
         proc_env = self._build_proc_env(session.session_id, telemetry_context)
         before_snapshot = _snapshot_worktree(session.repo_path) if session.repo_path else {}
 
         result = self._driver.send_turn(
             session,
             message,
+            turn=turn,
             model=_resolve_model(session),
             telemetry_context=telemetry_context,
             proc_env=proc_env,
         )
-        self._observe_driver_state(session, result)
-        result = self._observe_cache_health(session, result)
-        if session.repo_path:
-            after_snapshot = _snapshot_worktree(session.repo_path)
-            result.file_changes = _compute_turn_changes(session.repo_path, before_snapshot, after_snapshot)
-            result.files_modified = [item["path"] for item in result.file_changes]
-        self._maybe_emit_telemetry(result, telemetry_context, telemetry_sink)
-        return result
+        return self._finish(session, result, before_snapshot, telemetry_context, telemetry_sink)
 
-    # ------------------------------------------------------------------ #
-    # [A82 Stage 3] Managed (protocol-1) turn contract (CodingBackend).
-    # ------------------------------------------------------------------ #
+    def compact_session(self, session: Session, *, turn: Optional[TurnControl] = None, telemetry_context=None, telemetry_sink=None) -> ExecutionResult:
+        """[A102] `/compact` on the continuous SDK driver (see
+        ``ClaudeSDKClientDriver.compact_session``)."""
+        from src.core.test_guard import assert_live_calls_allowed
+        assert_live_calls_allowed("claude")
+        turn = turn or turn_control(str(uuid.uuid4()))
+        self._log_driver_turn("compact_session", session.session_id or "")
+        proc_env = self._build_proc_env(session.session_id, telemetry_context)
+        before_snapshot = _snapshot_worktree(session.repo_path) if session.repo_path else {}
+
+        result = self._driver.compact_session(
+            session,
+            turn=turn,
+            model=_resolve_model(session),
+            telemetry_context=telemetry_context,
+            proc_env=proc_env,
+        )
+        return self._finish(session, result, before_snapshot, telemetry_context, telemetry_sink)
+
     def supports_managed_turns(self) -> bool:
-        """Managed execution exists only on the continuous SDK driver (its
-        no-interrupt, loop-reserved send). The print/resume driver has none."""
+        """The single turn pipeline needs the SDK session's ``--replay-user-messages``
+        echo correlation (``WORKER_MANAGED_TURNS``, default ON). A worker without
+        it advertises no managed path."""
         from src.backends.claude_driver import _replay_user_messages_enabled
 
         return self._driver.driver_type() == "sdk" and _replay_user_messages_enabled()
@@ -372,107 +336,25 @@ class ClaudeCodeBackend(CodingBackend):
         """[A82 Stage 5] Per-session sender tool on the SDK driver only."""
         return self._driver.provision_sender_capability(session_id, token)
 
-    def run_managed_turn(self, session: Session, message: str, ownership, *, telemetry_context=None, telemetry_sink=None, on_process=None) -> ExecutionResult:
-        return self._run_managed(
-            "managed_turn", session, ownership, telemetry_context, telemetry_sink,
-            lambda proc_env: self._driver.run_managed_turn(
-                session,
-                message,
-                model=_resolve_model(session),
-                telemetry_context=telemetry_context,
-                proc_env=proc_env,
-                on_process=on_process,
-                turn_uuid=getattr(ownership, "turn_uuid", None),
-            ),
-        )
-
-    def run_managed_compaction(self, session: Session, ownership, *, telemetry_context=None, telemetry_sink=None, on_process=None) -> ExecutionResult:
-        """[A82 Stage 4b] Managed `/compact` on the continuous SDK driver (see
-        ``ClaudeSDKClientDriver.run_managed_compaction``)."""
-        return self._run_managed(
-            "managed_compaction", session, ownership, telemetry_context, telemetry_sink,
-            lambda proc_env: self._driver.run_managed_compaction(
-                session,
-                model=_resolve_model(session),
-                telemetry_context=telemetry_context,
-                proc_env=proc_env,
-                on_process=on_process,
-                turn_uuid=getattr(ownership, "turn_uuid", None),
-            ),
-        )
-
-    def cancel_managed_turn(self, session: Session, turn_uuid: str) -> bool:
-        """[A82 Stage 4b] Operator cancel of exactly the managed turn ``turn_uuid``.
-
-        [rework] ARM first (a prompt not yet registered — CLI still booting — is
-        then never submitted), then deliver to the live pending entry if one
-        exists (interrupt now or at its echo) and disarm. Returns True: the
-        cancel is delivered or durably armed for this uuid."""
-        from src.backends.claude_driver import arm_managed_cancel, disarm_managed_cancel
-
-        if not turn_uuid:
-            return False
-        arm_managed_cancel(turn_uuid)
+    def forget_turn(self, session: Session, turn_uuid: str) -> bool:
+        """[A102] The carrier learned this turn's row is terminal: drop its
+        pending entry so the session can become quiescent again."""
         sessions = getattr(self._driver, "_sessions", None)
         sdk_sess = sessions.get(session.session_id) if sessions is not None else None
-        cancel = getattr(sdk_sess, "cancel_managed_turn", None)
-        if callable(cancel) and cancel(turn_uuid):
-            disarm_managed_cancel(turn_uuid)  # delivered to the registered prompt
-        return True
-
-    def _run_managed(self, label: str, session: Session, ownership, telemetry_context, telemetry_sink, invoke) -> ExecutionResult:
-        from src.control.turn_queue import ManagedUnsupportedError, OwnershipConflictError
-
-        if not self.supports_managed_turns():
-            raise ManagedUnsupportedError(
-                "active Claude driver has no managed execution path",
-                driver=self._driver.driver_type(),
-            )
-        if (ownership.session_id or "") != (session.session_id or ""):
-            raise OwnershipConflictError(
-                "managed ownership does not match the session", task_id=ownership.task_id,
-            )
-        self._log_driver_turn(label, session.session_id or "")
-        from src.core.test_guard import assert_live_calls_allowed
-        assert_live_calls_allowed("claude")
-        proc_env = self._build_proc_env(session.session_id, telemetry_context)
-        before_snapshot = _snapshot_worktree(session.repo_path) if session.repo_path else {}
-
-        result = invoke(proc_env)
-        self._observe_driver_state(session, result)
-        result = self._observe_cache_health(session, result)
-        if session.repo_path:
-            after_snapshot = _snapshot_worktree(session.repo_path)
-            result.file_changes = _compute_turn_changes(session.repo_path, before_snapshot, after_snapshot)
-            result.files_modified = [item["path"] for item in result.file_changes]
-        self._maybe_emit_telemetry(result, telemetry_context, telemetry_sink)
-        return result
-
-    def forget_managed_turn(self, session: Session, turn_uuid: str) -> bool:
-        sessions = getattr(self._driver, "_sessions", None)
-        sdk_sess = sessions.get(session.session_id) if sessions is not None else None
-        forget = getattr(sdk_sess, "forget_managed_turn", None)
+        forget = getattr(sdk_sess, "forget_turn", None)
         return bool(callable(forget) and forget(turn_uuid))
 
     def is_quiescent(self, session: Session) -> bool:
         probe = getattr(self._driver, "is_session_quiescent", None)
         return bool(callable(probe) and probe(session.session_id))
 
-    def run_oneoff(self, cwd: str, message: str, *, telemetry_context=None, telemetry_sink=None) -> ExecutionResult:
+    def run_oneoff(self, cwd: str, message: str, *, turn: Optional[TurnControl] = None, telemetry_context=None, telemetry_sink=None) -> ExecutionResult:
+        """[R1] A thin one-off: a throwaway SDK session running ``message`` as its
+        first prompt (``create_session`` semantics), with its own ``turn_control``."""
+        turn = turn or turn_control(str(uuid.uuid4()))
         proc_env = self._build_proc_env(None, telemetry_context)
         before_snapshot = _snapshot_worktree(cwd) if cwd else {}
-        # [ADR-0001] Root the one-off on the canonical SDK driver when it is active —
-        # a transient SDK session, not `claude -p`. Only when the primary driver is
-        # itself the legacy CLI (SDK unavailable) do we go through the print/resume
-        # fallback. Both expose the same run_oneoff(cwd, message, *, model, proc_env).
-        driver = self._driver if self._driver.driver_type() == "sdk" else self._fallback
-        if driver is not self._driver:
-            logger.warning(
-                "event=oneoff_on_legacy_driver — run_oneoff falling back to `claude -p` "
-                "because the SDK driver is unavailable. Install claude_agent_sdk / set "
-                "CLAUDE_DRIVER_TYPE=sdk to keep one-offs on the SDK client."
-            )
-        result = driver.run_oneoff(cwd, message, model=None, proc_env=proc_env)
+        result = self._driver.run_oneoff(cwd, message, turn=turn, model=None, proc_env=proc_env)
         if cwd:
             after_snapshot = _snapshot_worktree(cwd)
             result.file_changes = _compute_turn_changes(cwd, before_snapshot, after_snapshot)
@@ -482,16 +364,50 @@ class ClaudeCodeBackend(CodingBackend):
 
     def set_proactive_sink(self, sink: Any) -> None:
         """Register a sink for autonomous turns (background-job continuations).
-
-        Delegates to the SDK driver; a no-op on drivers that don't support it
-        (e.g. the legacy print/resume fallback, which has no live session to
-        continue on its own)."""
+        Delegates to the SDK driver."""
         setter = getattr(self._driver, "set_proactive_sink", None)
         if callable(setter):
             setter(sink)
 
-    def cancel(self, session: Session) -> None:
-        self._driver.cancel(session)
+    def cancel(self, session: Session, turn_uuid: Optional[str] = None) -> bool:
+        """[A102] With a ``turn_uuid``: abort EXACTLY that turn if the CLI is
+        running it, arm the interrupt for its echo if it has not begun, and never
+        touch another turn (ARM first so a prompt not yet registered is never
+        submitted; then deliver to the live pending entry and disarm). Without one:
+        a session-wide interrupt of whatever is in flight (kept for the legacy
+        in-process caller S2 removes). Returns True iff delivered or durably armed."""
+        if turn_uuid is None:
+            self._driver.cancel(session)
+            return True
+        from src.backends.claude_driver import arm_managed_cancel, disarm_managed_cancel
+
+        if not turn_uuid:
+            return False
+        arm_managed_cancel(turn_uuid)
+        sessions = getattr(self._driver, "_sessions", None)
+        sdk_sess = sessions.get(session.session_id) if sessions is not None else None
+        cancel = getattr(sdk_sess, "cancel_turn", None)
+        if callable(cancel) and cancel(turn_uuid):
+            disarm_managed_cancel(turn_uuid)  # delivered to the registered prompt
+        return True
+
+    # ------------------------------------------------------------------ #
+    # [A102 S1] Deprecated managed-* shims — one-liners that build a
+    # TurnControl from the carrier's ownership and call the natural method.
+    # The carrier (src/worker/agent.py) still calls these until S2 deletes
+    # both the shims and this seam.
+    # ------------------------------------------------------------------ #
+    def run_managed_turn(self, session: Session, message: str, ownership, *, telemetry_context=None, telemetry_sink=None, on_process=None) -> ExecutionResult:
+        return self.resume_session(session, message, turn=turn_control(getattr(ownership, "turn_uuid", None) or "", ownership=ownership, on_process=on_process), telemetry_context=telemetry_context, telemetry_sink=telemetry_sink)
+
+    def run_managed_compaction(self, session: Session, ownership, *, telemetry_context=None, telemetry_sink=None, on_process=None) -> ExecutionResult:
+        return self.compact_session(session, turn=turn_control(getattr(ownership, "turn_uuid", None) or "", ownership=ownership, on_process=on_process), telemetry_context=telemetry_context, telemetry_sink=telemetry_sink)
+
+    def cancel_managed_turn(self, session: Session, turn_uuid: str) -> bool:
+        return self.cancel(session, turn_uuid)
+
+    def forget_managed_turn(self, session: Session, turn_uuid: str) -> bool:
+        return self.forget_turn(session, turn_uuid)
 
     def close(self, session: Session) -> None:
         self._driver.close(session)
@@ -510,23 +426,14 @@ class ClaudeCodeBackend(CodingBackend):
                 self._driver.mark_lost(sid)
 
     def terminate_active_processes(self) -> None:
-        # For SDK driver, close all live sessions
-        from src.backends.claude_driver import ClaudeSDKClientDriver, ClaudePrintResumeDriver
-        if isinstance(self._driver, ClaudeSDKClientDriver):
-            for sdk_sess in list(self._driver._sessions.values()):
-                sdk_sess.close()
-        elif isinstance(self._driver, ClaudePrintResumeDriver):
-            self._driver.terminate_active_processes()
+        # Close all live SDK sessions (the one Claude driver).
+        for sdk_sess in list(self._driver._sessions.values()):
+            sdk_sess.close()
 
     # ------------------------------------------------------------------
     # Backward-compatibility delegators
-    # These keep existing tests and callers working without modification.
     # The canonical implementations live in claude_driver.py.
     # ------------------------------------------------------------------
-
-    def _build_cmd(self, resume_id: Optional[str], session_id: Optional[str], model: Optional[str] = None) -> List[str]:
-        """Thin delegator — single source of truth is ClaudePrintResumeDriver._build_cmd."""
-        return self._fallback._build_cmd(resume_id, session_id, model)
 
     @staticmethod
     def _parse(

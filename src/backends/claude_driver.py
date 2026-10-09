@@ -19,8 +19,8 @@
 # RemoteControl: --remote-control exists but no documented programmatic protocol
 #             was discoverable. Not viable without reverse-engineering.
 #
-# Winner: ClaudeSDKClientDriver using claude-code-sdk 0.0.25.
-#         Fallback: ClaudePrintResumeDriver (existing behavior).
+# Winner: ClaudeSDKClientDriver using claude-code-sdk. [A102/R2] It is the ONE
+#         Claude driver — the legacy print/resume CLI driver was deleted.
 #
 # Async note: The SDK is async (anyio). The existing CodingBackend protocol is
 # sync (called via asyncio.to_thread). ClaudeSDKClientDriver therefore runs
@@ -32,10 +32,7 @@ import asyncio
 import json
 import logging
 import os
-import queue
 import re
-import shutil
-import subprocess
 import threading
 import time
 import uuid
@@ -46,8 +43,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from src.core.interfaces import ExecutionResult, Session
-from src.core.process_utils import terminate_many_popen
-from src.core.turn_liveness import ProgressClock, TurnLimits, turn_limits
+from src.core.turn_liveness import ProgressClock, TurnControl
 from src.core.roles import MANAGER_ROLE_ID, WORKER_ROLE_ID, load_manager_role, load_worker_role
 from src.backends.claude_role_adapter import claude_system_prompt, manager_tool_names, worker_tool_names
 
@@ -58,7 +54,6 @@ except Exception:  # pragma: no cover - SDK may not be importable in all envs
 
 logger = logging.getLogger(__name__)
 
-_NO_WINDOW = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
 _DEFAULT_TOOLS = ["Read", "Edit", "MultiEdit", "LS", "Grep", "Glob", "Bash"]
 
 # Cache health thresholds
@@ -392,21 +387,17 @@ class _PendingTurn:
     ``progress_cb`` is the activity callback for *this* turn, routed by the
     reader while this turn is the active (head) one.
 
-    [A82 Stage 3 rework 4] ``managed`` marks a protocol-1 turn submitted through
-    :meth:`_SDKSession.send_managed`. Managed turns are correlated by ECHO: the
-    query is written with a caller-chosen ``turn_uuid`` and the session runs
-    with ``--replay-user-messages``, so the CLI echoes a ``UserMessage`` whose
+    [A82 Stage 3 rework 4] Turns are correlated by ECHO: the query is written
+    with a caller-chosen ``turn_uuid`` and the session runs with
+    ``--replay-user-messages``, so the CLI echoes a ``UserMessage`` whose
     ``uuid`` is ours when (and only when) it begins the turn that processes our
-    prompt (verified live, §15 spike). The managed turn is served EXACTLY the
+    prompt (verified live, §15 spike). The turn is served EXACTLY the
     ``ResultMessage`` that closes the turn begun by that echo; any other turn's
     result (an autonomous continuation, a turn already running at submit) goes
-    to the proactive sink. Legacy (protocol-0) turns keep the exact FIFO routing
-    (§15 decision 1: legacy byte-identical); replayed echoes are ignored for
-    them.
+    to the proactive sink.
     """
     future: "asyncio.Future"
     progress_cb: Any = None
-    managed: bool = False
     turn_uuid: Optional[str] = None
     echo_seen: bool = False
     # The managed caller hit its deadline; the eventual reply is routed as
@@ -1011,30 +1002,6 @@ class _SDKSession:
             except Exception:
                 pass
 
-    def submit(self, coro, timeout: Optional[float] = None) -> Any:
-        """Run coro on the SDK event loop from any thread and return result.
-
-        timeout=None means wait indefinitely (correct for long-running tasks).
-        timeout=N kills the wait after N seconds and raises TimeoutError.
-        """
-        if not self._loop or self._closed:
-            raise RuntimeError("SDK session loop is not running")
-        fut = asyncio.run_coroutine_threadsafe(coro, self._loop)
-        try:
-            return fut.result(timeout=timeout)
-        except Exception:
-            # The coroutine can still be alive on the SDK's own loop thread —
-            # e.g. mid `receive_response()` with the real claude subprocess
-            # still generating output — when this raises (most commonly a
-            # `sdk_turn_timeout_sec` timeout, the SDK-driver equivalent of the
-            # legacy driver's inactivity/hard-cap kill). Cancelling the
-            # wrapper future alone doesn't reach it: that's the same gap the
-            # cancel-button bug had. Interrupt the actual turn so it stops for
-            # real instead of running unattended in the background.
-            fut.cancel()
-            self.cancel_inflight()
-            raise
-
     async def _reader_loop(self) -> None:
         """Drain the SDK message stream for the life of the session.
 
@@ -1149,7 +1116,7 @@ class _SDKSession:
                     uid = getattr(msg, "uuid", None)
                     if uid:
                         owner = next(
-                            (p for p in self._pending if p.managed and p.turn_uuid == uid),
+                            (p for p in self._pending if p.turn_uuid == uid),
                             None,
                         )
                         if owner is not None:
@@ -1263,12 +1230,12 @@ class _SDKSession:
         return self._pending[0].progress_cb if self._pending else None
 
     def _dispatch(self, outcome: "TurnOutcome") -> None:
-        """Route a finished turn: fulfil the oldest pending query, or — if none
-        is waiting — treat it as an autonomous turn and hand it to the proactive
+        """Route a finished turn: fulfil the turn begun by our echoed prompt, or
+        — if none — treat it as an autonomous turn and hand it to the proactive
         sink. Runs on the SDK loop thread."""
-        # [A82 Stage 3 rework 4] Managed turns are correlated by ECHO (see
-        # _PendingTurn): this result closes the turn begun by `_turn_owner`'s
-        # echoed prompt, if any.
+        # [A82 Stage 3 rework 4] Turns are correlated by ECHO (see _PendingTurn):
+        # this result closes the turn begun by `_turn_owner`'s echoed prompt, if
+        # any.
         owner = self._turn_owner
         self._turn_owner = None
         if owner is not None:
@@ -1277,30 +1244,19 @@ class _SDKSession:
             except ValueError:
                 pass  # a ghost (abandoned + popped before its echo)
             if owner.abandoned or owner.future is None or owner.future.done():
-                # Late reply of a deadline-held managed turn (M3): route it to
-                # the carrier as late_managed, never to an unread future.
+                # Late reply of a deadline-held turn (M3): route it to the
+                # carrier as late_managed, never to an unread future.
                 outcome.late_managed = True
                 outcome.managed_turn_uuid = owner.turn_uuid or ""
             else:
                 owner.future.set_result(outcome)
                 return
-        else:
-            legacy = next((p for p in self._pending if not p.managed), None)
-            if legacy is not None:
-                # Legacy FIFO — with no managed turn outstanding this is
-                # exactly the original `popleft()` (byte-identical).
-                self._pending.remove(legacy)
-                if not legacy.future.done():
-                    legacy.future.set_result(outcome)
-                return
-            # Only managed turns are waiting and none has begun (no echo yet):
-            # this result belongs to another turn (autonomous continuation /
-            # a turn already running) → proactive sink. A managed prompt that
-            # was written to the CLI but not yet echoed is STILL owed by the
-            # CLI, so it stays pending (the session is NOT quiescent) — even if
-            # its caller already hit the deadline. Its exits: its own echo +
-            # result (routed late_managed), session close, or stream end.
-        # No one asked for this turn — it's a background-job continuation.
+        # No echo owner: this result belongs to another turn (autonomous
+        # continuation / a turn already running) → proactive sink. A prompt that
+        # was written to the CLI but not yet echoed is STILL owed by the CLI, so
+        # it stays pending (the session is NOT quiescent) — even if its caller
+        # already hit the deadline. Its exits: its own echo + result (routed
+        # late_managed), session close, or stream end.
         outcome.proactive = True
         if outcome.late_managed and self._on_proactive is not None:
             self._late_handoffs += 1
@@ -1335,38 +1291,38 @@ class _SDKSession:
                 pending.future.set_exception(err)
 
     async def _submit_turn(
-        self, message: str, progress_cb=None, managed: bool = False,
-        turn_uuid: Optional[str] = None, ticket: Optional[Dict[str, Any]] = None,
-        local_command: bool = False,
+        self, message: str, *, turn_uuid: Optional[str] = None, progress_cb=None,
+        ticket: Optional[Dict[str, Any]] = None, local_command: bool = False,
     ) -> "TurnOutcome":
         """Send one user turn and await its terminal result.
 
         Registers a pending entry BEFORE writing the query so the reader can
-        never fulfil it out of order, then writes the query and awaits the
-        future the reader will complete. Runs on the SDK loop thread.
+        never fulfil it out of order, then writes the query (tagged with the
+        caller's ``turn_uuid`` for echo correlation) and awaits the future the
+        reader will complete. Runs on the SDK loop thread.
         """
         if self._client is None:
             raise RuntimeError("SDK client not initialised")
         if ticket is not None and ticket.get("abandoned"):
-            # The managed caller's deadline expired before this coroutine even
-            # ran (a starved loop): never submit a prompt nobody awaits.
+            # The caller's deadline expired before this coroutine even ran (a
+            # starved loop): never submit a prompt nobody awaits.
             from src.control.turn_queue import RecoveryRequiredError
 
             raise RecoveryRequiredError(
-                "managed turn abandoned before submission", session_key=self.session_key,
+                "turn abandoned before submission", session_key=self.session_key,
             )
-        if managed and turn_uuid and disarm_managed_cancel(turn_uuid):
+        if turn_uuid and disarm_managed_cancel(turn_uuid):
             # [A82 Stage 4b rework] Cancelled before it could be registered:
             # never submit it (same loop step as the registration below).
             from src.control.turn_queue import OwnershipConflictError
 
             raise OwnershipConflictError(
-                "managed turn cancelled by the operator before submission (not submitted)",
+                "turn cancelled by the operator before submission (not submitted)",
                 session_key=self.session_key, reason="not_submitted",
             )
         loop = asyncio.get_event_loop()
         future: "asyncio.Future" = loop.create_future()
-        pending = _PendingTurn(future=future, progress_cb=progress_cb, managed=managed)
+        pending = _PendingTurn(future=future, progress_cb=progress_cb)
         self._pending.append(pending)
         # [A82 Stage 3] A query is now outstanding — this is the quiescence
         # oracle's `_last_query_terminal` conjunct (reset True by the reader on
@@ -1378,35 +1334,31 @@ class _SDKSession:
             # session_id here is the SDK's *internal* conversation-thread
             # selector, not the gateway session id; one _SDKSession owns one
             # claude process, so the default thread is correct.
-            if managed:
-                # [A82 Stage 3 rework 4] Caller-chosen uuid, echoed back by the
-                # CLI when it begins the turn that processes this prompt.
-                import uuid as _uuid
+            # [A82 Stage 3 rework 4] Caller-chosen uuid, echoed back by the CLI
+            # when it begins the turn that processes this prompt.
+            import uuid as _uuid
 
-                pending.turn_uuid = turn_uuid or str(_uuid.uuid4())
-                if ticket is not None:
-                    ticket["pending"] = pending
-                if local_command:
-                    # [A82 Stage 4b] A local slash command is never echoed by
-                    # the CLI. Its reservation proved this process never ran a
-                    # query (no other turn/background work can exist), so the
-                    # turn it starts is ours by construction.
-                    pending.echo_seen = True
-                    self._turn_owner = pending
+            pending.turn_uuid = turn_uuid or str(_uuid.uuid4())
+            if ticket is not None:
+                ticket["pending"] = pending
+            if local_command:
+                # [A82 Stage 4b] A local slash command is never echoed by the
+                # CLI. Its reservation proved this process never ran a query (no
+                # other turn/background work can exist), so the turn it starts is
+                # ours by construction.
+                pending.echo_seen = True
+                self._turn_owner = pending
 
-                async def _one(text: str = message, uid: str = pending.turn_uuid):
-                    yield {
-                        "type": "user",
-                        "message": {"role": "user", "content": text},
-                        "parent_tool_use_id": None,
-                        "uuid": uid,
-                    }
+            async def _one(text: str = message, uid: str = pending.turn_uuid):
+                yield {
+                    "type": "user",
+                    "message": {"role": "user", "content": text},
+                    "parent_tool_use_id": None,
+                    "uuid": uid,
+                }
 
-                self._ever_submitted = True
-                await self._client.query(_one())
-            else:
-                self._ever_submitted = True
-                await self._client.query(message)
+            self._ever_submitted = True
+            await self._client.query(_one())
         except Exception:
             # Query never landed — drop the pending entry so it can't swallow a
             # later result and re-introduce an offset.
@@ -1457,49 +1409,51 @@ class _SDKSession:
                 return False
         return True
 
-    def send_managed(self, message: str, progress_cb=None, turn_uuid: Optional[str] = None, local_command: bool = False) -> "TurnOutcome":
-        """[A82 Stage 2 / §15 decision 1] Protocol-1 MANAGED send.
+    def send(self, message: str, *, turn: "TurnControl", progress_cb=None, local_command: bool = False) -> "TurnOutcome":
+        """[A102] The ONE turn send. Fail-closed on conflict (NEVER interrupt),
+        echo correlation, and a no-interrupt wait driven entirely by ``turn``:
+        the carrier owns the policy (``turn.limits``); the backend only reports
+        progress (the reader ``touch``es ``turn``'s clock per native event) and
+        gives up (typed :class:`RecoveryRequiredError`, never an interrupt/abort)
+        only when ``turn.expired()`` is non-empty.
 
-        A DISTINCT path from the legacy :meth:`send`. On a lock conflict (a turn
-        already in flight) it FAILS CLOSED with a typed
-        :class:`OwnershipConflictError` and NEVER calls ``cancel_inflight`` —
-        i.e. it does not interrupt the live turn (the managed queue serialises
-        turns durably at the DB layer, so the driver must not silently interrupt
-        the current owner). The legacy :meth:`send` keeps its byte-identical
-        interrupt-on-conflict behavior for protocol-0 callers.
-
-        This is the ONLY behavioral divergence: once the lock is acquired the
-        managed submit reuses the exact same reader/dispatch machinery."""
+        On a lock conflict (a turn already in flight) it FAILS CLOSED with a
+        typed :class:`OwnershipConflictError` and NEVER calls ``cancel_inflight``
+        — the durable queue serialises turns, so the driver must not interrupt
+        the current owner. Once the lock is acquired the submit reuses the exact
+        same reader/dispatch machinery."""
         from src.control.turn_queue import OwnershipConflictError
 
-        limits = turn_limits(self._managed_stall_sec())
         if not self._lock.acquire(blocking=False):
             logger.warning(
-                "event=sdk_managed_turn_conflict session_key=%s — a turn is in "
-                "flight; the managed path FAILS CLOSED (no interrupt)",
+                "event=sdk_turn_conflict session_key=%s — a turn is in flight; "
+                "the send FAILS CLOSED (no interrupt)",
                 self.session_key,
             )
             raise OwnershipConflictError(
-                "session is busy with an in-flight turn; managed send is "
-                "fail-closed and does not interrupt the current owner",
+                "session is busy with an in-flight turn; send is fail-closed "
+                "and does not interrupt the current owner",
                 session_key=self.session_key,
             )
         try:
-            # One ticket per managed call binds the deadline abandon to THIS
-            # call's pending entry (set on the loop at registration).
+            # One ticket per call binds the deadline abandon to THIS call's
+            # pending entry (set on the loop at registration).
             ticket: Dict[str, Any] = {"abandoned": False, "pending": None}
-            self._turn_progress = ProgressClock()
-            return self._submit_managed_no_interrupt(
-                self._reserve_and_submit_managed(
-                    message, progress_cb, turn_uuid, ticket, local_command=local_command,
+            # The reader touches THIS turn's clock on every native message, so a
+            # long but working turn is never given up on (only a stall / the
+            # hard cap is) — and the limits are the carrier's, not the backend's.
+            self._turn_progress = turn.progress
+            return self._submit_and_wait(
+                self._reserve_and_submit(
+                    message, turn, progress_cb, ticket, local_command=local_command,
                 ),
-                limits, ticket,
+                turn, ticket,
             )
         finally:
             self._lock.release()
 
-    async def _reserve_and_submit_managed(
-        self, message: str, progress_cb=None, turn_uuid: Optional[str] = None,
+    async def _reserve_and_submit(
+        self, message: str, turn: "TurnControl", progress_cb=None,
         ticket: Optional[Dict[str, Any]] = None, local_command: bool = False,
     ) -> "TurnOutcome":
         """[A82 Stage 3 rework, M4] Quiescence reservation ON THE SDK LOOP.
@@ -1516,29 +1470,29 @@ class _SDKSession:
 
         if not self._replay_user_messages:
             raise ManagedUnsupportedError(
-                "managed turns need --replay-user-messages (echo correlation) on this session",
+                "turns need --replay-user-messages (echo correlation) on this session",
                 session_key=self.session_key,
             )
         if not self.is_quiescent():
             logger.warning(
-                "event=sdk_managed_turn_not_quiescent session_key=%s — native "
-                "work is still in flight; managed send fails closed",
+                "event=sdk_turn_not_quiescent session_key=%s — native work is "
+                "still in flight; send fails closed",
                 self.session_key,
             )
             raise OwnershipConflictError(
                 "session is not quiescent (native background work in flight); "
-                "managed send is fail-closed",
+                "send is fail-closed",
                 session_key=self.session_key,
             )
         if local_command and self._ever_submitted:
             # [A82 Stage 4b] Attribution of an un-echoed local command needs a
             # process that never ran a query (see `_ever_submitted`).
             raise OwnershipConflictError(
-                "managed local command needs a fresh session process (not submitted)",
+                "local command needs a fresh session process (not submitted)",
                 session_key=self.session_key,
             )
         return await self._submit_turn(
-            message, progress_cb=progress_cb, managed=True, turn_uuid=turn_uuid, ticket=ticket,
+            message, turn_uuid=turn.turn_uuid, progress_cb=progress_cb, ticket=ticket,
             local_command=local_command,
         )
 
@@ -1553,8 +1507,8 @@ class _SDKSession:
 
         return process_identity(pid)
 
-    def forget_managed_turn(self, turn_uuid: str) -> bool:
-        """[A82 Stage 3 rework 6] The carrier learned this managed turn's row is
+    def forget_turn(self, turn_uuid: str) -> bool:
+        """[A82 Stage 3 rework 6] The carrier learned this turn's row is
         terminal (operator-resolved / definitively refused): drop its pending
         entry so the session can become quiescent again without close/restart.
         A later echo of it matches nothing (its result → proactive sink).
@@ -1566,7 +1520,7 @@ class _SDKSession:
 
         def _drop() -> None:
             try:
-                for p in [p for p in self._pending if p.managed and p.turn_uuid == turn_uuid]:
+                for p in [p for p in self._pending if p.turn_uuid == turn_uuid]:
                     self._pending.remove(p)
                     removed["v"] = True
                     if p.future is not None and not p.future.done():
@@ -1584,9 +1538,9 @@ class _SDKSession:
         done.wait(5)
         return removed["v"]
 
-    def cancel_managed_turn(self, turn_uuid: str) -> bool:
-        """[A82 Stage 4b] Operator cancel of EXACTLY the managed turn
-        ``turn_uuid`` (the carrier's per-attempt identity) — never another turn:
+    def cancel_turn(self, turn_uuid: str) -> bool:
+        """[A82 Stage 4b] Operator cancel of EXACTLY the turn ``turn_uuid`` (the
+        carrier's per-attempt identity) — never another turn:
         if it is the turn the CLI is running (its echo began it), interrupt now;
         if it was written but not yet begun, arm the interrupt for its echo.
         Thread-safe (decided on the SDK loop). Returns True iff delivered/armed;
@@ -1599,7 +1553,7 @@ class _SDKSession:
         def _arm() -> None:
             try:
                 p = next(
-                    (p for p in self._pending if p.managed and p.turn_uuid == turn_uuid),
+                    (p for p in self._pending if p.turn_uuid == turn_uuid),
                     None,
                 )
                 if p is None:
@@ -1680,18 +1634,18 @@ class _SDKSession:
                 self._late_handoffs += 1
                 asyncio.create_task(self._run_proactive(outcome))
 
-    def _submit_managed_no_interrupt(
-        self, coro, limits: TurnLimits, ticket: Optional[Dict[str, Any]] = None
+    def _submit_and_wait(
+        self, coro, turn: "TurnControl", ticket: Optional[Dict[str, Any]] = None
     ) -> "TurnOutcome":
-        """Run a managed coroutine on the SDK loop WITHOUT the legacy
-        interrupt-on-failure of :meth:`submit` (§15 decision 1: the managed path
-        never calls ``cancel_inflight``). The wait ends only when the turn makes
-        no native progress for ``limits.stall_sec`` (``_turn_progress``, touched
-        by the reader per message) or hits the hard cap — then it raises a typed
-        :class:`RecoveryRequiredError` and leaves the turn registered in
-        ``_pending`` so the quiescence oracle keeps the session held until the
-        backend actually reaches a terminal result (design §3.3: uncertainty
-        retains ownership)."""
+        """[A102] Run the submit coroutine on the SDK loop and wait WITHOUT ever
+        interrupting on failure (never ``cancel_inflight``). The wait ends only
+        when ``turn.expired()`` is non-empty — no native progress for the stall
+        window (``turn``'s clock is touched by the reader per message) or the
+        hard cap — then it raises a typed :class:`RecoveryRequiredError` and
+        leaves the turn registered in ``_pending`` so the quiescence oracle keeps
+        the session held until the backend actually reaches a terminal result
+        (design §3.3: uncertainty retains ownership). The limits are the
+        carrier's (``turn.limits``); this backend reads no timeout config."""
         import concurrent.futures
 
         from src.control.turn_queue import RecoveryRequiredError
@@ -1700,21 +1654,20 @@ class _SDKSession:
             coro.close()
             raise RuntimeError("SDK session loop is not running")
         fut = asyncio.run_coroutine_threadsafe(coro, self._loop)
-        clock = self._turn_progress
         while True:
             try:
-                return fut.result(timeout=max(0.01, min(1.0, clock.remaining(limits))))
+                return fut.result(timeout=max(0.01, min(1.0, turn.remaining())))
             except concurrent.futures.TimeoutError:
-                expiry = clock.expiry(limits)
+                expiry = turn.expired()
                 if expiry:
                     break  # no native progress for the window (or hard cap)
         logger.warning(
-            "event=sdk_managed_turn_deadline session_key=%s expiry=%s stall_sec=%s "
-            "hard_cap_sec=%s — no interrupt; turn held for recovery",
-            self.session_key, expiry, limits.stall_sec, limits.hard_cap_sec,
+            "event=sdk_turn_deadline session_key=%s expiry=%s — no interrupt; "
+            "turn held for recovery",
+            self.session_key, expiry,
         )
         # M3: the eventual real reply must reach the carrier, not an unread
-        # future — mark the outstanding managed turn abandoned (on the loop).
+        # future — mark the outstanding turn abandoned (on the loop).
         try:
             if ticket is not None:
                 abandoned = threading.Event()
@@ -1733,63 +1686,16 @@ class _SDKSession:
                     from src.control.turn_queue import OwnershipConflictError
 
                     raise OwnershipConflictError(
-                        "managed turn deadline expired before submission (not submitted)",
+                        "turn deadline expired before submission (not submitted)",
                         session_key=self.session_key, reason="not_submitted",
                     )
         except RuntimeError:
             pass
         raise RecoveryRequiredError(
-            "managed turn exceeded its deadline without a terminal result; "
-            "backend not interrupted — recovery required",
+            "turn exceeded its deadline without a terminal result; backend not "
+            "interrupted — recovery required",
             session_key=self.session_key, reason="managed_turn_deadline",
         )
-
-    def _managed_stall_sec(self) -> Optional[float]:
-        """No-progress window for a managed turn; ``None`` ⇒ the shared
-        :func:`turn_limits` default."""
-        return None
-
-    def _turn_timeout_sec(self) -> Optional[float]:
-        """Resolve the per-turn deadline (shared by legacy + managed send)."""
-        timeout: Optional[float] = 36000.0
-        try:
-            from config import config as _cfg
-            raw = getattr(_cfg.system, "sdk_turn_timeout_sec", 36000)
-            timeout = None if int(raw) == 0 else float(max(60, int(raw)))
-        except Exception:
-            pass
-        return timeout
-
-    def send(self, message: str, progress_cb=None) -> "TurnOutcome":
-        # sdk_turn_timeout_sec is the total deadline for one turn (send → full response).
-        # 0 means no limit. Default 36000 (10 h) — distinct from inactivity_timeout_sec
-        # which is a per-stdout-line timeout used only by the PrintResume driver.
-        timeout: Optional[float] = 36000.0
-        try:
-            from config import config as _cfg
-            raw = getattr(_cfg.system, "sdk_turn_timeout_sec", 36000)
-            timeout = None if int(raw) == 0 else float(max(60, int(raw)))
-        except Exception:
-            pass
-        # Guard against a stale turn still holding the lock (e.g. a cancel that
-        # didn't reach this session in time, or a caller that never cancelled at
-        # all). Queuing silently behind it is what produced the ever-growing
-        # transcript bug: the new message would only get sent once the old,
-        # abandoned turn finally finished on its own, appending straight into
-        # the same live conversation. Interrupt it up front instead so the new
-        # turn starts promptly on a clean, still-live session.
-        if not self._lock.acquire(blocking=False):
-            logger.warning(
-                "event=sdk_session_turn_conflict session_key=%s — a previous turn "
-                "is still in flight; interrupting it before starting this one",
-                self.session_key,
-            )
-            self.cancel_inflight()
-            self._lock.acquire()
-        try:
-            return self.submit(self._submit_turn(message, progress_cb=progress_cb), timeout=timeout)
-        finally:
-            self._lock.release()
 
     def cancel_inflight(self) -> None:
         """Best-effort interrupt of a turn in progress.
@@ -2088,29 +1994,23 @@ class ClaudeSDKClientDriver(ClaudeDriver):
         with self._lock:
             return self._sessions.pop(session_key, None)
 
-    def start_session(self, session, message, *, model=None, telemetry_context=None, proc_env=None) -> ExecutionResult:
-        return self._run_turn(session, message, model=model, effort=getattr(session, "effort", None), proc_env=proc_env or {}, telemetry_context=telemetry_context)
+    def start_session(self, session, message, *, turn: "TurnControl", model=None, telemetry_context=None, proc_env=None) -> ExecutionResult:
+        return self._run_turn(session, message, turn=turn, model=model, effort=getattr(session, "effort", None), proc_env=proc_env or {}, telemetry_context=telemetry_context)
 
-    def send_turn(self, session, message, *, model=None, telemetry_context=None, proc_env=None) -> ExecutionResult:
-        return self._run_turn(session, message, model=model, effort=getattr(session, "effort", None), proc_env=proc_env or {}, telemetry_context=telemetry_context)
+    def send_turn(self, session, message, *, turn: "TurnControl", model=None, telemetry_context=None, proc_env=None) -> ExecutionResult:
+        return self._run_turn(session, message, turn=turn, model=model, effort=getattr(session, "effort", None), proc_env=proc_env or {}, telemetry_context=telemetry_context)
 
-    def run_managed_turn(self, session, message, *, model=None, telemetry_context=None, proc_env=None, on_process=None, turn_uuid=None) -> ExecutionResult:
-        """[A82 Stage 3] Driver half of ``CodingBackend.run_managed_turn``: the
-        same turn pipeline, but submitted through the private no-interrupt,
-        loop-reserved ``_SDKSession.send_managed``."""
-        return self._run_turn(session, message, model=model, effort=getattr(session, "effort", None), proc_env=proc_env or {}, telemetry_context=telemetry_context, _managed=True, _on_process=on_process, _turn_uuid=turn_uuid)
-
-    def run_managed_compaction(self, session, *, model=None, telemetry_context=None, proc_env=None, on_process=None, turn_uuid=None) -> ExecutionResult:
-        """[A82 Stage 4b] Managed `/compact`. The CLI answers a local slash
-        command WITHOUT echoing the caller uuid (bundled CLI 2.1.191: the local
-        command path yields init / local-command output / compact_boundary /
-        result, never the input message), so echo correlation cannot attribute
-        it on a process that may have run other turns. Instead it runs on a
-        process that never received a query: a pooled process that did is
-        retired only if quiescent — atomically on its loop, never interrupted
-        (not quiescent ⇒ typed conflict, nothing submitted) — and a fresh one
-        is resumed from the session's native id. Nothing else can produce a
-        turn there, so its first result is ours."""
+    def compact_session(self, session, *, turn: "TurnControl", model=None, telemetry_context=None, proc_env=None) -> ExecutionResult:
+        """[A82 Stage 4b] `/compact`. The CLI answers a local slash command
+        WITHOUT echoing the caller uuid (bundled CLI 2.1.191: the local command
+        path yields init / local-command output / compact_boundary / result,
+        never the input message), so echo correlation cannot attribute it on a
+        process that may have run other turns. Instead it runs on a process that
+        never received a query: a pooled process that did is retired only if
+        quiescent — atomically on its loop, never interrupted (not quiescent ⇒
+        typed conflict, nothing submitted) — and a fresh one is resumed from the
+        session's native id. Nothing else can produce a turn there, so its first
+        result is ours."""
         from src.control.turn_queue import OwnershipConflictError
 
         with self._lock:
@@ -2124,10 +2024,9 @@ class ClaudeSDKClientDriver(ClaudeDriver):
                     error_class="managed_conflict",
                 )
         return self._run_turn(
-            session, "/compact", model=model, effort=getattr(session, "effort", None),
-            proc_env=proc_env or {}, telemetry_context=telemetry_context, _managed=True,
-            _on_process=on_process, _turn_uuid=turn_uuid, _local_command=True,
-            _resume_if_new=getattr(session, "backend_session_id", "") or None,
+            session, "/compact", turn=turn, model=model, effort=getattr(session, "effort", None),
+            proc_env=proc_env or {}, telemetry_context=telemetry_context, local_command=True,
+            resume_if_new=getattr(session, "backend_session_id", "") or None,
         )
 
     def is_session_quiescent(self, session_id: str) -> bool:
@@ -2141,12 +2040,12 @@ class ClaudeSDKClientDriver(ClaudeDriver):
         # unless a late reply is still being handed off.
         return sdk_sess.is_quiescent()
 
-    def _run_turn(self, session: Session, message: str, *, model: Optional[str], effort: Optional[str], proc_env: Dict[str, str], telemetry_context=None, _managed: bool = False, _on_process=None, _turn_uuid=None, _local_command: bool = False, _resume_if_new: Optional[str] = None) -> ExecutionResult:
+    def _run_turn(self, session: Session, message: str, *, turn: "TurnControl", model: Optional[str], effort: Optional[str], proc_env: Dict[str, str], telemetry_context=None, local_command: bool = False, resume_if_new: Optional[str] = None) -> ExecutionResult:
         start = time.time()
         try:
             sdk_sess = (
-                self._get_or_create(session, model, effort, proc_env, resume_if_new=_resume_if_new)
-                if _resume_if_new else self._get_or_create(session, model, effort, proc_env)
+                self._get_or_create(session, model, effort, proc_env, resume_if_new=resume_if_new)
+                if resume_if_new else self._get_or_create(session, model, effort, proc_env)
             )
             session.driver_type = "sdk"
             # Build a lightweight progress callback so the SDK message loop can
@@ -2156,23 +2055,14 @@ class ClaudeSDKClientDriver(ClaudeDriver):
             t_id = getattr(telemetry_context, "turn_id", None)
             progress_cb = _make_activity_cb(sess_id, t_id)
             # [A82 Stage 3 rework 4] Report the backend process identity BEFORE
-            # the managed prompt is submitted, so a crashed carrier's successor
-            # can prove this exact process is gone (B2 carrier_restarted).
-            if _managed and _on_process is not None:
+            # the prompt is submitted, so a crashed carrier's successor can prove
+            # this exact process is gone (B2 carrier_restarted).
+            if turn.on_process is not None:
                 try:
-                    _on_process(sdk_sess.process_identity())
+                    turn.on_process(sdk_sess.process_identity())
                 except Exception:
                     logger.warning("event=sdk_process_identity_report_failed", exc_info=True)
-            # [A82 Stage 3 rework] Managed (protocol-1) rows take the
-            # no-interrupt, loop-reserved send; legacy rows keep `send`.
-            if _managed:
-                outcome = (
-                    sdk_sess.send_managed(message, progress_cb=progress_cb, turn_uuid=_turn_uuid, local_command=True)
-                    if _local_command
-                    else sdk_sess.send_managed(message, progress_cb=progress_cb, turn_uuid=_turn_uuid)
-                )
-            else:
-                outcome = sdk_sess.send(message, progress_cb=progress_cb)
+            outcome = sdk_sess.send(message, turn=turn, progress_cb=progress_cb, local_command=local_command)
             elapsed = time.time() - start
             session.driver_status = "live"
 
@@ -2236,24 +2126,15 @@ class ClaudeSDKClientDriver(ClaudeDriver):
                             "event=dead_session_close_failed session_id=%s",
                             session.session_id, exc_info=True,
                         )
-                if _managed:
-                    # [A82 Stage 3 round 5] The managed prompt's write was
-                    # refused by a terminated CLI: it was never sent. Attest
-                    # "not submitted" so the carrier releases it as
-                    # not-invoked (prompt preserved, back to pending) instead
-                    # of recording a terminal failure.
-                    return ExecutionResult(
-                        success=False,
-                        output="",
-                        errors=[f"not_submitted: {err_str}"],
-                        error_class="managed_conflict",
-                        execution_time=elapsed,
-                    )
+                # [A82 Stage 3 round 5] The prompt's write was refused by a
+                # terminated CLI: it was never sent. Attest "not submitted" so
+                # the carrier releases it as not-invoked (prompt preserved, back
+                # to pending) instead of recording a terminal failure.
                 return ExecutionResult(
                     success=False,
                     output="",
-                    errors=[err_str],
-                    error_class="transient",
+                    errors=[f"not_submitted: {err_str}"],
+                    error_class="managed_conflict",
                     execution_time=elapsed,
                 )
             if isinstance(e, SDKStreamEndedError):
@@ -2271,24 +2152,23 @@ class ClaudeSDKClientDriver(ClaudeDriver):
                     raw_stdout=e.raw_ndjson,
                     raw_stderr=f"error_class=sdk_stream_closed\nreason={e.reason}",
                 )
-            if _managed:
-                from src.control.turn_queue import RecoveryRequiredError, TurnQueueError
+            from src.control.turn_queue import RecoveryRequiredError, TurnQueueError
 
-                if isinstance(e, TurnQueueError):
-                    # Typed managed outcome: RecoveryRequiredError = backend
-                    # outcome uncertain (hold the session); any other typed
-                    # conflict was raised BEFORE the query was submitted.
-                    return ExecutionResult(
-                        success=False,
-                        output="",
-                        errors=[err_str],
-                        error_class=(
-                            "recovery_required"
-                            if isinstance(e, RecoveryRequiredError)
-                            else "managed_conflict"
-                        ),
-                        execution_time=elapsed,
-                    )
+            if isinstance(e, TurnQueueError):
+                # Typed outcome: RecoveryRequiredError = backend outcome
+                # uncertain (hold the session); any other typed conflict was
+                # raised BEFORE the query was submitted.
+                return ExecutionResult(
+                    success=False,
+                    output="",
+                    errors=[err_str],
+                    error_class=(
+                        "recovery_required"
+                        if isinstance(e, RecoveryRequiredError)
+                        else "managed_conflict"
+                    ),
+                    execution_time=elapsed,
+                )
             return ExecutionResult(
                 success=False,
                 output="",
@@ -2325,19 +2205,18 @@ class ClaudeSDKClientDriver(ClaudeDriver):
         cwd: str,
         message: str,
         *,
+        turn: "TurnControl",
         model: Optional[str] = None,
         proc_env: Optional[Dict[str, str]] = None,
     ) -> ExecutionResult:
-        """One-shot (stateless) call rooted on the SDK client, NOT `claude -p`.
-
-        [ADR-0001] The legacy sessionless path used to shell out through
-        ``ClaudePrintResumeDriver`` (the CLI driver). This keeps a genuine one-off on
-        the canonical SDK driver by running it in a TRANSIENT session — open → one turn
-        → close — so no work ever silently lands on the CLI path when the SDK is
-        available. The ephemeral session is role-less (case_role/role_boot default None
-        ⇒ plain boot) and is ALWAYS torn down in ``finally`` (no leaked SDK client /
-        event-loop thread). A unique key guarantees it never collides with a pooled
-        session. Signature mirrors ``ClaudePrintResumeDriver.run_oneoff``."""
+        """[R1] One-shot (stateless) call rooted on the SDK client, NOT
+        `claude -p`: a throwaway :class:`Session` run through the single turn
+        pipeline (``create_session`` semantics) in a TRANSIENT session — open →
+        one turn → close — so no work ever silently lands on the CLI path. The
+        ephemeral session is role-less (case_role/role_boot default None ⇒ plain
+        boot) and is ALWAYS torn down in ``finally`` (no leaked SDK client /
+        event-loop thread). A unique key guarantees it never collides with a
+        pooled session."""
         from src.core.test_guard import assert_live_calls_allowed
         from src.core.interfaces import SessionStatus
         from src.core.timeutil import now_iso
@@ -2353,7 +2232,7 @@ class ClaudeSDKClientDriver(ClaudeDriver):
         )
         try:
             return self._run_turn(
-                ephemeral, message, model=model, effort=None, proc_env=proc_env or {}
+                ephemeral, message, turn=turn, model=model, effort=None, proc_env=proc_env or {}
             )
         finally:
             self.close(ephemeral)
@@ -2381,330 +2260,6 @@ class ClaudeSDKClientDriver(ClaudeDriver):
     def driver_type(self) -> str:
         return "sdk"
 
-
-# ---------------------------------------------------------------------------
-# ClaudePrintResumeDriver  (fallback, existing behaviour)
-# ---------------------------------------------------------------------------
-
-class ClaudePrintResumeDriver(ClaudeDriver):
-    """Existing per-turn print/resume driver, kept as fallback only.
-
-    --include-partial-messages is intentionally removed here; it inflated
-    telemetry by duplicating usage rows per assistant message.
-    """
-
-    def __init__(self):
-        self._exe = shutil.which("claude") or "claude"
-        self._session_procs: Dict[str, subprocess.Popen] = {}
-        self._oneoff_procs: set = set()
-        self._proc_lock = threading.Lock()
-
-    def start_session(self, session, message, *, model=None, telemetry_context=None, proc_env=None) -> ExecutionResult:
-        from src.core.test_guard import assert_live_calls_allowed
-        assert_live_calls_allowed("claude")
-        session.driver_type = "print_resume"
-        session.driver_status = "closed"
-        return self._run(
-            session.repo_path, message,
-            resume_id=None,
-            session_id=session.backend_session_id or str(uuid.uuid4()),
-            session_key=session.session_id,
-            model=model,
-            effort=getattr(session, "effort", None),
-            proc_env=proc_env or {},
-        )
-
-    def send_turn(self, session, message, *, model=None, telemetry_context=None, proc_env=None) -> ExecutionResult:
-        from src.core.test_guard import assert_live_calls_allowed
-        assert_live_calls_allowed("claude")
-        session.driver_type = "print_resume"
-        session.driver_status = "closed"
-        return self._run(
-            session.repo_path, message,
-            resume_id=session.backend_session_id or None,
-            session_id=None,
-            session_key=session.session_id,
-            model=model,
-            effort=getattr(session, "effort", None),
-            proc_env=proc_env or {},
-        )
-
-    def cancel(self, session: Session) -> None:
-        with self._proc_lock:
-            proc = self._session_procs.get(session.session_id)
-        if proc is not None:
-            terminate_many_popen([proc])
-
-    def close(self, session: Session) -> None:
-        pass
-
-    def run_oneoff(
-        self,
-        cwd: str,
-        message: str,
-        *,
-        model: Optional[str] = None,
-        proc_env: Optional[Dict[str, str]] = None,
-    ) -> ExecutionResult:
-        """One-shot (stateless) call — no session, no resume.
-
-        Replaces the legacy ``ClaudeCodeBackend._run`` path so ``run_oneoff``
-        goes through the driver and benefits from the hard-cap timeout.
-        """
-        from src.core.test_guard import assert_live_calls_allowed
-        assert_live_calls_allowed("claude")
-        return self._run(
-            cwd, message,
-            resume_id=None,
-            session_id=None,
-            session_key=None,
-            model=model,
-            effort=None,
-            proc_env=proc_env or {},
-        )
-
-    def driver_type(self) -> str:
-        return "print_resume"
-
-    def _build_cmd(self, resume_id: Optional[str], session_id: Optional[str], model: Optional[str] = None, effort: Optional[str] = None) -> List[str]:
-        tools = _session_allowed_tools()
-
-        if resume_id:
-            cmd = [
-                self._exe,
-                "--resume", resume_id,
-                "--verbose",
-                "--output-format", "stream-json",
-                # --include-partial-messages deliberately omitted (telemetry duplication)
-                "--dangerously-skip-permissions",
-                "-p",
-            ]
-        else:
-            cmd = [
-                self._exe,
-                "--verbose",
-                "--output-format", "stream-json",
-                "--dangerously-skip-permissions",
-                "-p",
-            ]
-            if session_id:
-                cmd.extend(["--session-id", session_id])
-
-        if model:
-            cmd.extend(["--model", model])
-        if effort:
-            cmd.extend(["--effort", effort])
-
-        cmd.extend(["--allowedTools", ",".join(tools)])
-        return cmd
-
-    def _register_process(self, proc: subprocess.Popen, session_key: Optional[str]) -> None:
-        stale: Optional[subprocess.Popen] = None
-        with self._proc_lock:
-            if session_key:
-                stale = self._session_procs.get(session_key)
-                self._session_procs[session_key] = proc
-            else:
-                self._oneoff_procs.add(proc)
-        if stale is not None and stale is not proc:
-            terminate_many_popen([stale])
-
-    def _unregister_process(self, proc: subprocess.Popen, session_key: Optional[str]) -> None:
-        with self._proc_lock:
-            if session_key:
-                current = self._session_procs.get(session_key)
-                if current is proc:
-                    self._session_procs.pop(session_key, None)
-            else:
-                self._oneoff_procs.discard(proc)
-
-    def _run(
-        self,
-        cwd: str,
-        message: str,
-        resume_id: Optional[str],
-        session_id: Optional[str],
-        session_key: Optional[str],
-        model: Optional[str],
-        effort: Optional[str],
-        proc_env: Dict[str, str],
-    ) -> ExecutionResult:
-        start = time.time()
-        try:
-            inactivity_sec = 36000
-            # Absolute wall-clock cap, independent of the rolling inactivity
-            # timer. The inactivity timeout resets on every line of stdout, so a
-            # backend that dribbles output (or emits its banner then stalls) can
-            # otherwise run forever, stacking up zombie claude.exe processes.
-            # 0 disables the hard cap (falls back to inactivity-only, legacy
-            # behaviour). Default to a generous multiple of the inactivity
-            # window so normal long tasks are unaffected.
-            hard_cap_sec = 0
-            try:
-                from config import config as _cfg
-                inactivity_sec = max(60, int(getattr(_cfg.system, "inactivity_timeout_sec", 36000)))
-                hard_cap_sec = int(getattr(_cfg.system, "task_timeout", 0) or 0)
-            except Exception:
-                pass
-            if hard_cap_sec <= 0:
-                # Safety net even when task_timeout is disabled: never let a
-                # single invocation exceed 4x the inactivity window.
-                hard_cap_sec = inactivity_sec * 4
-            deadline = start + hard_cap_sec
-
-            cmd = self._build_cmd(resume_id, session_id, model, effort)
-            proc: Optional[subprocess.Popen] = None
-            try:
-                proc = subprocess.Popen(
-                    cmd,
-                    stdin=subprocess.PIPE,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    cwd=cwd or None,
-                    env=proc_env or None,
-                    creationflags=_NO_WINDOW,
-                )
-                self._register_process(proc, session_key)
-                proc.stdin.write(message.encode())
-                proc.stdin.close()
-
-                stdout_q: queue.Queue = queue.Queue()
-                stderr_q: queue.Queue = queue.Queue()
-                _SENTINEL = object()
-
-                def _reader(pipe, q: queue.Queue) -> None:
-                    try:
-                        for raw_line in pipe:
-                            q.put(raw_line)
-                    finally:
-                        q.put(_SENTINEL)
-
-                t_out = threading.Thread(target=_reader, args=(proc.stdout, stdout_q), daemon=True)
-                t_err = threading.Thread(target=_reader, args=(proc.stderr, stderr_q), daemon=True)
-                t_out.start()
-                t_err.start()
-
-                stdout_lines: List[bytes] = []
-                stderr_lines: List[bytes] = []
-                stdout_done = False
-                stderr_done = False
-                killed = False
-                kill_reason = "inactivity"
-
-                while not (stdout_done and stderr_done):
-                    if not stdout_done:
-                        # Wait no longer than whichever budget expires first:
-                        # the rolling inactivity window or the absolute deadline.
-                        remaining_hard = deadline - time.time()
-                        wait_for = inactivity_sec if remaining_hard <= 0 else min(inactivity_sec, remaining_hard)
-                        if wait_for <= 0:
-                            wait_for = 0.1
-                        try:
-                            item = stdout_q.get(timeout=wait_for)
-                            if item is _SENTINEL:
-                                stdout_done = True
-                            else:
-                                stdout_lines.append(item)
-                        except queue.Empty:
-                            if time.time() >= deadline:
-                                kill_reason = "hard_cap"
-                                logger.warning(
-                                    "claude hard-cap timeout after %.0fs (task_timeout) -- terminating pid=%s",
-                                    hard_cap_sec, proc.pid,
-                                )
-                            else:
-                                kill_reason = "inactivity"
-                                logger.warning(
-                                    "claude inactivity timeout after %.0fs -- terminating pid=%s",
-                                    inactivity_sec, proc.pid,
-                                )
-                            killed = True
-                            terminate_many_popen([proc])
-                            stdout_done = True
-
-                    if not stderr_done:
-                        while True:
-                            try:
-                                item = stderr_q.get_nowait()
-                                if item is _SENTINEL:
-                                    stderr_done = True
-                                    break
-                                stderr_lines.append(item)
-                            except queue.Empty:
-                                break
-
-                # drain
-                for q_ref, lines_ref, wait in ((stdout_q, stdout_lines, False), (stderr_q, stderr_lines, True)):
-                    if wait:
-                        while True:
-                            try:
-                                item = q_ref.get(timeout=5.0)
-                                if item is _SENTINEL:
-                                    break
-                                lines_ref.append(item)
-                            except queue.Empty:
-                                break
-                    else:
-                        while True:
-                            try:
-                                item = q_ref.get_nowait()
-                                if item is not _SENTINEL:
-                                    lines_ref.append(item)
-                            except queue.Empty:
-                                break
-
-                t_out.join(timeout=5.0)
-                t_err.join(timeout=5.0)
-                try:
-                    proc.wait(timeout=10.0)
-                except subprocess.TimeoutExpired:
-                    pass
-
-                returncode = proc.returncode if proc.returncode is not None else -1
-                stdout = b"".join(stdout_lines).decode(errors="replace")
-                stderr = b"".join(stderr_lines).decode(errors="replace")
-                elapsed = time.time() - start
-
-                if killed:
-                    if kill_reason == "hard_cap":
-                        cap_min = int(hard_cap_sec // 60)
-                        err_msg = (
-                            f"Claude process killed after {cap_min}m wall-clock (hard cap). "
-                            f"Adjust GATEWAY_TASK_TIMEOUT_SEC (currently {hard_cap_sec}) to tune this."
-                        )
-                    else:
-                        inactivity_min = int(inactivity_sec // 60)
-                        err_msg = (
-                            f"Claude process killed after {inactivity_min}m of inactivity. "
-                            f"Adjust GATEWAY_INACTIVITY_TIMEOUT_SEC (currently {inactivity_sec}) to tune this."
-                        )
-                    return ExecutionResult(
-                        success=False,
-                        output="",
-                        errors=[err_msg],
-                        execution_time=elapsed,
-                        raw_stdout=stdout,
-                        raw_stderr=stderr,
-                    )
-
-                return _parse_print_resume(stdout, stderr, returncode, elapsed, session_id or resume_id or "")
-
-            finally:
-                if proc is not None:
-                    self._unregister_process(proc, session_key)
-
-        except Exception as e:
-            return ExecutionResult(
-                success=False,
-                output="",
-                errors=[str(e)],
-                execution_time=time.time() - start,
-            )
-
-    def terminate_active_processes(self) -> None:
-        with self._proc_lock:
-            procs = list(self._session_procs.values()) + list(self._oneoff_procs)
-        terminate_many_popen(procs)
 
 
 # ---------------------------------------------------------------------------
@@ -2839,51 +2394,12 @@ def _parse_print_resume(stdout: str, stderr: str, returncode: int, elapsed: floa
 
 
 # ---------------------------------------------------------------------------
-# Driver registry
+# Driver factory
 # ---------------------------------------------------------------------------
 
-_SDK_AVAILABLE: Optional[bool] = None
-
-
-def _sdk_available() -> bool:
-    global _SDK_AVAILABLE
-    if _SDK_AVAILABLE is None:
-        try:
-            import claude_agent_sdk  # noqa: F401
-            _SDK_AVAILABLE = True
-        except ImportError:
-            _SDK_AVAILABLE = False
-    return _SDK_AVAILABLE
-
-
-def build_driver(driver_type: str = "auto") -> ClaudeDriver:
-    """Return the appropriate driver.
-
-    "sdk"         -- ClaudeSDKClientDriver; raises RuntimeError if SDK not importable
-                     (no silent fallback — use "auto" if you want graceful degradation)
-    "auto"        -- SDK if available, else print_resume (WARNING logged on fallback)
-    "print_resume"-- ClaudePrintResumeDriver (legacy CLI, always available)
-    """
-    if driver_type == "sdk":
-        if not _sdk_available():
-            raise RuntimeError(
-                "CLAUDE_DRIVER_TYPE=sdk but claude_agent_sdk is not importable. "
-                "Install it in the venv: pip install claude-agent-sdk  "
-                "To allow silent fallback set CLAUDE_DRIVER_TYPE=auto instead."
-            )
-        logger.info("event=driver_selected driver=sdk")
-        return ClaudeSDKClientDriver()
-    if driver_type == "auto":
-        if _sdk_available():
-            logger.info("event=driver_selected driver=sdk (auto)")
-            return ClaudeSDKClientDriver()
-        logger.warning(
-            "event=driver_fallback driver=print_resume reason=sdk_unavailable "
-            "— SDK package (claude_agent_sdk) not importable; falling back to LEGACY "
-            "CLI/print-resume driver. Sessions will be stateless and subject to "
-            "inactivity timeouts. This is a degraded mode — fix SDK availability ASAP."
-        )
-        return ClaudePrintResumeDriver()
-    # driver_type == "print_resume" (explicit legacy request)
-    logger.info("event=driver_selected driver=print_resume (explicit)")
-    return ClaudePrintResumeDriver()
+def build_driver(driver_type: str = "sdk") -> ClaudeDriver:
+    """[A102 / R2] The SDK continuous driver is the ONE Claude driver. The
+    legacy print/resume CLI driver and driver selection were deleted — its
+    inactivity-reader idea now lives in ``turn_liveness``. ``driver_type`` is
+    accepted for signature compatibility; any value yields the SDK driver."""
+    return ClaudeSDKClientDriver()

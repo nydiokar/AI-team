@@ -37,11 +37,10 @@ def test_R5_refused_managed_write_is_not_submitted_at_driver(monkeypatch):
     monkeypatch.setattr(ClaudeSDKClientDriver, "_get_or_create", lambda self, *a, **k: sess)
     session = SimpleNamespace(session_id="s1", repo_path="", backend_session_id="n", effort=None,
                               driver_type="", driver_status="")
-    res = drv._run_turn(session, "m", model=None, effort=None, proc_env={}, _managed=True)
+    from src.core.turn_liveness import turn_control
+    res = drv._run_turn(session, "m", model=None, effort=None, proc_env={}, turn=turn_control("u-r5"))
     assert res.success is False and res.error_class == "managed_conflict"
     assert "not_submitted" in res.errors[0]
-    legacy = drv._run_turn(session, "m", model=None, effort=None, proc_env={})
-    assert legacy.error_class == "transient"  # legacy mapping unchanged
 
 
 def test_R5_refused_managed_write_returns_turn_to_pending(db, tmp_path, real_claude, monkeypatch):
@@ -67,9 +66,8 @@ def test_R5_M1_dead_session_with_pending_late_handoff_is_not_quiescent():
     sess = _start_fake_session(fake)
     release = threading.Event()
     sess._on_proactive = lambda k, o: release.wait(5)
-    sess._managed_stall_sec = lambda: 0.3
     try:
-        out = _managed_in_thread(sess, "late")
+        out = _managed_in_thread(sess, "late", stall=0.3)
         _wait_query(fake)
         out["t"].join(3)
         _emit_autonomous(sess, fake, fake.echo_for(), _result("LATE"))
@@ -98,10 +96,11 @@ def test_R5_M3_starved_loop_past_deadline_does_not_attest_not_submitted():
     never the not-submitted attestation (the prompt IS sent once the loop runs)."""
     from src.control.turn_queue import OwnershipConflictError, RecoveryRequiredError
 
+    from src.core.turn_liveness import turn_control
+
     fake = _FakeClient()
     fake.defer_echo = True
     sess = _start_fake_session(fake)
-    sess._managed_stall_sec = lambda: 0.2
     sess._abandon_wait_sec = 0.3
     real_q = sess.is_quiescent
 
@@ -114,7 +113,7 @@ def test_R5_M3_starved_loop_past_deadline_does_not_attest_not_submitted():
     sess.is_quiescent = stalled_quiescence_check
     try:
         with pytest.raises(OwnershipConflictError) as ei:
-            sess.send_managed("m")
+            sess.send("m", turn=turn_control("u-r5m3", stall_override=0.2))
         assert ei.value.code == "recovery_required", "attested not-submitted without knowing"
         assert isinstance(ei.value, RecoveryRequiredError)
         _wait_query(fake)  # once the loop resumes, the prompt IS written

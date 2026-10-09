@@ -10,10 +10,11 @@ recovery path (``_recover_completed_session``, taken when the gateway is recreat
 mid-turn) updated only the session row, so the UI showed the worker ``closed``
 while the Manager's wait-group dangled forever — burning cache-heartbeat turns.
 
-``backfill_missing_task_finished`` reconciles the ledger from TASK TRUTH so the
-single durable fact is sufficient to wake the Manager regardless of which path
-finalised the worker. Covers BOTH wait subsystems: M3.4 wait-groups and A46
-per-task waits.
+A104 Phase 5: ``backfill_missing_task_finished`` and the wait-group ledger are
+deleted — the Manager's wake is the agent inbox row written in the child's
+terminal txn on EVERY terminal path, so no ledger backfill is needed. What remains
+here: reconcile resolves from task truth, and recovery still emits the durable
+``task.finished`` fact onto the Case resolved from task lineage.
 """
 import asyncio
 import json
@@ -42,94 +43,31 @@ def _task(db: MeshDB, task_id: str, status: str = "completed") -> None:
     db.enqueue_task(task_id, None, None, "claude", "resume_session", {}, status=status)
 
 
-def _arm_group(db: MeshDB, case_id: str, gid: str, members, condition: str = "ALL") -> None:
-    db.append_flow_event(
-        case_id, "worker.wait_pending", "manager",
-        entity_type="wait_group", entity_id=gid,
-        payload={"wait_group_id": gid, "condition": condition, "member_task_ids": members},
-    )
-
-
 def _finished(db: MeshDB, case_id: str):
     return [e for e in db.list_flow_events(case_id) if e["event_type"] == "task.finished"]
-
-
-# --- the incident: wait-group member completed-in-DB but no task.finished -------
-
-def test_backfill_emits_finished_for_completed_group_member(tmp_path):
-    db = _db(tmp_path)
-    case_id = db.open_case("obj", "mgr-1", role="manager")
-    _task(db, "task_9dfd", status="completed")
-    _arm_group(db, case_id, "p1.3", ["task_9dfd"], condition="ALL")
-
-    # No task.finished yet -> the wake loop sees nothing satisfied (the live bug).
-    assert db.compute_continuation_tick(case_id)["satisfied"] is False
-
-    backfilled = db.backfill_missing_task_finished(case_id)
-    assert backfilled == ["task_9dfd"]
-    fin = _finished(db, case_id)
-    assert len(fin) == 1
-    assert json.loads(fin[0]["payload_json"])["outcome"] == "success"
-
-    # The single durable fact is now present -> the Manager would be woken.
-    assert db.compute_continuation_tick(case_id)["satisfied"] is True
-
-
-def test_backfill_skips_still_running_member(tmp_path):
-    db = _db(tmp_path)
-    case_id = db.open_case("obj", "mgr-1", role="manager")
-    _task(db, "task_run", status="claimed")  # genuinely still running
-    _arm_group(db, case_id, "g", ["task_run"])
-    assert db.backfill_missing_task_finished(case_id) == []
-    assert _finished(db, case_id) == []
-
-
-def test_backfill_idempotent(tmp_path):
-    db = _db(tmp_path)
-    case_id = db.open_case("obj", "mgr-1", role="manager")
-    _task(db, "task_x")
-    _arm_group(db, case_id, "g", ["task_x"])
-    assert db.backfill_missing_task_finished(case_id) == ["task_x"]
-    assert db.backfill_missing_task_finished(case_id) == []  # event already present
-    assert len(_finished(db, case_id)) == 1
-
-
-def test_backfill_failed_outcome_from_task_status(tmp_path):
-    db = _db(tmp_path)
-    case_id = db.open_case("obj", "mgr-1", role="manager")
-    _task(db, "task_f", status="failed")
-    _arm_group(db, case_id, "g", ["task_f"])
-    assert db.backfill_missing_task_finished(case_id) == ["task_f"]
-    assert json.loads(_finished(db, case_id)[0]["payload_json"])["outcome"] == "failed"
-
-
-def test_backfill_ignores_resolved_group(tmp_path):
-    db = _db(tmp_path)
-    case_id = db.open_case("obj", "mgr-1", role="manager")
-    _task(db, "task_done")
-    _arm_group(db, case_id, "g", ["task_done"])
-    db.append_flow_event(
-        case_id, "worker.wait_resolved", "system",
-        entity_type="wait_group", entity_id="g",
-        payload={"wait_group_id": "g", "outcome": "drained"},
-    )
-    assert db.backfill_missing_task_finished(case_id) == []
 
 
 # --- A46 per-task waits also covered, end to end via reconcile ------------------
 
 def test_reconcile_resolves_from_task_truth(tmp_path, monkeypatch):
+    """A104: the inbox row is written in the child's TERMINAL txn, whichever path
+    terminalises it — here the lost-carrier reaper (``synthesize_managed_terminal``),
+    which never emits ``task.finished`` itself. Reconcile still resolves it, with
+    no ``task.finished`` and no wait marker involved."""
+    from tests.inbox_seed import seed_child
+
     monkeypatch.setenv("DURABLE_RELAY_ENABLED", "1")
     db = _db(tmp_path)
     case_id = db.open_case("obj", "mgr-1", role="manager")
-    db.record_worker_wait(case_id, "task_t")  # A46 per-task wait (entity_type='task')
-    _task(db, "task_t", status="completed")
+    seed_child(db, case_id, "task_t", requester="mgr-1")
+    assert [p["task_id"] for p in db.reconcile_worker_waits(case_id)["pending"]] == ["task_t"]
+    assert db.synthesize_managed_terminal("task_t") == "synthesized"
 
-    # No task.finished was ever emitted (recovery path) — reconcile must still
-    # resolve it from the task-row truth (via the backfill it now runs first).
     out = db.reconcile_worker_waits(case_id)
     assert out["ok"] is True
-    assert [r["task_id"] for r in out["resolved"]] == ["task_t"]
+    assert out["resolved"] == [{"task_id": "task_t", "outcome": "failed"}]
+    assert out["pending"] == []
+    assert _finished(db, case_id) == []  # resolved from task truth, not the ledger
 
 
 # --- cross-path invariant: a task id ALONE must reach the right Case ------------
@@ -163,8 +101,7 @@ def test_recover_completed_session_emits_task_finished(tmp_path, monkeypatch):
     _patch_db(monkeypatch, db)
     case_id = db.open_case("obj", "mgr-1", role="manager")
     db.create_flow_link(case_id, "task", "task_rec", "task")
-    _arm_group(db, case_id, "g", ["task_rec"], condition="ALL")
-    assert db.compute_continuation_tick(case_id)["satisfied"] is False  # the bug state
+    assert _finished(db, case_id) == []  # the bug state: no durable terminal fact
 
     orch = _orch()
     orch.session_store = types.SimpleNamespace(save=lambda s: None)
@@ -187,6 +124,8 @@ def test_recover_completed_session_emits_task_finished(tmp_path, monkeypatch):
 
     asyncio.run(orch._recover_completed_session(session, task_row))
 
-    # The durable fact landed -> the dangling wait now resolves (Manager woken).
-    assert [e["entity_id"] for e in _finished(db, case_id)] == ["task_rec"]
-    assert db.compute_continuation_tick(case_id)["satisfied"] is True
+    # The durable fact landed on the Case (A104: the Manager's wake itself is the
+    # agent inbox, written in the child's terminal txn — see test_reconcile_resolves_from_task_truth).
+    fin = _finished(db, case_id)
+    assert [e["entity_id"] for e in fin] == ["task_rec"]
+    assert json.loads(fin[0]["payload_json"])["outcome"] == "success"
