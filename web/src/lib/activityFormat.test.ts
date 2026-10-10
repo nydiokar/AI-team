@@ -30,6 +30,8 @@ const session: Session = {
   keepNote: "",
   reason: null,
   turnQueue: null,
+  caseRole: null,
+  currentCaseId: null,
 };
 
 function line(overrides: Partial<LogLine>): LogLine {
