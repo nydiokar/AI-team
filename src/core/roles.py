@@ -77,6 +77,26 @@ _WORKER_ROLE_DOC: Path = (
 )
 
 
+# --- Scientific Governor role constants ------------------------------------
+#
+# The Scientific Governor reviews a manager's milestone-completion proposal for a
+# research programme (PAST/PRESENT/FUTURE continuity + a six-question validity
+# protocol). It is NOT a third live-boot tier: the harness `_role_boot` path only
+# promotes `manager` (case_role) and `worker` (role_boot='worker') sessions.
+# A governor runs as a WORKER whose stable stance is this role doc, delivered in the
+# manager-composed dispatch envelope (see docs/harness/scientific_governor_contract.md).
+# This loader makes the role first-class + discoverable (same seam as the Worker
+# role) without touching that gating.
+SCIENTIFIC_GOVERNOR_ROLE_ID: str = "scientific_governor"
+SCIENTIFIC_GOVERNOR_TOOL_PROFILE: str = WORKER_TOOL_PROFILE
+SCIENTIFIC_GOVERNOR_SKILLS: List[str] = []
+
+_SCIENTIFIC_GOVERNOR_ROLE_DOC: Path = (
+    Path(__file__).resolve().parents[2]
+    / "docs" / "harness" / "roles" / "scientific_governor.md"
+)
+
+
 class AgentRoleDefinition(BaseModel):
     """A provider-neutral role: stable identity + what it declares it needs.
 
@@ -159,6 +179,43 @@ def load_worker_role() -> AgentRoleDefinition:
         # Honest description, not a Pydantic model name: no WorkerReport type
         # exists. See the OUTPUT CONTRACT section of worker.md.
         output_contract="worker-report: what was done / skipped / failed, with commit SHAs",
+    )
+
+
+def load_scientific_governor_role() -> AgentRoleDefinition:
+    """Load the canonical Scientific Governor role from
+    ``docs/harness/roles/scientific_governor.md``.
+
+    Mirrors :func:`load_worker_role` exactly (same two-branch missing/empty guard).
+    The governor runs on the ``worker_v1`` tool profile — it reviews and reports, it
+    does not dispatch, merge, or close — so it needs no manager grant. Raises
+    :class:`FileNotFoundError` if the artifact is missing or empty.
+    """
+    if not _SCIENTIFIC_GOVERNOR_ROLE_DOC.is_file():
+        raise FileNotFoundError(
+            f"Scientific Governor role profile not found at {_SCIENTIFIC_GOVERNOR_ROLE_DOC}; "
+            "cannot boot a Scientific Governor review."
+        )
+    instructions: str = _SCIENTIFIC_GOVERNOR_ROLE_DOC.read_text(encoding="utf-8").strip()
+    if not instructions:
+        raise FileNotFoundError(
+            f"Scientific Governor role profile at {_SCIENTIFIC_GOVERNOR_ROLE_DOC} is empty; "
+            "cannot boot a Scientific Governor review."
+        )
+    return AgentRoleDefinition(
+        role_id=SCIENTIFIC_GOVERNOR_ROLE_ID,
+        system_instructions=instructions,
+        declared_skills=list(SCIENTIFIC_GOVERNOR_SKILLS),
+        tool_profile=SCIENTIFIC_GOVERNOR_TOOL_PROFILE,
+        # Honest description, not a Pydantic model name: the review output is a
+        # structured prose packet (six answers, severity-tagged findings, one
+        # decision + cheapest-useful next action), not a typed model.
+        output_contract=(
+            "governor-review: six-question answers, findings tagged "
+            "BLOCKER|MATERIAL|RESIDUAL|OPPORTUNITY, one decision "
+            "(accept|accept-with-qualifications|request-material-repair|reject), "
+            "cheapest-useful next action"
+        ),
     )
 
 

@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "ai-team/scientific-governor/metrics",
+  "title": "ScientificGovernorReviewMetric",
+  "description": "One append-only record per governor review or verification pass. Written by scripts/oracle/governor_metrics.py. Makes the governor's own value auditable: did it catch real defects without false blockers.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "recorded_at", "case_id", "pass_kind", "decision"],
+  "properties": {
+    "schema_version": { "type": "integer", "const": 1 },
+    "recorded_at": { "type": "string", "description": "ISO-8601 UTC timestamp of when the record was appended." },
+    "case_id": { "type": "string", "description": "Manager Case the reviewed milestone belongs to." },
+    "milestone_id": { "type": ["string", "null"], "description": "Milestone/contract identifier under review." },
+    "pass_kind": { "type": "string", "enum": ["review", "verification"], "description": "First review pass or the post-rework verification pass." },
+    "decision": {
+      "type": "string",
+      "enum": ["accept", "accept-with-qualifications", "request-material-repair", "reject"]
+    },
+    "reviews_performed": { "type": "integer", "minimum": 1, "description": "Cumulative passes on this milestone including this one." },
+    "blocker_findings": { "type": "integer", "minimum": 0 },
+    "material_findings": { "type": "integer", "minimum": 0 },
+    "residual_findings": { "type": "integer", "minimum": 0 },
+    "opportunity_findings": { "type": "integer", "minimum": 0 },
+    "findings_accepted": { "type": "integer", "minimum": 0, "description": "Findings the manager acted on / agreed with." },
+    "findings_rebutted": { "type": "integer", "minimum": 0, "description": "Findings the manager rebutted with evidence." },
+    "findings_deferred": { "type": "integer", "minimum": 0, "description": "Findings recorded as RESIDUAL / deferred, not reworked." },
+    "rework_completed_preclosure": { "type": "integer", "minimum": 0, "description": "BLOCKER/MATERIAL findings resolved before the Case closed." },
+    "review_latency_seconds": { "type": ["number", "null"], "minimum": 0 },
+    "model_consumption_usd": { "type": ["number", "null"], "minimum": 0, "description": "Model spend attributed to this pass." },
+    "escaped_defects_found_postclosure": { "type": "integer", "minimum": 0, "description": "Defects discovered after closure that this review should have caught — the counter-metric to false blockers." }
+  }
+}
