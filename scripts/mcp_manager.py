@@ -283,6 +283,251 @@ def classify_status(status: Optional[str]) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Carrier (node) discovery + machine-agnostic local-node resolution
+#
+# A Manager dispatching a worker must name a REGISTERED carrier node_id — but the
+# OS hostname is NOT the carrier id (e.g. this host is `DESKTOP-3PGTBMF` yet its
+# registered carrier is `Horse`), and there was no cheap way to list valid
+# carriers. These helpers read the one source of truth, GET /api/nodes, so the
+# Manager never has to hand-reverse-engineer the mesh:
+#   * _list_nodes()                   — raw node rows (node_id, tailscale_ip,
+#                                       status, managed_backends).
+#   * _online_managed_carriers(b)     — online carriers that registered backend b.
+#   * _local_identity()               — this host's identity signals (configured
+#                                       carrier id env, tailscale IP, hostname).
+#   * _resolve_local_carrier(b)       — map "the node I'm on" → its registered
+#                                       online managed-capable carrier id for b.
+#   * _carrier_unavailable_hint(...)  — rewrite a carrier_unavailable 503 into an
+#                                       actionable "online carriers: …" suggestion
+#                                       (modelled on the symbol index's near-match
+#                                       suggestion on a miss).
+# ---------------------------------------------------------------------------
+
+# Env vars a mesh node/carrier daemon exports for its OWN registered carrier id.
+# A Manager's MCP server runs inside the carrier's process env, so these resolve
+# "the node I'm on" → its exact registered node_id with zero network round-trips.
+# Ordered by directness; first non-empty wins.
+_LOCAL_CARRIER_ID_ENV = ("MESH_LOCAL_CARRIER_NODE_ID", "WORKER_NODE_ID", "AI_TEAM_NODE_ID")
+
+# Local-intent sentinels a Manager can pass as node_id to mean "the node I'm on"
+# (resolved to the registered carrier id), instead of hand-passing the mesh id.
+_LOCAL_NODE_SENTINELS = frozenset({"local", "here", "this", "this-node", "self"})
+
+
+def _as_str_list(value: Any) -> List[str]:
+    """Coerce a node field to a list[str], tolerating the DB-fallback shape.
+
+    The in-process registry serializes list fields as real JSON arrays, but the
+    DB-fallback path of GET /api/nodes returns a flat `SELECT *` row whose list
+    columns (managed_backends, backends, repos) are raw JSON *strings*
+    (e.g. '["claude", "codex"]'). Parse a string; pass a list through; else []."""
+    if isinstance(value, list):
+        return [v for v in value if isinstance(v, str)]
+    if isinstance(value, str) and value.strip():
+        try:
+            parsed = json.loads(value)
+        except (TypeError, ValueError):
+            return []
+        if isinstance(parsed, list):
+            return [v for v in parsed if isinstance(v, str)]
+    return []
+
+
+def _node_managed_backends(node: Dict[str, Any]) -> List[str]:
+    """Managed-capable backends for a node row, tolerant of BOTH /api/nodes shapes.
+
+    Live DB-fallback shape: a top-level `managed_backends` column, possibly a JSON
+    *string*. In-process registry shape: nested under `capabilities`. Read either."""
+    top = _as_str_list(node.get("managed_backends"))
+    if top:
+        return top
+    caps = node.get("capabilities") or {}
+    if isinstance(caps, dict):
+        return _as_str_list(caps.get("managed_backends"))
+    return []
+
+
+def _list_nodes() -> List[Dict[str, Any]]:
+    """All registered mesh nodes via GET /api/nodes (source of truth for carriers)."""
+    result = _api_request("GET", "/api/nodes")
+    nodes = result.get("nodes") if isinstance(result, dict) else None
+    return [n for n in (nodes or []) if isinstance(n, dict)]
+
+
+def _online_managed_carriers(backend: str) -> List[Dict[str, Any]]:
+    """Online carriers that registered `backend` as managed-capable."""
+    out: List[Dict[str, Any]] = []
+    for n in _list_nodes():
+        if (n.get("status") == "online") and backend in _node_managed_backends(n):
+            out.append(n)
+    return out
+
+
+def _local_identity() -> Dict[str, Any]:
+    """This host's identity signals used to resolve its registered carrier id.
+
+    Pure/local (no network): the configured carrier-id env vars, this host's
+    tailscale IP (from the tailscale CLI, best-effort), and the OS hostname. Each
+    is used ONLY to match a node row from /api/nodes — never trusted as a carrier
+    id on its own (the hostname notably is NOT the carrier id)."""
+    import socket
+    import subprocess
+
+    env_ids: List[str] = []
+    for key in _LOCAL_CARRIER_ID_ENV:
+        val = (os.environ.get(key) or "").strip()
+        if val and val not in env_ids:
+            env_ids.append(val)
+
+    tailscale_ip = ""
+    try:
+        proc = subprocess.run(
+            ["tailscale", "ip", "-4"], capture_output=True, text=True, timeout=5,
+        )
+        if proc.returncode == 0:
+            tailscale_ip = (proc.stdout.splitlines() or [""])[0].strip()
+    except Exception:
+        tailscale_ip = ""
+
+    try:
+        hostname = socket.gethostname().strip()
+    except Exception:
+        hostname = ""
+
+    return {"env_ids": env_ids, "tailscale_ip": tailscale_ip, "hostname": hostname}
+
+
+def _resolve_local_carrier(backend: str) -> Dict[str, Any]:
+    """Map "the node I'm on" → its registered online managed-capable carrier id.
+
+    Returns ``{"node_id": str|None, "how": str, "candidates": [node_id,...]}``.
+    Resolution signals, in priority order, each confirmed against /api/nodes to be
+    ONLINE and managed-capable for `backend`:
+      1. configured carrier-id env (MESH_LOCAL_CARRIER_NODE_ID / WORKER_NODE_ID /
+         AI_TEAM_NODE_ID) — the carrier daemon's own id;
+      2. this host's tailscale IP matched to a node's tailscale_ip;
+      3. the OS hostname matched to a node_id (weakest; usually does NOT match).
+    `node_id` is None when nothing resolves OR the match is ambiguous (several
+    online carriers share the signal); `candidates` then lists the online carriers
+    so the caller can surface an actionable error. Never silently mis-routes."""
+    carriers = _online_managed_carriers(backend)
+    candidate_ids = [c.get("node_id") for c in carriers if c.get("node_id")]
+    by_id = {c.get("node_id"): c for c in carriers}
+    ident = _local_identity()
+
+    # 1) Configured carrier id env — exact, and still validated against the live
+    #    online managed-capable set (a stale env must not mis-route).
+    for env_id in ident["env_ids"]:
+        if env_id in by_id:
+            return {"node_id": env_id, "how": f"carrier-id env ({env_id})",
+                    "candidates": candidate_ids}
+
+    # 2) This host's tailscale IP → the node registered under it. Only unambiguous.
+    if ident["tailscale_ip"]:
+        ip_matches = [c.get("node_id") for c in carriers
+                      if c.get("tailscale_ip") == ident["tailscale_ip"]]
+        if len(ip_matches) == 1:
+            return {"node_id": ip_matches[0], "how": f"tailscale IP {ident['tailscale_ip']}",
+                    "candidates": candidate_ids}
+        if len(ip_matches) > 1:
+            return {"node_id": None, "how": f"ambiguous tailscale IP {ident['tailscale_ip']}",
+                    "candidates": ip_matches}
+
+    # 3) OS hostname → node_id (last resort; usually fails — hostname != carrier id).
+    if ident["hostname"] and ident["hostname"] in by_id:
+        return {"node_id": ident["hostname"], "how": f"hostname {ident['hostname']}",
+                "candidates": candidate_ids}
+
+    return {"node_id": None, "how": "unresolved", "candidates": candidate_ids}
+
+
+def _carrier_unavailable_hint(backend: str, attempted: Optional[str]) -> str:
+    """Actionable suffix listing the ONLINE managed-capable carriers for `backend`.
+
+    Best-effort: any failure reaching /api/nodes degrades to an empty string so the
+    original 503 still surfaces unchanged (never masks the real error)."""
+    try:
+        carriers = _online_managed_carriers(backend)
+    except Exception:
+        return ""
+    if not carriers:
+        return (f" No carrier is currently online AND managed-capable for backend "
+                f"{backend!r}. Check `list_nodes` / GET /api/nodes, or dispatch on a "
+                f"backend that has an online carrier.")
+    listing = ", ".join(
+        f"{c.get('node_id')} ({c.get('tailscale_ip') or 'no-ip'})" for c in carriers
+    )
+    lead = (f" {attempted!r} is not an online managed-capable carrier for backend "
+            f"{backend!r}." if attempted else
+            f" No local carrier resolved for backend {backend!r}.")
+    return (f"{lead} Online carriers for {backend!r}: {listing}. "
+            f"Pass one as node_id, or pass node_id='local' to auto-resolve the carrier "
+            f"for the node you are on. (See `list_nodes`.)")
+
+
+def _dispatch_api_request(method: str, path: str, payload: Optional[Dict[str, Any]],
+                          *, backend: str, attempted_node: Optional[str],
+                          headers: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
+    """_api_request, but a `carrier_unavailable` 503 is REWRITTEN into an actionable
+    error listing the online managed-capable carriers for `backend`.
+
+    This is the highest-leverage single fix for the dispatch UX: the gateway's bare
+    503 ``no registered managed-capable carrier 'X' for backend 'claude'`` becomes
+    ``… Online carriers for 'claude': Horse (100.112.245.29), …`` so the Manager
+    can self-correct instead of locking up. Modelled on how the repo's symbol index
+    answers a miss with near-matches. Any other error propagates unchanged."""
+    try:
+        return _api_request(method, path, payload, headers=headers)
+    except RuntimeError as exc:
+        msg = str(exc)
+        # The 503 body is JSON {"reason":"carrier_unavailable", ...}; _api_request
+        # folds it into its message string. Match on the stable reason code.
+        if "carrier_unavailable" in msg or "no registered managed-capable carrier" in msg:
+            raise RuntimeError(msg + _carrier_unavailable_hint(backend, attempted_node)) from exc
+        raise
+
+
+# ---------------------------------------------------------------------------
+# Tool: list_nodes  (cheap carrier discovery — no reverse-engineering the mesh)
+# ---------------------------------------------------------------------------
+
+def _list_nodes_tool(args: Dict[str, Any]) -> str:
+    """List registered mesh carriers so a Manager can pick a valid dispatch_worker
+    node_id (read-only over GET /api/nodes)."""
+    backend = _bounded_text(args.get("backend"), "backend", _MAX_ID_CHARS, required=False)
+    nodes = _list_nodes()
+    if not nodes:
+        return "No mesh nodes registered (GET /api/nodes returned none)."
+    rows = sorted(
+        nodes,
+        key=lambda n: (n.get("status") != "online", str(n.get("node_id") or "")),
+    )
+    lines = [f"Registered carriers ({len(rows)}) — online first:"]
+    for n in rows:
+        mb = _node_managed_backends(n)
+        if backend and backend not in mb:
+            continue
+        marker = "[online]" if n.get("status") == "online" else "[offline]"
+        lines.append(
+            f"  {marker} {n.get('node_id')}  status={n.get('status')!r}  "
+            f"ip={n.get('tailscale_ip') or '(none)'}  "
+            f"managed_backends={mb or '[]'}"
+        )
+    if backend:
+        lines.append("")
+        lines.append(
+            f"(filtered to carriers managed-capable for backend {backend!r}; "
+            f"only [online] carriers can take a dispatch.)"
+        )
+    lines.append("")
+    lines.append(
+        "dispatch_worker(node_id=…) needs an EXACT [online] carrier id from this list. "
+        "Or pass node_id='local' to auto-resolve the carrier for the node you are on."
+    )
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
 # Tool: dispatch_worker
 # ---------------------------------------------------------------------------
 
@@ -296,6 +541,29 @@ def _dispatch_worker(args: Dict[str, Any]) -> str:
     case_id = _bounded_text(args.get("case_id"), "case_id", _MAX_ID_CHARS, required=False)
     node_id = _bounded_text(args.get("node_id"), "node_id", _MAX_ID_CHARS, required=False)
     backend = _bounded_text(args.get("backend"), "backend", _MAX_ID_CHARS, required=False) or "claude"
+
+    # [Dispatch UX] Machine-agnostic local-node resolution. A Manager that wants
+    # "dispatch on the node I'm on" must NOT have to hand-pass the exact registered
+    # carrier id (the OS hostname is NOT the carrier id — e.g. DESKTOP-3PGTBMF's
+    # registered carrier is `Horse`). Passing a local-intent sentinel resolves it
+    # against GET /api/nodes. An EXPLICIT non-sentinel node_id is passed through
+    # UNCHANGED (current callers keep working exactly as before). If the sentinel
+    # resolves to nothing/ambiguous, FAIL LOUD with the online-carrier list rather
+    # than silently mis-route.
+    node_resolution_note: Optional[str] = None
+    if node_id and node_id.strip().lower() in _LOCAL_NODE_SENTINELS:
+        resolved = _resolve_local_carrier(backend)
+        if not resolved["node_id"]:
+            raise ValueError(
+                f"dispatch_worker could not resolve the local carrier for backend "
+                f"{backend!r} ({resolved['how']})."
+                + _carrier_unavailable_hint(backend, None)
+            )
+        node_resolution_note = (
+            f"node_id={node_id!r} resolved to carrier {resolved['node_id']!r} "
+            f"via {resolved['how']}"
+        )
+        node_id = resolved["node_id"]
     # [Worker role] Explicit, opt-in role signal. When 'worker', the NEW observable
     # worker session below is stamped with role_boot='worker' so its driver boots
     # the Worker role (worker.md + worker tools). ABSENT ⇒ a legacy tier-0 worker
@@ -366,7 +634,8 @@ def _dispatch_worker(args: Dict[str, Any]) -> str:
             # create-time signal, so it only applies when we open a session here;
             # reusing an existing session_id cannot retro-stamp it.
             sess_body["role_boot"] = "worker"
-        sess_result = _api_request("POST", "/api/sessions", sess_body)
+        sess_result = _dispatch_api_request(
+            "POST", "/api/sessions", sess_body, backend=backend, attempted_node=node_id)
         new_sess = sess_result.get("session") if isinstance(sess_result, dict) else None
         new_sid = new_sess.get("session_id") if isinstance(new_sess, dict) else None
         if not isinstance(new_sid, str) or not new_sid.strip() or len(new_sid) > _MAX_ID_CHARS:
@@ -407,8 +676,9 @@ def _dispatch_worker(args: Dict[str, Any]) -> str:
     # [A82 Stage 4b rework 2] Declare this caller as automation: for a session
     # enrolled in the managed turn queue the dispatched turn is non-human and
     # never releases an operator stop hold (a label, not authentication).
-    result = _api_request("POST", "/api/instructions", body,
-                          headers={"X-AI-Team-Principal": "automation"})
+    result = _dispatch_api_request("POST", "/api/instructions", body,
+                                   backend=backend, attempted_node=node_id,
+                                   headers={"X-AI-Team-Principal": "automation"})
     task_id = result.get("task_id", "?")
     session = result.get("session") or {}
     sess_id = session.get("session_id") if isinstance(session, dict) else None
@@ -437,6 +707,10 @@ def _dispatch_worker(args: Dict[str, Any]) -> str:
         f"CWD:       {cwd or '(session/default)'}",
         f"Files:     {', '.join(files) if files else '(none)'}",
     ]
+    if node_resolution_note:
+        lines.append(f"Node:      {node_resolution_note}")
+    elif node_id:
+        lines.append(f"Node:      {node_id} (explicit carrier)")
     if model:
         if opened_session:
             lines.append(f"Model:     {model} (this worker session boots on it)")
@@ -1239,12 +1513,30 @@ _TOOLS = [
                 "cwd": {"type": "string", "description": "Working directory / repo path. Pass it (typically your Case's repo) so a real, openable worker session can be opened; without it the dispatch falls back to a sessionless one-off. RESOLVED ON THE TARGET NODE'S filesystem (see node_id) — a path that exists on your node but not on the gateway host requires node_id set to the node that actually holds the repo."},
                 "files": {"type": "array", "items": {"type": "string"}, "description": "Target files to focus the worker on (optional)."},
                 "case_id": {"type": "string", "description": "The Manager's OWN Case id. Pass it to make the worker JOIN this Case (member task, shared membership) instead of spawning a child Case — the M3.1 default. Worker completion leaves the Case OPEN."},
-                "node_id": {"type": "string", "description": "Node to pin the NEW worker session to: the worker boots on THIS node and cwd is resolved on ITS filesystem, so pin the node that actually holds the repo (e.g. a node worker so the session survives a gateway restart). Pass the node's EXACT node_id as shown by /api/nodes — it is matched exactly, NOT a fuzzy display-name lookup. OMIT ONLY if the repo lives on the gateway host itself: omitting routes the worker to the gateway host (__local__ — NOT the Manager's own node), where the gateway validates cwd against its own allowed_root and rejects a missing/outside path up front with invalid_repo_path. (A pinned remote node skips that up-front check — a bad cwd there surfaces at the worker's first turn instead.)"},
+                "node_id": {"type": "string", "description": "Node to pin the NEW worker session to: the worker boots on THIS node and cwd is resolved on ITS filesystem, so pin the node that actually holds the repo (e.g. a node worker so the session survives a gateway restart). Pass the node's EXACT registered node_id — use `list_nodes` to discover valid online carriers (the OS hostname is NOT the carrier id). SHORTCUT: pass 'local' (or 'here'/'this'/'self') to auto-resolve the registered carrier for the node you are on — no need to hand-pass the mesh id. If you pass an id that is not an online managed-capable carrier, the error now LISTS the valid online carriers for your backend. OMIT ONLY if the repo lives on the gateway host itself: omitting routes the worker to the gateway host (__local__ — NOT the Manager's own node), where the gateway validates cwd against its own allowed_root and rejects a missing/outside path up front with invalid_repo_path. (A pinned remote node skips that up-front check — a bad cwd there surfaces at the worker's first turn instead.)"},
                 "role": {"type": "string", "description": "Set to 'worker' to boot the NEW worker session with the canonical Worker role (worker.md identity + worker tools), gated by MANAGER_ROLE_ENABLED. Omit for a legacy tier-0 worker. Only applies when a new session is opened (with cwd); it cannot retro-stamp a reused session_id."},
                 "model": {"type": "string", "description": "REQUIRED when opening a NEW worker session (cwd with no session_id): explicitly choose the task-fit boot model. Use 'haiku' for narrow/easy-to-verify work, 'sonnet' for most bounded implementation and fixes, and 'opus' for architecture, high-risk, security-sensitive, or ambiguous work. The choice is sent only to session creation. Ignored when a session_id is reused because that worker keeps its boot model."},
                 "parent_flow_run_id": {"type": "string", "description": "Use ONLY for a genuine child-CASE lineage edge (child→parent in /api/flows). To keep the worker inside the Manager's Case, use case_id instead."},
             },
             "required": ["objective"],
+        },
+    },
+    {
+        "name": "list_nodes",
+        "description": (
+            "List the registered mesh CARRIERS so you can pick a valid dispatch_worker "
+            "node_id (read-only over GET /api/nodes). Returns each node's node_id, status "
+            "(● online / ○ offline), tailscale_ip, and managed_backends. Only an ● online "
+            "carrier whose managed_backends includes your backend can take a dispatch. The "
+            "OS hostname is NOT the carrier id — use a node_id from THIS list, or pass "
+            "node_id='local' to dispatch_worker to auto-resolve the carrier for the node you "
+            "are on. Optional `backend` filters to carriers managed-capable for it."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "backend": {"type": "string", "description": "Optional backend (e.g. 'claude') to filter to carriers that registered it as managed-capable."},
+            },
         },
     },
     {
@@ -1561,6 +1853,7 @@ _TOOLS = [
 ]
 
 _TOOL_IMPLS = {
+    "list_nodes": _list_nodes_tool,
     "dispatch_worker": _dispatch_worker,
     "wait_for_worker": _wait_for_worker,
     "open_case": _open_case,
