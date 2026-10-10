@@ -46,6 +46,7 @@ from src.core.interfaces import ExecutionResult, Session
 from src.core.turn_liveness import ProgressClock, TurnControl
 from src.core.roles import MANAGER_ROLE_ID, WORKER_ROLE_ID, load_manager_role, load_worker_role
 from src.backends.claude_role_adapter import claude_system_prompt, manager_tool_names, worker_tool_names
+from src.core.process_utils import process_tree_snapshot, terminate_snapshot
 
 try:
     from claude_agent_sdk import CLIConnectionError as _CLIConnectionError
@@ -703,6 +704,17 @@ def _resync_stdout_reader(read_lines, max_buffer_size: int):
     return _iter()
 
 
+def _client_pid(client: Any) -> int:
+    """pid of a connected ClaudeSDKClient's claude process (0 when unknown).
+
+    The SDK keeps it private (``_transport._process``); a custom transport or a
+    future SDK layout simply yields 0, which disables only the tree-kill.
+    """
+    proc = getattr(getattr(client, "_transport", None), "_process", None)
+    pid = getattr(proc, "pid", 0)
+    return pid if isinstance(pid, int) else 0
+
+
 def _install_sdk_stream_resync() -> None:
     """Patch the SDK transport's stdout reader with the resyncing one.
 
@@ -794,6 +806,9 @@ class _SDKSession:
         # claude executable (the legacy path). Set it to run workers on a
         # newer CLI than the one pinned inside the installed SDK.
         self.cli_path = cli_path
+        # pid of this session's claude process (0 until connected) — lets close
+        # kill its whole tree and the worker's sweep tell owned children apart.
+        self.pid: int = 0
         # [A53] Governor ceilings for this SDK session (None ⇒ no cap ⇒ legacy).
         self.max_turns = max_turns
         self.max_budget_usd = max_budget_usd
@@ -998,6 +1013,7 @@ class _SDKSession:
             except Exception:
                 pass
             return
+        self.pid = _client_pid(self._client)
         self._ready.set()
         # One long-lived consumer of the message stream for the life of the
         # session. This is the SDK's intended pattern for an interactive chat:
@@ -1015,10 +1031,20 @@ class _SDKSession:
         finally:
             if self._reader_task is not None:
                 self._reader_task.cancel()
+            # disconnect() signals only the direct claude pid; its MCP servers
+            # (cmd → npx → node on Windows) would outlive it. Snapshot the tree
+            # while the root is alive, close gracefully, then kill survivors.
+            tree = process_tree_snapshot(self.pid)
             try:
                 await self._client.disconnect()
             except Exception:
                 pass
+            survivors = await asyncio.to_thread(terminate_snapshot, tree)
+            if survivors:
+                logger.info(
+                    "event=sdk_close_reaped_tree session_key=%s pid=%s survivors=%d",
+                    self.session_key, self.pid, survivors,
+                )
 
     async def _reader_loop(self) -> None:
         """Drain the SDK message stream for the life of the session.
@@ -2274,6 +2300,15 @@ class ClaudeSDKClientDriver(ClaudeDriver):
         insert/pop is irrelevant for a heartbeat gauge.
         """
         return len(self._sessions)
+
+    def live_session_ids(self) -> List[str]:
+        """Pooled session ids — what the worker reconciles against the gateway.
+        Lockless for the same reason as ``live_session_count``."""
+        return list(self._sessions)
+
+    def owned_pids(self) -> List[int]:
+        """claude pids owned by pooled sessions (the orphan sweep spares these)."""
+        return [s.pid for s in list(self._sessions.values()) if s.pid]
 
     def driver_type(self) -> str:
         return "sdk"

@@ -417,6 +417,16 @@ class ClaudeCodeBackend(CodingBackend):
         counter = getattr(self._driver, "live_session_count", None)
         return counter() if callable(counter) else 0
 
+    def live_session_ids(self) -> List[str]:
+        """Pooled live session ids (SDK driver only; else none)."""
+        ids = getattr(self._driver, "live_session_ids", None)
+        return ids() if callable(ids) else []
+
+    def owned_pids(self) -> List[int]:
+        """claude pids owned by pooled sessions (SDK driver only; else none)."""
+        pids = getattr(self._driver, "owned_pids", None)
+        return pids() if callable(pids) else []
+
     def mark_sessions_lost(self) -> None:
         """Called on worker restart — all live SDK sessions are orphaned."""
         from src.backends.claude_driver import ClaudeSDKClientDriver

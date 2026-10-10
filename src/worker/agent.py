@@ -45,6 +45,7 @@ from src.core.process_utils import (
     WORKER_INCARNATION_ENV,
     WORKER_NODE_ENV,
     reap_stale_worker_children,
+    reap_unowned_worker_children,
 )
 
 _NO_WINDOW = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
@@ -2518,6 +2519,71 @@ class WorkerAgent:
                     pass
         return total
 
+    def _reconcile_pooled_sessions_once(self) -> Dict[str, int]:
+        """Close pooled sessions the gateway has already closed, then reap this
+        worker's own claude children that no pooled session owns.
+
+        Backstop for a ``close_session`` teardown that never arrived (reaped
+        before claim, skipped, lost): without it the process lives until the
+        worker restarts. Ids the gateway does not know are left alone.
+        """
+        closed = 0
+        owned: List[int] = []
+        for name, backend in (self._backends or {}).items():
+            ids_fn = getattr(backend, "live_session_ids", None)
+            if not callable(ids_fn):
+                continue
+            ids: List[str] = [s for s in ids_fn() if not s.startswith("oneoff-")]
+            if ids:
+                resp = self._http.post(
+                    "/nodes/sessions/reconcile",
+                    {"node_id": self.cfg.node_id, "session_ids": ids[:500]},
+                ) or {}
+                for sid in resp.get("closed", []):
+                    session = _make_session_from_payload(
+                        {"session": {"session_id": sid, "backend": name}}
+                    )
+                    try:
+                        backend.close(session)
+                        closed += 1
+                    except Exception as e:
+                        logger.warning(
+                            "event=session_reconcile_close_failed session_id=%s err=%s", sid, e,
+                        )
+            pids_fn = getattr(backend, "owned_pids", None)
+            if callable(pids_fn):
+                owned.extend(pids_fn())
+        reaped = reap_unowned_worker_children(self._incarnation_id, self.cfg.node_id, owned)
+        return {"closed": closed, "reaped": len(reaped)}
+
+    async def _session_reconcile_loop(self) -> None:
+        """Run ``_reconcile_pooled_sessions_once`` every WORKER_SESSION_RECONCILE_SEC
+        (default 12h; 0 disables). The first sweep runs 10 min after boot."""
+        try:
+            interval = int(os.environ.get("WORKER_SESSION_RECONCILE_SEC", "43200"))
+        except ValueError:
+            interval = 43200
+        if interval <= 0:
+            logger.info("event=session_reconcile_disabled node_id=%s", self.cfg.node_id)
+            return
+        delay = min(interval, 600)
+        while not self._shutdown.is_set():
+            try:
+                await asyncio.wait_for(self._shutdown.wait(), timeout=delay)
+                return
+            except asyncio.TimeoutError:
+                pass
+            delay = interval
+            try:
+                res = await asyncio.to_thread(self._reconcile_pooled_sessions_once)
+                if res["closed"] or res["reaped"]:
+                    logger.warning(
+                        "event=session_reconcile node_id=%s closed=%d reaped=%d",
+                        self.cfg.node_id, res["closed"], res["reaped"],
+                    )
+            except Exception as e:
+                logger.warning("event=session_reconcile_failed node_id=%s err=%s", self.cfg.node_id, e)
+
     def _memory_watchdog_sample(self) -> Optional[dict]:
         """[A98 O7] Sample this worker process tree's RSS vs a threshold and warn
         BEFORE the OOM-killer fires (the 2026-10-07 incident had NO such trail — a
@@ -3390,6 +3456,7 @@ class WorkerAgent:
         quota_observer = asyncio.create_task(self._quota_observe_loop())
         quota_prewarm = asyncio.create_task(self._quota_prewarm_supervisor_loop())
         controller_state_refresh = asyncio.create_task(self._controller_state_loop())
+        session_reconcile = asyncio.create_task(self._session_reconcile_loop())
         if self._canary:
             logger.info("event=worker_canary_mode node_id=%s polling_disabled=true", self.cfg.node_id)
             poller = asyncio.create_task(self._shutdown.wait())
@@ -3443,9 +3510,9 @@ class WorkerAgent:
             for t in pending:
                 t.cancel()
 
-        for t in (poller, heartbeat, nudge_listener, job_watcher, quota_observer, quota_prewarm, controller_state_refresh):
+        for t in (poller, heartbeat, nudge_listener, job_watcher, quota_observer, quota_prewarm, controller_state_refresh, session_reconcile):
             t.cancel()
-        await asyncio.gather(poller, heartbeat, nudge_listener, job_watcher, quota_observer, quota_prewarm, controller_state_refresh, return_exceptions=True)
+        await asyncio.gather(poller, heartbeat, nudge_listener, job_watcher, quota_observer, quota_prewarm, controller_state_refresh, session_reconcile, return_exceptions=True)
 
         # Terminate any backend subprocesses still alive (e.g. a hung
         # claude.exe that outlived its task). Without this, a worker restart

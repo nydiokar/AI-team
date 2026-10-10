@@ -2214,6 +2214,24 @@ class MeshDB:
         ).fetchone()
         return dict(row) if row else None
 
+    def terminal_session_ids(self, session_ids: List[str]) -> List[str]:
+        """The subset of ``session_ids`` whose session row is ``closed``/``cancelled``.
+
+        One query for the whole batch (a worker's pooled-session reconcile). Ids
+        with no row are NOT returned — an unknown id may be a transient one-off
+        the worker is still running, so absence is never proof of closure.
+        """
+        ids: List[str] = [s for s in dict.fromkeys(session_ids) if s]
+        if not ids:
+            return []
+        placeholders = ",".join("?" * len(ids))
+        rows = self._conn().execute(
+            f"SELECT session_id FROM sessions WHERE session_id IN ({placeholders}) "
+            "AND status IN ('closed', 'cancelled')",
+            ids,
+        ).fetchall()
+        return [str(r[0]) for r in rows]
+
     def list_sessions(
         self,
         status: Optional[str] = None,
