@@ -1,0 +1,15 @@
+{
+  "population": "FULL oracle_vector (1686 tok, 30,464,958 states)",
+  "n_states": 30464958,
+  "exec_depth_null": 3862,
+  "exec_depth_null_frac": 0.0001,
+  "entry_unpriceable": 838618,
+  "entry_unpriceable_frac": 0.0275,
+  "no_conf_crossing": 26489036,
+  "no_conf_crossing_frac": 0.8695,
+  "tape_end_censored": 30464958,
+  "tape_end_censored_frac": 1.0,
+  "resolvable_states": 29626258,
+  "resolvable_frac": 0.9725,
+  "reach2x_states_among_exec_defined": 793485
+}

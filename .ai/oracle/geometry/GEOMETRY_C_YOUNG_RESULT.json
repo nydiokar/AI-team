@@ -1,0 +1,253 @@
+{
+  "gate": "GEOMETRY_C_TASK3_YOUNG_FULL",
+  "scope": "young (age<180s) reach-recognizability on ACTUAL H_t, FULL young-state coverage.",
+  "n_young_states": 166158,
+  "n_young_tokens": 1686,
+  "young_reach2x_rate": 0.2141,
+  "by_young_bin_counts": {
+    "0-30s": 23841,
+    "30-60s": 29352,
+    "60-120s": 57564,
+    "120-180s": 55401
+  },
+  "matched_smd_reach_vs_nonreach": {
+    "hhi_wallet_sol_300s": -0.1417,
+    "time_since_last_trade_s": 0.1348,
+    "top1_wallet_sol_frac_300s": -0.1268,
+    "time_since_last_sell_s": 0.1253,
+    "time_since_last_buy_s": 0.1091,
+    "realized_vol_120s": -0.0813,
+    "realized_vol_600s": -0.0813,
+    "up_tick_frac_300s": 0.0788,
+    "roundtrip_sol_frac_300s": -0.0712,
+    "distinct_wallets_300s": 0.0684,
+    "flipper_frac_300s": -0.0647,
+    "depth_slope_600s": 0.0568,
+    "price_logslope_300s": 0.0563,
+    "dd_from_peak": 0.0543,
+    "trail_rate_tps_300s": 0.0463,
+    "price_logslope_60s": 0.0454,
+    "mult_from_entry": 0.0454,
+    "depth_slope_120s": 0.0423,
+    "buy_sol_frac_300s": 0.0374,
+    "trail_rate_tps": 0.0344,
+    "net_sol_300s": 0.0266,
+    "cum_net_sol": 0.0266,
+    "distinct_wallets_slope_300s": 0.0228,
+    "net_sol_accel_30_300": 0.019,
+    "net_sol_30s": 0.0187,
+    "trail_rate_tps_30s": 0.0187,
+    "price_logaccel_60_300": 0.0177,
+    "buy_sol_frac_slope_300s": 0.0081,
+    "buy_sol_frac_accel_30_300": -0.003,
+    "bp_accel_30_vs_120": -0.0017
+  },
+  "top10_discriminators": [
+    [
+      "hhi_wallet_sol_300s",
+      -0.1417
+    ],
+    [
+      "time_since_last_trade_s",
+      0.1348
+    ],
+    [
+      "top1_wallet_sol_frac_300s",
+      -0.1268
+    ],
+    [
+      "time_since_last_sell_s",
+      0.1253
+    ],
+    [
+      "time_since_last_buy_s",
+      0.1091
+    ],
+    [
+      "realized_vol_120s",
+      -0.0813
+    ],
+    [
+      "realized_vol_600s",
+      -0.0813
+    ],
+    [
+      "up_tick_frac_300s",
+      0.0788
+    ],
+    [
+      "roundtrip_sol_frac_300s",
+      -0.0712
+    ],
+    [
+      "distinct_wallets_300s",
+      0.0684
+    ]
+  ],
+  "held_out_logistic_auc_by_young_bin": {
+    "0-30s": {
+      "n_train": 13205,
+      "n_val": 5243,
+      "val_reach_rate": 0.1539,
+      "auc": 0.6816,
+      "auc_token_clustered_ci": [
+        0.641,
+        0.714
+      ],
+      "beats_chance": true
+    },
+    "30-60s": {
+      "n_train": 15744,
+      "n_val": 6688,
+      "val_reach_rate": 0.2053,
+      "auc": 0.5597,
+      "auc_token_clustered_ci": [
+        0.518,
+        0.602
+      ],
+      "beats_chance": true
+    },
+    "60-120s": {
+      "n_train": 31304,
+      "n_val": 13139,
+      "val_reach_rate": 0.21,
+      "auc": 0.4764,
+      "auc_token_clustered_ci": [
+        0.429,
+        0.528
+      ],
+      "beats_chance": false
+    },
+    "120-180s": {
+      "n_train": 30307,
+      "n_val": 12596,
+      "val_reach_rate": 0.2294,
+      "auc": 0.5009,
+      "auc_token_clustered_ci": [
+        0.451,
+        0.548
+      ],
+      "beats_chance": false
+    }
+  },
+  "young_raw_h_geometry_excess": {
+    "k": 6,
+    "clustered_on": [
+      "net_sol_30s",
+      "net_sol_300s",
+      "cum_net_sol",
+      "buy_sol_frac_300s",
+      "trail_rate_tps_300s",
+      "price_logslope_60s",
+      "price_logslope_300s",
+      "up_tick_frac_300s",
+      "distinct_wallets_300s",
+      "top1_wallet_sol_frac_300s",
+      "hhi_wallet_sol_300s",
+      "realized_vol_120s",
+      "realized_vol_600s",
+      "dd_from_peak",
+      "mult_from_entry",
+      "trail_rate_tps"
+    ],
+    "n_cells": 15,
+    "n_cells_positive": 12,
+    "token_weighted_point_excess": 0.1407,
+    "cell_clustered_ci_lo": 0.0563,
+    "cell_clustered_ci_hi": 0.2328,
+    "ci_excludes_zero": true,
+    "per_cell": [
+      {
+        "yb": 0,
+        "exp_bin": 0,
+        "n_tokens": 1686,
+        "excess": 0.1968
+      },
+      {
+        "yb": 0,
+        "exp_bin": 1,
+        "n_tokens": 639,
+        "excess": -0.069
+      },
+      {
+        "yb": 0,
+        "exp_bin": 2,
+        "n_tokens": 173,
+        "excess": -0.0076
+      },
+      {
+        "yb": 1,
+        "exp_bin": 0,
+        "n_tokens": 1029,
+        "excess": 0.1812
+      },
+      {
+        "yb": 1,
+        "exp_bin": 1,
+        "n_tokens": 770,
+        "excess": -0.06
+      },
+      {
+        "yb": 1,
+        "exp_bin": 2,
+        "n_tokens": 470,
+        "excess": 0.1156
+      },
+      {
+        "yb": 1,
+        "exp_bin": 3,
+        "n_tokens": 139,
+        "excess": 0.0068
+      },
+      {
+        "yb": 2,
+        "exp_bin": 0,
+        "n_tokens": 723,
+        "excess": 0.1608
+      },
+      {
+        "yb": 2,
+        "exp_bin": 1,
+        "n_tokens": 709,
+        "excess": 0.6166
+      },
+      {
+        "yb": 2,
+        "exp_bin": 2,
+        "n_tokens": 612,
+        "excess": 0.1504
+      },
+      {
+        "yb": 2,
+        "exp_bin": 3,
+        "n_tokens": 367,
+        "excess": 0.1908
+      },
+      {
+        "yb": 3,
+        "exp_bin": 0,
+        "n_tokens": 476,
+        "excess": 0.0611
+      },
+      {
+        "yb": 3,
+        "exp_bin": 1,
+        "n_tokens": 562,
+        "excess": 0.0407
+      },
+      {
+        "yb": 3,
+        "exp_bin": 2,
+        "n_tokens": 518,
+        "excess": 0.0873
+      },
+      {
+        "yb": 3,
+        "exp_bin": 3,
+        "n_tokens": 528,
+        "excess": 0.0542
+      }
+    ]
+  },
+  "amend_a_anchor": "AMEND-A: reach_probability is the ONLY genuine young R edge (R_BETTER 7/7); economic top-vs-bottom R-reach separation CI>0 only from ~180s onward; 0-180s straddles 0. This tests whether raw H_t itself carries that edge young."
+}

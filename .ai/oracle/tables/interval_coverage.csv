@@ -1,0 +1,9 @@
+component,size,model,cov80_nominal,cov80_empirical,cov50_nominal,cov50_empirical,n_states
+excursion,0p5,R,0.8,0.7783,0.5,0.531,11981
+excursion,0p5,C,0.8,0.714,0.5,0.3965,11981
+excursion,1p0,R,0.8,0.8153,0.5,0.5028,11981
+excursion,1p0,C,0.8,0.7075,0.5,0.395,11981
+excursion,2p0,R,0.8,0.7931,0.5,0.579,11981
+excursion,2p0,C,0.8,0.7126,0.5,0.3962,11981
+retention_exec_1p0,1p0,R,0.8,0.7367,0.5,,11981
+retention_exec_1p0,1p0,C,0.8,0.66,0.5,,11981
