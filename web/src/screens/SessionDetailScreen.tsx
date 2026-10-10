@@ -1337,13 +1337,14 @@ export function SessionDetailScreen() {
           <TurnQueuePanel sessionId={id} page={turnQueue} ownedIds={queueIds} />
         )}
 
-        {/* [A101] The quota resume decision, moved OUT of the Work tab and
-            co-located with the composer. Shown when this session has a message
-            held by a quota pause (read-model `resume_case_id`). It is the exact
-            same component the Work/Case view used — same options (Decline / In
-            place / Fresh Manager), same effects — only its location changed. */}
-        {id && !closed && turnQueue?.resume_case_id && (
-          <CaseResumePanel caseId={turnQueue.resume_case_id} />
+        {/* Quota resume — shown for any manager session affiliated with a Case,
+            regardless of whether there is a queued managed turn. CaseResumePanel
+            polls /api/cases/{id}/resume-state directly and self-hides when there
+            is nothing to decide (not paused, no pending approval, manager alive).
+            Also covers the fallback path where resume_case_id is set via the
+            turn-queue block projection. */}
+        {id && !closed && session?.currentCaseId && session.caseRole === "manager" && (
+          <CaseResumePanel caseId={session.currentCaseId} />
         )}
 
         {/* Composer pinned outside the scroll container so it always sits at the true bottom */}

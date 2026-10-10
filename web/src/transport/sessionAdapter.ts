@@ -113,6 +113,8 @@ export function toSession(raw: RawSessionView): Session {
     keepNote: raw.keep_note ?? "",
     reason: deriveReason(raw),
     turnQueue: toSessionTurnQueue(raw.turn_queue),
+    caseRole: raw.case_role ?? null,
+    currentCaseId: raw.current_case_id ?? null,
   };
 }
 
