@@ -1065,6 +1065,17 @@ _RESERVED_MACHINE_SENTINELS = frozenset(
 # (MESH_PENDING_REAPER_GRACE_SEC / MESH_PENDING_MAX_AGE_SEC).
 _DEFAULT_PENDING_GRACE_SEC = 1800       # unknown/offline pinned node must persist this long
 _DEFAULT_PENDING_MAX_AGE_SEC = 604800   # 7d absolute ceiling for ANY pending row
+# Out-of-slot CONTROL/teardown actions (worker/agent.py handles these outside the
+# turn slot). They are dispatched *precisely because* a session is being stopped or
+# torn down, so their target session is legitimately ``cancelled``/``closed`` the
+# instant they are enqueued. They MUST be exempt from the no-grace ``session_closed``
+# reaper reason — otherwise the janitor reaps the operator's own interrupt (pinned to
+# an online carrier) in the ~1s before that carrier's poll can claim it, and Stop
+# silently never lands. Node-offline / age_exceeded still apply (a genuinely orphaned
+# control row pinned to a dead node is still reaped), so this is not a leak.
+_CONTROL_TEARDOWN_ACTIONS = frozenset(
+    {"close_session", "cancel_codex", "cancel_turn", "cancel_managed"}
+)
 # Default round cap when a Case's completion_criteria does not carry an explicit
 # ``round_cap`` — a backstop against a runaway continuation loop, not a tuning knob.
 DEFAULT_CONTINUATION_ROUND_CAP = 50
@@ -5990,6 +6001,7 @@ class MeshDB:
                    t.session_id AS session_id,
                    t.machine_id AS machine_id,
                    t.created_at AS created_at,
+                   t.action   AS action,
                    s.status AS _session_status,
                    n.node_id AS _node_row_id,
                    n.status  AS _node_status
@@ -6011,7 +6023,12 @@ class MeshDB:
             is_real_pin = bool(machine_id) and machine_id not in _RESERVED_MACHINE_SENTINELS
             pinned_online = is_real_pin and row.get("_node_status") == "online"
             reason: Optional[str] = None
-            if row.get("session_id") and (row.get("_session_status") in ("closed", "cancelled")):
+            is_control = row.get("action") in _CONTROL_TEARDOWN_ACTIONS
+            if (
+                not is_control
+                and row.get("session_id")
+                and (row.get("_session_status") in ("closed", "cancelled"))
+            ):
                 reason = "session_closed"
             elif is_real_pin and grace_sec > 0 and age_sec >= grace_sec and row.get("_node_row_id") is None:
                 reason = "node_unknown"
