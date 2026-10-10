@@ -48,3 +48,39 @@ def test_dependency_never_unblocks_without_explicit_opt_in() -> None:
     assert "READY_TO_UNBLOCK" not in dispatch._derive_flags(gated, jobs)
     assert "READY_TO_UNBLOCK" in dispatch._derive_flags(opted_in, jobs)
     assert "READY_TO_UNBLOCK" not in dispatch._derive_flags(unsafe, jobs)
+
+
+def _packet(dispatch, tmp_path: Path, contract: str):
+    dispatch.DISPATCH_DIR = tmp_path
+    packet = tmp_path / "GATED_JOB.md"
+    packet.write_text(
+        '```yaml\njob_id: GATED_JOB\ncreated_at: "2026-01-01T00:00:00Z"\nstatus: active\n'
+        'evidence: []\nupdated_at: "2026-01-01T00:00:00Z"\n```\n# brief\n\n' + contract,
+        encoding="utf-8",
+    )
+    return packet
+
+
+def test_done_is_refused_while_the_arch_contract_is_not_met(tmp_path: Path) -> None:
+    dispatch = _module()
+    # this repo at HEAD certainly still defines set_field in scripts/dispatch
+    packet = _packet(dispatch, tmp_path, "```arch-contract\nscope: [scripts/dispatch]\nretired: [set_field]\n```\n")
+
+    try:
+        dispatch.set_field("GATED_JOB", "status", "done")
+        raise AssertionError("done must be refused")
+    except SystemExit as refused:
+        assert "arch-contract" in str(refused)
+    assert dispatch._read_yaml_block(packet)["status"] == "active"
+    dispatch.set_field("GATED_JOB", "status", "blocked")  # other transitions are not gated
+    assert dispatch._read_yaml_block(packet)["status"] == "blocked"
+
+
+def test_done_passes_when_the_arch_contract_is_met(tmp_path: Path) -> None:
+    dispatch = _module()
+    packet = _packet(dispatch, tmp_path,
+                     "```arch-contract\nscope: [scripts/dispatch]\nretired: [zz_name_never_defined_anywhere]\n```\n")
+
+    dispatch.set_field("GATED_JOB", "status", "done")
+
+    assert dispatch._read_yaml_block(packet)["status"] == "done"

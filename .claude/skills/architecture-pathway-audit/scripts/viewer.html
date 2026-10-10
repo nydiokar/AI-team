@@ -1,0 +1,191 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Execution Path Explorer</title><style>
+:root{--bg:#0b111b;--panel:#131e2c;--line:#29394e;--card:#1b293a;--text:#e9eef7;--dim:#91a6c1;--accent:#51afff;--warn:#efb765;--bad:#ee8f86;font-family:Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,Arial;color:var(--text);background:var(--bg)}
+*{box-sizing:border-box}body{margin:0;overflow:hidden;background:var(--bg)}
+header{height:56px;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:10px;padding:0 14px;background:var(--panel)}
+header strong{font-size:15px;white-space:nowrap}header .sub{font-size:11px;color:var(--dim);max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+select,button,input{font:inherit;font-size:12px;color:var(--text);background:#263649;border:1px solid #3c5370;border-radius:7px;padding:6px 9px}button{cursor:pointer}button:hover{background:#354b64}button:disabled{opacity:.45;cursor:default}button.on{background:#2f5f8c;border-color:#5fa2df}
+.grow{flex:1}.tb{display:flex;gap:6px;align-items:center}
+main{display:flex;height:calc(100vh - 56px)}
+#left{width:300px;min-width:220px;border-right:1px solid var(--line);background:var(--panel);display:flex;flex-direction:column}
+#left .top{padding:10px;border-bottom:1px solid var(--line)}#left input{width:100%}#rsum{font-size:11px;color:var(--dim);margin-top:7px;line-height:1.5}
+#routes{overflow-y:auto;flex:1;padding:4px 0}.app{font-size:10px;letter-spacing:.6px;text-transform:uppercase;color:var(--dim);padding:9px 10px 3px}
+.r{display:flex;gap:6px;align-items:center;padding:5px 10px;font-size:12px;cursor:pointer;border-left:3px solid transparent}.r:hover{background:#1c2b3e}.r.sel{background:#203550;border-left-color:var(--accent)}
+.m{font-size:9px;font-weight:800;border-radius:4px;padding:2px 4px;min-width:40px;text-align:center;background:#2a3d55}.m.GET{background:#1f5a4d}.m.POST{background:#5a4a1f}.m.DELETE{background:#5a2626}.m.PATCH,.m.PUT{background:#3f2f5f}
+.r .p{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}.r .x{font-size:10px;color:#6fd3a5}.r .w{font-size:10px;color:var(--warn)}
+#canvas{position:relative;overflow:hidden;flex:1;background-image:radial-gradient(#22324a 1px,transparent 1px);background-size:22px 22px;cursor:grab}
+#world{position:absolute;transform-origin:0 0;top:0;left:0}#arrows{position:absolute;left:0;top:0;overflow:visible}
+.edge{fill:none;stroke-width:1.8;opacity:.8}.edge:hover{stroke-width:3.5;opacity:1}
+.e-CALLS{stroke:#6c95c0}.e-async{stroke:#5fd0e6;stroke-dasharray:7 4}.e-SPAWNS{stroke:#79d38c;stroke-dasharray:3 4}.e-HTTP_CALLS{stroke:#f0a35c}.e-HANDLES{stroke:#42c9b2;stroke-width:2.6}
+.e-REGISTERS,.e-INCLUDES{stroke:#8796ab;stroke-dasharray:2 4}.e-CONFIGURES{stroke:#b28ae0;stroke-dasharray:4 3}.e-WRITES{stroke:#e0787c}.e-OVERRIDDEN_BY{stroke:#8fd86b;stroke-dasharray:9 3 2 3}
+.e-CANDIDATE_CALL{stroke:#f0a35c;stroke-dasharray:2 5}.e-SIMILAR_TO{stroke:#e7d36b;stroke-dasharray:1 4}.e-CALL_REFERENCE{stroke:#9fb3ff;stroke-dasharray:5 2}.edge.low{opacity:.3;stroke-dasharray:2 3}.edge.hl{stroke:#ffd166!important;stroke-width:3.4;opacity:1}
+.elabel{font-size:10px;fill:#9fb3cc}
+.node{position:absolute;width:228px;background:var(--card);border:1px solid #4e6381;border-radius:10px;cursor:pointer;box-shadow:0 6px 18px #0007;user-select:none;overflow:hidden}
+.node:hover{border-color:#83c6ff}.node.sel{box-shadow:0 0 0 2px var(--accent),0 6px 18px #0008}.node.flag{border-color:var(--warn)}.node.hl{box-shadow:0 0 0 3px #ffd166}.node.dim{opacity:.25}
+.node .bar{height:5px;background:#5c99d9}.k-Route .bar{background:#42c9b2}.k-Method .bar{background:#7f84e6}.k-NestedFunction .bar{background:#4cc2d9}.k-Class .bar{background:#8e9bb0}.k-External .bar{background:#5b6677}
+.k-EnvVar .bar{background:#b28ae0}.k-Variable .bar{background:#e0a35c}.k-HttpEndpoint .bar{background:#f0a35c}.k-Module .bar{background:#6a7c94}.k-Group .bar{background:repeating-linear-gradient(90deg,#7f84e6 0 8px,#5c99d9 8px 16px)}
+.k-NestedFunction{border-style:dashed}.k-External{opacity:.7}
+.node .kind{color:#9bb2d0;letter-spacing:.6px;font-size:9px;padding:6px 9px 1px;text-transform:uppercase;display:flex;gap:6px}
+.node .label{padding:0 9px 3px;font-size:12px;font-weight:700;overflow-wrap:anywhere}.node .foot{font-size:10px;color:#86a1c4;padding:0 9px 6px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.node .acts{display:flex;border-top:1px solid #2f4159}.node .acts button{flex:1;border:0;border-radius:0;background:transparent;padding:4px;font-size:11px;color:#9fc1e6}.node .acts button:hover{background:#28405c}
+.badge{font-size:9px;border-radius:4px;padding:0 4px;background:#33465f;color:#d6e2f0}.badge.w{background:#5a4320;color:#ffd79a}.badge.a{background:#1d4d5a;color:#a8ecff}.badge.s{background:#3b3060}
+.members{font-size:11px;padding:0 9px 6px;max-height:140px;overflow:auto}.members div{padding:1px 0;color:#c9d6e6}.members div:hover{color:#fff;text-decoration:underline}
+aside{width:380px;min-width:300px;border-left:1px solid var(--line);background:var(--panel);display:flex;flex-direction:column}
+.tabs{display:flex;border-bottom:1px solid var(--line)}.tabs button{flex:1;border:0;border-radius:0;background:transparent;padding:10px;color:var(--dim)}.tabs button.on{color:var(--text);border-bottom:2px solid var(--accent);background:transparent}
+.pane{overflow-y:auto;padding:14px;flex:1;font-size:12px;line-height:1.5}.pane h3{font-size:11px;color:#a9bfd9;letter-spacing:.6px;text-transform:uppercase;margin:14px 0 6px}
+.metric{display:flex;justify-content:space-between;gap:10px;padding:3px 0;color:var(--dim)}.metric b{color:var(--text);text-align:right}
+.notice{padding:9px;border:1px solid #536784;background:#1c2a3c;border-radius:8px;color:#b8cbe0;margin:8px 0}.caution{border-color:#9c7548;color:#f0c48c}
+.finding{padding:9px;margin-bottom:7px;border:1px solid #43546e;border-radius:8px;background:#1b293a;cursor:pointer}.finding:hover{border-color:var(--warn)}.finding.on{border-color:#ffd166}
+.lvl{font-size:9px;font-weight:800;border-radius:4px;padding:1px 5px;margin-right:5px}.lvl.candidate{background:#6a4a17;color:#ffd79a}.lvl.fact{background:#24435f;color:#a9d4ff}
+.mono{font-family:ui-monospace,Consolas,monospace;font-size:11px;white-space:pre-wrap;overflow-wrap:anywhere}
+pre.src{background:#0d1622;border:1px solid #2a3a50;border-radius:6px;padding:8px;max-height:340px;overflow:auto;font-size:11px}
+a{color:#7cc4ff}.link{color:#7cc4ff;cursor:pointer}.link:hover{text-decoration:underline}
+#status{position:absolute;left:12px;bottom:12px;background:#182639ee;border:1px solid #364d68;border-radius:7px;font-size:11px;color:#b6cbe1;padding:7px 9px;max-width:70%;z-index:3}
+#status.err{color:var(--bad);border-color:#7a3b3b}#legend{position:absolute;right:12px;bottom:12px;background:#182639ee;border:1px solid #364d68;border-radius:7px;font-size:10px;color:#b6cbe1;padding:7px 9px;z-index:3}
+#legend svg{vertical-align:middle}#results{position:absolute;top:50px;z-index:20;background:var(--panel);border:1px solid #3c5370;border-radius:7px;max-height:360px;overflow:auto;width:420px;display:none}
+#results div{padding:6px 9px;font-size:12px;cursor:pointer;border-bottom:1px solid #22324a}#results div:hover{background:#203550}
+@media(max-width:1200px){aside{width:300px}#left{width:240px}}
+</style></head><body>
+<header><div><strong>Execution Path Explorer</strong><div class="sub" id="sub"></div></div>
+<div class="tb" style="position:relative"><input id="sym" placeholder="Find symbol (Enter = search CBM)" style="width:240px"><div id="results"></div></div>
+<div class="grow"></div>
+<div class="tb"><span style="font-size:11px;color:var(--dim)">Depth</span><select id="depth"><option>1</option><option>2</option><option selected>3</option><option>4</option><option>5</option></select>
+<button id="down" title="Expand selected node downstream (callees) to the chosen depth">Expand ▸</button><button id="up" title="Load callers / registration of the selected node">◂ Callers</button>
+<select id="group" title="Group functions into components"><option value="off">Group: off</option><option value="class">Group: class/module</option><option value="file">Group: file</option></select>
+<button id="tAux" title="Configuration reads, state writes, similarity edges">Config/state</button><button id="tExt" title="Builtins and library calls">External</button><button id="tLow" class="on" title="Low-confidence CBM name guesses and same-name candidate targets of ambiguous calls">Candidates</button><button id="fit">Fit</button></div></header>
+<main><section id="left"><div class="top"><input id="rq" placeholder="Filter routes (method, path, file)"><div id="rsum"></div></div><div id="routes"></div></section>
+<section id="canvas"><div id="world"><svg id="arrows"></svg><div id="nodes"></div></div><div id="status"></div><div id="legend"></div></section>
+<aside><div class="tabs"><button data-t="details" class="on">Details</button><button data-t="findings">Findings</button><button data-t="coverage">Coverage</button></div><div class="pane" id="pane"></div></aside></main>
+<script>
+let S=/*__INITIAL_STATE__*/null;
+const $=id=>document.getElementById(id);
+const esc=x=>{const e=document.createElement('span');e.textContent=String(x??'');return e.innerHTML};
+const LIVE=location.protocol!=='file:';
+const FLOW=new Set(['HANDLES','CALLS','ASYNC_CALLS','HTTP_CALLS','SPAWNS','CALL_REFERENCE','OVERRIDDEN_BY']);
+const STRUCT=new Set(['REGISTERS','INCLUDES']);const AUX=new Set(['CONFIGURES','WRITES','SIMILAR_TO','READS_TABLE','WRITES_TABLE']);
+const HIDE_KIND_EXT=new Set(['External']);
+let V={root:'',sel:'',tab:'details',group:'off',aux:false,ext:false,low:true,collapsed:new Set(),extra:new Set(),ungroup:new Set(),more:new Map(),hlNodes:new Set(),hlEdges:new Set(),finding:'',scale:1,tx:40,ty:30,busy:false};
+let N=new Map(),OUT=new Map(),IN=new Map(),POS=new Map(),VIS=new Set(),FLAG=new Set();
+function ekey(e){return e.from+'\u0001'+e.to+'\u0001'+e.type}
+function index(){N=new Map(S.nodes.map(n=>[n.id,n]));OUT=new Map();IN=new Map();for(const e of S.edges){if(!OUT.has(e.from))OUT.set(e.from,[]);if(!IN.has(e.to))IN.set(e.to,[]);OUT.get(e.from).push(e);IN.get(e.to).push(e)}FLAG=new Set(S.findings.flatMap(f=>[f.anchor,...f.related]))}
+function merge(d){if(!d.delta){S=d;index();return}const have=new Set(S.nodes.map(n=>n.id)),hk=new Set(S.edges.map(ekey));for(const n of d.nodes)if(!have.has(n.id))S.nodes.push(n);for(const e of d.edges)if(!hk.has(ekey(e)))S.edges.push(e);for(const k of ['routes','findings','coverage','stats','expanded','unresolved','analysis_scope','ready','ready_error'])S[k]=d[k];index()}
+function status(t,err){const s=$('status');s.textContent=t;s.className=err?'err':''}
+async function api(path){const r=await fetch(path);let j;try{j=await r.json()}catch(e){throw Error('Bad response '+r.status)}if(!r.ok)throw Error((j.kind?j.kind+': ':'')+(j.error||r.status));return j}
+const isExp=(id,d)=>S.expanded.includes(d+'|'+id);
+function edgeShown(e){if(e.type==='CANDIDATE_CALL')return V.low;if(e.low_confidence&&!V.low)return false;if(AUX.has(e.type))return V.aux;return FLOW.has(e.type)||STRUCT.has(e.type)}
+function nodeShown(id){const n=N.get(id);if(!n)return false;if(!V.ext&&(n.kind==='External'))return false;if(!V.aux&&(n.kind==='EnvVar'||n.kind==='Variable'||n.kind==='Table'))return false;return true}
+function label(id){const n=N.get(id);return n?n.label:id}
+// ---------- visible graph: downstream BFS from root, upstream BFS, plus user-added extras ----------
+function visible(){const col=new Map(),more=new Map();if(!V.root||!N.has(V.root))return{col,more,edges:[]};col.set(V.root,0);
+ let q=[V.root];while(q.length){const id=q.shift(),c=col.get(id);if(c>=12||V.collapsed.has(id))continue;const kids=(OUT.get(id)||[]).filter(e=>edgeShown(e)&&nodeShown(e.to)&&e.to!==id&&!STRUCT.has(e.type)).map(e=>e.to);const uniq=[...new Set(kids)].sort((a,b)=>label(a).localeCompare(label(b)));const lim=V.more.get(id)||15;if(uniq.length>lim)more.set(id,uniq.length-lim);for(const k of uniq.slice(0,lim))if(!col.has(k)){col.set(k,c+1);q.push(k)}}
+ q=[V.root];const up=new Map([[V.root,0]]);while(q.length){const id=q.shift(),c=up.get(id);if(c<=-4)continue;for(const e of (IN.get(id)||[])){if(!edgeShown(e)||!nodeShown(e.from)||col.has(e.from))continue;if(!(STRUCT.has(e.type)||e.type==='HANDLES'||isExp(id,'in')))continue;col.set(e.from,c-1);up.set(e.from,c-1);q.push(e.from)}}
+ for(let pass=0;pass<3;pass++)for(const id of V.extra){if(col.has(id)||!N.has(id))continue;const succ=(OUT.get(id)||[]).map(e=>e.to).filter(t=>col.has(t));const pred=(IN.get(id)||[]).map(e=>e.from).filter(f=>col.has(f));if(succ.length)col.set(id,Math.min(...succ.map(t=>col.get(t)))-1);else if(pred.length)col.set(id,Math.max(...pred.map(f=>col.get(f)))+1)}
+ for(const id of V.hlNodes)if(!col.has(id)&&N.has(id)){const pred=(IN.get(id)||[]).map(e=>e.from).filter(f=>col.has(f));col.set(id,pred.length?Math.max(...pred.map(f=>col.get(f)))+1:1)}
+ for(const id of V.extra)if(!col.has(id)&&N.has(id)){const pred=(IN.get(id)||[]).map(e=>e.from).filter(f=>col.has(f));if(pred.length)col.set(id,Math.max(...pred.map(f=>col.get(f)))+1)}
+ const edges=S.edges.filter(e=>col.has(e.from)&&col.has(e.to)&&edgeShown(e));return{col,more,edges}}
+// ---------- grouping: merge same-component nodes within a column ----------
+function compKey(n){if(V.group==='file')return n.file||n.component;return n.component}
+function grouped(col){const disp=new Map(),members=new Map();for(const [id,c] of col){const n=N.get(id);let key=id;if(V.group!=='off'&&id!==V.root&&id!==V.sel&&n.kind!=='Route'&&!V.hlNodes.has(id)){const ck=compKey(n);if(ck&&!V.ungroup.has(ck))key='grp::'+ck+'::'+c}disp.set(id,key);if(!members.has(key))members.set(key,{col:c,ids:[]});members.get(key).ids.push(id)}
+ for(const [k,m] of members)if(k.startsWith('grp::')&&m.ids.length<2){disp.set(m.ids[0],m.ids[0]);members.delete(k);members.set(m.ids[0],m)}return{disp,members}}
+// ---------- layout ----------
+function render(){index();const {col,more,edges}=visible();VIS=new Set(col.keys());const {disp,members}=grouped(col);
+ const cols=new Map();for(const [k,m] of members){if(!cols.has(m.col))cols.set(m.col,[]);cols.get(m.col).push(k)}
+ let this_y=30;const ypos=new Map();POS=new Map();const H=new Map();let w=600,h=400;
+ const dEdges=new Map();for(const e of edges){const a=disp.get(e.from),b=disp.get(e.to);if(!a||!b||a===b)continue;const k=a+'\u0001'+b;if(!dEdges.has(k))dEdges.set(k,{from:a,to:b,list:[]});dEdges.get(k).list.push(e)}
+ const preds=new Map();for(const d of dEdges.values()){if(!preds.has(d.to))preds.set(d.to,[]);preds.get(d.to).push(d.from)}
+ for(const [id,n] of more){const k=disp.get(id);if(!k||!members.has(k))continue;const mk='more::'+id;const c=members.get(k).col+1;members.set(mk,{col:c,ids:[],more:id,count:n});if(!cols.has(c))cols.set(c,[]);cols.get(c).push(mk);dEdges.set(k+'\u0001'+mk,{from:k,to:mk,list:[{type:'CALLS'}]});if(!preds.has(mk))preds.set(mk,[]);preds.get(mk).push(k)}
+ const WRAP=12,CW=270;let xcur=40;for(const c of [...cols.keys()].sort((a,b)=>a-b)){const ks=cols.get(c);const bc=k=>{const ps=(preds.get(k)||[]).filter(p=>ypos.has(p));return ps.length?ps.reduce((s,p)=>s+ypos.get(p),0)/ps.length:1e9};
+  ks.sort((a,b)=>(a.startsWith('more::')-b.startsWith('more::'))||bc(a)-bc(b)||dlabel(a,members).localeCompare(dlabel(b,members)));const chunks=Math.ceil(ks.length/WRAP);
+  ks.forEach((k,i)=>{const m=members.get(k);const x=xcur+Math.floor(i/WRAP)*CW;if(i%WRAP===0)this_y=30;const hh=k.startsWith('grp::')?92+Math.min(8,m.ids.length)*15:k.startsWith('more::')?50:96;POS.set(k,{x,y:this_y});H.set(k,hh);ypos.set(k,this_y+hh/2);this_y+=hh+22;w=Math.max(w,x+260);h=Math.max(h,this_y+20)});xcur+=chunks*CW+(chunks>1?40:20)}
+ $('world').style.width=w+'px';$('world').style.height=h+'px';const svg=$('arrows');svg.setAttribute('width',w);svg.setAttribute('height',h);
+ let html='<defs>'+['#6c95c0','#ffd166'].map((c,i)=>`<marker id="t${i}" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto"><path d="M0 0L8 3L0 6Z" fill="${c}"/></marker>`).join('')+'</defs>';
+ for(const d of dEdges.values()){const f=POS.get(d.from),t=POS.get(d.to);if(!f||!t)continue;const e=d.list[0];const back=t.x<=f.x;const x1=f.x+228,y1=f.y+Math.min(40,H.get(d.from)/2),x2=t.x,y2=t.y+Math.min(40,H.get(d.to)/2);
+  const bend=back?Math.max(80,(x1-x2)/2+60):Math.max(30,(x2-x1)/2);const path=`M${x1} ${y1} C${x1+bend} ${y1},${x2-bend} ${y2},${x2} ${y2}`;
+  const cls=e.props&&e.props.awaited?'async':e.type;const hl=d.list.some(x=>V.hlEdges.has(ekey(x)));const low=d.list.every(x=>x.low_confidence);
+  const tip=d.list.slice(0,6).map(x=>`${x.type}${x.props&&x.props.awaited?' (await)':''} ${x.file||''}${x.line?':'+x.line:''} [${x.source||''}${x.props&&x.props.strategy?' '+x.props.strategy:''}${x.props&&x.props.confidence!=null?' '+x.props.confidence:''}]`).join('\n')+(d.list.length>6?`\n… ${d.list.length-6} more`:'');
+  html+=`<path class="edge e-${esc(cls)}${low?' low':''}${hl?' hl':''}" d="${path}" marker-end="url(#t${hl?1:0})"><title>${esc(tip)}</title></path>`;if(d.list.length>1)html+=`<text class="elabel" x="${(x1+x2)/2}" y="${(y1+y2)/2-4}">×${d.list.length}</text>`}
+ svg.innerHTML=html;const box=$('nodes');box.replaceChildren();const q=$('sym').value.trim().toLowerCase();
+ for(const [k,p] of POS){const m=members.get(k);const el=document.createElement('div');el.style.left=p.x+'px';el.style.top=p.y+'px';
+  if(k.startsWith('more::')){el.className='node k-Group';el.innerHTML=`<div class="bar"></div><div class="label" style="padding:9px">+${m.count} more callees</div>`;el.onclick=()=>{V.more.set(m.more,(V.more.get(m.more)||15)+30);render()};box.appendChild(el);continue}
+  if(k.startsWith('grp::')){const ck=k.split('::')[1];el.className='node k-Group'+(m.ids.some(i=>FLAG.has(i))?' flag':'');el.innerHTML=`<div class="bar"></div><div class="kind">Component · ${m.ids.length}</div><div class="label">${esc(ck.split('.').slice(-2).join('.'))}</div><div class="members">${m.ids.sort((a,b)=>label(a).localeCompare(label(b))).map(i=>`<div data-id="${esc(i)}">${esc(label(i))}</div>`).join('')}</div><div class="acts"><button data-a="ungroup">Ungroup</button></div>`;
+   el.querySelectorAll('.members div').forEach(d=>d.onclick=ev=>{ev.stopPropagation();select(d.dataset.id)});el.querySelector('[data-a=ungroup]').onclick=ev=>{ev.stopPropagation();V.ungroup.add(ck);render()};box.appendChild(el);continue}
+  const n=N.get(k);const unr=(S.unresolved[k]||[]).length;const fin=FLAG.has(k);const ex=isExp(k,'out');
+  el.className=`node k-${n.kind}${k===V.sel?' sel':''}${fin?' flag':''}${V.hlNodes.has(k)?' hl':''}${q&&!(`${n.label} ${n.qn} ${n.file}`.toLowerCase().includes(q))?' dim':''}`;
+  const badges=[n.async?'<span class="badge a">async</span>':'',n.source==='ast'?'<span class="badge s">AST</span>':'',unr?`<span class="badge w" title="unresolved/ambiguous calls">⚠${unr}</span>`:'',fin?'<span class="badge w">finding</span>':''].join('');
+  el.innerHTML=`<div class="bar"></div><div class="kind">${esc(n.kind)} ${badges}</div><div class="label">${esc(n.label)}</div><div class="foot">${esc(n.file||'')}${n.line?':'+n.line:''}</div><div class="acts"><button data-a="up" title="callers">◂</button><button data-a="col" title="collapse/expand subtree">${V.collapsed.has(k)?'▣ show':'▢ hide'}</button><button data-a="down" title="expand downstream">${ex?'✓':'+'} ▸</button></div>`;
+  el.onclick=()=>select(k);el.ondblclick=()=>expand(k,'out');
+  el.querySelector('[data-a=up]').onclick=ev=>{ev.stopPropagation();expand(k,'in')};el.querySelector('[data-a=down]').onclick=ev=>{ev.stopPropagation();V.collapsed.delete(k);expand(k,'out')};
+  el.querySelector('[data-a=col]').onclick=ev=>{ev.stopPropagation();V.collapsed.has(k)?V.collapsed.delete(k):V.collapsed.add(k);render()};box.appendChild(el)}
+ transform();routesList();pane();legend();
+ const nE=[...dEdges.values()].length;if(!V.busy)status(`${VIS.size} nodes · ${nE} edges shown · ${S.nodes.length} nodes / ${S.edges.length} edges loaded${LIVE?'':' · OFFLINE SNAPSHOT (expansion disabled)'}${S.ready_error?' · '+S.ready_error:''}`,!!S.ready_error)}
+function dlabel(k,members){return k.startsWith('grp::')?k:label(k)}
+function legend(){const items=[['CALLS','call'],['async','await'],['SPAWNS','spawn'],['HANDLES','handles'],['REGISTERS','registers'],['HTTP_CALLS','http'],['OVERRIDDEN_BY','impl'],['CANDIDATE_CALL','candidate'],['CONFIGURES','config'],['WRITES','writes']];
+ $('legend').innerHTML=items.map(([c,t])=>`<svg width="26" height="8"><path class="edge e-${c}" d="M1 4H25"/></svg>${t}`).join(' &nbsp;')}
+// ---------- interactions ----------
+function select(id){V.sel=id;V.tab='details';render();center(id)}
+function setRoot(id){V.root=id;V.sel=id;V.collapsed.clear();V.extra.clear();V.hlNodes.clear();V.hlEdges.clear();V.finding='';V.ungroup.clear();render();fit()}
+async function expand(id,dir,depth){if(!LIVE){status('Offline snapshot: start pathway_explorer.py to expand.',true);return}if(V.busy)return;V.busy=true;
+ const dd=depth||+$('depth').value;status(`Loading ${dir==='in'?'callers of':'downstream of'} ${label(id)} (depth ${dir==='in'?1:dd})…`);
+ try{const d=await api(`/api/expand?id=${encodeURIComponent(id)}&dir=${dir}&depth=${dd}`);merge(d);if(dir==='in'){for(const e of IN.get(id)||[])V.extra.add(e.from)}V.busy=false;render();
+  const r=d.request;status(`${dir==='in'?'Callers':'Downstream'} of ${label(id)}: +${d.nodes.length} nodes, +${d.edges.length} edges in ${r.ms} ms (${r.runs.map(x=>`${x.cbm_expansions} fetched / ${x.cache_hits} cached${x.truncated?' / TRUNCATED at cap':''}`).join('; ')}).`)}
+ catch(e){V.busy=false;render();status(`Expansion failed for ${label(id)} — ${e.message}. Nothing was cached; retry is safe.`,true)}}
+async function openRoute(id){setRoot(id);if(LIVE&&!isExp(id,'out')){await expand(id,'out',+$('depth').value);if(!isExp(id,'in'))await expand(id,'in',1);fit()}}
+// ---------- route list ----------
+function routesList(){const q=$('rq').value.trim().toLowerCase();const box=$('routes');const rs=S.routes.filter(r=>!q||`${r.method} ${r.path} ${r.file} ${r.handler?r.handler.qual:''}`.toLowerCase().includes(q));
+ let html='',app=null;for(const r of rs){if(r.app!==app){app=r.app;html+=`<div class="app">${esc(app||'(not mounted)')}</div>`}const ex=isExp(r.id,'out');const bad=r.status!=='registered'||r.handler_status!=='resolved';
+  html+=`<div class="r${r.id===V.root?' sel':''}" data-id="${esc(r.id)}" title="${esc(r.file+':'+r.line+' · '+r.status+' · handler '+(r.handler?r.handler.qual:'unresolved'))}"><span class="m ${esc(r.method)}">${esc(r.method)}</span><span class="p">${esc(r.path)}</span>${bad?`<span class="w">${esc(r.status)}</span>`:''}${r.conditional_registration?'<span class="w" title="registered under a branch / after an early return: may be absent at runtime">cond</span>':''}${ex?'<span class="x">●</span>':''}</div>`}
+ box.innerHTML=html||'<div class="notice">No routes match.</div>';box.querySelectorAll('.r').forEach(d=>d.onclick=()=>openRoute(d.dataset.id));
+ const c=S.coverage;$('rsum').innerHTML=`<b>${S.routes.length}</b> routes shown of <b>${c.routes_discovered}</b> discovered · ${Object.entries(c.routes_by_status).map(([k,v])=>`${v} ${k}`).join(', ')}<br>handlers: ${Object.entries(c.handlers).map(([k,v])=>`${v} ${k.replace(/_/g,' ')}`).join(', ')} · expanded ${c.routes_expanded}`}
+// ---------- side panes ----------
+function pane(){document.querySelectorAll('.tabs button').forEach(b=>b.classList.toggle('on',b.dataset.t===V.tab));const p=$('pane');if(V.tab==='details')p.innerHTML=details();else if(V.tab==='findings')p.innerHTML=findings();else p.innerHTML=coverage();wirePane()}
+function elist(list,dir){if(!list.length)return '<div style="color:var(--dim)">none loaded</div>';return list.slice(0,80).map(e=>{const o=dir==='out'?e.to:e.from;return `<div><span class="link" data-sel="${esc(o)}">${esc(label(o))}</span> <span style="color:var(--dim)">${esc(e.type)}${e.props&&e.props.awaited?' await':''}${e.low_confidence?' low-conf':''} · ${esc((e.file||'')+(e.line?':'+e.line:''))} · ${esc(e.source||'')}${e.props&&e.props.strategy?' '+esc(e.props.strategy):''}</span></div>`}).join('')+(list.length>80?`<div>… ${list.length-80} more</div>`:'')}
+function details(){const n=N.get(V.sel);if(!n)return '<div class="notice">Select a route on the left, or search a symbol. Click a node for details; ▸ expands callees, ◂ loads callers.</div>';
+ const abs=n.file?(S.scope.replace(/\\/g,'/')+'/'+n.file):'';const outs=(OUT.get(n.id)||[]),ins=(IN.get(n.id)||[]);const unr=S.unresolved[n.id]||[];
+ return `<div class="mono"><b>${esc(n.kind)}</b> ${esc(n.label)}</div><div class="mono" style="color:var(--dim)">${esc(n.qn)}</div>
+ <div style="margin:6px 0">${n.file?`<a href="vscode://file/${esc(abs)}:${n.line||1}">${esc(n.file)}:${n.line||''}</a> · <span class="link" data-src="${esc(n.id)}">show source</span>`:'(no source location)'} · source: ${esc(n.source)}</div>
+ <div class="tb" style="flex-wrap:wrap"><button data-root="${esc(n.id)}">Focus as root</button><button data-exp="out">Expand ▸</button><button data-exp="in">◂ Callers</button></div>
+ <div id="srcbox"></div><h3>Outgoing (${outs.length}) ${isExp(n.id,'out')?'· complete':'· not expanded'}</h3>${elist(outs,'out')}
+ <h3>Incoming (${ins.length}) ${isExp(n.id,'in')?'· complete':'· partial (only edges loaded via other nodes)'}</h3>${elist(ins,'in')}
+ ${unr.length?`<h3>Unresolved / ambiguous calls (${unr.length})</h3>`+unr.slice(0,60).map(u=>`<div class="mono">L${u.line} ${esc(u.callee)} — <span style="color:var(--warn)">${esc(u.status)}</span> ${esc(u.reason||'')}${u.candidates&&u.candidates.length?'<br>&nbsp;&nbsp;candidates: '+u.candidates.map(c=>`<span class="link" data-sel="${esc(c)}">${esc(c.split('.').slice(-2).join('.'))}</span>`).join(', '):''}</div>`).join(''):''}
+ ${S.findings.filter(f=>f.anchor===n.id||f.related.includes(n.id)).map(f=>`<h3>Finding</h3><div class="finding" data-f="${esc(f.id)}"><span class="lvl ${f.level}">${f.level}</span><b>${esc(f.kind)}</b><div>${esc(f.title)}</div></div>`).join('')}`}
+function findings(){const fs=S.findings;if(!fs.length)return `<div class="notice">${esc((S.analysis_scope||{}).note||'No structural candidates in the loaded graph.')} This is not a clean-architecture verdict.</div>`;
+ const sc=S.analysis_scope||{};return `<div class="notice caution">Facts are observed structure; candidates are structural patterns that <b>may</b> indicate a defect. Nothing here is semantically verified — every item needs source review. Analysis covers only loaded neighbourhoods (${sc.roots_with_loaded_paths||0} routes with loaded paths).${sc.capped_kinds&&sc.capped_kinds.length?` Capped at ${sc.cap_per_kind} per kind: ${sc.capped_kinds.map(k=>`${k} (${sc.counts_by_kind[k]})`).join(', ')}.`:''}</div>`+
+ fs.map(f=>`<div class="finding${f.id===V.finding?' on':''}" data-f="${esc(f.id)}"><span class="lvl ${f.level}">${f.level}</span><b>${esc(f.kind)}</b><div><b>${esc(label(f.anchor))}</b> — ${esc(f.title)}</div><div style="color:var(--dim)">${esc(f.detail)}</div>${f.id===V.finding?evidence(f):''}</div>`).join('')}
+function evidence(f){return f.evidence.map((ev,i)=>ev.path?`<div class="mono" style="margin-top:5px">${ev.role?esc(ev.role)+': ':''}${ev.path.map(x=>`<span class="link" data-sel="${esc(x)}">${esc(label(x))}</span>`).join(' → ')}${ev.config?'<br>config: '+esc(ev.config.join(', ')||'none'):''}<br>${(ev.edges||[]).map(e=>esc(`${e.type||'?'} ${e.file||''}${e.line?':'+e.line:''}`)).join(' | ')}</div>`:`<div class="mono" style="margin-top:5px">shared: ${esc((ev.shared||[]).map(x=>x.split('.').pop()).join(', '))}<br>only A: ${esc((ev.only_a||[]).map(x=>x.split('.').pop()).join(', '))}<br>only B: ${esc((ev.only_b||[]).map(x=>x.split('.').pop()).join(', '))}</div>`).join('')+`<div style="color:var(--dim);margin-top:4px">Semantic verification: ${esc(f.semantic_verification)}</div>`}
+function coverage(){const c=S.coverage,st=S.stats,x=c.route_cross_check_vs_cbm||{};const m=(k,v)=>`<div class="metric">${k}<b>${esc(v)}</b></div>`;
+ return `<h3>Routes</h3>${m('Discovered (AST)',c.routes_discovered)}${Object.entries(c.routes_by_status).map(([k,v])=>m('· '+k,v)).join('')}${m('Loaded in selector',c.routes_loaded_in_selector)}${m('Expanded',c.routes_expanded)}${Object.entries(c.handlers).map(([k,v])=>m('Handler: '+k.replace(/_/g,' '),v)).join('')}
+ <h3>Cross-check vs CBM Route nodes</h3>${x.available?m('CBM Route nodes',x.cbm_route_nodes)+m('AST METHOD+path keys',x.ast_route_keys)+m('Matched',x.matched)+m('AST-only',x.ast_only.length)+m('CBM-only (server)',x.cbm_only_server.length)+m('CBM-only (outbound HTTP targets)',x.cbm_only_client_http_targets.length)+`<div class="mono" style="color:var(--dim)">${esc([...x.ast_only,...x.cbm_only_server,...x.cbm_only_client_http_targets].join('\n'))}</div>`:'<div style="color:var(--dim)">pending CBM</div>'}
+ <h3>Graph</h3>${m('Loaded nodes',c.loaded_nodes)}${m('Loaded edges',c.loaded_edges)}${Object.entries(c.edge_sources).map(([k,v])=>m('Edges from '+k,v)).join('')}${m('Expansions cached',c.expanded_entries)}${m('Incomplete (row cap)',c.incomplete_entries.length)}
+ <h3>Unresolved calls (in expanded nodes)</h3>${Object.entries(c.unresolved_calls).map(([k,v])=>m(k,v)).join('')||'<div style="color:var(--dim)">none</div>'}
+ <h3>Limitations</h3>${[...c.cbm_limitations,...c.route_limitations.map(l=>`${l.kind} ${l.file}:${l.line} ${l.detail}`),...c.parse_errors].map(t=>`<div class="notice">${esc(t)}</div>`).join('')}<div class="notice caution">Complete repository audit: NO. Static analysis cannot see runtime-computed dispatch; absent edges are not evidence of absent execution paths.</div>
+ <h3>Performance</h3>${m('CBM calls (this process)',st.cbm_calls)}${m('CBM query seconds',st.cbm_query_seconds)}${m('Cache hits / misses',`${st.cache_hits} / ${st.cache_misses}`)}${m('Last expansion ms',st.last_expand_ms??'-')}${m('Index runs (this process)',st.index_runs)}${st.index?m('Last index',`${st.index.at} (${st.index.seconds}s, ${st.index.nodes} nodes)`):''}${m('CBM version',st.cbm_version||'-')}`}
+function wirePane(){const p=$('pane');p.querySelectorAll('[data-sel]').forEach(a=>a.onclick=()=>{const id=a.dataset.sel;if(!VIS.has(id))V.extra.add(id);select(id)});
+ p.querySelectorAll('[data-root]').forEach(b=>b.onclick=()=>{setRoot(b.dataset.root);if(!isExp(b.dataset.root,'out'))expand(b.dataset.root,'out')});
+ p.querySelectorAll('[data-exp]').forEach(b=>b.onclick=()=>expand(V.sel,b.dataset.exp));
+ p.querySelectorAll('[data-src]').forEach(b=>b.onclick=async()=>{if(!LIVE){$('srcbox').innerHTML='<div class="notice">Source view needs the live server.</div>';return}try{const s=await api('/api/source?id='+encodeURIComponent(b.dataset.src));$('srcbox').innerHTML=`<pre class="src">${s.text.split('\n').map((l,i)=>esc(String(s.start+i).padStart(5)+'  '+l)).join('\n')}</pre>`}catch(e){$('srcbox').innerHTML=`<div class="notice caution">${esc(e.message)}</div>`}});
+ p.querySelectorAll('[data-f]').forEach(d=>d.onclick=()=>showFinding(d.dataset.f))}
+function showFinding(fid){const f=S.findings.find(x=>x.id===fid);if(!f)return;V.finding=fid;V.tab='findings';V.hlNodes=new Set([f.anchor,...f.related]);V.hlEdges=new Set();
+ const paths=f.evidence.filter(e=>e.path).map(e=>e.path);for(const p of paths){p.forEach(x=>V.hlNodes.add(x));for(let i=0;i+1<p.length;i++)for(const e of OUT.get(p[i])||[])if(e.to===p[i+1])V.hlEdges.add(ekey(e))}
+ const start=paths.length&&N.has(paths[0][0])?paths[0][0]:f.anchor;if(V.root!==start){V.root=start;V.collapsed.clear();V.extra.clear()}for(const x of V.hlNodes)V.extra.add(x);V.sel=f.anchor;render();fit()}
+// ---------- symbol search ----------
+$('sym').oninput=()=>{render()};$('sym').onkeydown=async e=>{if(e.key!=='Enter')return;const q=$('sym').value.trim();if(!q)return;const box=$('results');
+ const local=S.nodes.filter(n=>`${n.label} ${n.qn}`.toLowerCase().includes(q.toLowerCase())).slice(0,15);let remote=[];if(LIVE){try{remote=(await api('/api/search?q='+encodeURIComponent(q))).results}catch(err){status(err.message,true)}}
+ const seen=new Set();const all=[...local,...remote].filter(n=>!seen.has(n.id)&&seen.add(n.id));box.innerHTML=all.map(n=>`<div data-id="${esc(n.id)}"><b>${esc(n.label)}</b> <span style="color:var(--dim)">${esc(n.kind)} · ${esc(n.file||'')}:${n.line||''}</span></div>`).join('')||'<div>No matches</div>';box.style.display='block';
+ box.querySelectorAll('[data-id]').forEach(d=>d.onclick=()=>{box.style.display='none';const n=all.find(x=>x.id===d.dataset.id);if(n&&!N.has(n.id)){S.nodes.push(n);index()}setRoot(d.dataset.id);if(LIVE&&!isExp(d.dataset.id,'out'))expand(d.dataset.id,'out')})};
+document.addEventListener('click',e=>{if(!e.target.closest('#results')&&e.target!==$('sym'))$('results').style.display='none'});
+// ---------- pan/zoom ----------
+function transform(){$('world').style.transform=`translate(${V.tx}px,${V.ty}px) scale(${V.scale})`}
+function fit(){const c=$('canvas'),w=parseFloat($('world').style.width)||700,h=parseFloat($('world').style.height)||400;const full=Math.min((c.clientWidth-40)/w,(c.clientHeight-40)/h);V.scale=Math.max(.5,Math.min(1.05,full));if(full>=.5){V.tx=Math.max(10,(c.clientWidth-w*V.scale)/2);V.ty=Math.max(10,(c.clientHeight-h*V.scale)/2);transform()}else{const p=POS.get(V.root)||{x:40,y:30};V.tx=20-30*V.scale;V.ty=20-Math.max(0,p.y-120)*V.scale;transform()}}
+function center(id){let p=POS.get(id);if(!p)for(const [k,pp] of POS)if(k.startsWith('grp::')&&k.includes(N.get(id)?.component||'\u0000'))p=pp;if(!p)return;const c=$('canvas');V.tx=c.clientWidth/2-(p.x+114)*V.scale;V.ty=c.clientHeight/2-(p.y+45)*V.scale;transform()}
+let drag=null;const cv=$('canvas');cv.addEventListener('pointerdown',e=>{if(e.target.closest('.node'))return;drag={x:e.clientX,y:e.clientY,tx:V.tx,ty:V.ty};cv.setPointerCapture(e.pointerId)});cv.addEventListener('pointermove',e=>{if(!drag)return;V.tx=drag.tx+e.clientX-drag.x;V.ty=drag.ty+e.clientY-drag.y;transform()});cv.addEventListener('pointerup',()=>{drag=null});
+cv.addEventListener('wheel',e=>{e.preventDefault();const o=V.scale;V.scale=Math.max(.12,Math.min(2.5,V.scale*(e.deltaY<0?1.12:.9)));const b=cv.getBoundingClientRect(),x=e.clientX-b.left,y=e.clientY-b.top;V.tx=x-(x-V.tx)*V.scale/o;V.ty=y-(y-V.ty)*V.scale/o;transform()},{passive:false});
+// ---------- toolbar ----------
+$('down').onclick=()=>V.sel&&expand(V.sel,'out');$('up').onclick=()=>V.sel&&expand(V.sel,'in');$('fit').onclick=fit;$('rq').oninput=routesList;
+$('group').onchange=()=>{V.group=$('group').value;V.ungroup.clear();render()};
+const tog=(b,k)=>{$(b).onclick=()=>{V[k]=!V[k];$(b).classList.toggle('on',V[k]);render()}};tog('tAux','aux');tog('tExt','ext');tog('tLow','low');
+document.querySelectorAll('.tabs button').forEach(b=>b.onclick=()=>{V.tab=b.dataset.t;pane()});
+async function boot(){if(!S&&LIVE)S=await api('/api/state');index();$('sub').textContent=`${S.project} · ${S.scope}`;
+ const first=S.routes.find(r=>isExp(r.id,'out'))||S.routes[0];if(first){V.root=first.id;V.sel=first.id}render();fit();
+ if(LIVE&&!S.ready){status('CBM session warming up / indexing in background; routes are already available.');const poll=setInterval(async()=>{try{const s=await api('/api/state');if(s.ready){clearInterval(poll);merge(s);render()}}catch(e){}},1500)}
+ window.__explorer={get state(){return S},get view(){return V},visibleCount:()=>VIS.size,openRoute,expand,showFinding,render}}
+boot().catch(e=>status('Failed to load state: '+e.message,true));
+</script></body></html>

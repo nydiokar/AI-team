@@ -97,6 +97,8 @@ NOT_A_JOB |= _load_sidecar_exclusions()
 VALID_STATUS = {"ready", "active", "blocked", "done", "dead"}
 FENCE = "```"
 YAML_BLOCK_RE = re.compile(r"^```yaml\s*\n(.*?)\n```", re.DOTALL)
+ARCH_CONTRACT_RE = re.compile(r"^```arch-contract[ \t]*$", re.MULTILINE)
+CONTRACT_CHECK = REPO_ROOT / ".claude" / "skills" / "architecture-pathway-audit" / "scripts" / "contract_check.py"
 
 
 @dataclass
@@ -381,6 +383,8 @@ def set_field(job_id: str, field_name: str, value: str) -> None:
     m = YAML_BLOCK_RE.search(text)
     if not m:
         raise SystemExit(f"{path.name} has no yaml block — run --migrate first")
+    if field_name == "status" and value == "done" and ARCH_CONTRACT_RE.search(text):
+        _arch_contract_gate(path)
     block = m.group(1)
 
     def replace_line(blk: str, key: str, val: str) -> str:
@@ -399,6 +403,20 @@ def set_field(job_id: str, field_name: str, value: str) -> None:
     if _read_yaml_block(path) is None:
         raise SystemExit(f"⚠ edit corrupted {path.name}'s yaml — reverted needed")
     print(f"{path.name}: {field_name} = {value} (updated_at bumped)")
+
+
+def _arch_contract_gate(path: Path) -> None:
+    """A packet that declares an end state (```arch-contract) cannot be marked done until the code at
+    HEAD matches it. Fails closed: no checker, a bad contract, or any violation refuses the transition.
+    The only way past a violation is a reasoned waiver inside the contract itself (visible in git)."""
+    if not CONTRACT_CHECK.is_file():
+        raise SystemExit(f"REFUSED {path.name}: has an arch-contract but {CONTRACT_CHECK} is missing")
+    run = subprocess.run([sys.executable, str(CONTRACT_CHECK), "--contract", str(path), "--repo", str(REPO_ROOT),
+                          "--rev", "HEAD"], capture_output=True, text=True, encoding="utf-8")
+    print(run.stdout, end="")
+    if run.returncode != 0:
+        raise SystemExit(f"REFUSED {path.name}: arch-contract not met at HEAD - status NOT changed to done."
+                         f"\n{run.stderr.strip()}".rstrip())
 
 
 def _inject_block(path: Path, block: str) -> None:
