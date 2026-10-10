@@ -9,6 +9,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Iterable, Optional
 
@@ -188,6 +189,50 @@ def terminate_many_popen(procs: Iterable[subprocess.Popen], timeout: float = 8.0
         terminate_subprocess_tree(proc, timeout=timeout)
 
 
+def process_tree_snapshot(pid: int) -> list:
+    """psutil handles for ``pid`` and all its descendants, taken NOW.
+
+    Take it while the root is alive: once the root exits, Windows has no way to
+    find its children (no process groups, orphans are not re-parented), so an
+    MCP server tree (cmd → npx → node) spawned by ``claude`` becomes unfindable.
+    Empty when psutil is absent or the pid is gone.
+    """
+    if pid <= 0 or psutil is None:
+        return []
+    try:
+        root = psutil.Process(pid)
+        return [root, *root.children(recursive=True)]
+    except Exception:
+        return []
+
+
+def terminate_snapshot(procs: list, timeout: float = 5.0) -> int:
+    """Terminate (then kill) every member of a ``process_tree_snapshot`` still running.
+
+    psutil re-checks each handle's identity (pid + create time) before signalling,
+    so a recycled pid is never hit. Returns how many were still running.
+    """
+    if psutil is None:
+        return 0
+    alive = [p for p in procs if _is_running(p)]
+    for p in alive:
+        with contextlib.suppress(Exception):
+            p.terminate()
+    with contextlib.suppress(Exception):
+        _, still = psutil.wait_procs(alive, timeout=timeout)
+        for p in still:
+            with contextlib.suppress(Exception):
+                p.kill()
+    return len(alive)
+
+
+def _is_running(proc: "psutil.Process") -> bool:
+    try:
+        return bool(proc.is_running()) and proc.status() != psutil.STATUS_ZOMBIE
+    except Exception:
+        return False
+
+
 # Env vars stamped into every worker-spawned backend child (inherited from the
 # worker's os.environ). A boot reaper uses them to distinguish THIS worker
 # incarnation's live children from its own prior-incarnation orphans — scoped by
@@ -245,6 +290,56 @@ def reap_stale_worker_children(
         try:
             terminate_process_tree(proc.info["pid"])
             reaped.append(int(proc.info["pid"]))
+        except Exception:
+            continue
+    return reaped
+
+
+def reap_unowned_worker_children(
+    current_incarnation: str,
+    current_node_id: str,
+    owned_pids: Iterable[int],
+    *,
+    min_age_sec: float = 600.0,
+    parent_pid: Optional[int] = None,
+    names: Iterable[str] = ("claude", "claude.exe"),
+) -> list[int]:
+    """Kill THIS worker's own backend children that no pooled session owns.
+
+    The live-incarnation counterpart of ``reap_stale_worker_children``: a
+    ``claude`` child whose session left the pool without a clean teardown (e.g.
+    ``mark_lost``, a failed disconnect) is unreachable yet keeps running. Reaped
+    only if it is a DIRECT child of ``parent_pid`` (default: this process),
+    carries this node's AND this incarnation's stamps, is not in ``owned_pids``,
+    and is older than ``min_age_sec`` (a session mid-spawn has not recorded its
+    pid yet). The whole tree (MCP servers) goes with it. Returns reaped pids.
+    """
+    if not current_incarnation or not current_node_id or psutil is None:
+        return []
+    parent = os.getpid() if parent_pid is None else parent_pid
+    owned = set(owned_pids)
+    wanted = {n.lower() for n in names}
+    cutoff = time.time() - min_age_sec
+    reaped: list[int] = []
+    for proc in psutil.process_iter(["pid", "name", "ppid", "create_time"]):
+        try:
+            info = proc.info
+            if (info.get("name") or "").lower() not in wanted:
+                continue
+            if info.get("ppid") != parent or info["pid"] in owned:
+                continue
+            if (info.get("create_time") or 0.0) > cutoff:
+                continue
+            env = proc.environ()
+            if env.get(WORKER_NODE_ENV, "") != current_node_id:
+                continue
+            if env.get(WORKER_INCARNATION_ENV, "") != current_incarnation:
+                continue
+        except Exception:
+            continue
+        try:
+            terminate_process_tree(info["pid"])
+            reaped.append(int(info["pid"]))
         except Exception:
             continue
     return reaped
