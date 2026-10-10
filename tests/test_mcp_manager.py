@@ -17,6 +17,13 @@ import pytest
 
 # Neutralise the .env bootstrap so importing the module reads no real secrets.
 os.environ["AI_TEAM_ENV_FILE"] = "/nonexistent/mcp_manager_test.env"
+# HERMETIC: a launching shell may export AI_TEAM_SESSION_ID / SESSION_ID (the
+# carrier does). dispatch_worker folds those into requester_session_id, which would
+# make the default-payload assertions below flaky. Clear them up front so the suite
+# is isolated from the environment it runs in (tests that WANT a requester set it
+# explicitly via monkeypatch).
+os.environ.pop("AI_TEAM_SESSION_ID", None)
+os.environ.pop("SESSION_ID", None)
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
 mcp_manager = importlib.import_module("mcp_manager")
@@ -1095,3 +1102,220 @@ def test_dispatch_worker_sends_its_own_session_as_requester(monkeypatch):
     monkeypatch.delenv("SESSION_ID")
     mcp_manager._dispatch_worker({"objective": "do x", "session_id": "s1"})
     assert "requester_session_id" not in seen["payload"]
+
+
+# --------------------------------------------------------------------------
+# Carrier discovery + machine-agnostic local-node resolution (Dispatch UX)
+# --------------------------------------------------------------------------
+
+# Mirrors the LIVE /api/nodes shape verified against the running gateway: carriers
+# carry a TOP-LEVEL managed_backends list, a status, and a tailscale_ip. Offline
+# nodes and nodes not managed-capable for the backend must be filtered out.
+_NODES_FIXTURE = {
+    "nodes": [
+        # Horse uses the REAL DB-fallback shape: managed_backends as a JSON STRING.
+        {"node_id": "Horse", "status": "online", "tailscale_ip": "100.112.245.29",
+         "managed_backends": '["claude", "codex", "opencode-server"]'},
+        {"node_id": "kanebra", "status": "online", "tailscale_ip": "100.88.11.88",
+         "managed_backends": ["claude", "codex", "opencode-server"]},
+        {"node_id": "kanebra-worker", "status": "offline", "tailscale_ip": "100.88.11.88",
+         "managed_backends": []},
+        # A hypothetical codex-only online carrier: must NOT appear for backend=claude.
+        {"node_id": "codex-only", "status": "online", "tailscale_ip": "100.99.0.1",
+         "managed_backends": ["codex"]},
+    ]
+}
+
+
+def _patch_nodes(monkeypatch, fixture=_NODES_FIXTURE):
+    def fake_request(method, path, payload=None, timeout=20.0, headers=None):
+        if method == "GET" and path == "/api/nodes":
+            return fixture
+        raise AssertionError(f"unexpected call {method} {path}")
+    monkeypatch.setattr(mcp_manager, "_api_request", fake_request)
+
+
+def _clear_identity(monkeypatch):
+    for key in mcp_manager._LOCAL_CARRIER_ID_ENV:
+        monkeypatch.delenv(key, raising=False)
+
+
+def test_node_managed_backends_reads_both_shapes():
+    # Live DB-fallback shape: top-level managed_backends as a real list.
+    assert mcp_manager._node_managed_backends(
+        {"managed_backends": ["claude", "x"]}) == ["claude", "x"]
+    # Live DB-fallback shape AS ACTUALLY SERVED: a flat SELECT * row stores list
+    # columns as raw JSON STRINGS. This is the real ground-truth shape (verified
+    # against the running gateway) — the filter must parse it, or every carrier
+    # reads as managed_backends=[] and NO carrier is ever found (the bug that made
+    # a live dispatch impossible).
+    assert mcp_manager._node_managed_backends(
+        {"managed_backends": '["claude", "codex", "opencode-server"]'}
+    ) == ["claude", "codex", "opencode-server"]
+    # In-process registry shape: nested under capabilities.
+    assert mcp_manager._node_managed_backends(
+        {"capabilities": {"managed_backends": ["codex"]}}) == ["codex"]
+    # Malformed JSON string ⇒ empty, never raises.
+    assert mcp_manager._node_managed_backends({"managed_backends": "{not json"}) == []
+    # Neither ⇒ empty, never raises.
+    assert mcp_manager._node_managed_backends({"node_id": "x"}) == []
+
+
+def test_online_managed_carriers_filters_offline_and_wrong_backend(monkeypatch):
+    _patch_nodes(monkeypatch)
+    ids = [c["node_id"] for c in mcp_manager._online_managed_carriers("claude")]
+    assert ids == ["Horse", "kanebra"]            # offline + codex-only excluded
+    assert [c["node_id"] for c in mcp_manager._online_managed_carriers("codex")] == [
+        "Horse", "kanebra", "codex-only"]
+
+
+def test_resolve_local_carrier_prefers_carrier_id_env(monkeypatch):
+    """The carrier daemon's own id env (WORKER_NODE_ID) resolves directly — but is
+    still validated against the live online managed-capable set."""
+    _patch_nodes(monkeypatch)
+    _clear_identity(monkeypatch)
+    monkeypatch.setenv("WORKER_NODE_ID", "Horse")
+    res = mcp_manager._resolve_local_carrier("claude")
+    assert res["node_id"] == "Horse"
+    assert "carrier-id env" in res["how"]
+
+
+def test_resolve_local_carrier_matches_tailscale_ip(monkeypatch):
+    """No usable env id ⇒ fall back to this host's tailscale IP matched to a node."""
+    _patch_nodes(monkeypatch)
+    _clear_identity(monkeypatch)
+    monkeypatch.setattr(
+        mcp_manager, "_local_identity",
+        lambda: {"env_ids": [], "tailscale_ip": "100.112.245.29", "hostname": "DESKTOP-3PGTBMF"},
+    )
+    res = mcp_manager._resolve_local_carrier("claude")
+    assert res["node_id"] == "Horse"
+    assert "tailscale IP" in res["how"]
+
+
+def test_resolve_local_carrier_hostname_does_not_match_is_unresolved(monkeypatch):
+    """DEFECT 2: the OS hostname is NOT the carrier id — with only a non-matching
+    hostname and no env/IP signal, resolution yields None (never mis-routes), and
+    exposes the candidate list for an actionable error."""
+    _patch_nodes(monkeypatch)
+    monkeypatch.setattr(
+        mcp_manager, "_local_identity",
+        lambda: {"env_ids": [], "tailscale_ip": "", "hostname": "DESKTOP-3PGTBMF"},
+    )
+    res = mcp_manager._resolve_local_carrier("claude")
+    assert res["node_id"] is None
+    assert set(res["candidates"]) == {"Horse", "kanebra"}
+
+
+def test_carrier_unavailable_hint_lists_online_carriers(monkeypatch):
+    _patch_nodes(monkeypatch)
+    hint = mcp_manager._carrier_unavailable_hint("claude", "DESKTOP-3PGTBMF")
+    assert "'DESKTOP-3PGTBMF' is not an online managed-capable carrier" in hint
+    assert "Horse (100.112.245.29)" in hint and "kanebra (100.88.11.88)" in hint
+    assert "codex-only" not in hint                 # wrong backend, excluded
+
+
+def test_carrier_unavailable_hint_degrades_silently(monkeypatch):
+    """A failure reaching /api/nodes must never mask the real 503 — empty suffix."""
+    def boom(method, path, payload=None, timeout=20.0, headers=None):
+        raise RuntimeError("gateway down")
+    monkeypatch.setattr(mcp_manager, "_api_request", boom)
+    assert mcp_manager._carrier_unavailable_hint("claude", "X") == ""
+
+
+def test_list_nodes_tool_lists_and_filters(monkeypatch):
+    _patch_nodes(monkeypatch)
+    out = mcp_manager._list_nodes_tool({})
+    assert "Horse" in out and "kanebra-worker" in out   # unfiltered: offline shown too
+    filtered = mcp_manager._list_nodes_tool({"backend": "claude"})
+    assert "Horse" in filtered and "kanebra" in filtered
+    assert "codex-only" not in filtered                 # not managed-capable for claude
+
+
+def test_dispatch_worker_resolves_local_sentinel_to_carrier(monkeypatch):
+    """node_id='local' is resolved to the registered carrier and sent to
+    /api/sessions — the Manager never hand-passes the mesh id."""
+    calls = []
+
+    def fake_request(method, path, payload=None, timeout=20.0, headers=None):
+        calls.append((method, path, payload))
+        if method == "GET" and path == "/api/nodes":
+            return _NODES_FIXTURE
+        if path == "/api/sessions":
+            return {"ok": True, "session": {"session_id": "ws_1"}}
+        return {"ok": True, "task_id": "t_local", "session": {"session_id": "ws_1"}}
+
+    monkeypatch.setattr(mcp_manager, "_api_request", fake_request)
+    _clear_identity(monkeypatch)
+    monkeypatch.setenv("WORKER_NODE_ID", "Horse")
+    out = mcp_manager._dispatch_worker({
+        "objective": "Implement T1", "cwd": "/repo", "node_id": "local", "model": "sonnet",
+    })
+    sess_call = next(c for c in calls if c[1] == "/api/sessions")
+    assert sess_call[2]["node_id"] == "Horse"           # sentinel → carrier id
+    assert "resolved to carrier 'Horse'" in out
+
+
+def test_dispatch_worker_local_sentinel_unresolved_fails_with_carrier_list(monkeypatch):
+    """Sentinel that resolves to nothing FAILS LOUD with the online-carrier list —
+    it never silently mis-routes (acceptance: 'FAIL with the rewritten actionable
+    error, never silently mis-route')."""
+    def fake_request(method, path, payload=None, timeout=20.0, headers=None):
+        if method == "GET" and path == "/api/nodes":
+            return _NODES_FIXTURE
+        raise AssertionError(f"must not dispatch; got {method} {path}")
+
+    monkeypatch.setattr(mcp_manager, "_api_request", fake_request)
+    monkeypatch.setattr(
+        mcp_manager, "_local_identity",
+        lambda: {"env_ids": [], "tailscale_ip": "", "hostname": "DESKTOP-3PGTBMF"},
+    )
+    with pytest.raises(ValueError) as ei:
+        mcp_manager._dispatch_worker({
+            "objective": "x", "cwd": "/repo", "node_id": "local", "model": "sonnet",
+        })
+    assert "Horse (100.112.245.29)" in str(ei.value)
+
+
+def test_dispatch_worker_explicit_node_id_unchanged(monkeypatch):
+    """A non-sentinel node_id passes through verbatim — no /api/nodes lookup, no
+    rewrite (current callers keep working exactly as before)."""
+    calls = []
+
+    def fake_request(method, path, payload=None, timeout=20.0, headers=None):
+        calls.append((method, path, payload))
+        if path == "/api/sessions":
+            return {"ok": True, "session": {"session_id": "ws_2"}}
+        return {"ok": True, "task_id": "t2", "session": {"session_id": "ws_2"}}
+
+    monkeypatch.setattr(mcp_manager, "_api_request", fake_request)
+    mcp_manager._dispatch_worker({
+        "objective": "x", "cwd": "/repo", "node_id": "Horse", "model": "sonnet",
+    })
+    assert not any(c[1] == "/api/nodes" for c in calls)  # no resolution round-trip
+    sess_call = next(c for c in calls if c[1] == "/api/sessions")
+    assert sess_call[2]["node_id"] == "Horse"
+
+
+def test_dispatch_worker_rewrites_carrier_unavailable_503(monkeypatch):
+    """DEFECT 1/2: a carrier_unavailable 503 from the dispatch is REWRITTEN to list
+    the valid online carriers (self-resolving error, modelled on the symbol index)."""
+    def fake_request(method, path, payload=None, timeout=20.0, headers=None):
+        if method == "GET" and path == "/api/nodes":
+            return _NODES_FIXTURE
+        if path == "/api/sessions":
+            raise RuntimeError(
+                'HTTP 503 on POST /api/sessions: {"ok": false, "reason": '
+                '"carrier_unavailable", "message": "no registered managed-capable '
+                "carrier 'DESKTOP-3PGTBMF' for backend 'claude'\"}"
+            )
+        raise AssertionError("should not reach /api/instructions")
+
+    monkeypatch.setattr(mcp_manager, "_api_request", fake_request)
+    with pytest.raises(RuntimeError) as ei:
+        mcp_manager._dispatch_worker({
+            "objective": "x", "cwd": "/repo", "node_id": "DESKTOP-3PGTBMF", "model": "sonnet",
+        })
+    msg = str(ei.value)
+    assert "carrier_unavailable" in msg                      # original 503 preserved
+    assert "Online carriers for 'claude': Horse (100.112.245.29)" in msg  # actionable suffix

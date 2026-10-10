@@ -25,6 +25,7 @@ from src.core.roles import AgentRoleDefinition, MANAGER_TOOL_PROFILE, WORKER_TOO
 # a worker needs Read/Edit/Bash/etc. (the defaults), nothing more.
 _PROFILE_TOOLS: Dict[str, List[str]] = {
     MANAGER_TOOL_PROFILE: [
+        "mcp__manager__list_nodes",
         "mcp__manager__dispatch_worker",
         "mcp__manager__wait_for_worker",
         "mcp__manager__open_case",

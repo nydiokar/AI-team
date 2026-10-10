@@ -87,6 +87,7 @@ def test_claude_adapter_appends_to_preset():
     sp = claude_system_prompt(role)
     assert sp == {"type": "preset", "preset": "claude_code", "append": role.system_instructions}
     assert manager_tool_names() == [
+        "mcp__manager__list_nodes",
         "mcp__manager__dispatch_worker",
         "mcp__manager__wait_for_worker",
         "mcp__manager__open_case",

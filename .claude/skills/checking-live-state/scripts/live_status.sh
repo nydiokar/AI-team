@@ -6,6 +6,37 @@ set -u
 REPO="$(cd "$(dirname "$0")/../../../.." && pwd)"
 CURL=(curl -s --max-time 5)   # 5s: /health answers in ms; longer means the process is wedged
 
+# Resolve the gateway base URL the SAME way mcp_manager._base_url() does, so a
+# REMOTE gateway (CONTROLLER_URL on the tailnet) is probed at its real address
+# instead of a hardcoded 127.0.0.1 — which would falsely report "UNREACHABLE/down"
+# and make a Manager conclude the harness is dead. Resolution order:
+#   1. DASHBOARD_URL (explicit override)
+#   2. CONTROLLER_URL host + DASHBOARD_PORT (the mesh controller this node reaches)
+#   3. 127.0.0.1:DASHBOARD_PORT (local gateway fallback)
+# Values come from the environment, falling back to the repo .env (same file the
+# gateway loads). No secrets printed.
+_env_val() {  # _env_val VAR_NAME — env wins, else grep .env
+  local name="$1" val="${!1:-}"
+  if [ -z "$val" ] && [ -f "$REPO/.env" ]; then
+    val="$(sed -nE "s/^[[:space:]]*$name=[\"']?([^\"'#]*)[\"']?.*/\1/p" "$REPO/.env" | tail -1)"
+  fi
+  printf '%s' "$(printf '%s' "$val" | tr -d '[:space:]')"
+}
+_gateway_base_url() {
+  local explicit port controller host
+  explicit="$(_env_val DASHBOARD_URL)"
+  if [ -n "$explicit" ]; then printf '%s' "${explicit%/}"; return; fi
+  port="$(_env_val DASHBOARD_PORT)"; [ -n "$port" ] || port="9003"
+  controller="$(_env_val CONTROLLER_URL)"
+  if [ -n "$controller" ]; then
+    # Strip scheme + any :port/path → bare host.
+    host="${controller#*://}"; host="${host%%/*}"; host="${host%%:*}"
+    if [ -n "$host" ]; then printf 'http://%s:%s' "$host" "$port"; return; fi
+  fi
+  printf 'http://127.0.0.1:%s' "$port"
+}
+GATEWAY_URL="$(_gateway_base_url)"
+
 echo "== containers (compose project ai-team)"
 docker ps -a --filter label=com.docker.compose.project=ai-team \
   --format '{{.Names}}\t{{.Status}}\t{{.Image}}' 2>/dev/null || echo "docker unavailable"
@@ -26,8 +57,8 @@ if [ -n "$LOCAL_ID" ]; then
   fi
 fi
 
-echo "== gateway :9003/health"
-"${CURL[@]}" http://127.0.0.1:9003/health || echo "UNREACHABLE"
+echo "== gateway /health ($GATEWAY_URL)"
+"${CURL[@]}" "$GATEWAY_URL/health" || echo "UNREACHABLE at $GATEWAY_URL"
 echo
 
 echo "== task-server /health"

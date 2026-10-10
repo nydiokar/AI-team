@@ -20,6 +20,13 @@ Read-only. Prints: compose containers + health, the live image's build time and 
 (`schema_version`, `nodes_online/total`, pending/claimed tasks, mesh degraded), the PM2 worker,
 and any flags you name.
 
+The gateway `/health` probe targets the **MCP-resolved controller URL** (DASHBOARD_URL, else
+CONTROLLER_URL host + DASHBOARD_PORT, else 127.0.0.1:DASHBOARD_PORT — the same resolution
+`mcp_manager._base_url()` uses). When the gateway runs REMOTELY (CONTROLLER_URL on the tailnet)
+the probe reports the real remote address and its true up/down — it does **not** hardcode
+127.0.0.1 (which would falsely read "down" for a healthy remote gateway and wrongly imply the
+harness is dead). The printed `(URL)` is the address actually probed.
+
 ## Reading the answers
 
 - **Is commit X live?** Only if the image was built after it. With a `prod-<sha>` tag:
@@ -30,7 +37,7 @@ and any flags you name.
   gateway restart before it bites. Do not infer flags from `/proc/<pid>/environ` — dotenv sets
   them after exec, so `/proc` lies.
 - **Are workers alive?** task-server `nodes_online`; per-node detail via authenticated
-  `GET /api/nodes` on :9003. A nonzero PM2 restart count is normal under autorestart — only
+  `GET /api/nodes` on the gateway. A nonzero PM2 restart count is normal under autorestart — only
   `claimed` tasks stuck for hours against an online node is an incident.
 - **What did it log?** `docker logs --tail 200 ai-team-gateway-1`; files under
   `~/ai-team-data/controller/logs/` (`orchestrator.log`, `events.ndjson`). Startup markers:
