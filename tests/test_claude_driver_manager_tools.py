@@ -51,6 +51,7 @@ _LEGACY_MANAGER_TOOLS = {
 }
 
 _ROLE_MANAGER_TOOLS = {
+    "mcp__manager__list_nodes",
     "mcp__manager__dispatch_worker",
     "mcp__manager__wait_for_worker",
     "mcp__manager__open_case",
