@@ -11182,12 +11182,6 @@ Generated from user description: {description}
                 admission, sid, len(inbox_ids), admission.queue_sequence,
             )
             notify_turn_queue_changed()
-            if carrier:
-                try:
-                    from src.control.node_inspector import _nudge_worker as _nw
-                    asyncio.create_task(_nw(carrier, db))
-                except Exception:  # noqa: BLE001 — nudge is best-effort
-                    pass
             return admission
         outcome, flow_run_id = await self._write_managed_lineage(task, str(admission), lineage_token)
         if outcome == "withdrawn":
