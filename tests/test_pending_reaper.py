@@ -81,6 +81,34 @@ def test_cancelled_session_pending_is_flagged(tmp_path):
     assert _stale(db).get("task_cx") == "session_closed"
 
 
+def test_control_action_on_cancelled_session_is_exempt(tmp_path):
+    """A cancel_managed interrupt is enqueued *because* Stop just marked the
+    session cancelled. Pinned to an ONLINE carrier it must survive the no-grace
+    session_closed reap — otherwise the janitor reaps the operator's own interrupt
+    in the ~1s before the carrier's poll claims it, and Stop silently never lands.
+    Covers all out-of-slot control actions."""
+    db = _db(tmp_path)
+    db.upsert_node("Horse", "100.0.0.7", 9001, ["claude"], 2, status="online")
+    _seed_session(db, "sess_stop", "cancelled")
+    for action in ("cancel_managed", "cancel_turn", "cancel_codex", "close_session"):
+        tid = f"ctl_{action}"
+        enqueue_pre_cutover(db, tid, "sess_stop", "Horse", "claude", action, {"target_task_id": "t"})
+        _backdate(db, tid, _iso(NOW - timedelta(seconds=5)))
+    assert _stale(db) == {}  # none reaped by session_closed
+
+
+def test_control_action_still_reaped_when_carrier_offline(tmp_path):
+    """The exemption is scoped to session_closed ONLY. A control row pinned to a
+    DEAD carrier is a genuine leak — node_offline must still retire it past grace,
+    so no orphan survives forever."""
+    db = _db(tmp_path)
+    db.upsert_node("deadcarrier", "100.0.0.6", 9001, ["claude"], 2, status="offline")
+    _seed_session(db, "sess_stop2", "cancelled")
+    enqueue_pre_cutover(db, "ctl_off", "sess_stop2", "deadcarrier", "claude", "cancel_managed", {"target_task_id": "t"})
+    _backdate(db, "ctl_off", _iso(NOW - timedelta(seconds=GRACE + 60)))
+    assert _stale(db).get("ctl_off") == "node_offline"
+
+
 def test_open_session_pending_is_not_flagged(tmp_path):
     db = _db(tmp_path)
     _seed_session(db, "sess_live", "awaiting_input")
