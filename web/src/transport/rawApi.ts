@@ -52,6 +52,11 @@ export interface RawSessionView {
    *  session (core.view_models.SessionTurnQueueState). null/absent ⇒ not
    *  enrolled (legacy status semantics apply). */
   turn_queue?: RawSessionTurnQueue | null;
+  /** [quota-resume] Role of this session in its affiliated Case, or null for
+   *  standalone sessions. Values: "manager" | "worker" | null. */
+  case_role?: string | null;
+  /** [quota-resume] Case ID this session is currently affiliated with, or null. */
+  current_case_id?: string | null;
 }
 
 // [A82 Stage 6] Queue overlay: waiting count + the ledger's active slot holder.

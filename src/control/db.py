@@ -295,7 +295,7 @@ RUNTIME_FLAG_DEFINITIONS: Dict[str, Dict[str, str]] = {
         "default": "0",
         "effect_scope": "live",
         "registry_writable": "1",
-        "description": "On quota restore, resume the paused Case immediately instead of asking the operator. Default OFF: resuming a fat Manager session re-writes its whole prompt cache (observed 200-300k tokens), so spending that is an operator decision. When ON, the env knob CASE_QUOTA_RESUME_AUTO_MAX_USD (0 = no ceiling) still holds back any resume whose estimated cost exceeds it.",
+        "description": "On quota restore, resume the paused Case immediately instead of asking the operator. Default OFF: the operator approves the resume via the session UI. When ON, the env knob CASE_QUOTA_RESUME_AUTO_MAX_USD (0 = no ceiling) still holds back any resume whose estimated cost exceeds it.",
     },
     "TRANSIENT_PROVIDER_RESUME_ENABLED": {
         "default": "0",
@@ -640,9 +640,8 @@ def case_quota_resume_auto() -> bool:
     """[quota-resume] Whether a restored quota resumes the paused Case WITHOUT an
     operator approval.
 
-    Canonical read of ``CASE_QUOTA_RESUME_AUTO``; default OFF (the resume spends
-    real money re-writing the session's prompt cache — see
-    ``CASE_QUOTA_RESUME_AUTO_MAX_USD``).
+    Canonical read of ``CASE_QUOTA_RESUME_AUTO``; default OFF — the operator
+    approves via the session UI. Set to ON (via ``/api/flags``) to skip the ask.
     """
     return runtime_flag_enabled("CASE_QUOTA_RESUME_AUTO")
 
@@ -6797,7 +6796,12 @@ class MeshDB:
         by the approval service) joined to the approvals row in a SINGLE indexed
         query (no per-link fanout — CLAUDE.md §8). Read-only; swallows errors to
         False so a lookup glitch never falsely blocks a close (the caller's other
-        guards still apply)."""
+        guards still apply).
+
+        ``case_resume`` approvals are deliberately excluded: they are a quota-restore
+        notice, not a work-correctness gate. A Case should always be closable even
+        when a resume proposal is pending — the close supersedes it.
+        """
         try:
             # An approval whose expires_at has passed no longer blocks a close: an
             # ignored proposal must not wedge a Case forever (the expires_at column
@@ -6810,6 +6814,7 @@ class MeshDB:
                 JOIN approvals a ON a.id = fl.entity_id
                 WHERE fl.flow_run_id = ? AND fl.entity_type = 'approval'
                   AND a.status = 'pending'
+                  AND a.action != 'case_resume'
                   AND (a.expires_at IS NULL OR a.expires_at > ?)
                 LIMIT 1
                 """,

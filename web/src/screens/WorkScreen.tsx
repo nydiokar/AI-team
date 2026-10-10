@@ -123,10 +123,9 @@ export function WorkScreen() {
         <NewSessionSheet initialRole="manager" onClose={() => setInvokeOpen(false)} />
       )}
 
-      {/* [A101] The quota resume decision moved into the SESSION window
-          (co-located with the composer) + a push at pause time; it is no longer
-          surfaced here (the Work tab is the wrong place for a per-session
-          decision). See CaseResumePanel mounted in SessionDetailScreen. */}
+      {/* [A101] Quota resume surfaced in the session window co-located with
+          the composer — see CaseResumePanel in SessionDetailScreen. The push
+          notification deep-links directly to the session. */}
 
       {sweepOpen && (
         <div className="px-4 pt-4">

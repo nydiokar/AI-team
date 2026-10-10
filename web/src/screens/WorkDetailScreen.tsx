@@ -253,10 +253,8 @@ export function WorkDetailScreen() {
               </div>
             </div>
 
-            {/* [A101] The quota resume decision moved into the SESSION window
-                (co-located with the composer) + a push at pause time. It is no
-                longer surfaced here — a per-session decision does not belong in
-                the Work/Case view. See CaseResumePanel in SessionDetailScreen. */}
+            {/* [A101] Quota resume surfaced in the session window — see
+                CaseResumePanel in SessionDetailScreen. */}
 
             {/* Live roster — the operational head: who is working now + running
                 scripts. Placed first because "what's happening right now" is the
