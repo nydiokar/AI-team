@@ -203,3 +203,42 @@ def test_unmapped_role_is_least_privilege(monkeypatch):
     tools = set(cd._session_allowed_tools(role="some_future_advisory"))
     assert not (set(manager_tool_names()) & tools)
     assert set(base_tool_names()) <= tools
+
+
+# --------------------------------------------------------------------------- #
+# A108 — dynamic tool-profile overlay flows through the driver grant end-to-end
+# --------------------------------------------------------------------------- #
+
+def _set_dynamic(monkeypatch, *, dynamic, overlay=""):
+    import src.control.db as _db
+    monkeypatch.setattr(_db, "runtime_flag_enabled",
+                        lambda name: dynamic if name == "TOOL_PROFILES_DYNAMIC" else False)
+    monkeypatch.setattr(_db, "runtime_flag_value",
+                        lambda name: overlay if name == "TOOL_PROFILES_OVERLAY" else None)
+
+
+def test_overlay_grants_extra_manager_tool_through_driver(monkeypatch):
+    """With the gate ON, an overlay-added manager tool reaches the Manager session's
+    allowed_tools — no code/redeploy, just the controller value."""
+    import json
+    from src.backends.claude_role_adapter import static_profile_tools
+    monkeypatch.setattr(cd, "_mcp_jobs_configured", lambda: True)
+    monkeypatch.setattr(cd, "_mcp_manager_configured", lambda: True)
+    monkeypatch.setattr(cd, "_manager_role_enabled", lambda: True)
+    _set_dynamic(monkeypatch, dynamic=True, overlay=json.dumps(
+        {"profiles": {"manager_v1": static_profile_tools()["manager_v1"] + ["mcp__manager__brand_new"]}}))
+    tools = cd._session_allowed_tools(role="manager")
+    assert "mcp__manager__brand_new" in tools
+
+
+def test_gate_off_driver_grant_is_static(monkeypatch):
+    """Gate OFF ⇒ the driver grant is exactly the static surface (byte-identical)."""
+    import json
+    monkeypatch.setattr(cd, "_mcp_jobs_configured", lambda: True)
+    monkeypatch.setattr(cd, "_mcp_manager_configured", lambda: True)
+    monkeypatch.setattr(cd, "_manager_role_enabled", lambda: True)
+    _set_dynamic(monkeypatch, dynamic=False, overlay=json.dumps(
+        {"profiles": {"manager_v1": ["mcp__manager__should_be_ignored"]}}))
+    tools = cd._session_allowed_tools(role="manager")
+    assert "mcp__manager__should_be_ignored" not in tools
+    assert _ROLE_MANAGER_TOOLS <= set(tools)
