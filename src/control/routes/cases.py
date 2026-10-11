@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Any, Callable, Optional
 
-from fastapi import APIRouter, Depends, Header, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from fastapi.responses import JSONResponse
 
 from src.control import control_api as core
@@ -196,6 +196,17 @@ def build_router(
         running. A read of ``pending_for`` — no flag gate (it writes nothing)."""
         result = orchestrator.reconcile_worker_waits(case_id, actor="manager")
         return JSONResponse(result)
+
+    @router.get("/api/agent/inbox")
+    def api_agent_inbox(
+        session_id: str = Query(..., min_length=1, max_length=128),
+    ) -> JSONResponse:
+        """What the agent inbox holds for ONE session (the caller's own id, passed by
+        the whoami/check_inbox MCP tools from their process env): ``resolved`` =
+        finished child completions waiting to be consumed; ``pending`` = requests it
+        made still running. A session-keyed read of ``pending_for`` — the ONE pending
+        source; writes nothing, no flag gate."""
+        return JSONResponse(orchestrator.agent_inbox_view(session_id))
 
     @router.post("/api/cases/{case_id}/wait-group")
     def api_arm_wait_group(case_id: str, body: CaseWaitGroupBody) -> JSONResponse:

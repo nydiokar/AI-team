@@ -6712,6 +6712,30 @@ class TaskOrchestrator(ITaskOrchestrator):
             return {"ok": False, "reason": "db_unavailable"}
         return db.reconcile_worker_waits(flow_run_id, actor=actor)
 
+    def agent_inbox_view(self, session_id: str) -> Dict[str, Any]:
+        """[identity] What the agent inbox holds for ONE session — the caller's own,
+        supplied by the whoami/check_inbox MCP tools from their process env.
+
+        Session-keyed sibling of ``reconcile_worker_waits`` (which is Case-keyed),
+        in the same ``resolved``/``pending`` shape: ``resolved`` = finished child
+        completions addressed to this session, not yet consumed; ``pending`` = the
+        requests it made still running. A read of ``pending_for`` — the ONE pending
+        source (never a second pathway); writes nothing, no flag gate."""
+        sid = (session_id or "").strip()
+        if not sid:
+            return {"ok": False, "reason": "session_required", "resolved": [], "pending": []}
+        from src.control.db import get_db
+        db = get_db()
+        if db is None:
+            return {"ok": False, "reason": "db_unavailable", "resolved": [], "pending": []}
+        view = db.pending_for(sid)
+        resolved = [
+            {"task_id": m.about_task_id, "outcome": m.outcome or "success", "case_id": m.case_id}
+            for m in view.messages if m.about_task_id
+        ]
+        pending = [{"task_id": t} for t in view.outstanding_task_ids]
+        return {"ok": True, "session_id": sid, "resolved": resolved, "pending": pending}
+
     def get_case_brief(self, flow_run_id: str) -> Dict[str, Any]:
         """[A54] Orchestrator seam — the full working state of a Case from the DB
         alone (:func:`db.get_case_brief`), for a Manager reconstructing after a

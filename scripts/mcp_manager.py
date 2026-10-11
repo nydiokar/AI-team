@@ -135,6 +135,21 @@ def _token_candidates() -> List[str]:
     return out
 
 
+def _self_session_id() -> str:
+    """The CALLER's OWN gateway session id, resolved from the process environment.
+
+    This MCP server runs INSIDE the requesting agent's own session process; the
+    carrier/backend exports that session's gateway ``session_id`` into the env as
+    ``AI_TEAM_SESSION_ID`` (``SESSION_ID`` as the legacy fallback), and the A102
+    identity filter guarantees it is THIS session's id, never a stale inherited one.
+    That value is exactly the id the Case API keys on (``sessions.session_id``) — it
+    is NOT the SessionStart/transcript uuid the agent may see in its boot context
+    (a different namespace the Case API 404s on). So the agent never has to know,
+    discover, or type its own id: every identity-scoped tool resolves it from here.
+    Empty string when absent (non-agent contexts: tests, a manual invocation)."""
+    return (os.environ.get("AI_TEAM_SESSION_ID") or os.environ.get("SESSION_ID") or "").strip()
+
+
 # Terminal vocab mirrors src/control/work_read_model.py so we agree with the
 # server on what "done" / "needs attention" means (kept in sync deliberately).
 _DONE_STATUSES = {"closed", "superseded", "done", "complete", "completed",
@@ -669,7 +684,7 @@ def _dispatch_worker(args: Dict[str, Any]) -> str:
     # session (the carrier exports its ai-team session id), so the worker's
     # completion is addressed to THAT session's inbox. Absent ⇒ the gateway
     # resolves the requester itself.
-    requester = (os.environ.get("AI_TEAM_SESSION_ID") or os.environ.get("SESSION_ID") or "").strip()
+    requester = _self_session_id()
     if requester and requester != session_id:
         body["requester_session_id"] = requester[:128]
 
@@ -1140,11 +1155,37 @@ def _open_case(args: Dict[str, Any]) -> str:
     This is what lets a single persistent Manager session run the full loop for
     several objectives in a row — open → dispatch → review → close → open the next
     — instead of spawning a fresh session (and re-paying its boot context) per Case.
-    Requires the Manager's own ``session_id`` and a checkable ``completion_criteria``
+
+    The owner session is SELF-RESOLVED from the caller's process environment (the
+    same identity ``close_case`` and ``dispatch_worker`` already use) — you never
+    pass your own id. ``session_id`` is therefore optional; if you do pass it, it
+    MUST equal your own session (anything else is REFUSED, so a Case can never be
+    opened on another agent's session). Needs a checkable ``completion_criteria``
     that close_case will later demand. Returns the new case_id to use with
     dispatch_worker(case_id=...), record_review, get_case, and close_case."""
     objective = _bounded_text(args.get("objective"), "objective", _MAX_OBJECTIVE_CHARS)
-    session_id = _bounded_text(args.get("session_id"), "session_id", _MAX_ID_CHARS, required=True)
+    passed = _bounded_text(args.get("session_id"), "session_id", _MAX_ID_CHARS, required=False)
+    caller = _self_session_id()
+
+    # Ownership guard (self-resolution). The caller's own session is the ONLY owner
+    # a Case may be opened on. If an explicit id is passed it must match — passing a
+    # sibling/other id (e.g. one scraped from a doc header) is a refusal, not a
+    # silent mis-owned Case. When the env carries no identity (non-agent contexts)
+    # we fall back to the passed id so tests / manual calls still work.
+    if caller and passed and passed != caller:
+        return (
+            f"open_case REFUSED: session_id {passed!r} is not your session. Your session is "
+            f"{caller!r}. Do NOT pass session_id — open_case opens the Case on YOUR OWN session "
+            f"automatically (call whoami if unsure which id is yours). Opening a Case on another "
+            f"agent's session is not supported."
+        )
+    session_id = caller or passed
+    if not session_id:
+        return (
+            "open_case: could not resolve your session identity — neither AI_TEAM_SESSION_ID/"
+            "SESSION_ID is set in this process nor was a session_id passed. In a real agent "
+            "session your identity is always present; call whoami to see it."
+        )
     completion_criteria = _bounded_text(
         args.get("completion_criteria"), "completion_criteria", _MAX_OBJECTIVE_CHARS, required=False)
 
@@ -1169,7 +1210,7 @@ def _open_case(args: Dict[str, Any]) -> str:
     case_id = result.get("case_id", "?")
     cap_line = f"round_cap: {round_cap} (autonomous-continuation backstop)\n" if round_cap else ""
     return (
-        f"Opened Case {case_id} on session {session_id}.\n"
+        f"Opened Case {case_id} on YOUR session {session_id} (self-resolved owner).\n"
         f"Objective: {objective}\n"
         f"completion_criteria: {completion_criteria or '(none — set one so close_case can verify done)'}\n"
         f"{cap_line}\n"
@@ -1179,6 +1220,100 @@ def _open_case(args: Dict[str, Any]) -> str:
         f"with a continuation_plan when the criteria are truly met. When you close it, this "
         f"session stays alive — open_case again for the next objective."
     )
+
+
+# ---------------------------------------------------------------------------
+# Tool: whoami  (caller-only identity — never arbitrary)
+# ---------------------------------------------------------------------------
+
+def _whoami(args: Dict[str, Any]) -> str:
+    """Report the CALLER'S OWN identity and current Case — nothing else.
+
+    Resolves YOUR session id from the process environment (see _self_session_id):
+    this is the id open_case / close_case / dispatch_worker / record_review all key
+    on, and it is the id the Case API accepts — NOT any SessionStart/transcript uuid
+    you may see in your boot context. Takes no session argument on purpose: it can
+    only ever report you, so it can never be used to probe another agent. Read-only."""
+    sid = _self_session_id()
+    if not sid:
+        return (
+            "whoami: your session identity is not present in this process environment "
+            "(AI_TEAM_SESSION_ID/SESSION_ID unset). In a real agent session it is always set; "
+            "if you see this, the identity was not injected into the MCP server env."
+        )
+    node = (
+        os.environ.get("MESH_LOCAL_CARRIER_NODE_ID")
+        or os.environ.get("WORKER_NODE_ID")
+        or os.environ.get("AI_TEAM_NODE_ID")
+        or ""
+    ).strip()
+    lines = [
+        f"session_id: {sid}",
+        "  (this is YOUR gateway session id — the id the Case API keys on. You never need to "
+        "type it: open_case/close_case/dispatch_worker self-resolve it from here.)",
+    ]
+    if node:
+        lines.append(f"node: {node}")
+    turn = (os.environ.get("AI_TEAM_TURN_ID") or "").strip()
+    if turn:
+        lines.append(f"turn_id: {turn}")
+
+    # Current Case + role, from the authoritative session→case affiliation index,
+    # filtered to YOUR id only (the index returns the whole substrate; we never
+    # surface another session's row).
+    try:
+        index = _api_request("GET", "/api/work/affiliations/sessions")
+        mine = next(
+            (a for a in (index.get("affiliations") or []) if a.get("session_id") == sid),
+            None,
+        )
+    except Exception as exc:  # noqa: BLE001 — identity is still useful without enrichment
+        lines.append(f"current_case: (could not resolve: {exc})")
+        mine = "_skip_"
+    if mine is None:
+        lines.append("current_case: (none — you are not affiliated to any Case yet; open_case to start one)")
+    elif mine != "_skip_":
+        lines.append(f"current_case: {mine.get('flow_run_id')} (role={mine.get('role')}, status={mine.get('case_status')})")
+    lines.append("Call check_inbox to see what worker completions are waiting for you.")
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Tool: check_inbox  (the caller's outbox/inbox — what is waiting for ME)
+# ---------------------------------------------------------------------------
+
+def _check_inbox(args: Dict[str, Any]) -> str:
+    """What is waiting for the CALLER right now (read-only over the agent inbox).
+
+    Subscribe-by-poll surface over the ONE pending source (``pending_for``), keyed on
+    YOUR own session (self-resolved from the env — never an arbitrary id):
+      * resolved — finished worker completions addressed to you, not yet consumed
+        (review/act on them, then close or continue);
+      * pending  — work YOU dispatched that is still running.
+    An empty inbox means nothing is waiting. Writes nothing; consuming a completion
+    happens via record_review or being woken, not by this read."""
+    sid = _self_session_id()
+    if not sid:
+        return (
+            "check_inbox: your session identity is not present in this process environment "
+            "(AI_TEAM_SESSION_ID/SESSION_ID unset). Call whoami."
+        )
+    result = _api_request("GET", f"/api/agent/inbox?session_id={urllib.parse.quote(sid)}")
+    resolved = result.get("resolved") or []
+    pending = result.get("pending") or []
+    if not resolved and not pending:
+        return f"Inbox for {sid} is empty — nothing waiting, no dispatched work in flight."
+    lines = [f"Inbox for {sid}:"]
+    if resolved:
+        lines.append(f"  resolved ({len(resolved)}) — finished, waiting for you to review/act:")
+        for m in resolved[:50]:
+            case = f" case={m.get('case_id')}" if m.get("case_id") else ""
+            lines.append(f"    • task {m.get('task_id')} → {m.get('outcome')}{case}")
+    if pending:
+        lines.append(f"  pending ({len(pending)}) — dispatched work still running:")
+        for m in pending[:50]:
+            lines.append(f"    • task {m.get('task_id')}")
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
@@ -1545,21 +1680,46 @@ _TOOLS = [
             "Open a NEW Case on YOUR OWN Manager session (POST /api/cases). This is how a single "
             "persistent Manager session takes on another objective without spawning a fresh session "
             "— open -> dispatch_worker(case_id) -> return control (woken on completion) -> review -> close_case -> open the "
-            "next. Provide your own session_id and a checkable completion_criteria (close_case will "
-            "demand it). Pass round_cap to bound an autonomous continuation loop. Returns the new "
-            "case_id. Use when you finish one Case and want to start the next in the same "
-            "conversation, or when the operator hands you a new objective."
+            "next. The owner session is SELF-RESOLVED from your identity (exactly like close_case) — "
+            "do NOT pass session_id; you never need to know or type your own id. Provide a checkable "
+            "completion_criteria (close_case will demand it). Pass round_cap to bound an autonomous "
+            "continuation loop. Returns the new case_id. Use when you finish one Case and want to "
+            "start the next in the same conversation, or when the operator hands you a new objective. "
+            "(Call whoami if you want to confirm your identity / current Case first.)"
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
                 "objective": {"type": "string", "description": "The objective for the new Case. Ground it; do not overstate scope."},
-                "session_id": {"type": "string", "description": "YOUR OWN Manager session id (the session this Case is owned by)."},
+                "session_id": {"type": "string", "description": "OPTIONAL and normally omitted: your Case is opened on YOUR OWN session, resolved automatically from your identity. If passed it MUST equal your own session id — any other id is refused (a Case can never be opened on another agent's session)."},
                 "completion_criteria": {"type": "string", "description": "The checkable done-gate close_case will require (e.g. 'tests green; diff reviewed; PR opened')."},
                 "round_cap": {"type": "integer", "description": "Optional autonomous-continuation backstop: the MAX number of Wake-Dispatcher re-entries (completion wakes) before the Case escalates instead of looping. A safety bound, not a tuning knob — set a small value (e.g. 6-10) for a live autonomous run. Omit to use the engine default (50)."},
             },
-            "required": ["objective", "session_id"],
+            "required": ["objective"],
         },
+    },
+    {
+        "name": "whoami",
+        "description": (
+            "Report YOUR OWN identity (read-only): your gateway session id — the id open_case, "
+            "close_case, dispatch_worker and record_review all key on, and the id the Case API "
+            "accepts (NOT the SessionStart/transcript uuid you may see at boot, which the Case API "
+            "404s on) — plus your node and your CURRENT Case (id, role, status) if any. Takes no "
+            "arguments: it can only ever report YOU, never another agent. Use it so you never have "
+            "to guess or scrape your own session id."
+        ),
+        "inputSchema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "check_inbox",
+        "description": (
+            "Show what is waiting for YOU right now (read-only over the agent inbox, the one "
+            "pending source): 'resolved' = finished worker completions addressed to you, not yet "
+            "consumed (review/act on them); 'pending' = work you dispatched that is still running. "
+            "Keyed on YOUR own session (resolved from your identity — never an arbitrary id). A "
+            "poll-style read; it writes nothing and consumes nothing."
+        ),
+        "inputSchema": {"type": "object", "properties": {}},
     },
     {
         "name": "get_case",
@@ -1856,6 +2016,8 @@ _TOOL_IMPLS = {
     "list_nodes": _list_nodes_tool,
     "dispatch_worker": _dispatch_worker,
     "wait_for_worker": _wait_for_worker,
+    "whoami": _whoami,
+    "check_inbox": _check_inbox,
     "open_case": _open_case,
     "get_case": _get_case,
     "get_case_brief": _get_case_brief,

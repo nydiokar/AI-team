@@ -542,3 +542,24 @@ def test_M16_retry_of_a_failed_wake_carries_its_messages_no_second_wake(tmp_path
         conn.execute("UPDATE mesh_tasks SET status = 'pending' WHERE id = ?", (str(r),))  # A82's)
     _complete(db, str(r))
     assert _msg_states(db) == {"task_w1": "acked"}
+
+
+def test_agent_inbox_view_session_keyed(tmp_path, monkeypatch):
+    """orchestrator.agent_inbox_view keys the SAME pending_for read on a session
+    (the GET /api/agent/inbox seam behind the whoami/check_inbox MCP tools): a
+    finished requested child shows as resolved, a still-running one as pending; an
+    unknown session is clean; an empty session id is refused."""
+    from tests.inbox_seed import seed_child, seed_finished_child
+
+    db, o = _env(tmp_path, monkeypatch)
+    cid = _case(db)
+    seed_finished_child(db, cid, "task_done", requester="sess-1")
+    seed_child(db, cid, "task_running", requester="sess-1", status="running")
+
+    view = o.agent_inbox_view("sess-1")
+    assert view["ok"] is True
+    assert [r["task_id"] for r in view["resolved"]] == ["task_done"]
+    assert [p["task_id"] for p in view["pending"]] == ["task_running"]
+
+    assert o.agent_inbox_view("nobody")["resolved"] == []
+    assert o.agent_inbox_view("")["ok"] is False

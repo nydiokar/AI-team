@@ -35,6 +35,27 @@ def test_watch_job_defaults_to_agent_followup(monkeypatch, tmp_path):
     assert "Telegram" not in text
 
 
+def test_whoami_reports_session_and_node(monkeypatch):
+    """whoami (available to workers too) reports the caller's OWN session id + node
+    from the env — no network, no arguments."""
+    from scripts import mcp_jobs
+
+    monkeypatch.delenv("NODE_ID", raising=False)
+    monkeypatch.setenv("AI_TEAM_SESSION_ID", "sess_xyz")
+    monkeypatch.setenv("WORKER_NODE_ID", "Horse")
+    out = mcp_jobs._whoami({})
+    assert "sess_xyz" in out and "Horse" in out
+
+
+def test_whoami_without_identity(monkeypatch):
+    from scripts import mcp_jobs
+
+    monkeypatch.delenv("AI_TEAM_SESSION_ID", raising=False)
+    monkeypatch.delenv("SESSION_ID", raising=False)
+    out = mcp_jobs._whoami({})
+    assert "not present" in out
+
+
 def test_windows_sleep_command_is_normalized(monkeypatch):
     from scripts import mcp_jobs
 
