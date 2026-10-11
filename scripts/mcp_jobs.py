@@ -117,7 +117,17 @@ _TOOLS = [
             },
             "required": ["command", "label"],
         },
-    }
+    },
+    {
+        "name": "whoami",
+        "description": (
+            "Report YOUR OWN identity (read-only): your gateway session id and node, resolved "
+            "from the process environment. This is the id the gateway keys your session on — NOT "
+            "the SessionStart/transcript uuid you may see at boot. Takes no arguments: it can only "
+            "ever report YOU. Use it so you never have to guess or type your own session id."
+        ),
+        "inputSchema": {"type": "object", "properties": {}},
+    },
 ]
 
 # ---------------------------------------------------------------------------
@@ -180,6 +190,30 @@ def _bounded_text(value: Any, name: str, max_chars: int, *, required: bool = Tru
     if len(text) > max_chars:
         raise ValueError(f"{name} is too long (max {max_chars} characters)")
     return text or None
+
+
+def _whoami(args: Dict[str, Any]) -> str:
+    """Report the CALLER'S OWN identity from the process env — no network, no args.
+
+    Env-only on purpose: a worker's MCP server reaches the task server, not the
+    control API, and identity is the universally useful fact here ("what is my own
+    session id?"). The id reported is the gateway session id the carrier injected
+    (``AI_TEAM_SESSION_ID``/``SESSION_ID``) — the control-plane id, not the
+    SessionStart/transcript uuid."""
+    sid = (os.environ.get("AI_TEAM_SESSION_ID") or os.environ.get("SESSION_ID") or "").strip()
+    node = (os.environ.get("NODE_ID") or os.environ.get("WORKER_NODE_ID") or "").strip()
+    if not sid:
+        return (
+            "whoami: your session identity is not present in this process environment "
+            "(AI_TEAM_SESSION_ID/SESSION_ID unset)."
+        )
+    lines = [
+        f"session_id: {sid}",
+        "  (this is YOUR gateway session id — the control-plane id, not a transcript uuid.)",
+    ]
+    if node:
+        lines.append(f"node: {node}")
+    return "\n".join(lines)
 
 
 def _is_windows() -> bool:
@@ -283,14 +317,15 @@ def _dispatch(req: Dict[str, Any]) -> None:
         name = params.get("name", "")
         arguments = params.get("arguments", {})
 
-        if name == "watch_job":
+        impl = {"watch_job": _watch_job, "whoami": _whoami}.get(name)
+        if impl is not None:
             try:
-                text = _watch_job(arguments)
+                text = impl(arguments)
                 _reply(id_, {"content": [{"type": "text", "text": text}]})
             except Exception as exc:
-                print(f"[mcp_jobs] watch_job failed: {exc}", file=sys.stderr, flush=True)
+                print(f"[mcp_jobs] {name} failed: {exc}", file=sys.stderr, flush=True)
                 _reply(id_, {
-                    "content": [{"type": "text", "text": f"Error registering job: {exc}"}],
+                    "content": [{"type": "text", "text": f"Error in {name}: {exc}"}],
                     "isError": True,
                 })
         else:

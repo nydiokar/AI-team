@@ -714,10 +714,118 @@ def test_open_case_tool_posts_to_cases(monkeypatch):
     assert "case-777" in out
 
 
-def test_open_case_tool_requires_session_id(monkeypatch):
-    monkeypatch.setattr(mcp_manager, "_api_request", lambda *a, **k: {"case_id": "x"})
-    with pytest.raises(ValueError):
-        mcp_manager._open_case({"objective": "no session"})
+def test_open_case_no_identity_returns_guidance(monkeypatch):
+    """No env identity AND no passed session_id ⇒ helpful guidance, not a crash, and
+    NO Case opened (points the agent at whoami)."""
+    monkeypatch.delenv("AI_TEAM_SESSION_ID", raising=False)
+    monkeypatch.delenv("SESSION_ID", raising=False)
+    monkeypatch.setattr(mcp_manager, "_api_request",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not call")))
+    out = mcp_manager._open_case({"objective": "no session"})
+    assert "could not resolve your session identity" in out
+    assert "whoami" in out
+
+
+def test_open_case_self_resolves_from_env(monkeypatch):
+    """session_id omitted ⇒ the owner is self-resolved from the caller's env identity;
+    the POST carries THAT id and the echo says the owner was self-resolved."""
+    monkeypatch.setenv("AI_TEAM_SESSION_ID", "mgr-self")
+    calls = []
+
+    def _fake_api(method, path, payload=None, timeout=20.0):
+        calls.append((method, path, payload))
+        return {"ok": True, "case_id": "c-1"}
+
+    monkeypatch.setattr(mcp_manager, "_api_request", _fake_api)
+    out = mcp_manager._open_case({"objective": "go", "completion_criteria": "done"})
+    assert calls[0][1] == "/api/cases"
+    assert calls[0][2]["session_id"] == "mgr-self"
+    assert "self-resolved" in out and "mgr-self" in out
+
+
+def test_open_case_rejects_other_session(monkeypatch):
+    """Passing an id that is NOT the caller's own ⇒ refusal, and NO Case opened —
+    the fix for the silent mis-owned Case."""
+    monkeypatch.setenv("AI_TEAM_SESSION_ID", "mgr-self")
+    monkeypatch.setattr(mcp_manager, "_api_request",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not call")))
+    out = mcp_manager._open_case({"objective": "go", "session_id": "someone-else"})
+    assert "REFUSED" in out
+    assert "someone-else" in out and "mgr-self" in out
+
+
+def test_open_case_accepts_matching_session(monkeypatch):
+    """Passing your OWN id (matching the env) is accepted (back-compat)."""
+    monkeypatch.setenv("AI_TEAM_SESSION_ID", "mgr-self")
+    calls = []
+
+    def _fake_api(method, path, payload=None, timeout=20.0):
+        calls.append(payload)
+        return {"ok": True, "case_id": "c-2"}
+
+    monkeypatch.setattr(mcp_manager, "_api_request", _fake_api)
+    out = mcp_manager._open_case({"objective": "go", "session_id": "mgr-self"})
+    assert calls[0]["session_id"] == "mgr-self"
+    assert "c-2" in out
+
+
+# --------------------------------------------------------------------------
+# whoami / check_inbox — caller-only identity + inbox read
+# --------------------------------------------------------------------------
+
+def test_whoami_reports_self_and_current_case(monkeypatch):
+    """whoami returns the caller's OWN session id + current Case, filtered to the
+    caller — another agent's affiliation row is never surfaced."""
+    monkeypatch.setenv("AI_TEAM_SESSION_ID", "mgr-self")
+    monkeypatch.delenv("MESH_LOCAL_CARRIER_NODE_ID", raising=False)
+    monkeypatch.setenv("WORKER_NODE_ID", "Horse")
+
+    def _fake_api(method, path, payload=None, timeout=20.0, headers=None):
+        assert path == "/api/work/affiliations/sessions"
+        return {"affiliations": [
+            {"session_id": "other", "flow_run_id": "c-X", "role": "manager", "case_status": "open"},
+            {"session_id": "mgr-self", "flow_run_id": "c-1", "role": "manager", "case_status": "open"},
+        ]}
+
+    monkeypatch.setattr(mcp_manager, "_api_request", _fake_api)
+    out = mcp_manager._whoami({})
+    assert "mgr-self" in out and "c-1" in out and "Horse" in out
+    assert "c-X" not in out  # a sibling session's row is never leaked
+
+
+def test_whoami_no_identity(monkeypatch):
+    monkeypatch.delenv("AI_TEAM_SESSION_ID", raising=False)
+    monkeypatch.delenv("SESSION_ID", raising=False)
+    monkeypatch.setattr(mcp_manager, "_api_request",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not call")))
+    out = mcp_manager._whoami({})
+    assert "not present" in out
+
+
+def test_check_inbox_empty(monkeypatch):
+    monkeypatch.setenv("AI_TEAM_SESSION_ID", "mgr-self")
+
+    def _fake_api(method, path, payload=None, timeout=20.0, headers=None):
+        assert path == "/api/agent/inbox?session_id=mgr-self"
+        return {"ok": True, "resolved": [], "pending": []}
+
+    monkeypatch.setattr(mcp_manager, "_api_request", _fake_api)
+    out = mcp_manager._check_inbox({})
+    assert "empty" in out and "mgr-self" in out
+
+
+def test_check_inbox_lists_resolved_and_pending(monkeypatch):
+    monkeypatch.setenv("AI_TEAM_SESSION_ID", "mgr-self")
+
+    def _fake_api(method, path, payload=None, timeout=20.0, headers=None):
+        return {"ok": True,
+                "resolved": [{"task_id": "t1", "outcome": "success", "case_id": "c-1"}],
+                "pending": [{"task_id": "t2"}]}
+
+    monkeypatch.setattr(mcp_manager, "_api_request", _fake_api)
+    out = mcp_manager._check_inbox({})
+    assert "t1" in out and "success" in out and "t2" in out
+    assert "resolved (1)" in out and "pending (1)" in out
 
 
 def test_dispatch_tool_call_error_is_soft(monkeypatch):

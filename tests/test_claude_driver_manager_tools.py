@@ -54,6 +54,8 @@ _ROLE_MANAGER_TOOLS = {
     "mcp__manager__list_nodes",
     "mcp__manager__dispatch_worker",
     "mcp__manager__wait_for_worker",
+    "mcp__manager__whoami",
+    "mcp__manager__check_inbox",
     "mcp__manager__open_case",
     "mcp__manager__get_case",
     "mcp__manager__get_case_brief",

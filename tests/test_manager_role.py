@@ -90,6 +90,8 @@ def test_claude_adapter_appends_to_preset():
         "mcp__manager__list_nodes",
         "mcp__manager__dispatch_worker",
         "mcp__manager__wait_for_worker",
+        "mcp__manager__whoami",
+        "mcp__manager__check_inbox",
         "mcp__manager__open_case",
         "mcp__manager__get_case",
         "mcp__manager__read_session_history",
@@ -305,6 +307,35 @@ def test_api_manager_disabled_is_409(monkeypatch):
                     json={"objective": "x", "repo_path": "/x"})
     assert r.status_code == 409
     assert r.json()["detail"]["reason"] == "manager_role_disabled"
+
+
+def test_api_agent_inbox_route(monkeypatch):
+    """GET /api/agent/inbox is a session-keyed passthrough to agent_inbox_view
+    (the seam behind the whoami/check_inbox MCP tools) and requires session_id."""
+    from fastapi.testclient import TestClient
+    from src.control import control_api
+
+    seen = {}
+
+    def _view(session_id):
+        seen["sid"] = session_id
+        return {"ok": True, "session_id": session_id,
+                "resolved": [{"task_id": "t1", "outcome": "success", "case_id": "c-1"}],
+                "pending": []}
+
+    orch = types.SimpleNamespace(agent_inbox_view=_view)
+    monkeypatch.setattr(control_api, "_dashboard_token", lambda: "tok")
+    client = TestClient(control_api.build_control_api(orch))
+
+    r = client.get("/api/agent/inbox", params={"session_id": "mgr-self"},
+                   headers={"Authorization": "Bearer tok"})
+    assert r.status_code == 200
+    assert seen["sid"] == "mgr-self"
+    assert r.json()["resolved"][0]["task_id"] == "t1"
+
+    # session_id is required (422 without it).
+    r2 = client.get("/api/agent/inbox", headers={"Authorization": "Bearer tok"})
+    assert r2.status_code == 422
 
 
 def test_api_manager_ok(monkeypatch):
