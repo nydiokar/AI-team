@@ -28,6 +28,8 @@ _PROFILE_TOOLS: Dict[str, List[str]] = {
         "mcp__manager__list_nodes",
         "mcp__manager__dispatch_worker",
         "mcp__manager__wait_for_worker",
+        "mcp__manager__whoami",
+        "mcp__manager__check_inbox",
         "mcp__manager__open_case",
         "mcp__manager__get_case",
         "mcp__manager__read_session_history",

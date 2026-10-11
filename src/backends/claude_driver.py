@@ -564,6 +564,9 @@ def _session_allowed_tools(role: Optional[str] = None) -> List[str]:
     tools = list(_DEFAULT_TOOLS)
     if _mcp_jobs_configured():
         tools.append("mcp__jobs__watch_job")
+        # whoami is a read-only, caller-only identity tool (no args, no network):
+        # every agent that has the jobs server may ask "what is my own session id?"
+        tools.append("mcp__jobs__whoami")
     if _manager_role_enabled():
         if role == MANAGER_ROLE_ID and _mcp_manager_configured():
             tools.extend(manager_tool_names())
