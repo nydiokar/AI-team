@@ -16,6 +16,20 @@ from typing import List, Literal, Optional
 
 from pydantic import BaseModel, Field
 
+# --- Universal (base) tool profile -----------------------------------------
+#
+# Tools EVERY role gets, regardless of role or subtype — the floor of the grant.
+# A role's own ``tool_profile`` is layered ON TOP of this (see
+# ``tool_profile_for_role`` + ``ROLE_TOOL_PROFILES`` below). This is the single
+# provider-neutral home for "a capability every agent should have" (identity,
+# watched jobs): add the tool name to the base profile's list in the backend
+# adapter ONCE and every current and future role gets it — no role has to opt in,
+# and no backend file is edited per new role. Backends that gate MCP access at the
+# SERVER level (Codex, OpenCode) ignore this list entirely; only Claude, which
+# allowlists per tool, consumes it. Keep it to genuinely universal, low-authority
+# tools — anything role-specific belongs in that role's profile, not here.
+BASE_TOOL_PROFILE: str = "base_v1"
+
 # --- Manager role constants ------------------------------------------------
 
 MANAGER_ROLE_ID: str = "manager"
@@ -95,6 +109,33 @@ _SCIENTIFIC_GOVERNOR_ROLE_DOC: Path = (
     Path(__file__).resolve().parents[2]
     / "docs" / "harness" / "roles" / "scientific_governor.md"
 )
+
+
+# --- Role → tool-profile registry ------------------------------------------
+#
+# The ONE provider-neutral place that maps a role id to the (non-base) tool
+# profile it layers on top of BASE_TOOL_PROFILE. A new role or subtype is a single
+# entry here (plus its profile's concrete tool list in the backend adapter) — the
+# backend grant logic reads this map and never needs a per-role branch. An unknown
+# or unmapped role resolves to the least-privilege WORKER_TOOL_PROFILE, so a new
+# role can NEVER accidentally inherit a more powerful grant (e.g. the manager
+# surface) just by existing: it gets base + worker (empty) until it is deliberately
+# given its own profile here.
+ROLE_TOOL_PROFILES: dict[str, str] = {
+    MANAGER_ROLE_ID: MANAGER_TOOL_PROFILE,
+    WORKER_ROLE_ID: WORKER_TOOL_PROFILE,
+    SCIENTIFIC_GOVERNOR_ROLE_ID: SCIENTIFIC_GOVERNOR_TOOL_PROFILE,
+}
+
+
+def tool_profile_for_role(role_id: Optional[str]) -> str:
+    """The (non-base) tool profile for ``role_id`` — least-privilege by default.
+
+    An unknown/unmapped/absent role resolves to ``WORKER_TOOL_PROFILE`` (base only),
+    never to a privileged profile. This is the single lookup the backend grant uses
+    so adding a role is one ``ROLE_TOOL_PROFILES`` entry, not a backend code change.
+    """
+    return ROLE_TOOL_PROFILES.get(role_id or "", WORKER_TOOL_PROFILE)
 
 
 class AgentRoleDefinition(BaseModel):

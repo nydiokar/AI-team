@@ -44,8 +44,20 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from src.core.interfaces import ExecutionResult, Session
 from src.core.turn_liveness import ProgressClock, TurnControl
-from src.core.roles import MANAGER_ROLE_ID, WORKER_ROLE_ID, load_manager_role, load_worker_role
-from src.backends.claude_role_adapter import claude_system_prompt, manager_tool_names, worker_tool_names
+from src.core.roles import (
+    MANAGER_ROLE_ID,
+    MANAGER_TOOL_PROFILE,
+    WORKER_ROLE_ID,
+    WORKER_TOOL_PROFILE,
+    load_manager_role,
+    load_worker_role,
+    tool_profile_for_role,
+)
+from src.backends.claude_role_adapter import (
+    base_tool_names,
+    claude_system_prompt,
+    profile_tool_names,
+)
 from src.core.process_utils import process_tree_snapshot, terminate_snapshot
 
 try:
@@ -548,33 +560,38 @@ def _manager_role_enabled() -> bool:
 
 
 def _session_allowed_tools(role: Optional[str] = None) -> List[str]:
-    """Assemble a Claude session's allowed-tool list: the defaults plus any
-    opt-in MCP tool grants. Pure + gated so the grant logic is unit-testable
-    without booting the SDK. Byte-identical to the prior inline logic for the
-    jobs path.
+    """Assemble a Claude session's allowed-tool list: the built-in defaults, the
+    UNIVERSAL base profile, and the role's own profile. Pure + gated so the grant
+    logic is unit-testable without booting the SDK.
+
+    Layering (provider-neutral, one source each):
+      1. ``_DEFAULT_TOOLS`` — Claude's built-in file/shell tools.
+      2. ``base_tool_names()`` (BASE_TOOL_PROFILE) — universal MCP tools every role
+         gets; granted only when the jobs server is configured on the node.
+      3. The role's own profile, resolved via ``tool_profile_for_role`` — the ONE
+         role→profile map. A new role/subtype is a registry entry, not a branch
+         here. ``manager_v1`` tools additionally require the 'manager' server
+         configured; without it the role falls back to least-privilege (base only).
 
     Manager grant has two modes:
       - MANAGER_ROLE_ENABLED OFF (default): legacy A34 process-wide grant —
         double-gated (MANAGER_TOOLS_ENABLED env AND ~/.claude.json). ``role`` is
         ignored ⇒ byte-identical to before A38.
-      - MANAGER_ROLE_ENABLED ON: per-session scoping — only a ``role=="manager"``
-        session gets the manager_v1 tools (still requires the 'manager' server in
-        ~/.claude.json). This SUPERSEDES the process-wide grant for every session.
+      - MANAGER_ROLE_ENABLED ON: per-session scoping via the role→profile registry.
+        This SUPERSEDES the process-wide grant for every session.
     """
     tools = list(_DEFAULT_TOOLS)
     if _mcp_jobs_configured():
-        tools.append("mcp__jobs__watch_job")
-        # whoami is a read-only, caller-only identity tool (no args, no network):
-        # every agent that has the jobs server may ask "what is my own session id?"
-        tools.append("mcp__jobs__whoami")
+        tools.extend(base_tool_names())
     if _manager_role_enabled():
-        if role == MANAGER_ROLE_ID and _mcp_manager_configured():
-            tools.extend(manager_tool_names())
-        elif role == WORKER_ROLE_ID:
-            # A worker's grant is the DEFAULTS only — worker_tool_names() is
-            # honestly empty and requires no manager server. Extending with it
-            # is a no-op today; it keeps the worker on the same seam as manager.
-            tools.extend(worker_tool_names())
+        if role:
+            profile = tool_profile_for_role(role)
+            # manager_v1 tools live on the 'manager' MCP server; if it is not
+            # configured on this node, drop to least-privilege (base only) rather
+            # than naming tools no server will answer.
+            if profile == MANAGER_TOOL_PROFILE and not _mcp_manager_configured():
+                profile = WORKER_TOOL_PROFILE
+            tools.extend(profile_tool_names(profile))
     elif _manager_tools_enabled() and _mcp_manager_configured():
         tools.extend(["mcp__manager__dispatch_worker", "mcp__manager__wait_for_worker"])
     return tools

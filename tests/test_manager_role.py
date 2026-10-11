@@ -129,11 +129,12 @@ def test_tool_scoping_byte_identical_when_flag_off():
 
 def test_tool_scoping_manager_only_when_flag_on(monkeypatch):
     from src.backends import claude_driver as d
+    from src.backends.claude_role_adapter import manager_tool_names
     monkeypatch.setenv("MANAGER_ROLE_ENABLED", "1")
     monkeypatch.setattr(d, "_mcp_manager_configured", lambda: True)
     mgr = d._session_allowed_tools(role="manager")
     other = d._session_allowed_tools(role=None)
-    assert all(t in mgr for t in d.manager_tool_names())
+    assert all(t in mgr for t in manager_tool_names())
     assert not any("manager" in t for t in other)
 
 
@@ -147,12 +148,13 @@ def test_role_boot_off_is_default_even_for_manager():
 
 def test_role_boot_manager_session_when_flag_on(monkeypatch):
     from src.backends import claude_driver as d
+    from src.backends.claude_role_adapter import manager_tool_names
     monkeypatch.setenv("MANAGER_ROLE_ENABLED", "1")
     monkeypatch.setattr(d, "_mcp_manager_configured", lambda: True)
     inst = d.ClaudeSDKClientDriver.__new__(d.ClaudeSDKClientDriver)
     sp, tools = inst._role_boot(types.SimpleNamespace(session_id="m1", case_role="manager"))
     assert sp["type"] == "preset" and sp["preset"] == "claude_code" and sp["append"]
-    assert all(t in tools for t in d.manager_tool_names())
+    assert all(t in tools for t in manager_tool_names())
     # A non-manager session on the same (ON) flag ⇒ default path.
     assert inst._role_boot(types.SimpleNamespace(session_id="w1", case_role="worker")) == (None, None)
 

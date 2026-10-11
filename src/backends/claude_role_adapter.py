@@ -13,17 +13,38 @@ from __future__ import annotations
 
 from typing import Dict, List
 
-from src.core.roles import AgentRoleDefinition, MANAGER_TOOL_PROFILE, WORKER_TOOL_PROFILE
+from src.core.roles import (
+    AgentRoleDefinition,
+    BASE_TOOL_PROFILE,
+    MANAGER_TOOL_PROFILE,
+    WORKER_TOOL_PROFILE,
+)
 
-# Concrete Claude Code MCP tool names granted by each declared tool profile.
+# Concrete Claude Code MCP tool names granted by each declared tool profile. This
+# is the SINGLE place where a profile's abstract id resolves to Claude tool names;
+# `claude_driver` composes BASE_TOOL_PROFILE + a role's own profile via
+# ``profile_tool_names`` and never hard-codes a tool name itself.
+#
+# `base_v1`    = UNIVERSAL tools every role gets (identity + watched jobs), layered
+#                under every role. Add a universal tool here ONCE and all roles get
+#                it. Granted only when its server (jobs) is configured on the node.
 # `manager_v1` = the complete Case-aware surface exposed by ``mcp_manager``.
-# Keep this list synchronized with that server: naming a tool in the role prompt
-# without granting it here makes the capability unreachable to a real Manager.
-# `worker_v1` = EMPTY on purpose: a Worker gets NO extra MCP grant beyond the
-# driver defaults. It must NOT hold the manager surface (no dispatch_worker /
-# open_case / close_case / record_review). An empty list is the honest grant —
-# a worker needs Read/Edit/Bash/etc. (the defaults), nothing more.
+# `worker_v1`  = EMPTY on purpose: a Worker gets base + the driver defaults, nothing
+#                more. It must NOT hold the manager surface (no dispatch_worker /
+#                open_case / close_case / record_review).
+#
+# Keep each list synchronized with its MCP server: naming a tool in a role prompt
+# without granting it here makes the capability unreachable. The CI pin tests
+# (test_claude_driver_manager_tools.py) fail the build if base_v1/manager_v1 drift
+# from the advertised jobs/manager surfaces.
 _PROFILE_TOOLS: Dict[str, List[str]] = {
+    BASE_TOOL_PROFILE: [
+        # Read-only, caller-only identity (no args, no network) — every agent may
+        # ask "what is my own session id?".
+        "mcp__jobs__whoami",
+        # Register a long-running detached shell job (read-only to the session).
+        "mcp__jobs__watch_job",
+    ],
     MANAGER_TOOL_PROFILE: [
         "mcp__manager__list_nodes",
         "mcp__manager__dispatch_worker",
@@ -58,20 +79,35 @@ def claude_system_prompt(role: AgentRoleDefinition) -> Dict[str, object]:
     }
 
 
+def profile_tool_names(profile: str) -> List[str]:
+    """Concrete Claude tool names for any declared tool profile — the ONE resolver.
+
+    Unknown profile ⇒ empty list (least privilege). This is the general seam the
+    driver uses for base + role profiles alike; ``manager_tool_names`` /
+    ``worker_tool_names`` / ``base_tool_names`` are thin named wrappers over it.
+    """
+    return list(_PROFILE_TOOLS.get(profile, []))
+
+
+def base_tool_names() -> List[str]:
+    """Static ``base_v1`` (universal) tool names layered under every role."""
+    return profile_tool_names(BASE_TOOL_PROFILE)
+
+
 def manager_tool_names() -> List[str]:
     """Static ``manager_v1`` tool names — no role object / file read required.
 
     Used by the driver's tool-assembly so scoping a manager session's grant does
     not depend on loading the role artifact.
     """
-    return list(_PROFILE_TOOLS[MANAGER_TOOL_PROFILE])
+    return profile_tool_names(MANAGER_TOOL_PROFILE)
 
 
 def worker_tool_names() -> List[str]:
     """Static ``worker_v1`` tool names — mirrors :func:`manager_tool_names`.
 
-    Honestly EMPTY: a Worker gets no extra MCP tools beyond the driver defaults.
-    Kept as an explicit resolver (not an inline ``[]``) so the worker grant has
-    the same seam as the manager grant and can grow if a real need appears.
+    Honestly EMPTY: a Worker gets base + the driver defaults, nothing more. Kept as
+    an explicit resolver (not an inline ``[]``) so the worker grant has the same
+    seam as the manager grant and can grow if a real need appears.
     """
-    return list(_PROFILE_TOOLS[WORKER_TOOL_PROFILE])
+    return profile_tool_names(WORKER_TOOL_PROFILE)

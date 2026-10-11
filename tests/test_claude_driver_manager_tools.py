@@ -21,7 +21,7 @@ import json
 import pytest
 
 from src.backends import claude_driver as cd
-from src.backends.claude_role_adapter import manager_tool_names
+from src.backends.claude_role_adapter import base_tool_names, manager_tool_names
 
 
 # --------------------------------------------------------------------------- #
@@ -167,3 +167,39 @@ def test_jobs_grant_independent_of_manager(monkeypatch):
     tools = cd._session_allowed_tools()
     assert "mcp__jobs__watch_job" in tools
     assert not (_LEGACY_MANAGER_TOOLS & set(tools))
+
+
+# --------------------------------------------------------------------------- #
+# Base (universal) tool profile — every role gets it; CI-pinned to the jobs server
+# --------------------------------------------------------------------------- #
+
+def test_base_grant_matches_advertised_jobs_surface():
+    """base_v1 must grant EXACTLY the jobs server's advertised tools — a new jobs
+    tool that should be universal cannot be forgotten (and a privileged one must
+    not be smuggled onto the universal floor)."""
+    from scripts import mcp_jobs
+
+    advertised = {f"mcp__jobs__{tool['name']}" for tool in mcp_jobs._TOOLS}
+    assert set(base_tool_names()) == advertised
+
+
+def test_base_tools_reach_every_role(monkeypatch):
+    """The universal base tools are granted to manager, worker, and any future/
+    unmapped role alike (when the jobs server is configured)."""
+    monkeypatch.setattr(cd, "_mcp_jobs_configured", lambda: True)
+    monkeypatch.setattr(cd, "_mcp_manager_configured", lambda: True)
+    monkeypatch.setattr(cd, "_manager_role_enabled", lambda: True)
+    for role in ("manager", "worker", "scientific_governor", "some_future_advisory", None):
+        tools = cd._session_allowed_tools(role=role)
+        assert set(base_tool_names()) <= set(tools), f"base tools missing for role={role!r}"
+
+
+def test_unmapped_role_is_least_privilege(monkeypatch):
+    """An unknown/new role resolves to base-only — it can NEVER inherit the manager
+    surface just by existing (least-privilege default in the role→profile registry)."""
+    monkeypatch.setattr(cd, "_mcp_jobs_configured", lambda: True)
+    monkeypatch.setattr(cd, "_mcp_manager_configured", lambda: True)
+    monkeypatch.setattr(cd, "_manager_role_enabled", lambda: True)
+    tools = set(cd._session_allowed_tools(role="some_future_advisory"))
+    assert not (set(manager_tool_names()) & tools)
+    assert set(base_tool_names()) <= tools
