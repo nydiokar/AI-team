@@ -79,6 +79,15 @@ def claude_system_prompt(role: AgentRoleDefinition) -> Dict[str, object]:
     }
 
 
+def static_profile_tools() -> Dict[str, List[str]]:
+    """A deep copy of the STATIC profile→tools map (the seed + fail-closed fallback).
+
+    The dynamic overlay (``src.backends.tool_profile_source``) layers on top of this;
+    this stays the authoritative baseline the CI pin tests guard against MCP-server
+    drift. Returned as a copy so callers can never mutate the module state."""
+    return {profile: list(tools) for profile, tools in _PROFILE_TOOLS.items()}
+
+
 def profile_tool_names(profile: str) -> List[str]:
     """Concrete Claude tool names for any declared tool profile — the ONE resolver.
 

@@ -483,6 +483,30 @@ RUNTIME_FLAG_DEFINITIONS: Dict[str, Dict[str, str]] = {
         "registry_writable": "0",
         "description": "Worker boot reaps stale backend child processes from a previous incarnation.",
     },
+    "TOOL_PROFILES_DYNAMIC": {
+        "default": "0",
+        "effect_scope": "live",
+        "registry_writable": "1",
+        "description": (
+            "Resolve agent tool profiles from the controller-authoritative "
+            "TOOL_PROFILES_OVERLAY instead of the static in-code map. OFF ⇒ the "
+            "static map is used (byte-identical). ON ⇒ a valid overlay is applied, "
+            "else fail-closed to the static map. Read at session boot; a new value "
+            "reaches the next session with no worker restart."
+        ),
+    },
+    "TOOL_PROFILES_OVERLAY": {
+        "default": "",
+        "effect_scope": "live",
+        "registry_writable": "1",
+        "description": (
+            "JSON overlay of agent tool profiles honored only when "
+            "TOOL_PROFILES_DYNAMIC is ON. Shape: {\"profiles\": {\"<profile>\": "
+            "[\"mcp__srv__tool\", ...]}, \"role_profiles\": {\"<role>\": "
+            "\"<profile>\"}}. Validated on read; any malformation falls back to the "
+            "static map (fail-closed, least-privilege)."
+        ),
+    },
 }
 
 
@@ -528,6 +552,27 @@ def runtime_flag_enabled(flag_name: str) -> bool:
     if row is not None:
         return _truthy_flag(str(row.get("value") or ""))
     return _truthy_flag(os.environ.get(flag_name, definition["default"]))
+
+
+def runtime_flag_value(flag_name: str) -> Optional[str]:
+    """The effective RAW string value of a known runtime flag (registry → env →
+    default), routed through the same worker-safe seam as ``runtime_flag_enabled``.
+
+    For non-boolean config carried on the registry (e.g. a JSON overlay). Returns
+    the registry override when present, else the process env, else the definition
+    default; ``None`` only for an unknown flag's absent env with no default. On a
+    non-controller process the registry row comes from the A88 controller snapshot
+    (memory-only, no I/O on the hot path)."""
+    definition = RUNTIME_FLAG_DEFINITIONS.get(flag_name)
+    if definition is None:
+        raise ValueError(f"unknown runtime flag: {flag_name}")
+    row = _runtime_flag_row(flag_name) if runtime_flag_registry_writable(flag_name) else None
+    if row is not None and row.get("value") is not None:
+        return str(row.get("value"))
+    env_raw = os.environ.get(flag_name)
+    if env_raw is not None:
+        return env_raw
+    return definition.get("default")
 
 
 def render_runtime_flag(flag_name: str, db: Optional[Any] = None) -> Dict[str, Any]:

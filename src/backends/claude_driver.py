@@ -51,12 +51,15 @@ from src.core.roles import (
     WORKER_TOOL_PROFILE,
     load_manager_role,
     load_worker_role,
-    tool_profile_for_role,
 )
-from src.backends.claude_role_adapter import (
+from src.backends.claude_role_adapter import claude_system_prompt
+# [A108] Tool names resolve through the overlay-aware source (controller-authoritative
+# when TOOL_PROFILES_DYNAMIC is ON, else the static seed) — same signatures as the
+# adapter's static helpers, so the grant logic below is unchanged.
+from src.backends.tool_profile_source import (
     base_tool_names,
-    claude_system_prompt,
     profile_tool_names,
+    tool_profile_for_role,
 )
 from src.core.process_utils import process_tree_snapshot, terminate_snapshot
 
