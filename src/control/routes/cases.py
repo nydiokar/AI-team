@@ -11,6 +11,7 @@ from typing import Any, Callable, Optional
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 
 from src.control import control_api as core
 from src.control.control_api import (
@@ -32,6 +33,30 @@ from src.control.control_api import (
     ManagerInvokeBody,
     logger,
 )
+
+
+# --- OpenAPI response models (documentation only) ----------------------------
+# Describe the success body of the flagship case endpoints in the generated
+# OpenAPI spec. Handlers return ``JSONResponse`` directly (declared via
+# ``responses=``), so nothing is re-serialised or filtered at runtime.
+class OpenCaseOut(BaseModel):
+    ok: bool
+    case_id: str
+
+
+class CloseCaseOut(BaseModel):
+    """Structured close decision. ``ok:false`` with a ``reason`` is a refusal
+    (unmet criteria, open child work, pending approval) — a normal 200 signal,
+    not an HTTP error."""
+    ok: bool
+    closed: bool
+    reason: Optional[str] = None
+
+
+class RecordReviewOut(BaseModel):
+    ok: bool
+    event_type: str
+    event_id: str
 
 
 def build_router(
@@ -89,7 +114,10 @@ def build_router(
             idem_put("manager", idempotency_key, result)
             return JSONResponse(result)
 
-    @router.post("/api/cases")
+    @router.post(
+        "/api/cases",
+        responses={200: {"model": OpenCaseOut, "description": "The opened Case id."}},
+    )
     def api_open_case(body: CaseOpenBody) -> JSONResponse:
         """[M3.3] Open a NEW Case on an existing Manager session — the seam that lets
         a single persistent Manager session run many Cases (open → dispatch → review →
@@ -112,7 +140,12 @@ def build_router(
             raise HTTPException(status_code=400, detail={"ok": False, "reason": "open_case_failed"})
         return JSONResponse({"ok": True, "case_id": case_id})
 
-    @router.post("/api/cases/{case_id}/close")
+    @router.post(
+        "/api/cases/{case_id}/close",
+        responses={200: {"model": CloseCaseOut,
+                         "description": "Structured close decision (ok:false is a "
+                                        "refusal, not an error)."}},
+    )
     def api_close_case(case_id: str, body: CaseCloseBody) -> JSONResponse:
         """[A38] Authoritative Case closure (A37 ``close_case``) — the Manager's
         Decision surface. Returns the structured ``{ok, closed, reason}``: a
@@ -130,7 +163,11 @@ def build_router(
         )
         return JSONResponse(result)
 
-    @router.post("/api/cases/{case_id}/review")
+    @router.post(
+        "/api/cases/{case_id}/review",
+        responses={200: {"model": RecordReviewOut,
+                         "description": "The recorded review flow-event."}},
+    )
     def api_record_review(
         case_id: str,
         body: CaseReviewBody,

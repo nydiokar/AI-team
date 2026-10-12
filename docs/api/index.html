@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>AI-Team Control API — Reference</title>
+    <style>
+      body { margin: 0; }
+    </style>
+  </head>
+  <body>
+    <!--
+      Browsable reference for the gateway's Control API. It renders the committed
+      OpenAPI spec (./openapi.json), which is generated from the running app by
+      scripts/api_docs/generate_api_docs.py — so this view mirrors the code.
+
+      View it:  open this file directly, or serve the folder:
+          python -m http.server -d docs/api 8080   # then http://127.0.0.1:8080
+
+      Live "try it": the request console here targets the gateway at
+      http://127.0.0.1:9003. For an authenticated same-origin console, start the
+      gateway with CONTROL_API_DOCS=true and use its built-in Swagger at /docs.
+    -->
+    <script
+      id="api-reference"
+      data-url="./openapi.json"
+      data-configuration='{"theme":"purple","hideDownloadButton":false}'
+    ></script>
+    <script src="https://cdn.jsdelivr.net/npm/@scalar/api-reference"></script>
+  </body>
+</html>

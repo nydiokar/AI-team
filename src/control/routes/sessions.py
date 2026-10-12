@@ -22,6 +22,7 @@ from fastapi import (
     UploadFile,
 )
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 
 from src.control import control_api as core
 from src.control.control_api import (
@@ -41,6 +42,61 @@ from src.control.control_api import (
 )
 
 
+# --- OpenAPI response models (documentation only) ----------------------------
+# These describe the success body of the flagship list/create endpoints in the
+# generated OpenAPI spec. Handlers return ``JSONResponse`` directly, so FastAPI
+# passes the response through untouched — declaring these via ``responses=``
+# documents the shape WITHOUT re-serialising (no field is ever filtered out).
+class SessionReasonOut(BaseModel):
+    kind: str
+    confidence: str
+    detail: Optional[str] = None
+
+
+class TurnQueueOut(BaseModel):
+    queued: int
+    active_turn_id: Optional[str] = None
+    active_status: Optional[str] = None
+    paused: bool
+    hold: Optional[str] = None
+
+
+class SessionOut(BaseModel):
+    session_id: str
+    backend: str
+    repo_path: str
+    status: str
+    machine_id: str
+    backend_session_id: str
+    last_backend_session_id: str
+    model: Optional[str] = None
+    effort: Optional[str] = None
+    default_model: Optional[str] = None
+    last_task_id: str
+    last_summary: str
+    last_files_modified: list[str]
+    needs_input: bool
+    is_active: bool
+    origin_channel: str
+    origin_kind: str
+    updated_at: str
+    continued_from: Optional[str] = None
+    keep_pinned: bool
+    keep_note: str
+    reason: Optional[SessionReasonOut] = None
+    turn_queue: Optional[TurnQueueOut] = None
+
+
+class SessionListOut(BaseModel):
+    sessions: list[SessionOut]
+
+
+class CreateSessionOut(BaseModel):
+    ok: bool
+    reason: Optional[str] = None
+    session: Optional[SessionOut] = None
+
+
 def build_router(
     orchestrator: Any,
     *,
@@ -51,7 +107,11 @@ def build_router(
 ) -> APIRouter:
     router = APIRouter(dependencies=[Depends(require_auth)])
 
-    @router.get("/api/sessions")
+    @router.get(
+        "/api/sessions",
+        responses={200: {"model": SessionListOut,
+                         "description": "Known sessions, most-recent first."}},
+    )
     def api_sessions(
         limit: int = Query(200, ge=1, le=1000),
         keep_pinned: Optional[bool] = Query(default=None),
@@ -302,7 +362,12 @@ def build_router(
             idem_put("instructions", idempotency_key, resp)
             return JSONResponse(resp)
 
-    @router.post("/api/sessions")
+    @router.post(
+        "/api/sessions",
+        responses={200: {"model": CreateSessionOut,
+                         "description": "The created/continued session, wrapped "
+                                        "in the command envelope."}},
+    )
     def api_create_session(
         body: CreateSessionBody,
         idempotency_key: Optional[str] = Header(default=None, alias="Idempotency-Key"),
