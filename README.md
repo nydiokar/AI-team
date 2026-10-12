@@ -31,7 +31,10 @@ check status, and get notifications from your phone without exposing the web UI 
 internet.
 
 **Control API** — a REST + SSE surface at `/api/*`. The web UI is a client of this API; you
-can drive it from scripts or other tools with the same bearer token.
+can drive it from scripts or other tools with the same bearer token. It is a **self-describing
+surface**: the [`docs/api/`](docs/api/) reference — browsable OpenAPI spec, error catalog, and a
+60-second quickstart — is *generated from the running app* (`scripts/api_docs/generate_api_docs.py`),
+so it mirrors the code rather than drifting from it.
 
 ## Key capabilities
 
@@ -143,6 +146,7 @@ tests that invoke a paid CLI are opt-in behind an explicit flag — never run au
 | Topic | Link |
 |---|---|
 | First session walkthrough | [`docs/QUICK_START.md`](docs/QUICK_START.md) |
+| **API reference** (OpenAPI + errors + quickstart) | [`docs/api/`](docs/api/) |
 | Runtime and API map | [`docs/backend/ARCHITECTURE.md`](docs/backend/ARCHITECTURE.md) |
 | Environment flags reference | [`docs/backend/ENV_FEATURE_FLAGS.md`](docs/backend/ENV_FEATURE_FLAGS.md) |
 | Manager / worker harness | [`docs/harness/dispatch_pipeline.md`](docs/harness/dispatch_pipeline.md) |
