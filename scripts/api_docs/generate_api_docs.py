@@ -22,12 +22,15 @@ so no DB, network, or live gateway is required. Run from the repo root:
 
     .venv/bin/python scripts/api_docs/generate_api_docs.py
 
-Honesty note (deliberate, visible gap): request bodies are fully modelled
-(Pydantic), and the error contract is attached to every operation. Success
-*response* bodies are mostly un-modelled today (handlers return raw
-``JSONResponse``); rather than hand-invent schemas that would drift, those are
-documented via the shared ``CommandResult`` envelope and left as an explicit
-next pass. Owning the gap beats faking precision.
+Response coverage: request bodies are fully modelled (Pydantic), the error
+contract is attached to every operation, and success *response* bodies are now
+modelled too. Handlers still return raw ``JSONResponse``; the success schema is
+attached per-route via ``responses={200: {"model": XOut}}`` (see
+``src/control/routes/_responses.py``), which documents the shape WITHOUT
+re-serialising or filtering any field. ``tests/test_response_model_coverage.py``
+is the forcing function: a new ``/api/*`` endpoint with no meaningful success
+schema fails that test, so the docs can no longer silently drift back to the
+empty ``{}`` body that OpenAPI explorers render as ``null``.
 """
 from __future__ import annotations
 

@@ -10,8 +10,202 @@ from typing import Any, Callable, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel, ConfigDict, Field
 
 from src.control import control_api as core
+from src.control.routes._responses import TokenTotals
+
+
+# --- Response models (documentation only; handlers return JSONResponse) --------
+# These describe the success (200) body shape of each read-only projection for
+# the generated API reference. They are NOT used to validate/serialize responses
+# — the handlers below return JSONResponse verbatim — only to document schema.
+
+
+class FlowSummary(BaseModel):
+    flow_run_id: Optional[str] = None
+    task_id: Optional[str] = None
+    current_stage: Optional[str] = None
+    status: Optional[str] = None
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+
+
+class CaseSummary(BaseModel):
+    flow_run_id: Optional[str] = None
+    task_id: Optional[str] = None
+    objective_lock: Optional[str] = None
+    current_stage: Optional[str] = None
+    status: Optional[str] = None
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+    parent_flow_run_id: Optional[str] = None
+    dispatched_by: Optional[str] = None
+    dispatch_file: Optional[str] = None
+    bucket: str
+
+
+class LinkRow(BaseModel):
+    entity_type: Optional[str] = None
+    entity_id: Optional[str] = None
+    role: Optional[str] = None
+    created_by: Optional[str] = None
+    created_at: Optional[str] = None
+    metadata_json: Optional[str] = None
+
+
+class FlowsOut(BaseModel):
+    flows: list[FlowSummary]
+
+
+class FlowDetailOut(BaseModel):
+    flow: dict
+
+
+class WorkBucketCounts(BaseModel):
+    needs_decision: int
+    blocked: int
+    review: int
+    active: int
+    closed: int
+    unknown: int
+
+
+class WorkListOut(BaseModel):
+    cases: list[CaseSummary]
+    bucket_counts: WorkBucketCounts
+    total: int
+
+
+class SessionAffiliation(BaseModel):
+    session_id: str
+    flow_run_id: Optional[str] = None
+    role: str
+    objective_lock: Optional[str] = None
+    case_status: Optional[str] = None
+
+
+class SessionAffiliationsOut(BaseModel):
+    affiliations: list[SessionAffiliation]
+    total: int
+
+
+class CaseLedger(BaseModel):
+    tasks: list[LinkRow]
+    sessions: list[LinkRow]
+    approvals: list[LinkRow]
+    artifacts: list[LinkRow]
+    jobs: list[LinkRow]
+    flows: list[LinkRow]
+    other: list[LinkRow]
+
+
+class CaseCounts(BaseModel):
+    links: int
+    events: int
+    children: int
+
+
+class CaseCoverage(BaseModel):
+    has_links: bool
+    has_events: bool
+    has_parent: bool
+    is_root: bool
+
+
+class CaseDetailOut(BaseModel):
+    case: CaseSummary
+    record: dict
+    ledger: CaseLedger
+    parent: Optional[CaseSummary] = None
+    children: list[CaseSummary]
+    counts: CaseCounts
+    coverage: CaseCoverage
+
+
+class TimelineEvent(BaseModel):
+    id: Optional[int] = None
+    event_type: Optional[str] = None
+    actor: Optional[str] = None
+    from_state: Optional[str] = None
+    to_state: Optional[str] = None
+    entity_type: Optional[str] = None
+    entity_id: Optional[str] = None
+    payload_json: Optional[str] = None
+    created_at: Optional[str] = None
+
+
+class CaseTimelineOut(BaseModel):
+    flow_run_id: str
+    events: list[TimelineEvent]
+    evidence: list[LinkRow]
+    event_count: int
+
+
+class GraphNode(BaseModel):
+    flow_run_id: Optional[str] = None
+    rel: str
+    current_stage: Optional[str] = None
+    status: Optional[str] = None
+    bucket: str
+    objective_lock: Optional[str] = None
+
+
+class GraphEdge(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+    from_: str = Field(alias="from")
+    to: str
+    role: str
+
+
+class CaseGraphOut(BaseModel):
+    flow_run_id: str
+    nodes: list[GraphNode]
+    edges: list[GraphEdge]
+
+
+class RosterSession(BaseModel):
+    session_id: Optional[str] = None
+    role: str
+    present: bool
+    backend: Optional[str] = None
+    status: Optional[str] = None
+    model: Optional[str] = None
+    node: str
+    last_activity: Optional[str] = None
+    last_report: Optional[str] = None
+    turn_count: int
+    tokens: TokenTotals
+
+
+class RosterJob(BaseModel):
+    job_id: Optional[str] = None
+    label: Optional[str] = None
+    command_summary: Optional[str] = None
+    session_id: Optional[str] = None
+    node: Optional[str] = None
+    status: str
+    started_at: Optional[str] = None
+    started_epoch: Optional[int] = None
+    finished_at: Optional[str] = None
+    exit_code: Optional[int] = None
+    tail: Optional[str] = None
+    orphaned: bool
+    is_agent_spawn: bool
+
+
+class RosterCounts(BaseModel):
+    sessions: int
+    jobs: int
+    running_jobs: int
+
+
+class CaseRosterOut(BaseModel):
+    flow_run_id: str
+    sessions: list[RosterSession]
+    jobs: list[RosterJob]
+    counts: RosterCounts
+    token_totals: TokenTotals
 
 
 def build_router(orchestrator: Any, *, require_auth: Callable[..., Any]) -> APIRouter:
@@ -24,7 +218,10 @@ def build_router(orchestrator: Any, *, require_auth: Callable[..., Any]) -> APIR
         "flow_run_id", "task_id", "current_stage", "status", "created_at", "updated_at",
     )
 
-    @router.get("/api/flows")
+    @router.get(
+        "/api/flows",
+        responses={200: {"model": FlowsOut, "description": "Flow-run summaries, newest first."}},
+    )
     def api_flows(
         task_id: Optional[str] = Query(default=None),
         limit: int = Query(50, ge=1, le=500),
@@ -39,7 +236,10 @@ def build_router(orchestrator: Any, *, require_auth: Callable[..., Any]) -> APIR
         flows = [{k: row.get(k) for k in _FLOW_SUMMARY_FIELDS} for row in rows]
         return JSONResponse({"flows": flows})
 
-    @router.get("/api/flows/{flow_run_id}")
+    @router.get(
+        "/api/flows/{flow_run_id}",
+        responses={200: {"model": FlowDetailOut, "description": "One flow's full §11 DB record."}},
+    )
     def api_flow_detail(flow_run_id: str) -> JSONResponse:
         """One flow's full §11 record. 404 (``flow_not_found``) on an unknown id.
 
@@ -57,7 +257,10 @@ def build_router(orchestrator: Any, *, require_auth: Callable[..., Any]) -> APIR
     # links render as empty/unknown, never inferred. No mutation endpoints.
     # ----------------------------------------------------------------------
 
-    @router.get("/api/work")
+    @router.get(
+        "/api/work",
+        responses={200: {"model": WorkListOut, "description": "Case summaries with attention-bucket counts."}},
+    )
     def api_work_list(
         bucket: Optional[str] = Query(default=None),
         limit: int = Query(50, ge=1, le=500),
@@ -76,7 +279,10 @@ def build_router(orchestrator: Any, *, require_auth: Callable[..., Any]) -> APIR
             model["cases"] = [c for c in model["cases"] if c["bucket"] == bucket]
         return JSONResponse(model)
 
-    @router.get("/api/work/affiliations/sessions")
+    @router.get(
+        "/api/work/affiliations/sessions",
+        responses={200: {"model": SessionAffiliationsOut, "description": "Session→case affiliation index over the whole substrate."}},
+    )
     def api_work_session_affiliations() -> JSONResponse:
         """Authoritative session→case affiliation index over the WHOLE substrate.
 
@@ -90,7 +296,10 @@ def build_router(orchestrator: Any, *, require_auth: Callable[..., Any]) -> APIR
         rows = db.list_session_case_links() if db is not None else []
         return JSONResponse(_wrm.build_session_affiliations(rows))
 
-    @router.get("/api/work/{flow_run_id}")
+    @router.get(
+        "/api/work/{flow_run_id}",
+        responses={200: {"model": CaseDetailOut, "description": "One case: summary, full record, grouped ledger, lineage."}},
+    )
     def api_work_detail(flow_run_id: str) -> JSONResponse:
         """One case: summary + full record + grouped ledger + parent/children.
 
@@ -109,7 +318,10 @@ def build_router(orchestrator: Any, *, require_auth: Callable[..., Any]) -> APIR
         model = _wrm.build_case_detail(flow, links, event_count, parent, children)
         return JSONResponse(model)
 
-    @router.get("/api/work/{flow_run_id}/timeline")
+    @router.get(
+        "/api/work/{flow_run_id}/timeline",
+        responses={200: {"model": CaseTimelineOut, "description": "Case audit trail: newest flow_events + linked evidence."}},
+    )
     def api_work_timeline(
         flow_run_id: str,
         limit: int = Query(500, ge=1, le=2000),
@@ -127,7 +339,10 @@ def build_router(orchestrator: Any, *, require_auth: Callable[..., Any]) -> APIR
         links = db.list_flow_links(flow_run_id=flow_run_id)
         return JSONResponse(_wrm.build_case_timeline(flow_run_id, events, links))
 
-    @router.get("/api/work/{flow_run_id}/graph")
+    @router.get(
+        "/api/work/{flow_run_id}/graph",
+        responses={200: {"model": CaseGraphOut, "description": "Compact lineage graph: case, parent, children + edges."}},
+    )
     def api_work_graph(flow_run_id: str) -> JSONResponse:
         """Compact lineage graph: the case, its parent, and direct children, with
         parent→child edges from authoritative lineage. 404 on unknown case."""
@@ -141,7 +356,10 @@ def build_router(orchestrator: Any, *, require_auth: Callable[..., Any]) -> APIR
         children = db.list_child_flow_runs(flow_run_id)
         return JSONResponse(_wrm.build_case_graph(flow_run_id, flow, parent, children))
 
-    @router.get("/api/work/{flow_run_id}/roster")
+    @router.get(
+        "/api/work/{flow_run_id}/roster",
+        responses={200: {"model": CaseRosterOut, "description": "Live operational roster: sessions + jobs + token totals."}},
+    )
     def api_work_roster(flow_run_id: str) -> JSONResponse:
         """[Cockpit] The live operational roster for a Case — the "who is doing what
         right now" head of the Case, complementing the flow_events timeline (spine).

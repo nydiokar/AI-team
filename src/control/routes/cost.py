@@ -10,12 +10,200 @@ from typing import TYPE_CHECKING, Any, Callable, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel, ConfigDict, Field
 
 from src.control import app_metrics
 from src.control import control_api as core
+from src.control.routes._responses import TokenTotals, UsdSummary
 
 if TYPE_CHECKING:
     from src.control.db import MeshDB
+
+
+# --- OpenAPI success-response models (documentation only; handlers return JSONResponse) ---
+
+
+class ModelSpend(BaseModel):
+    model: str
+    usd_total: float
+    known: bool
+    reason: str
+    tokens_total: int
+
+
+class Totals(BaseModel):
+    tokens: TokenTotals
+    usd: UsdSummary
+
+
+class SeriesBucket(BaseModel):
+    bucket: str
+    dim: str
+    tokens: TokenTotals
+    usd: UsdSummary
+    models: list[ModelSpend]
+
+
+class Unattributed(BaseModel):
+    tokens: TokenTotals
+    usd: UsdSummary
+    models: list[ModelSpend]
+
+
+class CostExplorerOut(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    ok: bool
+    dimension: str
+    granularity: str
+    from_: Optional[str] = Field(default=None, alias="from")
+    to: Optional[str] = None
+    repo_path: Optional[str] = None
+    series: list[SeriesBucket]
+    totals: Totals
+    unattributed: Unattributed
+
+
+class CaseMeta(BaseModel):
+    status: str
+    objective_lock: Optional[str] = None
+    created_at: Optional[str] = None
+
+
+class SessionSpend(BaseModel):
+    session_id: str
+    role: str
+    tokens: TokenTotals
+    usd: UsdSummary
+    models: list[ModelSpend]
+
+
+class MgrVsWorkers(BaseModel):
+    manager: Totals
+    workers: Totals
+    workers_share_pct: Optional[float] = None
+    worker_sessions: int
+
+
+class CaseUsageOut(BaseModel):
+    ok: bool
+    flow_run_id: str
+    case: CaseMeta
+    sessions: list[SessionSpend]
+    mgr_vs_workers: MgrVsWorkers
+    totals: Totals
+
+
+class TopRow(BaseModel):
+    session_id: str
+    repo_path: Optional[str] = None
+    backend: Optional[str] = None
+    role: Optional[str] = None
+    tokens: TokenTotals
+    usd: UsdSummary
+    models: list[ModelSpend]
+
+
+class CostTopOut(BaseModel):
+    ok: bool
+    by: str
+    limit: int
+    rows: list[TopRow]
+    totals: Totals
+
+
+class ProjectRow(BaseModel):
+    repo_path: str
+    tokens: TokenTotals
+
+
+class CostProjectsOut(BaseModel):
+    ok: bool
+    limit: int
+    projects: list[ProjectRow]
+
+
+class AlertBudgets(BaseModel):
+    daily_budget_usd: float
+    session_burn_usd: float
+    case_total_usd: float
+
+
+class AlertRow(BaseModel):
+    rule: str
+    scope: str
+    value_usd: float
+    budget_usd: float
+    pct: float
+
+
+class AlertEnforcement(BaseModel):
+    enabled: bool
+    mechanism: str
+    governor_sdk_max_budget_usd: Optional[float] = None
+
+
+class CostAlertsOut(BaseModel):
+    ok: bool
+    enabled: bool
+    budgets: AlertBudgets
+    alerts: list[AlertRow]
+    enforcement: AlertEnforcement
+
+
+class RouteStat(BaseModel):
+    component: str
+    method: str
+    route: str
+    n: int
+    p50_ms: float
+    p95_ms: float
+    max_ms: float
+    slow: int
+    err5xx: int
+
+
+class Rollup(BaseModel):
+    ts: str
+    window_s: float
+    lag_p95_ms: float
+    lag_max_ms: float
+    lag_over_100ms: int
+    req_total: int
+    req_slow: int
+    req_5xx: int
+    host_avg: dict[str, float]
+    host_max: dict[str, float]
+    routes: list[RouteStat]
+
+
+class MetricsSystemOut(BaseModel):
+    enabled: bool
+    rollup_seconds: int
+    count: int
+    rollups: list[Rollup]
+
+
+class MetricsHealthOut(BaseModel):
+    status: str
+    cause: str
+    headline: str
+    detail: str
+
+
+class SystemAlertsOut(BaseModel):
+    ok: bool
+    alerts: list[dict]
+
+
+class QuotaWindowsOut(BaseModel):
+    enabled: bool
+    mode: str
+    adapters: list[dict]
+    buckets: list[dict]
+    latest_snapshots: list[dict]
+    window_states: list[dict]
+    prewarm: dict
 
 
 def build_router(orchestrator: Any, *, require_auth: Callable[..., Any]) -> APIRouter:
@@ -27,7 +215,10 @@ def build_router(orchestrator: Any, *, require_auth: Callable[..., Any]) -> APIR
             raise HTTPException(status_code=503, detail={"ok": False, "reason": "db_unavailable"})
         return db
 
-    @router.get("/api/cost/explorer")
+    @router.get(
+        "/api/cost/explorer",
+        responses={200: {"model": CostExplorerOut, "description": "Spend breakdown along one dimension, bucketed and priced"}},
+    )
     def api_cost_explorer(
         dimension: str = Query("project"),
         granularity: str = Query("day"),
@@ -57,7 +248,10 @@ def build_router(orchestrator: Any, *, require_auth: Callable[..., Any]) -> APIR
             )
         )
 
-    @router.get("/api/cases/{case_id}/usage")
+    @router.get(
+        "/api/cases/{case_id}/usage",
+        responses={200: {"model": CaseUsageOut, "description": "Per-case cost breakdown with manager/workers split"}},
+    )
     def api_case_usage(case_id: str) -> JSONResponse:
         """Per-case cost breakdown (the manager/workers split): each session's
         tokens + USD, and the mgr_vs_workers summary. 404 for an unknown case."""
@@ -67,7 +261,10 @@ def build_router(orchestrator: Any, *, require_auth: Callable[..., Any]) -> APIR
             raise HTTPException(status_code=404, detail={"ok": False, "reason": "case_not_found"})
         return JSONResponse(result)
 
-    @router.get("/api/cost/top")
+    @router.get(
+        "/api/cost/top",
+        responses={200: {"model": CostTopOut, "description": "Top spender sessions ranked by USD or tokens"}},
+    )
     def api_cost_top(
         by: str = Query("usd"),
         from_ts: Optional[str] = Query(default=None, alias="from"),
@@ -92,7 +289,10 @@ def build_router(orchestrator: Any, *, require_auth: Callable[..., Any]) -> APIR
             )
         )
 
-    @router.get("/api/cost/projects")
+    @router.get(
+        "/api/cost/projects",
+        responses={200: {"model": CostProjectsOut, "description": "Distinct projects with token usage, ordered by size"}},
+    )
     def api_cost_projects(
         from_ts: Optional[str] = Query(default=None, alias="from"),
         to_ts: Optional[str] = Query(default=None, alias="to"),
@@ -110,7 +310,10 @@ def build_router(orchestrator: Any, *, require_auth: Callable[..., Any]) -> APIR
             )
         )
 
-    @router.get("/api/cost/alerts")
+    @router.get(
+        "/api/cost/alerts",
+        responses={200: {"model": CostAlertsOut, "description": "Cost budget/burn-rate alerts and enforcement lever"}},
+    )
     def api_cost_alerts() -> JSONResponse:
         """A65 P3 cost budget/burn-rate alerts. Billable-USD only — never raw
         token/cache-read volume. Thresholds are the env knobs
@@ -138,19 +341,28 @@ def build_router(orchestrator: Any, *, require_auth: Callable[..., Any]) -> APIR
 
     # REVISIT (2026-10-05): no UI caller yet (tests only); the gateway's own per-minute
     # host/app metrics ring (app_metrics) - wire it into the System tab or drop it.
-    @router.get("/api/metrics/system")
+    @router.get(
+        "/api/metrics/system",
+        responses={200: {"model": MetricsSystemOut, "description": "Per-minute host/request metric rollups"}},
+    )
     def api_metrics_system(minutes: int = Query(60, ge=1, le=180)) -> JSONResponse:
         """Per-minute rollups: event-loop lag, request latency by route, disk/CPU/memory
         pressure (see app_metrics). In-memory ring, newest last; also on disk in
         logs/metrics.ndjson."""
         return JSONResponse(app_metrics.snapshot(minutes))
 
-    @router.get("/api/metrics/health")
+    @router.get(
+        "/api/metrics/health",
+        responses={200: {"model": MetricsHealthOut, "description": "One-line gateway health verdict for the UI banner"}},
+    )
     def api_metrics_health() -> JSONResponse:
         """Tiny 'what is happening' verdict (ok/warn/bad + cause) for the UI banner."""
         return JSONResponse(app_metrics.current_verdict().model_dump())
 
-    @router.get("/api/system-alerts")
+    @router.get(
+        "/api/system-alerts",
+        responses={200: {"model": SystemAlertsOut, "description": "Recent gateway-liveness outages from the external healthcheck"}},
+    )
     def api_system_alerts(
         limit: int = Query(20, ge=1, le=100),
     ) -> JSONResponse:
@@ -163,7 +375,10 @@ def build_router(orchestrator: Any, *, require_auth: Callable[..., Any]) -> APIR
         rows = db.list_recent_system_alerts(limit=limit) if db is not None else []
         return JSONResponse({"ok": True, "alerts": rows})
 
-    @router.get("/api/quota-windows")
+    @router.get(
+        "/api/quota-windows",
+        responses={200: {"model": QuotaWindowsOut, "description": "Quota window coordinator + prewarmer status"}},
+    )
     async def api_quota_windows() -> JSONResponse:
         coordinator = getattr(orchestrator, "quota_coordinator", None)
         if coordinator is None:

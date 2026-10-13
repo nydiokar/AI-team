@@ -22,8 +22,9 @@ from fastapi import (
     UploadFile,
 )
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
+from src.control.routes._responses import CommandResult, TokenTotals
 from src.control import control_api as core
 from src.control.control_api import (
     _ID_STR_MAX,
@@ -97,6 +98,100 @@ class CreateSessionOut(BaseModel):
     session: Optional[SessionOut] = None
 
 
+class SessionMutationOut(CommandResult):
+    """The ``{ok, reason}`` lifecycle envelope plus the mutated session view
+    (``None`` on a structured refusal)."""
+
+    session: Optional[SessionOut] = None
+
+
+class CacheHeartbeatsOut(BaseModel):
+    ok: bool
+    heartbeats: list[dict]
+
+
+class CacheHeartbeatStartOut(BaseModel):
+    ok: bool
+    heartbeat: dict
+
+
+class CacheHeartbeatStopOut(BaseModel):
+    ok: bool
+    stopped: int
+
+
+class MessagesOut(BaseModel):
+    messages: list[dict]
+
+
+class TimelineOut(BaseModel):
+    items: list[dict]
+    next_cursor: Optional[str] = None
+    generated_at: str
+    coverage: dict
+    context_fill: dict
+    reason: Optional[dict] = None
+
+
+class CostEstimate(BaseModel):
+    known: bool
+    model_priced: Optional[str] = None
+    reason: Optional[str] = None
+    currency: str
+    usd_total: Optional[float] = None
+    usd_input: Optional[float] = None
+    usd_output: Optional[float] = None
+    usd_cache_write: Optional[float] = None
+    usd_cache_read: Optional[float] = None
+    rates: Optional[dict] = None
+
+
+class UsageOut(BaseModel):
+    session_id: str
+    model: Optional[str] = None
+    tokens: TokenTotals
+    cost: CostEstimate
+
+
+class InstructionsOut(BaseModel):
+    ok: bool
+    task_id: str
+    session: Optional[SessionOut] = None
+
+
+class StopOut(BaseModel):
+    ok: bool
+    cancelled: bool
+    task_id: Optional[str] = None
+
+
+class CompactOut(BaseModel):
+    ok: bool
+    output: str
+    errors: list
+    queued: Optional[bool] = None
+    task_id: Optional[str] = None
+    status: Optional[str] = None
+
+
+class UploadOut(BaseModel):
+    ok: bool
+    filename: str
+    size: int
+    path: str
+    delivery: str
+    task_id: Optional[str] = None
+    instruction: Optional[str] = None
+    staged_file: Optional[dict] = None
+
+
+class InspectOut(BaseModel):
+    """Arbitrary node-inspector payload — shape is backend-defined, so extra
+    keys pass through untouched."""
+
+    model_config = ConfigDict(extra="allow")
+
+
 def build_router(
     orchestrator: Any,
     *,
@@ -128,7 +223,11 @@ def build_router(
             sessions = []
         return JSONResponse({"sessions": sessions})
 
-    @router.get("/api/cache-heartbeats")
+    @router.get(
+        "/api/cache-heartbeats",
+        responses={200: {"model": CacheHeartbeatsOut,
+                         "description": "Active cache-keepalive heartbeats."}},
+    )
     def api_cache_heartbeats(
         session_id: Optional[str] = Query(default=None, max_length=_ID_STR_MAX),
         limit: int = Query(100, ge=1, le=500),
@@ -141,7 +240,11 @@ def build_router(
             "heartbeats": db.list_cache_heartbeats(session_id=session_id, limit=limit),
         })
 
-    @router.post("/api/sessions/{session_id}/cache-heartbeat")
+    @router.post(
+        "/api/sessions/{session_id}/cache-heartbeat",
+        responses={200: {"model": CacheHeartbeatStartOut,
+                         "description": "Cache-keepalive heartbeat started."}},
+    )
     def api_enable_cache_heartbeat(session_id: str, body: CacheHeartbeatBody) -> JSONResponse:
         db = core._db()
         if db is None:
@@ -166,7 +269,11 @@ def build_router(
             raise HTTPException(status_code=409, detail={"ok": False, "reason": "cache_heartbeat_not_enabled"})
         return JSONResponse({"ok": True, "heartbeat": hb})
 
-    @router.delete("/api/sessions/{session_id}/cache-heartbeat")
+    @router.delete(
+        "/api/sessions/{session_id}/cache-heartbeat",
+        responses={200: {"model": CacheHeartbeatStopOut,
+                         "description": "Cache-keepalive heartbeat(s) stopped."}},
+    )
     def api_stop_cache_heartbeat(session_id: str) -> JSONResponse:
         db = core._db()
         if db is None:
@@ -177,7 +284,11 @@ def build_router(
                 changed += 1 if db.stop_cache_heartbeat(str(hb.get("id") or ""), "operator_disabled") else 0
         return JSONResponse({"ok": True, "stopped": changed})
 
-    @router.get("/api/sessions/{session_id}/messages")
+    @router.get(
+        "/api/sessions/{session_id}/messages",
+        responses={200: {"model": MessagesOut,
+                         "description": "Transcript messages for the session."}},
+    )
     def api_session_messages(
         session_id: str,
         limit: int = Query(200, ge=1, le=1000),
@@ -194,7 +305,11 @@ def build_router(
             raise HTTPException(status_code=404, detail="not_found")
         return JSONResponse({"messages": turns})
 
-    @router.get("/api/sessions/{session_id}/timeline")
+    @router.get(
+        "/api/sessions/{session_id}/timeline",
+        responses={200: {"model": TimelineOut,
+                         "description": "Paginated session timeline with coverage/context-fill."}},
+    )
     def api_session_timeline(
         session_id: str,
         limit: int = Query(50, ge=1, le=200),
@@ -239,7 +354,11 @@ def build_router(
         )
         return JSONResponse(response.model_dump(mode="json"))
 
-    @router.get("/api/sessions/{session_id}/usage")
+    @router.get(
+        "/api/sessions/{session_id}/usage",
+        responses={200: {"model": UsageOut,
+                         "description": "Token totals and USD cost estimate for the session."}},
+    )
     def api_session_usage(session_id: str) -> JSONResponse:
         """Per-session token totals + approximate USD cost.
 
@@ -296,7 +415,11 @@ def build_router(
     # (target_files / case_id / upload_attachment + the PRINCIPAL_HEADER
     # automation label). The legacy (BUSY) non-enrolled execution branch was
     # deleted at the convergence cutoff — a non-enrolled session turn is refused.
-    @router.post("/api/instructions")
+    @router.post(
+        "/api/instructions",
+        responses={200: {"model": InstructionsOut,
+                         "description": "Instruction accepted; a turn task was enqueued."}},
+    )
     async def api_instructions(
         body: InstructionBody,
         idempotency_key: Optional[str] = Header(default=None, alias="Idempotency-Key"),
@@ -401,7 +524,11 @@ def build_router(
             return JSONResponse(env)
 
     # REVISIT (2026-10-05): no caller; the web origin only echoes - validate what it is for.
-    @router.post("/api/sessions/{session_id}/bind")
+    @router.post(
+        "/api/sessions/{session_id}/bind",
+        responses={200: {"model": SessionMutationOut,
+                         "description": "Session bound; returns the updated session view."}},
+    )
     def api_bind_session(session_id: str, body: BindBody) -> JSONResponse:
         if body.chat_id is None:
             # Web has no chat binding today; verify the session exists and echo it.
@@ -415,7 +542,11 @@ def build_router(
             raise HTTPException(status_code=_REASON_STATUS.get(result.reason, 400), detail=env)
         return JSONResponse(env)
 
-    @router.post("/api/sessions/{session_id}/stop")
+    @router.post(
+        "/api/sessions/{session_id}/stop",
+        responses={200: {"model": StopOut,
+                         "description": "Active turn cancel requested (if any)."}},
+    )
     def api_stop_session(session_id: str) -> JSONResponse:
         session = orchestrator.session_service.store.get(session_id)
         if session is None:
@@ -446,7 +577,11 @@ def build_router(
                 orchestrator.session_service.mark_cancelled(session_id)
         return JSONResponse({"ok": True, "cancelled": cancelled, "task_id": session.last_task_id})
 
-    @router.post("/api/sessions/{session_id}/compact")
+    @router.post(
+        "/api/sessions/{session_id}/compact",
+        responses={200: {"model": CompactOut,
+                         "description": "Context compaction run or queued."}},
+    )
     async def api_compact_session(session_id: str, request: Request) -> JSONResponse:
         session = orchestrator.session_service.store.get(session_id)
         if session is None:
@@ -474,7 +609,11 @@ def build_router(
                          "status": managed.get("status")})
         return JSONResponse(body)
 
-    @router.post("/api/sessions/{session_id}/close")
+    @router.post(
+        "/api/sessions/{session_id}/close",
+        responses={200: {"model": SessionMutationOut,
+                         "description": "Session closed; returns the updated session view."}},
+    )
     async def api_close_session(session_id: str) -> JSONResponse:
         # backend.close may block (local backend) → off-thread, like Telegram.
         import asyncio
@@ -488,7 +627,11 @@ def build_router(
             raise HTTPException(status_code=_REASON_STATUS.get(result.reason, 400), detail=env)
         return JSONResponse(env)
 
-    @router.post("/api/sessions/{session_id}/restore")
+    @router.post(
+        "/api/sessions/{session_id}/restore",
+        responses={200: {"model": SessionMutationOut,
+                         "description": "Session restored; returns the updated session view."}},
+    )
     def api_restore_session(session_id: str) -> JSONResponse:
         result = orchestrator.session_service.restore_session(session_id)
         env = core._command_envelope(result)
@@ -496,7 +639,11 @@ def build_router(
             raise HTTPException(status_code=_REASON_STATUS.get(result.reason, 400), detail=env)
         return JSONResponse(env)
 
-    @router.post("/api/sessions/{session_id}/keep")
+    @router.post(
+        "/api/sessions/{session_id}/keep",
+        responses={200: {"model": SessionMutationOut,
+                         "description": "Keep-pin updated; returns the updated session view."}},
+    )
     async def api_keep_session(session_id: str, request: Request) -> JSONResponse:
         """Set the operator keep marker and searchable note.
 
@@ -536,7 +683,11 @@ def build_router(
             raise HTTPException(status_code=_REASON_STATUS.get(result.reason, 400), detail=env)
         return JSONResponse(env)
 
-    @router.post("/api/sessions/{session_id}/model")
+    @router.post(
+        "/api/sessions/{session_id}/model",
+        responses={200: {"model": SessionMutationOut,
+                         "description": "Session model updated; returns the updated session view."}},
+    )
     def api_set_model(session_id: str, body: ModelBody) -> JSONResponse:
         result = orchestrator.session_service.set_model(session_id, body.model)
         env = core._command_envelope(result)
@@ -544,7 +695,11 @@ def build_router(
             raise HTTPException(status_code=_REASON_STATUS.get(result.reason, 400), detail=env)
         return JSONResponse(env)
 
-    @router.post("/api/sessions/{session_id}/effort")
+    @router.post(
+        "/api/sessions/{session_id}/effort",
+        responses={200: {"model": SessionMutationOut,
+                         "description": "Session effort updated; returns the updated session view."}},
+    )
     async def api_set_effort(session_id: str, request: Request) -> JSONResponse:
         max_bytes = 256
         content_length = request.headers.get("content-length")
@@ -569,7 +724,11 @@ def build_router(
 
     # --- approvals (Move H) — durable approval gate -----------------------
 
-    @router.post("/api/sessions/{session_id}/upload")
+    @router.post(
+        "/api/sessions/{session_id}/upload",
+        responses={200: {"model": UploadOut,
+                         "description": "File staged/delivered to the session."}},
+    )
     async def api_upload_file(
         session_id: str,
         file: UploadFile = File(...),
@@ -594,7 +753,11 @@ def build_router(
 
     # --- inspect / jobs / git (U3.5 tier 2 — thin wraps over existing services) ---
 
-    @router.post("/api/sessions/{session_id}/inspect")
+    @router.post(
+        "/api/sessions/{session_id}/inspect",
+        responses={200: {"model": InspectOut,
+                         "description": "Arbitrary node-inspector payload."}},
+    )
     async def api_inspect(session_id: str, body: InspectBody) -> JSONResponse:
         """Run a repo inspection op routed to the session's owning node — the same
         NodeInspector path Telegram uses. Read-only."""

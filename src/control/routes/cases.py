@@ -14,6 +14,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from src.control import control_api as core
+from src.control.routes._responses import CommandResult
 from src.control.control_api import (
     _REASON_STATUS,
     CaseCloseBody,
@@ -59,6 +60,189 @@ class RecordReviewOut(BaseModel):
     event_id: str
 
 
+# --- Reusable sub-shapes -----------------------------------------------------
+class WaitOutcome(BaseModel):
+    task_id: str
+    outcome: str
+
+
+class PendingTask(BaseModel):
+    task_id: str
+
+
+class ReviewSummary(BaseModel):
+    verdict: str
+    reason: Optional[str]
+    event_type: str
+
+
+# --- Per-endpoint success envelopes (documentation only) ---------------------
+class ManagerInvokeOut(CommandResult):
+    session_id: str
+    case_id: str
+    task_id: str
+
+
+class RecordWorkerWaitOut(CommandResult):
+    event_id: Optional[int] = None
+
+
+class ReconcileWorkerWaitsOut(CommandResult):
+    resolved: list[WaitOutcome]
+    pending: list[PendingTask]
+
+
+class InboxResolvedEntry(BaseModel):
+    task_id: str
+    outcome: str
+    case_id: str
+
+
+class AgentInboxOut(CommandResult):
+    session_id: str
+    resolved: list[InboxResolvedEntry]
+    pending: list[PendingTask]
+
+
+class ArmWaitGroupOut(CommandResult):
+    event_id: Optional[int] = None
+
+
+class PublishArtifactOut(CommandResult):
+    link_id: int
+    event_id: str
+    artifact_id: str
+
+
+class PublishSpecOut(CommandResult):
+    link_id: int
+    event_id: str
+    artifact_id: str
+    spec_id: str
+
+
+class RecordSpecReviewOut(CommandResult):
+    spec_id: str
+    verdict: str
+    passed: bool
+    total: int
+    max: int
+    threshold: int
+    critical_zero: bool
+    missing: list[str]
+    out_of_range: list[str]
+    event_id: str
+    event_type: str
+
+
+class DecomposeCaseOut(CommandResult):
+    task_keys: list[str]
+    order: list[str]
+    link_ids: list[Optional[int]]
+
+
+class WorkerBrief(BaseModel):
+    task_id: str
+    finished: bool
+    outcome: Optional[str]
+    latest_review: Optional[ReviewSummary]
+
+
+class WaitGroupBrief(BaseModel):
+    wait_group_id: str
+    condition: str
+    members: list[str]
+    satisfied: bool
+    presented_task_ids: list[str]
+    retire: bool
+
+
+class CaseBrief(BaseModel):
+    case_id: str
+    objective: str
+    status: Optional[str]
+    current_stage: Optional[str]
+    completion_criteria: list[dict]
+    round_cap: int
+    rounds_used: int
+    rounds_remaining: int
+    workers: list[WorkerBrief]
+    worker_session_ids: list[str]
+    latest_review: Optional[ReviewSummary]
+    open_waits: list[str]
+    ready_waits: list[str]
+    wait_groups: list[WaitGroupBrief]
+
+
+class CaseBriefOut(CommandResult):
+    brief: CaseBrief
+
+
+class BootReconcileOut(CommandResult):
+    reconciled: ReconcileWorkerWaitsOut
+    rearmed: list[dict]
+
+
+class InterruptCaseOut(CommandResult):
+    cancelled_tasks: list[str]
+    already: bool
+    status: str
+
+
+class OrphanCandidate(BaseModel):
+    case_id: str
+    manager_session_id: Optional[str]
+    manager_status: Optional[str]
+    reason: str
+    disposition: str
+
+
+class OrphanCleaned(OrphanCandidate):
+    result: dict
+
+
+class OrphanSweepOut(CommandResult):
+    dry_run: bool
+    scanned: int
+    candidates: list[OrphanCandidate]
+    cleaned: list[OrphanCleaned]
+    skipped: int
+    expired_approvals: int
+
+
+class SetCaseStateOut(CommandResult):
+    changed: Optional[bool] = None
+    status: str
+    cancelled_tasks: Optional[list[str]] = None
+    already: Optional[bool] = None
+
+
+class CaseResumeStateOut(BaseModel):
+    case_id: str
+    paused: bool
+    pause: Optional[dict]
+    quota: dict
+    manager_session_id: Optional[str]
+    manager_session_status: Optional[str]
+    recommended_mode: str
+    estimate: Optional[dict]
+    pending_approval: Optional[dict]
+    auto: bool
+    enabled: bool
+    modes: list[str]
+
+
+class CaseResumeOut(CommandResult):
+    reason: str
+    case_id: str
+    mode: str
+    session_id: str
+
+
+class OperatorCloseOut(CommandResult):
+    closed: bool
+
+
 def build_router(
     orchestrator: Any,
     *,
@@ -69,7 +253,11 @@ def build_router(
 ) -> APIRouter:
     router = APIRouter(dependencies=[Depends(require_auth)])
 
-    @router.post("/api/manager")
+    @router.post(
+        "/api/manager",
+        responses={200: {"model": ManagerInvokeOut,
+                         "description": "The invoked Manager session + its first Case/task."}},
+    )
     async def api_manager(
         body: ManagerInvokeBody,
         idempotency_key: Optional[str] = Header(default=None, alias="Idempotency-Key"),
@@ -212,7 +400,11 @@ def build_router(
             idem_put("record_review", idempotency_key, result)
         return JSONResponse(result)
 
-    @router.post("/api/cases/{case_id}/waits")
+    @router.post(
+        "/api/cases/{case_id}/waits",
+        responses={200: {"model": RecordWorkerWaitOut,
+                         "description": "A104 shim no-op acknowledgement (event_id is null)."}},
+    )
     def api_record_worker_wait(case_id: str, body: CaseWaitBody) -> JSONResponse:
         """[A46 → A104 shim, D7] An un-redeployed mcp_manager calls this after every
         Case dispatch. Nothing is recorded any more (the agent inbox addresses the
@@ -226,7 +418,11 @@ def build_router(
         )
         return JSONResponse(result)
 
-    @router.post("/api/cases/{case_id}/waits/reconcile")
+    @router.post(
+        "/api/cases/{case_id}/waits/reconcile",
+        responses={200: {"model": ReconcileWorkerWaitsOut,
+                         "description": "The Case's inbox: resolved (finished) + pending (running)."}},
+    )
     def api_reconcile_worker_waits(case_id: str) -> JSONResponse:
         """[A46 → A104 shim, D5] What the agent inbox holds for this Case, in the
         legacy shape: ``resolved`` = finished, not yet consumed; ``pending`` = still
@@ -234,7 +430,11 @@ def build_router(
         result = orchestrator.reconcile_worker_waits(case_id, actor="manager")
         return JSONResponse(result)
 
-    @router.get("/api/agent/inbox")
+    @router.get(
+        "/api/agent/inbox",
+        responses={200: {"model": AgentInboxOut,
+                         "description": "One session's inbox: resolved child completions + pending requests."}},
+    )
     def api_agent_inbox(
         session_id: str = Query(..., min_length=1, max_length=128),
     ) -> JSONResponse:
@@ -245,7 +445,11 @@ def build_router(
         source; writes nothing, no flag gate."""
         return JSONResponse(orchestrator.agent_inbox_view(session_id))
 
-    @router.post("/api/cases/{case_id}/wait-group")
+    @router.post(
+        "/api/cases/{case_id}/wait-group",
+        responses={200: {"model": ArmWaitGroupOut,
+                         "description": "The armed wait-group acknowledgement."}},
+    )
     def api_arm_wait_group(case_id: str, body: CaseWaitGroupBody) -> JSONResponse:
         """[M3.4] Arm a Manager wait-group so the Wake-Dispatcher autonomously
         re-enters this Case when the group is satisfied. Gated by
@@ -276,7 +480,11 @@ def build_router(
         )
         return JSONResponse(result)
 
-    @router.post("/api/cases/{case_id}/artifacts")
+    @router.post(
+        "/api/cases/{case_id}/artifacts",
+        responses={200: {"model": PublishArtifactOut,
+                         "description": "The published artifact link + event."}},
+    )
     def api_publish_artifact(case_id: str, body: CasePublishArtifactBody) -> JSONResponse:
         """[A56/M4] Publish a durable artifact onto a Case (``artifact`` flow_link +
         ``artifact.published`` event). Gated by ``SPEC_AUTHORING_ENABLED`` (404 when
@@ -290,7 +498,11 @@ def build_router(
         )
         return JSONResponse(result)
 
-    @router.post("/api/cases/{case_id}/spec")
+    @router.post(
+        "/api/cases/{case_id}/spec",
+        responses={200: {"model": PublishSpecOut,
+                         "description": "The authored spec link + event."}},
+    )
     def api_publish_spec(case_id: str, body: CaseSpecBody) -> JSONResponse:
         """[A56/M4] Author a spec onto a Case as durable evidence (``spec.authored``).
         Gated by ``SPEC_AUTHORING_ENABLED`` (404 when OFF ⇒ byte-identical)."""
@@ -302,7 +514,11 @@ def build_router(
         )
         return JSONResponse(result)
 
-    @router.post("/api/cases/{case_id}/spec-review")
+    @router.post(
+        "/api/cases/{case_id}/spec-review",
+        responses={200: {"model": RecordSpecReviewOut,
+                         "description": "The scored spec verdict + the review event."}},
+    )
     def api_record_spec_review(case_id: str, body: CaseSpecReviewBody) -> JSONResponse:
         """[A56/M4] Score a spec against R1 by a SEPARATE plan-reviewer seat; the
         verdict (accepted|rework_requested) is computed from the scores, not trusted.
@@ -316,7 +532,11 @@ def build_router(
         )
         return JSONResponse(result)
 
-    @router.post("/api/cases/{case_id}/decompose")
+    @router.post(
+        "/api/cases/{case_id}/decompose",
+        responses={200: {"model": DecomposeCaseOut,
+                         "description": "The expanded task-DAG (keys, order, link ids)."}},
+    )
     def api_decompose_case(case_id: str, body: CaseDecomposeBody) -> JSONResponse:
         """[A56/M4] Expand an APPROVED objective into a task-DAG of N ``task_attached``
         links on ONE Case (no orphan flow_runs). REFUSES (422 with a structured reason)
@@ -334,7 +554,11 @@ def build_router(
             raise HTTPException(status_code=422, detail=result)
         return JSONResponse(result)
 
-    @router.get("/api/cases/{case_id}/brief")
+    @router.get(
+        "/api/cases/{case_id}/brief",
+        responses={200: {"model": CaseBriefOut,
+                         "description": "The full working state of a Case from the DB alone."}},
+    )
     def api_get_case_brief(case_id: str) -> JSONResponse:
         """[A54/M3.4 Job 2] The full working state of a Case from the DB ALONE — the
         Manager's single 'where am I on this Case' read for reconstructing after a
@@ -345,7 +569,11 @@ def build_router(
             raise HTTPException(status_code=404, detail=result.get("reason") or "case_not_found")
         return JSONResponse(result)
 
-    @router.post("/api/cases/{case_id}/boot-reconcile")
+    @router.post(
+        "/api/cases/{case_id}/boot-reconcile",
+        responses={200: {"model": BootReconcileOut,
+                         "description": "Boot-time reconcile result + re-armed wait-groups."}},
+    )
     def api_boot_reconcile_case(case_id: str) -> JSONResponse:
         """[A54/M3.4 Job 2] Boot-time reconstruction hook — reconcile outstanding
         worker waits AND re-arm live wait-groups from the ledger (idempotent). Gated
@@ -358,7 +586,11 @@ def build_router(
         result = orchestrator.boot_reconcile_case(case_id, actor="manager")
         return JSONResponse(result)
 
-    @router.post("/api/cases/{case_id}/interrupt")
+    @router.post(
+        "/api/cases/{case_id}/interrupt",
+        responses={200: {"model": InterruptCaseOut,
+                         "description": "Interrupt result: cancelled tasks + resulting status."}},
+    )
     async def api_interrupt_case(case_id: str, body: CaseInterruptBody) -> JSONResponse:
         """[A53] KILL path: cancel a Case's in-flight worker task(s), mark it
         blocked (resumable), record flow.interrupted, escalate once. NOT flag-gated
@@ -371,7 +603,11 @@ def build_router(
             raise HTTPException(status_code=code, detail=result)
         return JSONResponse(result)
 
-    @router.post("/api/cases/orphans/sweep")
+    @router.post(
+        "/api/cases/orphans/sweep",
+        responses={200: {"model": OrphanSweepOut,
+                         "description": "Orphan-sweep result: scanned/candidates/cleaned counts."}},
+    )
     async def api_sweep_orphaned_cases(body: CaseOrphanSweepBody) -> JSONResponse:
         """Block stale open Cases that have no active Manager session.
 
@@ -390,7 +626,11 @@ def build_router(
             raise HTTPException(status_code=503, detail=result)
         return JSONResponse(result)
 
-    @router.post("/api/cases/{case_id}/state")
+    @router.post(
+        "/api/cases/{case_id}/state",
+        responses={200: {"model": SetCaseStateOut,
+                         "description": "Case state-change result (branch-specific fields optional)."}},
+    )
     async def api_set_case_state(case_id: str, body: CaseStateBody) -> JSONResponse:
         """Operator Case state control for non-terminal Cases.
 
@@ -412,7 +652,11 @@ def build_router(
             raise HTTPException(status_code=code, detail=result)
         return JSONResponse(result)
 
-    @router.get("/api/cases/{case_id}/resume-state")
+    @router.get(
+        "/api/cases/{case_id}/resume-state",
+        responses={200: {"model": CaseResumeStateOut,
+                         "description": "Quota-pause status, resume cost estimate, pending decision."}},
+    )
     def api_case_resume_state(case_id: str) -> JSONResponse:
         """[quota-resume] Is this Case quota-paused, when does quota return, what
         would resuming cost, and is a decision already pending?
@@ -425,7 +669,11 @@ def build_router(
         """
         return JSONResponse(orchestrator.case_resume_state(case_id))
 
-    @router.post("/api/cases/{case_id}/resume")
+    @router.post(
+        "/api/cases/{case_id}/resume",
+        responses={200: {"model": CaseResumeOut,
+                         "description": "The resumed Case: mode + the (re)entered Manager session."}},
+    )
     async def api_case_resume(case_id: str, body: CaseResumeBody) -> JSONResponse:
         """[quota-resume] Resume a Case NOW — the operator's manual equivalent of
         the automatic quota-restore path, deliberately the SAME leased
@@ -448,7 +696,11 @@ def build_router(
             raise HTTPException(status_code=code, detail=result)
         return JSONResponse(result)
 
-    @router.post("/api/cases/{case_id}/operator-close")
+    @router.post(
+        "/api/cases/{case_id}/operator-close",
+        responses={200: {"model": OperatorCloseOut,
+                         "description": "Structured operator-close decision (ok:false is a refusal)."}},
+    )
     def api_operator_close_case(case_id: str, body: CaseOperatorCloseBody) -> JSONResponse:
         """Manual operator close for stale/non-terminal Cases.
 

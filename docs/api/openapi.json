@@ -15,10 +15,11 @@
         "operationId": "health_health_get",
         "responses": {
           "200": {
-            "description": "Successful Response",
+            "description": "Liveness + SDK governor ceilings, carrier-coverage flag, and build identity.",
             "content": {
               "application/json": {
                 "schema": {
+                  "$ref": "#/components/schemas/HealthOut",
                   "additionalProperties": true,
                   "type": "object",
                   "title": "Response Health Health Get"
@@ -39,10 +40,11 @@
         "operationId": "api_turn_queue_coverage_api_turn_queue_coverage_get",
         "responses": {
           "200": {
-            "description": "Successful Response",
+            "description": "Latest managed-carrier coverage check + open retired-backend session count.",
             "content": {
               "application/json": {
                 "schema": {
+                  "$ref": "#/components/schemas/TurnQueueCoverageOut",
                   "additionalProperties": true,
                   "type": "object",
                   "title": "Response Api Turn Queue Coverage Api Turn Queue Coverage Get"
@@ -100,10 +102,12 @@
         ],
         "responses": {
           "200": {
-            "description": "Successful Response",
+            "description": "Flat {tasks:[...]} by default; {sections:{...}} when sectioned=true.",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/TasksOut"
+                }
               }
             }
           },
@@ -132,10 +136,12 @@
         "operationId": "api_nodes_api_nodes_get",
         "responses": {
           "200": {
-            "description": "Successful Response",
+            "description": "Live mesh execution nodes.",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/NodesOut"
+                }
               }
             }
           },
@@ -179,10 +185,12 @@
         ],
         "responses": {
           "200": {
-            "description": "Successful Response",
+            "description": "Newest-first artifact summaries.",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/ArtifactsOut"
+                }
               }
             }
           },
@@ -228,10 +236,12 @@
         ],
         "responses": {
           "200": {
-            "description": "Successful Response",
+            "description": "One artifact header + normalized changed files.",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/ArtifactOut"
+                }
               }
             }
           },
@@ -291,10 +301,12 @@
         ],
         "responses": {
           "200": {
-            "description": "Successful Response",
+            "description": "Live event deltas; pass offset back as since.",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/EventsOut"
+                }
               }
             }
           },
@@ -390,10 +402,12 @@
         ],
         "responses": {
           "200": {
-            "description": "Successful Response",
+            "description": "Turn telemetry rows (filterable).",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/TurnsOut"
+                }
               }
             }
           },
@@ -438,10 +452,12 @@
         ],
         "responses": {
           "200": {
-            "description": "Successful Response",
+            "description": "A single decoded turn row (open schema).",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/TurnOut"
+                }
               }
             }
           },
@@ -486,10 +502,12 @@
         ],
         "responses": {
           "200": {
-            "description": "Successful Response",
+            "description": "Turn + invocations, model requests, and processes.",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/TurnDiagnosticsOut"
+                }
               }
             }
           },
@@ -544,10 +562,12 @@
         ],
         "responses": {
           "200": {
-            "description": "Successful Response",
+            "description": "Turn execution graph: nodes + edges.",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/TurnGraphOut"
+                }
               }
             }
           },
@@ -620,10 +640,12 @@
         ],
         "responses": {
           "200": {
-            "description": "Successful Response",
+            "description": "Event rows for a single turn.",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/TurnEventsOut"
+                }
               }
             }
           },
@@ -712,10 +734,12 @@
         "operationId": "api_backends_usage_api_backends_usage_get",
         "responses": {
           "200": {
-            "description": "Successful Response",
+            "description": "Honest per-backend account/usage view; null + reason for unprovable limits.",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/BackendsUsageOut"
+                }
               }
             }
           },
@@ -769,10 +793,12 @@
         ],
         "responses": {
           "200": {
-            "description": "Successful Response",
+            "description": "Discoverable repos for a node.",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/ProjectsOut"
+                }
               }
             }
           },
@@ -835,10 +861,12 @@
         ],
         "responses": {
           "200": {
-            "description": "Successful Response",
+            "description": "Model catalog for a node; models is a list (single backend) or dict keyed by backend.",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/ModelsOut"
+                }
               }
             }
           },
@@ -920,10 +948,12 @@
         ],
         "responses": {
           "200": {
-            "description": "Successful Response",
+            "description": "Watched jobs: running + recent.",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JobsOut"
+                }
               }
             }
           },
@@ -972,10 +1002,12 @@
         ],
         "responses": {
           "200": {
-            "description": "Successful Response",
+            "description": "Mesh health trend + reconcile backlog.",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/MeshHealthOut"
+                }
               }
             }
           },
@@ -1031,10 +1063,12 @@
         },
         "responses": {
           "200": {
-            "description": "Successful Response",
+            "description": "The held managed turn's new resolved status.",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/TurnRecoveryResolveOut"
+                }
               }
             }
           },
@@ -1079,11 +1113,13 @@
           }
         ],
         "responses": {
-          "200": {
-            "description": "Successful Response",
+          "202": {
+            "description": "Admission receipt for the queued turn (the handler responds 202 Accepted).",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/TurnRequestReceiptOut"
+                }
               }
             }
           },
@@ -1495,10 +1531,12 @@
         ],
         "responses": {
           "200": {
-            "description": "Successful Response",
+            "description": "Enrollment state after the operation.",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/TurnEnrollmentOut"
+                }
               }
             }
           },
@@ -1544,10 +1582,12 @@
         ],
         "responses": {
           "200": {
-            "description": "Successful Response",
+            "description": "Enrollment state after the operation.",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/TurnEnrollmentOut"
+                }
               }
             }
           },
@@ -1577,10 +1617,12 @@
         "operationId": "api_list_flags_api_flags_get",
         "responses": {
           "200": {
-            "description": "Successful Response",
+            "description": "Effective runtime flags.",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/FlagsOut"
+                }
               }
             }
           },
@@ -1630,10 +1672,12 @@
         },
         "responses": {
           "200": {
-            "description": "Successful Response",
+            "description": "Updated runtime flag.",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/FlagSetOut"
+                }
               }
             }
           },
@@ -1676,10 +1720,12 @@
         ],
         "responses": {
           "200": {
-            "description": "Successful Response",
+            "description": "Cleared runtime flag override.",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/FlagDeleteOut"
+                }
               }
             }
           },
@@ -1745,10 +1791,12 @@
         ],
         "responses": {
           "200": {
-            "description": "Successful Response",
+            "description": "Approval requests.",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/ApprovalsOut"
+                }
               }
             }
           },
@@ -1809,10 +1857,12 @@
         },
         "responses": {
           "200": {
-            "description": "Successful Response",
+            "description": "Created approval request.",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/ApprovalCreateOut"
+                }
               }
             }
           },
@@ -1868,10 +1918,12 @@
         },
         "responses": {
           "200": {
-            "description": "Successful Response",
+            "description": "Resolved approval request.",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/ApprovalResolveOut"
+                }
               }
             }
           },
@@ -1901,10 +1953,12 @@
         "operationId": "api_push_status_api_push_status_get",
         "responses": {
           "200": {
-            "description": "Successful Response",
+            "description": "Browser-push availability.",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/PushStatusOut"
+                }
               }
             }
           },
@@ -1929,10 +1983,12 @@
         "operationId": "api_push_subscribe_api_push_subscribe_post",
         "responses": {
           "200": {
-            "description": "Successful Response",
+            "description": "Subscription stored.",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/CommandResult"
+                }
               }
             }
           },
@@ -1966,10 +2022,12 @@
         },
         "responses": {
           "200": {
-            "description": "Successful Response",
+            "description": "Subscription removed.",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/CommandResult"
+                }
               }
             }
           },
@@ -2003,10 +2061,12 @@
         "operationId": "api_git_status_api_git_status_post",
         "responses": {
           "200": {
-            "description": "Successful Response",
+            "description": "Working-tree status and safety.",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/GitStatusOut"
+                }
               }
             }
           },
@@ -2040,10 +2100,12 @@
         },
         "responses": {
           "200": {
-            "description": "Successful Response",
+            "description": "Commit result.",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/GitCommitOut"
+                }
               }
             }
           },
@@ -2087,10 +2149,12 @@
         },
         "responses": {
           "200": {
-            "description": "Successful Response",
+            "description": "Commit-all result.",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/GitCommitAllOut"
+                }
               }
             }
           },
@@ -2294,10 +2358,12 @@
         ],
         "responses": {
           "200": {
-            "description": "Successful Response",
+            "description": "Active cache-keepalive heartbeats.",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/CacheHeartbeatsOut"
+                }
               }
             }
           },
@@ -2352,10 +2418,12 @@
         },
         "responses": {
           "200": {
-            "description": "Successful Response",
+            "description": "Cache-keepalive heartbeat started.",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/CacheHeartbeatStartOut"
+                }
               }
             }
           },
@@ -2398,10 +2466,12 @@
         ],
         "responses": {
           "200": {
-            "description": "Successful Response",
+            "description": "Cache-keepalive heartbeat(s) stopped.",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/CacheHeartbeatStopOut"
+                }
               }
             }
           },
@@ -2459,10 +2529,12 @@
         ],
         "responses": {
           "200": {
-            "description": "Successful Response",
+            "description": "Transcript messages for the session.",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/MessagesOut"
+                }
               }
             }
           },
@@ -2536,10 +2608,12 @@
         ],
         "responses": {
           "200": {
-            "description": "Successful Response",
+            "description": "Paginated session timeline with coverage/context-fill.",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/TimelineOut"
+                }
               }
             }
           },
@@ -2585,10 +2659,12 @@
         ],
         "responses": {
           "200": {
-            "description": "Successful Response",
+            "description": "Token totals and USD cost estimate for the session.",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/UsageOut"
+                }
               }
             }
           },
@@ -2667,10 +2743,12 @@
         },
         "responses": {
           "200": {
-            "description": "Successful Response",
+            "description": "Instruction accepted; a turn task was enqueued.",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/InstructionsOut"
+                }
               }
             }
           },
@@ -2728,10 +2806,12 @@
         },
         "responses": {
           "200": {
-            "description": "Successful Response",
+            "description": "Session bound; returns the updated session view.",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/SessionMutationOut"
+                }
               }
             }
           },
@@ -2776,10 +2856,12 @@
         ],
         "responses": {
           "200": {
-            "description": "Successful Response",
+            "description": "Active turn cancel requested (if any).",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/StopOut"
+                }
               }
             }
           },
@@ -2824,10 +2906,12 @@
         ],
         "responses": {
           "200": {
-            "description": "Successful Response",
+            "description": "Context compaction run or queued.",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/CompactOut"
+                }
               }
             }
           },
@@ -2872,10 +2956,12 @@
         ],
         "responses": {
           "200": {
-            "description": "Successful Response",
+            "description": "Session closed; returns the updated session view.",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/SessionMutationOut"
+                }
               }
             }
           },
@@ -2920,10 +3006,12 @@
         ],
         "responses": {
           "200": {
-            "description": "Successful Response",
+            "description": "Session restored; returns the updated session view.",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/SessionMutationOut"
+                }
               }
             }
           },
@@ -2969,10 +3057,12 @@
         ],
         "responses": {
           "200": {
-            "description": "Successful Response",
+            "description": "Keep-pin updated; returns the updated session view.",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/SessionMutationOut"
+                }
               }
             }
           },
@@ -3027,10 +3117,12 @@
         },
         "responses": {
           "200": {
-            "description": "Successful Response",
+            "description": "Session model updated; returns the updated session view.",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/SessionMutationOut"
+                }
               }
             }
           },
@@ -3075,10 +3167,12 @@
         ],
         "responses": {
           "200": {
-            "description": "Successful Response",
+            "description": "Session effort updated; returns the updated session view.",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/SessionMutationOut"
+                }
               }
             }
           },
@@ -3134,10 +3228,12 @@
         },
         "responses": {
           "200": {
-            "description": "Successful Response",
+            "description": "File staged/delivered to the session.",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/UploadOut"
+                }
               }
             }
           },
@@ -3193,10 +3289,12 @@
         },
         "responses": {
           "200": {
-            "description": "Successful Response",
+            "description": "Arbitrary node-inspector payload.",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/InspectOut"
+                }
               }
             }
           },
@@ -3261,10 +3359,12 @@
         ],
         "responses": {
           "200": {
-            "description": "Successful Response",
+            "description": "Flow-run summaries, newest first.",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/FlowsOut"
+                }
               }
             }
           },
@@ -3310,10 +3410,12 @@
         ],
         "responses": {
           "200": {
-            "description": "Successful Response",
+            "description": "One flow's full \u00a711 DB record.",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/FlowDetailOut"
+                }
               }
             }
           },
@@ -3378,10 +3480,12 @@
         ],
         "responses": {
           "200": {
-            "description": "Successful Response",
+            "description": "Case summaries with attention-bucket counts.",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/WorkListOut"
+                }
               }
             }
           },
@@ -3411,10 +3515,12 @@
         "operationId": "api_work_session_affiliations_api_work_affiliations_sessions_get",
         "responses": {
           "200": {
-            "description": "Successful Response",
+            "description": "Session\u2192case affiliation index over the whole substrate.",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/SessionAffiliationsOut"
+                }
               }
             }
           },
@@ -3455,10 +3561,12 @@
         ],
         "responses": {
           "200": {
-            "description": "Successful Response",
+            "description": "One case: summary, full record, grouped ledger, lineage.",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/CaseDetailOut"
+                }
               }
             }
           },
@@ -3516,10 +3624,12 @@
         ],
         "responses": {
           "200": {
-            "description": "Successful Response",
+            "description": "Case audit trail: newest flow_events + linked evidence.",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/CaseTimelineOut"
+                }
               }
             }
           },
@@ -3565,10 +3675,12 @@
         ],
         "responses": {
           "200": {
-            "description": "Successful Response",
+            "description": "Compact lineage graph: case, parent, children + edges.",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/CaseGraphOut"
+                }
               }
             }
           },
@@ -3614,10 +3726,12 @@
         ],
         "responses": {
           "200": {
-            "description": "Successful Response",
+            "description": "Live operational roster: sessions + jobs + token totals.",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/CaseRosterOut"
+                }
               }
             }
           },
@@ -3680,10 +3794,12 @@
         },
         "responses": {
           "200": {
-            "description": "Successful Response",
+            "description": "The invoked Manager session + its first Case/task.",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/ManagerInvokeOut"
+                }
               }
             }
           },
@@ -3927,10 +4043,12 @@
         },
         "responses": {
           "200": {
-            "description": "Successful Response",
+            "description": "A104 shim no-op acknowledgement (event_id is null).",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/RecordWorkerWaitOut"
+                }
               }
             }
           },
@@ -3976,10 +4094,12 @@
         ],
         "responses": {
           "200": {
-            "description": "Successful Response",
+            "description": "The Case's inbox: resolved (finished) + pending (running).",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/ReconcileWorkerWaitsOut"
+                }
               }
             }
           },
@@ -4027,10 +4147,12 @@
         ],
         "responses": {
           "200": {
-            "description": "Successful Response",
+            "description": "One session's inbox: resolved child completions + pending requests.",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/AgentInboxOut"
+                }
               }
             }
           },
@@ -4086,10 +4208,12 @@
         },
         "responses": {
           "200": {
-            "description": "Successful Response",
+            "description": "The armed wait-group acknowledgement.",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/ArmWaitGroupOut"
+                }
               }
             }
           },
@@ -4145,10 +4269,12 @@
         },
         "responses": {
           "200": {
-            "description": "Successful Response",
+            "description": "The published artifact link + event.",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/PublishArtifactOut"
+                }
               }
             }
           },
@@ -4204,10 +4330,12 @@
         },
         "responses": {
           "200": {
-            "description": "Successful Response",
+            "description": "The authored spec link + event.",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/PublishSpecOut"
+                }
               }
             }
           },
@@ -4263,10 +4391,12 @@
         },
         "responses": {
           "200": {
-            "description": "Successful Response",
+            "description": "The scored spec verdict + the review event.",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/RecordSpecReviewOut"
+                }
               }
             }
           },
@@ -4322,10 +4452,12 @@
         },
         "responses": {
           "200": {
-            "description": "Successful Response",
+            "description": "The expanded task-DAG (keys, order, link ids).",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/DecomposeCaseOut"
+                }
               }
             }
           },
@@ -4371,10 +4503,12 @@
         ],
         "responses": {
           "200": {
-            "description": "Successful Response",
+            "description": "The full working state of a Case from the DB alone.",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/CaseBriefOut"
+                }
               }
             }
           },
@@ -4420,10 +4554,12 @@
         ],
         "responses": {
           "200": {
-            "description": "Successful Response",
+            "description": "Boot-time reconcile result + re-armed wait-groups.",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/BootReconcileOut"
+                }
               }
             }
           },
@@ -4479,10 +4615,12 @@
         },
         "responses": {
           "200": {
-            "description": "Successful Response",
+            "description": "Interrupt result: cancelled tasks + resulting status.",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/InterruptCaseOut"
+                }
               }
             }
           },
@@ -4522,10 +4660,12 @@
         },
         "responses": {
           "200": {
-            "description": "Successful Response",
+            "description": "Orphan-sweep result: scanned/candidates/cleaned counts.",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/OrphanSweepOut"
+                }
               }
             }
           },
@@ -4586,10 +4726,12 @@
         },
         "responses": {
           "200": {
-            "description": "Successful Response",
+            "description": "Case state-change result (branch-specific fields optional).",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/SetCaseStateOut"
+                }
               }
             }
           },
@@ -4635,10 +4777,12 @@
         ],
         "responses": {
           "200": {
-            "description": "Successful Response",
+            "description": "Quota-pause status, resume cost estimate, pending decision.",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/CaseResumeStateOut"
+                }
               }
             }
           },
@@ -4694,10 +4838,12 @@
         },
         "responses": {
           "200": {
-            "description": "Successful Response",
+            "description": "The resumed Case: mode + the (re)entered Manager session.",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/CaseResumeOut"
+                }
               }
             }
           },
@@ -4753,10 +4899,12 @@
         },
         "responses": {
           "200": {
-            "description": "Successful Response",
+            "description": "Structured operator-close decision (ok:false is a refusal).",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/OperatorCloseOut"
+                }
               }
             }
           },
@@ -4873,10 +5021,12 @@
         ],
         "responses": {
           "200": {
-            "description": "Successful Response",
+            "description": "Spend breakdown along one dimension, bucketed and priced",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/CostExplorerOut"
+                }
               }
             }
           },
@@ -4922,10 +5072,12 @@
         ],
         "responses": {
           "200": {
-            "description": "Successful Response",
+            "description": "Per-case cost breakdown with manager/workers split",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/CaseUsageOut"
+                }
               }
             }
           },
@@ -5032,10 +5184,12 @@
         ],
         "responses": {
           "200": {
-            "description": "Successful Response",
+            "description": "Top spender sessions ranked by USD or tokens",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/CostTopOut"
+                }
               }
             }
           },
@@ -5116,10 +5270,12 @@
         ],
         "responses": {
           "200": {
-            "description": "Successful Response",
+            "description": "Distinct projects with token usage, ordered by size",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/CostProjectsOut"
+                }
               }
             }
           },
@@ -5149,10 +5305,12 @@
         "operationId": "api_cost_alerts_api_cost_alerts_get",
         "responses": {
           "200": {
-            "description": "Successful Response",
+            "description": "Cost budget/burn-rate alerts and enforcement lever",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/CostAlertsOut"
+                }
               }
             }
           },
@@ -5196,10 +5354,12 @@
         ],
         "responses": {
           "200": {
-            "description": "Successful Response",
+            "description": "Per-minute host/request metric rollups",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/MetricsSystemOut"
+                }
               }
             }
           },
@@ -5229,10 +5389,12 @@
         "operationId": "api_metrics_health_api_metrics_health_get",
         "responses": {
           "200": {
-            "description": "Successful Response",
+            "description": "One-line gateway health verdict for the UI banner",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/MetricsHealthOut"
+                }
               }
             }
           },
@@ -5276,10 +5438,12 @@
         ],
         "responses": {
           "200": {
-            "description": "Successful Response",
+            "description": "Recent gateway-liveness outages from the external healthcheck",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/SystemAlertsOut"
+                }
               }
             }
           },
@@ -5308,10 +5472,12 @@
         "operationId": "api_quota_windows_api_quota_windows_get",
         "responses": {
           "200": {
-            "description": "Successful Response",
+            "description": "Quota window coordinator + prewarmer status",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/QuotaWindowsOut"
+                }
               }
             }
           },
@@ -5332,6 +5498,292 @@
   },
   "components": {
     "schemas": {
+      "AgentInboxOut": {
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "title": "Ok"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "session_id": {
+            "type": "string",
+            "title": "Session Id"
+          },
+          "resolved": {
+            "items": {
+              "$ref": "#/components/schemas/InboxResolvedEntry"
+            },
+            "type": "array",
+            "title": "Resolved"
+          },
+          "pending": {
+            "items": {
+              "$ref": "#/components/schemas/PendingTask"
+            },
+            "type": "array",
+            "title": "Pending"
+          }
+        },
+        "type": "object",
+        "required": [
+          "ok",
+          "session_id",
+          "resolved",
+          "pending"
+        ],
+        "title": "AgentInboxOut"
+      },
+      "AlertBudgets": {
+        "properties": {
+          "daily_budget_usd": {
+            "type": "number",
+            "title": "Daily Budget Usd"
+          },
+          "session_burn_usd": {
+            "type": "number",
+            "title": "Session Burn Usd"
+          },
+          "case_total_usd": {
+            "type": "number",
+            "title": "Case Total Usd"
+          }
+        },
+        "type": "object",
+        "required": [
+          "daily_budget_usd",
+          "session_burn_usd",
+          "case_total_usd"
+        ],
+        "title": "AlertBudgets"
+      },
+      "AlertEnforcement": {
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "title": "Enabled"
+          },
+          "mechanism": {
+            "type": "string",
+            "title": "Mechanism"
+          },
+          "governor_sdk_max_budget_usd": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Governor Sdk Max Budget Usd"
+          }
+        },
+        "type": "object",
+        "required": [
+          "enabled",
+          "mechanism"
+        ],
+        "title": "AlertEnforcement"
+      },
+      "AlertRow": {
+        "properties": {
+          "rule": {
+            "type": "string",
+            "title": "Rule"
+          },
+          "scope": {
+            "type": "string",
+            "title": "Scope"
+          },
+          "value_usd": {
+            "type": "number",
+            "title": "Value Usd"
+          },
+          "budget_usd": {
+            "type": "number",
+            "title": "Budget Usd"
+          },
+          "pct": {
+            "type": "number",
+            "title": "Pct"
+          }
+        },
+        "type": "object",
+        "required": [
+          "rule",
+          "scope",
+          "value_usd",
+          "budget_usd",
+          "pct"
+        ],
+        "title": "AlertRow"
+      },
+      "ApprovalCreateOut": {
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "title": "Ok"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "approval": {
+            "$ref": "#/components/schemas/ApprovalOut"
+          }
+        },
+        "type": "object",
+        "required": [
+          "ok",
+          "approval"
+        ],
+        "title": "ApprovalCreateOut",
+        "description": "``POST /api/approvals`` \u2014 envelope plus the created approval."
+      },
+      "ApprovalOut": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "session_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Session Id"
+          },
+          "task_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Task Id"
+          },
+          "action": {
+            "type": "string",
+            "title": "Action"
+          },
+          "risk": {
+            "type": "string",
+            "title": "Risk"
+          },
+          "reversible": {
+            "type": "integer",
+            "title": "Reversible"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "requested_by": {
+            "type": "string",
+            "title": "Requested By"
+          },
+          "resolved_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Resolved By"
+          },
+          "payload": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Payload"
+          },
+          "created_at": {
+            "type": "string",
+            "title": "Created At"
+          },
+          "resolved_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Resolved At"
+          },
+          "expires_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expires At"
+          },
+          "flow_run_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Flow Run Id"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "session_id",
+          "task_id",
+          "action",
+          "risk",
+          "reversible",
+          "status",
+          "requested_by",
+          "resolved_by",
+          "payload",
+          "created_at",
+          "resolved_at",
+          "expires_at"
+        ],
+        "title": "ApprovalOut",
+        "description": "A single approval request record."
+      },
       "ApprovalRequestBody": {
         "properties": {
           "action": {
@@ -5400,6 +5852,159 @@
         ],
         "title": "ApprovalResolveBody"
       },
+      "ApprovalResolveOut": {
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "title": "Ok"
+          },
+          "reason": {
+            "type": "string",
+            "title": "Reason"
+          },
+          "approval": {
+            "$ref": "#/components/schemas/ApprovalOut"
+          }
+        },
+        "type": "object",
+        "required": [
+          "ok",
+          "reason",
+          "approval"
+        ],
+        "title": "ApprovalResolveOut",
+        "description": "``POST /api/approvals/{approval_id}/resolve`` \u2014 envelope plus the approval."
+      },
+      "ApprovalsOut": {
+        "properties": {
+          "approvals": {
+            "items": {
+              "$ref": "#/components/schemas/ApprovalOut"
+            },
+            "type": "array",
+            "title": "Approvals"
+          }
+        },
+        "type": "object",
+        "required": [
+          "approvals"
+        ],
+        "title": "ApprovalsOut",
+        "description": "``GET /api/approvals`` \u2014 the list of pending/resolved approvals."
+      },
+      "ArmWaitGroupOut": {
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "title": "Ok"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "event_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Event Id"
+          }
+        },
+        "type": "object",
+        "required": [
+          "ok"
+        ],
+        "title": "ArmWaitGroupOut"
+      },
+      "ArtifactOut": {
+        "properties": {
+          "artifact": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Artifact"
+          },
+          "files": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Files"
+          }
+        },
+        "type": "object",
+        "required": [
+          "artifact",
+          "files"
+        ],
+        "title": "ArtifactOut"
+      },
+      "ArtifactsOut": {
+        "properties": {
+          "artifacts": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Artifacts"
+          }
+        },
+        "type": "object",
+        "required": [
+          "artifacts"
+        ],
+        "title": "ArtifactsOut"
+      },
+      "BackendsUsageOut": {
+        "properties": {
+          "telemetry_available": {
+            "type": "boolean",
+            "title": "Telemetry Available"
+          },
+          "backends": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Backends"
+          },
+          "limits_source": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Limits Source"
+          },
+          "limits_reason": {
+            "type": "string",
+            "title": "Limits Reason"
+          }
+        },
+        "type": "object",
+        "required": [
+          "telemetry_available",
+          "backends",
+          "limits_reason"
+        ],
+        "title": "BackendsUsageOut"
+      },
       "BindBody": {
         "properties": {
           "chat_id": {
@@ -5442,6 +6047,61 @@
         ],
         "title": "Body_api_upload_file_api_sessions__session_id__upload_post"
       },
+      "BootReconcileOut": {
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "title": "Ok"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "reconciled": {
+            "$ref": "#/components/schemas/ReconcileWorkerWaitsOut"
+          },
+          "rearmed": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Rearmed"
+          }
+        },
+        "type": "object",
+        "required": [
+          "ok",
+          "reconciled",
+          "rearmed"
+        ],
+        "title": "BootReconcileOut"
+      },
+      "BuildOut": {
+        "properties": {
+          "version": {
+            "type": "string",
+            "title": "Version"
+          },
+          "git_sha": {
+            "type": "string",
+            "title": "Git Sha"
+          }
+        },
+        "type": "object",
+        "required": [
+          "version",
+          "git_sha"
+        ],
+        "title": "BuildOut"
+      },
       "CacheHeartbeatBody": {
         "properties": {
           "reason": {
@@ -5475,6 +6135,210 @@
           "reason"
         ],
         "title": "CacheHeartbeatBody"
+      },
+      "CacheHeartbeatStartOut": {
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "title": "Ok"
+          },
+          "heartbeat": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Heartbeat"
+          }
+        },
+        "type": "object",
+        "required": [
+          "ok",
+          "heartbeat"
+        ],
+        "title": "CacheHeartbeatStartOut"
+      },
+      "CacheHeartbeatStopOut": {
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "title": "Ok"
+          },
+          "stopped": {
+            "type": "integer",
+            "title": "Stopped"
+          }
+        },
+        "type": "object",
+        "required": [
+          "ok",
+          "stopped"
+        ],
+        "title": "CacheHeartbeatStopOut"
+      },
+      "CacheHeartbeatsOut": {
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "title": "Ok"
+          },
+          "heartbeats": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Heartbeats"
+          }
+        },
+        "type": "object",
+        "required": [
+          "ok",
+          "heartbeats"
+        ],
+        "title": "CacheHeartbeatsOut"
+      },
+      "CaseBrief": {
+        "properties": {
+          "case_id": {
+            "type": "string",
+            "title": "Case Id"
+          },
+          "objective": {
+            "type": "string",
+            "title": "Objective"
+          },
+          "status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Status"
+          },
+          "current_stage": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Current Stage"
+          },
+          "completion_criteria": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Completion Criteria"
+          },
+          "round_cap": {
+            "type": "integer",
+            "title": "Round Cap"
+          },
+          "rounds_used": {
+            "type": "integer",
+            "title": "Rounds Used"
+          },
+          "rounds_remaining": {
+            "type": "integer",
+            "title": "Rounds Remaining"
+          },
+          "workers": {
+            "items": {
+              "$ref": "#/components/schemas/WorkerBrief"
+            },
+            "type": "array",
+            "title": "Workers"
+          },
+          "worker_session_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Worker Session Ids"
+          },
+          "latest_review": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ReviewSummary"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "open_waits": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Open Waits"
+          },
+          "ready_waits": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Ready Waits"
+          },
+          "wait_groups": {
+            "items": {
+              "$ref": "#/components/schemas/WaitGroupBrief"
+            },
+            "type": "array",
+            "title": "Wait Groups"
+          }
+        },
+        "type": "object",
+        "required": [
+          "case_id",
+          "objective",
+          "status",
+          "current_stage",
+          "completion_criteria",
+          "round_cap",
+          "rounds_used",
+          "rounds_remaining",
+          "workers",
+          "worker_session_ids",
+          "latest_review",
+          "open_waits",
+          "ready_waits",
+          "wait_groups"
+        ],
+        "title": "CaseBrief"
+      },
+      "CaseBriefOut": {
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "title": "Ok"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "brief": {
+            "$ref": "#/components/schemas/CaseBrief"
+          }
+        },
+        "type": "object",
+        "required": [
+          "ok",
+          "brief"
+        ],
+        "title": "CaseBriefOut"
       },
       "CaseCloseBody": {
         "properties": {
@@ -5532,6 +6396,57 @@
         "title": "CaseCloseBody",
         "description": "[A38] Authoritatively close a Case (A37 close_case). ``outcome`` must be a\nterminal status; ``criteria_reconciliation`` records each completion_criterion\nas met or waived-with-reason so an honest close can proceed.\n``continuation_plan`` records the Manager's next-priority handoff."
       },
+      "CaseCounts": {
+        "properties": {
+          "links": {
+            "type": "integer",
+            "title": "Links"
+          },
+          "events": {
+            "type": "integer",
+            "title": "Events"
+          },
+          "children": {
+            "type": "integer",
+            "title": "Children"
+          }
+        },
+        "type": "object",
+        "required": [
+          "links",
+          "events",
+          "children"
+        ],
+        "title": "CaseCounts"
+      },
+      "CaseCoverage": {
+        "properties": {
+          "has_links": {
+            "type": "boolean",
+            "title": "Has Links"
+          },
+          "has_events": {
+            "type": "boolean",
+            "title": "Has Events"
+          },
+          "has_parent": {
+            "type": "boolean",
+            "title": "Has Parent"
+          },
+          "is_root": {
+            "type": "boolean",
+            "title": "Is Root"
+          }
+        },
+        "type": "object",
+        "required": [
+          "has_links",
+          "has_events",
+          "has_parent",
+          "is_root"
+        ],
+        "title": "CaseCoverage"
+      },
       "CaseDecomposeBody": {
         "properties": {
           "spec_id": {
@@ -5555,6 +6470,83 @@
         "title": "CaseDecomposeBody",
         "description": "[A56/M4] Decompose an APPROVED objective into a task-DAG on ONE Case.\n``spec_id`` is the approved spec; ``tasks`` is the list of task nodes, each\n``{task_key, objective, depends_on: [...], ...hints}``."
       },
+      "CaseDetailOut": {
+        "properties": {
+          "case": {
+            "$ref": "#/components/schemas/CaseSummary"
+          },
+          "record": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Record"
+          },
+          "ledger": {
+            "$ref": "#/components/schemas/CaseLedger"
+          },
+          "parent": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CaseSummary"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "children": {
+            "items": {
+              "$ref": "#/components/schemas/CaseSummary"
+            },
+            "type": "array",
+            "title": "Children"
+          },
+          "counts": {
+            "$ref": "#/components/schemas/CaseCounts"
+          },
+          "coverage": {
+            "$ref": "#/components/schemas/CaseCoverage"
+          }
+        },
+        "type": "object",
+        "required": [
+          "case",
+          "record",
+          "ledger",
+          "children",
+          "counts",
+          "coverage"
+        ],
+        "title": "CaseDetailOut"
+      },
+      "CaseGraphOut": {
+        "properties": {
+          "flow_run_id": {
+            "type": "string",
+            "title": "Flow Run Id"
+          },
+          "nodes": {
+            "items": {
+              "$ref": "#/components/schemas/GraphNode"
+            },
+            "type": "array",
+            "title": "Nodes"
+          },
+          "edges": {
+            "items": {
+              "$ref": "#/components/schemas/GraphEdge"
+            },
+            "type": "array",
+            "title": "Edges"
+          }
+        },
+        "type": "object",
+        "required": [
+          "flow_run_id",
+          "nodes",
+          "edges"
+        ],
+        "title": "CaseGraphOut"
+      },
       "CaseInterruptBody": {
         "properties": {
           "reason": {
@@ -5573,6 +6565,105 @@
         "type": "object",
         "title": "CaseInterruptBody",
         "description": "[A53] Kill a Case: cancel its in-flight worker task(s), mark it blocked\n(resumable), record flow.interrupted, escalate once. ``reason`` is an optional\nshort label for the interruption (defaults to 'operator_kill')."
+      },
+      "CaseLedger": {
+        "properties": {
+          "tasks": {
+            "items": {
+              "$ref": "#/components/schemas/LinkRow"
+            },
+            "type": "array",
+            "title": "Tasks"
+          },
+          "sessions": {
+            "items": {
+              "$ref": "#/components/schemas/LinkRow"
+            },
+            "type": "array",
+            "title": "Sessions"
+          },
+          "approvals": {
+            "items": {
+              "$ref": "#/components/schemas/LinkRow"
+            },
+            "type": "array",
+            "title": "Approvals"
+          },
+          "artifacts": {
+            "items": {
+              "$ref": "#/components/schemas/LinkRow"
+            },
+            "type": "array",
+            "title": "Artifacts"
+          },
+          "jobs": {
+            "items": {
+              "$ref": "#/components/schemas/LinkRow"
+            },
+            "type": "array",
+            "title": "Jobs"
+          },
+          "flows": {
+            "items": {
+              "$ref": "#/components/schemas/LinkRow"
+            },
+            "type": "array",
+            "title": "Flows"
+          },
+          "other": {
+            "items": {
+              "$ref": "#/components/schemas/LinkRow"
+            },
+            "type": "array",
+            "title": "Other"
+          }
+        },
+        "type": "object",
+        "required": [
+          "tasks",
+          "sessions",
+          "approvals",
+          "artifacts",
+          "jobs",
+          "flows",
+          "other"
+        ],
+        "title": "CaseLedger"
+      },
+      "CaseMeta": {
+        "properties": {
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "objective_lock": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Objective Lock"
+          },
+          "created_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Created At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "status"
+        ],
+        "title": "CaseMeta"
       },
       "CaseOpenBody": {
         "properties": {
@@ -5761,6 +6852,149 @@
         "title": "CaseResumeBody",
         "description": "[quota-resume] Operator-triggered Case resume.\n\n``mode`` is optional: omitted (or unknown) means \"let the harness pick\"\n(``_recommended_resume_mode``). Bounded tiny body \u2014 the resume itself is\nsingle-flight leased server-side, so a double-click cannot start two\nManagers."
       },
+      "CaseResumeOut": {
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "title": "Ok"
+          },
+          "reason": {
+            "type": "string",
+            "title": "Reason"
+          },
+          "case_id": {
+            "type": "string",
+            "title": "Case Id"
+          },
+          "mode": {
+            "type": "string",
+            "title": "Mode"
+          },
+          "session_id": {
+            "type": "string",
+            "title": "Session Id"
+          }
+        },
+        "type": "object",
+        "required": [
+          "ok",
+          "reason",
+          "case_id",
+          "mode",
+          "session_id"
+        ],
+        "title": "CaseResumeOut"
+      },
+      "CaseResumeStateOut": {
+        "properties": {
+          "case_id": {
+            "type": "string",
+            "title": "Case Id"
+          },
+          "paused": {
+            "type": "boolean",
+            "title": "Paused"
+          },
+          "pause": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pause"
+          },
+          "quota": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Quota"
+          },
+          "manager_session_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Manager Session Id"
+          },
+          "manager_session_status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Manager Session Status"
+          },
+          "recommended_mode": {
+            "type": "string",
+            "title": "Recommended Mode"
+          },
+          "estimate": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Estimate"
+          },
+          "pending_approval": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pending Approval"
+          },
+          "auto": {
+            "type": "boolean",
+            "title": "Auto"
+          },
+          "enabled": {
+            "type": "boolean",
+            "title": "Enabled"
+          },
+          "modes": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Modes"
+          }
+        },
+        "type": "object",
+        "required": [
+          "case_id",
+          "paused",
+          "pause",
+          "quota",
+          "manager_session_id",
+          "manager_session_status",
+          "recommended_mode",
+          "estimate",
+          "pending_approval",
+          "auto",
+          "enabled",
+          "modes"
+        ],
+        "title": "CaseResumeStateOut"
+      },
       "CaseReviewBody": {
         "properties": {
           "verdict": {
@@ -5798,6 +7032,43 @@
         ],
         "title": "CaseReviewBody",
         "description": "[M3.2] Record a Manager review verdict on a Case. ``verdict`` must be one of\naccepted|rework_requested|waived; ``reason`` is an optional short note.\n``task_id`` optionally TAGS the verdict to a specific worker task \u2014 richer audit,\nand the Wake-Dispatcher reads it as a consumption signal so an out-of-band review\nis not re-surfaced as a redundant continuation wake."
+      },
+      "CaseRosterOut": {
+        "properties": {
+          "flow_run_id": {
+            "type": "string",
+            "title": "Flow Run Id"
+          },
+          "sessions": {
+            "items": {
+              "$ref": "#/components/schemas/RosterSession"
+            },
+            "type": "array",
+            "title": "Sessions"
+          },
+          "jobs": {
+            "items": {
+              "$ref": "#/components/schemas/RosterJob"
+            },
+            "type": "array",
+            "title": "Jobs"
+          },
+          "counts": {
+            "$ref": "#/components/schemas/RosterCounts"
+          },
+          "token_totals": {
+            "$ref": "#/components/schemas/TokenTotals"
+          }
+        },
+        "type": "object",
+        "required": [
+          "flow_run_id",
+          "sessions",
+          "jobs",
+          "counts",
+          "token_totals"
+        ],
+        "title": "CaseRosterOut"
       },
       "CaseSpecBody": {
         "properties": {
@@ -5899,6 +7170,201 @@
         "title": "CaseStateBody",
         "description": "Operator Case state control. Non-terminal Cases can be moved between\n``open`` and ``blocked``. Terminal close/cancel semantics stay on their\ndedicated paths."
       },
+      "CaseSummary": {
+        "properties": {
+          "flow_run_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Flow Run Id"
+          },
+          "task_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Task Id"
+          },
+          "objective_lock": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Objective Lock"
+          },
+          "current_stage": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Current Stage"
+          },
+          "status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Status"
+          },
+          "created_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Created At"
+          },
+          "updated_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Updated At"
+          },
+          "parent_flow_run_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Parent Flow Run Id"
+          },
+          "dispatched_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Dispatched By"
+          },
+          "dispatch_file": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Dispatch File"
+          },
+          "bucket": {
+            "type": "string",
+            "title": "Bucket"
+          }
+        },
+        "type": "object",
+        "required": [
+          "bucket"
+        ],
+        "title": "CaseSummary"
+      },
+      "CaseTimelineOut": {
+        "properties": {
+          "flow_run_id": {
+            "type": "string",
+            "title": "Flow Run Id"
+          },
+          "events": {
+            "items": {
+              "$ref": "#/components/schemas/TimelineEvent"
+            },
+            "type": "array",
+            "title": "Events"
+          },
+          "evidence": {
+            "items": {
+              "$ref": "#/components/schemas/LinkRow"
+            },
+            "type": "array",
+            "title": "Evidence"
+          },
+          "event_count": {
+            "type": "integer",
+            "title": "Event Count"
+          }
+        },
+        "type": "object",
+        "required": [
+          "flow_run_id",
+          "events",
+          "evidence",
+          "event_count"
+        ],
+        "title": "CaseTimelineOut"
+      },
+      "CaseUsageOut": {
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "title": "Ok"
+          },
+          "flow_run_id": {
+            "type": "string",
+            "title": "Flow Run Id"
+          },
+          "case": {
+            "$ref": "#/components/schemas/CaseMeta"
+          },
+          "sessions": {
+            "items": {
+              "$ref": "#/components/schemas/SessionSpend"
+            },
+            "type": "array",
+            "title": "Sessions"
+          },
+          "mgr_vs_workers": {
+            "$ref": "#/components/schemas/MgrVsWorkers"
+          },
+          "totals": {
+            "$ref": "#/components/schemas/Totals"
+          }
+        },
+        "type": "object",
+        "required": [
+          "ok",
+          "flow_run_id",
+          "case",
+          "sessions",
+          "mgr_vs_workers",
+          "totals"
+        ],
+        "title": "CaseUsageOut"
+      },
       "CaseWaitBody": {
         "properties": {
           "task_id": {
@@ -5980,6 +7446,355 @@
         ],
         "title": "CloseCaseOut",
         "description": "Structured close decision. ``ok:false`` with a ``reason`` is a refusal\n(unmet criteria, open child work, pending approval) \u2014 a normal 200 signal,\nnot an HTTP error."
+      },
+      "CommandResult": {
+        "type": "object",
+        "description": "Success envelope returned by lifecycle/mutation endpoints.",
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "example": true
+          },
+          "reason": {
+            "type": "string",
+            "nullable": true,
+            "example": null
+          }
+        },
+        "required": [
+          "ok"
+        ]
+      },
+      "CompactOut": {
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "title": "Ok"
+          },
+          "output": {
+            "type": "string",
+            "title": "Output"
+          },
+          "errors": {
+            "items": {},
+            "type": "array",
+            "title": "Errors"
+          },
+          "queued": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Queued"
+          },
+          "task_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Task Id"
+          },
+          "status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Status"
+          }
+        },
+        "type": "object",
+        "required": [
+          "ok",
+          "output",
+          "errors"
+        ],
+        "title": "CompactOut"
+      },
+      "CostAlertsOut": {
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "title": "Ok"
+          },
+          "enabled": {
+            "type": "boolean",
+            "title": "Enabled"
+          },
+          "budgets": {
+            "$ref": "#/components/schemas/AlertBudgets"
+          },
+          "alerts": {
+            "items": {
+              "$ref": "#/components/schemas/AlertRow"
+            },
+            "type": "array",
+            "title": "Alerts"
+          },
+          "enforcement": {
+            "$ref": "#/components/schemas/AlertEnforcement"
+          }
+        },
+        "type": "object",
+        "required": [
+          "ok",
+          "enabled",
+          "budgets",
+          "alerts",
+          "enforcement"
+        ],
+        "title": "CostAlertsOut"
+      },
+      "CostEstimate": {
+        "properties": {
+          "known": {
+            "type": "boolean",
+            "title": "Known"
+          },
+          "model_priced": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model Priced"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "currency": {
+            "type": "string",
+            "title": "Currency"
+          },
+          "usd_total": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Usd Total"
+          },
+          "usd_input": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Usd Input"
+          },
+          "usd_output": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Usd Output"
+          },
+          "usd_cache_write": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Usd Cache Write"
+          },
+          "usd_cache_read": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Usd Cache Read"
+          },
+          "rates": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rates"
+          }
+        },
+        "type": "object",
+        "required": [
+          "known",
+          "currency"
+        ],
+        "title": "CostEstimate"
+      },
+      "CostExplorerOut": {
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "title": "Ok"
+          },
+          "dimension": {
+            "type": "string",
+            "title": "Dimension"
+          },
+          "granularity": {
+            "type": "string",
+            "title": "Granularity"
+          },
+          "from": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "From"
+          },
+          "to": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "To"
+          },
+          "repo_path": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Repo Path"
+          },
+          "series": {
+            "items": {
+              "$ref": "#/components/schemas/SeriesBucket"
+            },
+            "type": "array",
+            "title": "Series"
+          },
+          "totals": {
+            "$ref": "#/components/schemas/Totals"
+          },
+          "unattributed": {
+            "$ref": "#/components/schemas/Unattributed"
+          }
+        },
+        "type": "object",
+        "required": [
+          "ok",
+          "dimension",
+          "granularity",
+          "series",
+          "totals",
+          "unattributed"
+        ],
+        "title": "CostExplorerOut"
+      },
+      "CostProjectsOut": {
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "title": "Ok"
+          },
+          "limit": {
+            "type": "integer",
+            "title": "Limit"
+          },
+          "projects": {
+            "items": {
+              "$ref": "#/components/schemas/ProjectRow"
+            },
+            "type": "array",
+            "title": "Projects"
+          }
+        },
+        "type": "object",
+        "required": [
+          "ok",
+          "limit",
+          "projects"
+        ],
+        "title": "CostProjectsOut"
+      },
+      "CostTopOut": {
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "title": "Ok"
+          },
+          "by": {
+            "type": "string",
+            "title": "By"
+          },
+          "limit": {
+            "type": "integer",
+            "title": "Limit"
+          },
+          "rows": {
+            "items": {
+              "$ref": "#/components/schemas/TopRow"
+            },
+            "type": "array",
+            "title": "Rows"
+          },
+          "totals": {
+            "$ref": "#/components/schemas/Totals"
+          }
+        },
+        "type": "object",
+        "required": [
+          "ok",
+          "by",
+          "limit",
+          "rows",
+          "totals"
+        ],
+        "title": "CostTopOut"
       },
       "CreateSessionBody": {
         "properties": {
@@ -6077,6 +7892,402 @@
         ],
         "title": "CreateSessionOut"
       },
+      "DecomposeCaseOut": {
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "title": "Ok"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "task_keys": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Task Keys"
+          },
+          "order": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Order"
+          },
+          "link_ids": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "type": "array",
+            "title": "Link Ids"
+          }
+        },
+        "type": "object",
+        "required": [
+          "ok",
+          "task_keys",
+          "order",
+          "link_ids"
+        ],
+        "title": "DecomposeCaseOut"
+      },
+      "EventsOut": {
+        "properties": {
+          "events": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Events"
+          },
+          "offset": {
+            "type": "integer",
+            "title": "Offset"
+          }
+        },
+        "type": "object",
+        "required": [
+          "events",
+          "offset"
+        ],
+        "title": "EventsOut"
+      },
+      "FlagDeleteOut": {
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "title": "Ok"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "deleted": {
+            "type": "boolean",
+            "title": "Deleted"
+          },
+          "flag": {
+            "$ref": "#/components/schemas/FlagOut"
+          }
+        },
+        "type": "object",
+        "required": [
+          "ok",
+          "deleted",
+          "flag"
+        ],
+        "title": "FlagDeleteOut",
+        "description": "``DELETE /api/flags/{flag_name}`` \u2014 envelope plus the cleared flag."
+      },
+      "FlagOut": {
+        "properties": {
+          "flag_name": {
+            "type": "string",
+            "title": "Flag Name"
+          },
+          "value": {
+            "type": "boolean",
+            "title": "Value"
+          },
+          "raw_value": {
+            "type": "string",
+            "title": "Raw Value"
+          },
+          "source": {
+            "type": "string",
+            "title": "Source"
+          },
+          "effect_scope": {
+            "type": "string",
+            "title": "Effect Scope"
+          },
+          "registry_writable": {
+            "type": "boolean",
+            "title": "Registry Writable"
+          },
+          "description": {
+            "type": "string",
+            "title": "Description"
+          },
+          "registry": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Registry"
+          },
+          "env_value": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Env Value"
+          }
+        },
+        "type": "object",
+        "required": [
+          "flag_name",
+          "value",
+          "raw_value",
+          "source",
+          "effect_scope",
+          "registry_writable",
+          "description"
+        ],
+        "title": "FlagOut",
+        "description": "A single effective runtime flag."
+      },
+      "FlagSetOut": {
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "title": "Ok"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "flag": {
+            "$ref": "#/components/schemas/FlagOut"
+          }
+        },
+        "type": "object",
+        "required": [
+          "ok",
+          "flag"
+        ],
+        "title": "FlagSetOut",
+        "description": "``PUT /api/flags/{flag_name}`` \u2014 envelope plus the updated flag."
+      },
+      "FlagsOut": {
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "title": "Ok"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "flags": {
+            "items": {
+              "$ref": "#/components/schemas/FlagOut"
+            },
+            "type": "array",
+            "title": "Flags"
+          }
+        },
+        "type": "object",
+        "required": [
+          "ok",
+          "flags"
+        ],
+        "title": "FlagsOut",
+        "description": "``GET /api/flags`` \u2014 the command envelope plus the flag list."
+      },
+      "FlowDetailOut": {
+        "properties": {
+          "flow": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Flow"
+          }
+        },
+        "type": "object",
+        "required": [
+          "flow"
+        ],
+        "title": "FlowDetailOut"
+      },
+      "FlowSummary": {
+        "properties": {
+          "flow_run_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Flow Run Id"
+          },
+          "task_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Task Id"
+          },
+          "current_stage": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Current Stage"
+          },
+          "status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Status"
+          },
+          "created_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Created At"
+          },
+          "updated_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Updated At"
+          }
+        },
+        "type": "object",
+        "title": "FlowSummary"
+      },
+      "FlowsOut": {
+        "properties": {
+          "flows": {
+            "items": {
+              "$ref": "#/components/schemas/FlowSummary"
+            },
+            "type": "array",
+            "title": "Flows"
+          }
+        },
+        "type": "object",
+        "required": [
+          "flows"
+        ],
+        "title": "FlowsOut"
+      },
+      "GitCommitAllOut": {
+        "properties": {
+          "success": {
+            "type": "boolean",
+            "title": "Success"
+          },
+          "branch_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Branch Name"
+          },
+          "commit_hash": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Commit Hash"
+          },
+          "files_committed": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Files Committed"
+          },
+          "errors": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Errors"
+          }
+        },
+        "type": "object",
+        "required": [
+          "success",
+          "branch_name",
+          "commit_hash",
+          "files_committed",
+          "errors"
+        ],
+        "title": "GitCommitAllOut",
+        "description": "``POST /api/git/commit_all`` \u2014 commit-all result."
+      },
       "GitCommitBody": {
         "properties": {
           "task_id": {
@@ -6112,6 +8323,290 @@
         ],
         "title": "GitCommitBody"
       },
+      "GitCommitOut": {
+        "properties": {
+          "success": {
+            "type": "boolean",
+            "title": "Success"
+          },
+          "branch_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Branch Name"
+          },
+          "commit_hash": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Commit Hash"
+          },
+          "files_committed": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Files Committed"
+          },
+          "sensitive_files_blocked": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Sensitive Files Blocked"
+          },
+          "errors": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Errors"
+          }
+        },
+        "type": "object",
+        "required": [
+          "success",
+          "branch_name",
+          "commit_hash",
+          "files_committed",
+          "sensitive_files_blocked",
+          "errors"
+        ],
+        "title": "GitCommitOut",
+        "description": "``POST /api/git/commit`` \u2014 commit result with safety blocking."
+      },
+      "GitStatusChanges": {
+        "properties": {
+          "modified": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Modified"
+          },
+          "created": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Created"
+          },
+          "deleted": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Deleted"
+          },
+          "total": {
+            "type": "integer",
+            "title": "Total"
+          }
+        },
+        "type": "object",
+        "required": [
+          "modified",
+          "created",
+          "deleted",
+          "total"
+        ],
+        "title": "GitStatusChanges"
+      },
+      "GitStatusOut": {
+        "properties": {
+          "current_branch": {
+            "type": "string",
+            "title": "Current Branch"
+          },
+          "working_directory_clean": {
+            "type": "boolean",
+            "title": "Working Directory Clean"
+          },
+          "changes": {
+            "$ref": "#/components/schemas/GitStatusChanges"
+          },
+          "staged_files": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Staged Files"
+          },
+          "unstaged_files": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Unstaged Files"
+          },
+          "safety": {
+            "$ref": "#/components/schemas/GitStatusSafety"
+          }
+        },
+        "type": "object",
+        "required": [
+          "current_branch",
+          "working_directory_clean",
+          "changes",
+          "staged_files",
+          "unstaged_files",
+          "safety"
+        ],
+        "title": "GitStatusOut",
+        "description": "``POST /api/git/status`` \u2014 working-tree status + safety classification."
+      },
+      "GitStatusSafety": {
+        "properties": {
+          "safe_files": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Safe Files"
+          },
+          "sensitive_files": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Sensitive Files"
+          },
+          "has_sensitive_files": {
+            "type": "boolean",
+            "title": "Has Sensitive Files"
+          }
+        },
+        "type": "object",
+        "required": [
+          "safe_files",
+          "sensitive_files",
+          "has_sensitive_files"
+        ],
+        "title": "GitStatusSafety"
+      },
+      "GovernorOut": {
+        "properties": {
+          "sdk_max_turns": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sdk Max Turns"
+          },
+          "sdk_max_budget_usd": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sdk Max Budget Usd"
+          }
+        },
+        "type": "object",
+        "title": "GovernorOut"
+      },
+      "GraphEdge": {
+        "properties": {
+          "from": {
+            "type": "string",
+            "title": "From"
+          },
+          "to": {
+            "type": "string",
+            "title": "To"
+          },
+          "role": {
+            "type": "string",
+            "title": "Role"
+          }
+        },
+        "type": "object",
+        "required": [
+          "from",
+          "to",
+          "role"
+        ],
+        "title": "GraphEdge"
+      },
+      "GraphNode": {
+        "properties": {
+          "flow_run_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Flow Run Id"
+          },
+          "rel": {
+            "type": "string",
+            "title": "Rel"
+          },
+          "current_stage": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Current Stage"
+          },
+          "status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Status"
+          },
+          "bucket": {
+            "type": "string",
+            "title": "Bucket"
+          },
+          "objective_lock": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Objective Lock"
+          }
+        },
+        "type": "object",
+        "required": [
+          "rel",
+          "bucket"
+        ],
+        "title": "GraphNode"
+      },
       "HTTPValidationError": {
         "properties": {
           "detail": {
@@ -6124,6 +8619,54 @@
         },
         "type": "object",
         "title": "HTTPValidationError"
+      },
+      "HealthOut": {
+        "properties": {
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "governor": {
+            "$ref": "#/components/schemas/GovernorOut"
+          },
+          "turn_queue": {
+            "$ref": "#/components/schemas/TurnQueueStatusOut"
+          },
+          "build": {
+            "$ref": "#/components/schemas/BuildOut"
+          }
+        },
+        "type": "object",
+        "required": [
+          "status",
+          "governor",
+          "turn_queue",
+          "build"
+        ],
+        "title": "HealthOut"
+      },
+      "InboxResolvedEntry": {
+        "properties": {
+          "task_id": {
+            "type": "string",
+            "title": "Task Id"
+          },
+          "outcome": {
+            "type": "string",
+            "title": "Outcome"
+          },
+          "case_id": {
+            "type": "string",
+            "title": "Case Id"
+          }
+        },
+        "type": "object",
+        "required": [
+          "task_id",
+          "outcome",
+          "case_id"
+        ],
+        "title": "InboxResolvedEntry"
       },
       "InspectBody": {
         "properties": {
@@ -6170,6 +8713,13 @@
           "op"
         ],
         "title": "InspectBody"
+      },
+      "InspectOut": {
+        "properties": {},
+        "additionalProperties": true,
+        "type": "object",
+        "title": "InspectOut",
+        "description": "Arbitrary node-inspector payload \u2014 shape is backend-defined, so extra\nkeys pass through untouched."
       },
       "InstructionBody": {
         "properties": {
@@ -6276,6 +8826,174 @@
           "description"
         ],
         "title": "InstructionBody"
+      },
+      "InstructionsOut": {
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "title": "Ok"
+          },
+          "task_id": {
+            "type": "string",
+            "title": "Task Id"
+          },
+          "session": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SessionOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "ok",
+          "task_id"
+        ],
+        "title": "InstructionsOut"
+      },
+      "InterruptCaseOut": {
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "title": "Ok"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "cancelled_tasks": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Cancelled Tasks"
+          },
+          "already": {
+            "type": "boolean",
+            "title": "Already"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status"
+          }
+        },
+        "type": "object",
+        "required": [
+          "ok",
+          "cancelled_tasks",
+          "already",
+          "status"
+        ],
+        "title": "InterruptCaseOut"
+      },
+      "JobsOut": {
+        "properties": {
+          "running": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Running"
+          },
+          "recent": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Recent"
+          }
+        },
+        "type": "object",
+        "required": [
+          "running",
+          "recent"
+        ],
+        "title": "JobsOut"
+      },
+      "LinkRow": {
+        "properties": {
+          "entity_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Entity Type"
+          },
+          "entity_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Entity Id"
+          },
+          "role": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Role"
+          },
+          "created_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Created By"
+          },
+          "created_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Created At"
+          },
+          "metadata_json": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Metadata Json"
+          }
+        },
+        "type": "object",
+        "title": "LinkRow"
       },
       "ManagerInvokeBody": {
         "properties": {
@@ -6395,6 +9113,242 @@
         "title": "ManagerInvokeBody",
         "description": "[A38] Boot a Manager session bound to one new Case (M3 Phase 3.1)."
       },
+      "ManagerInvokeOut": {
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "title": "Ok"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "session_id": {
+            "type": "string",
+            "title": "Session Id"
+          },
+          "case_id": {
+            "type": "string",
+            "title": "Case Id"
+          },
+          "task_id": {
+            "type": "string",
+            "title": "Task Id"
+          }
+        },
+        "type": "object",
+        "required": [
+          "ok",
+          "session_id",
+          "case_id",
+          "task_id"
+        ],
+        "title": "ManagerInvokeOut"
+      },
+      "MeshHealthHistoryOut": {
+        "properties": {
+          "recent": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Recent"
+          }
+        },
+        "type": "object",
+        "required": [
+          "recent"
+        ],
+        "title": "MeshHealthHistoryOut"
+      },
+      "MeshHealthOut": {
+        "properties": {
+          "current": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Current"
+          },
+          "history": {
+            "$ref": "#/components/schemas/MeshHealthHistoryOut"
+          },
+          "reconcile": {
+            "$ref": "#/components/schemas/MeshReconcileOut"
+          }
+        },
+        "type": "object",
+        "required": [
+          "current",
+          "history",
+          "reconcile"
+        ],
+        "title": "MeshHealthOut"
+      },
+      "MeshReconcileOut": {
+        "properties": {
+          "total": {
+            "type": "integer",
+            "title": "Total"
+          },
+          "pending": {
+            "type": "integer",
+            "title": "Pending"
+          },
+          "reconciled": {
+            "type": "integer",
+            "title": "Reconciled"
+          },
+          "invalid": {
+            "type": "integer",
+            "title": "Invalid"
+          },
+          "oldest_pending_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Oldest Pending At"
+          },
+          "latest_reconciled_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Latest Reconciled At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "total",
+          "pending",
+          "reconciled",
+          "invalid"
+        ],
+        "title": "MeshReconcileOut"
+      },
+      "MessagesOut": {
+        "properties": {
+          "messages": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Messages"
+          }
+        },
+        "type": "object",
+        "required": [
+          "messages"
+        ],
+        "title": "MessagesOut"
+      },
+      "MetricsHealthOut": {
+        "properties": {
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "cause": {
+            "type": "string",
+            "title": "Cause"
+          },
+          "headline": {
+            "type": "string",
+            "title": "Headline"
+          },
+          "detail": {
+            "type": "string",
+            "title": "Detail"
+          }
+        },
+        "type": "object",
+        "required": [
+          "status",
+          "cause",
+          "headline",
+          "detail"
+        ],
+        "title": "MetricsHealthOut"
+      },
+      "MetricsSystemOut": {
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "title": "Enabled"
+          },
+          "rollup_seconds": {
+            "type": "integer",
+            "title": "Rollup Seconds"
+          },
+          "count": {
+            "type": "integer",
+            "title": "Count"
+          },
+          "rollups": {
+            "items": {
+              "$ref": "#/components/schemas/Rollup"
+            },
+            "type": "array",
+            "title": "Rollups"
+          }
+        },
+        "type": "object",
+        "required": [
+          "enabled",
+          "rollup_seconds",
+          "count",
+          "rollups"
+        ],
+        "title": "MetricsSystemOut"
+      },
+      "MgrVsWorkers": {
+        "properties": {
+          "manager": {
+            "$ref": "#/components/schemas/Totals"
+          },
+          "workers": {
+            "$ref": "#/components/schemas/Totals"
+          },
+          "workers_share_pct": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Workers Share Pct"
+          },
+          "worker_sessions": {
+            "type": "integer",
+            "title": "Worker Sessions"
+          }
+        },
+        "type": "object",
+        "required": [
+          "manager",
+          "workers",
+          "worker_sessions"
+        ],
+        "title": "MgrVsWorkers"
+      },
       "ModelBody": {
         "properties": {
           "model": {
@@ -6411,6 +9365,84 @@
         },
         "type": "object",
         "title": "ModelBody"
+      },
+      "ModelSpend": {
+        "properties": {
+          "model": {
+            "type": "string",
+            "title": "Model"
+          },
+          "usd_total": {
+            "type": "number",
+            "title": "Usd Total"
+          },
+          "known": {
+            "type": "boolean",
+            "title": "Known"
+          },
+          "reason": {
+            "type": "string",
+            "title": "Reason"
+          },
+          "tokens_total": {
+            "type": "integer",
+            "title": "Tokens Total"
+          }
+        },
+        "type": "object",
+        "required": [
+          "model",
+          "usd_total",
+          "known",
+          "reason",
+          "tokens_total"
+        ],
+        "title": "ModelSpend"
+      },
+      "ModelsOut": {
+        "properties": {
+          "backend": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Backend"
+          },
+          "node_id": {
+            "type": "string",
+            "title": "Node Id"
+          },
+          "models": {
+            "title": "Models"
+          }
+        },
+        "type": "object",
+        "required": [
+          "node_id",
+          "models"
+        ],
+        "title": "ModelsOut"
+      },
+      "NodesOut": {
+        "properties": {
+          "nodes": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Nodes"
+          }
+        },
+        "type": "object",
+        "required": [
+          "nodes"
+        ],
+        "title": "NodesOut"
       },
       "OpenCaseOut": {
         "properties": {
@@ -6430,6 +9462,379 @@
         ],
         "title": "OpenCaseOut"
       },
+      "OperatorCloseOut": {
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "title": "Ok"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "closed": {
+            "type": "boolean",
+            "title": "Closed"
+          }
+        },
+        "type": "object",
+        "required": [
+          "ok",
+          "closed"
+        ],
+        "title": "OperatorCloseOut"
+      },
+      "OrphanCandidate": {
+        "properties": {
+          "case_id": {
+            "type": "string",
+            "title": "Case Id"
+          },
+          "manager_session_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Manager Session Id"
+          },
+          "manager_status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Manager Status"
+          },
+          "reason": {
+            "type": "string",
+            "title": "Reason"
+          },
+          "disposition": {
+            "type": "string",
+            "title": "Disposition"
+          }
+        },
+        "type": "object",
+        "required": [
+          "case_id",
+          "manager_session_id",
+          "manager_status",
+          "reason",
+          "disposition"
+        ],
+        "title": "OrphanCandidate"
+      },
+      "OrphanCleaned": {
+        "properties": {
+          "case_id": {
+            "type": "string",
+            "title": "Case Id"
+          },
+          "manager_session_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Manager Session Id"
+          },
+          "manager_status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Manager Status"
+          },
+          "reason": {
+            "type": "string",
+            "title": "Reason"
+          },
+          "disposition": {
+            "type": "string",
+            "title": "Disposition"
+          },
+          "result": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Result"
+          }
+        },
+        "type": "object",
+        "required": [
+          "case_id",
+          "manager_session_id",
+          "manager_status",
+          "reason",
+          "disposition",
+          "result"
+        ],
+        "title": "OrphanCleaned"
+      },
+      "OrphanSweepOut": {
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "title": "Ok"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "dry_run": {
+            "type": "boolean",
+            "title": "Dry Run"
+          },
+          "scanned": {
+            "type": "integer",
+            "title": "Scanned"
+          },
+          "candidates": {
+            "items": {
+              "$ref": "#/components/schemas/OrphanCandidate"
+            },
+            "type": "array",
+            "title": "Candidates"
+          },
+          "cleaned": {
+            "items": {
+              "$ref": "#/components/schemas/OrphanCleaned"
+            },
+            "type": "array",
+            "title": "Cleaned"
+          },
+          "skipped": {
+            "type": "integer",
+            "title": "Skipped"
+          },
+          "expired_approvals": {
+            "type": "integer",
+            "title": "Expired Approvals"
+          }
+        },
+        "type": "object",
+        "required": [
+          "ok",
+          "dry_run",
+          "scanned",
+          "candidates",
+          "cleaned",
+          "skipped",
+          "expired_approvals"
+        ],
+        "title": "OrphanSweepOut"
+      },
+      "PendingTask": {
+        "properties": {
+          "task_id": {
+            "type": "string",
+            "title": "Task Id"
+          }
+        },
+        "type": "object",
+        "required": [
+          "task_id"
+        ],
+        "title": "PendingTask"
+      },
+      "ProjectOut": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "path": {
+            "type": "string",
+            "title": "Path"
+          }
+        },
+        "type": "object",
+        "required": [
+          "name",
+          "path"
+        ],
+        "title": "ProjectOut"
+      },
+      "ProjectRow": {
+        "properties": {
+          "repo_path": {
+            "type": "string",
+            "title": "Repo Path"
+          },
+          "tokens": {
+            "$ref": "#/components/schemas/TokenTotals"
+          }
+        },
+        "type": "object",
+        "required": [
+          "repo_path",
+          "tokens"
+        ],
+        "title": "ProjectRow"
+      },
+      "ProjectsOut": {
+        "properties": {
+          "projects": {
+            "items": {
+              "$ref": "#/components/schemas/ProjectOut"
+            },
+            "type": "array",
+            "title": "Projects"
+          }
+        },
+        "type": "object",
+        "required": [
+          "projects"
+        ],
+        "title": "ProjectsOut"
+      },
+      "PublishArtifactOut": {
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "title": "Ok"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "link_id": {
+            "type": "integer",
+            "title": "Link Id"
+          },
+          "event_id": {
+            "type": "string",
+            "title": "Event Id"
+          },
+          "artifact_id": {
+            "type": "string",
+            "title": "Artifact Id"
+          }
+        },
+        "type": "object",
+        "required": [
+          "ok",
+          "link_id",
+          "event_id",
+          "artifact_id"
+        ],
+        "title": "PublishArtifactOut"
+      },
+      "PublishSpecOut": {
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "title": "Ok"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "link_id": {
+            "type": "integer",
+            "title": "Link Id"
+          },
+          "event_id": {
+            "type": "string",
+            "title": "Event Id"
+          },
+          "artifact_id": {
+            "type": "string",
+            "title": "Artifact Id"
+          },
+          "spec_id": {
+            "type": "string",
+            "title": "Spec Id"
+          }
+        },
+        "type": "object",
+        "required": [
+          "ok",
+          "link_id",
+          "event_id",
+          "artifact_id",
+          "spec_id"
+        ],
+        "title": "PublishSpecOut"
+      },
+      "PushStatusOut": {
+        "properties": {
+          "available": {
+            "type": "boolean",
+            "title": "Available"
+          },
+          "reason": {
+            "type": "string",
+            "title": "Reason"
+          },
+          "vapid_public_key": {
+            "type": "string",
+            "title": "Vapid Public Key"
+          },
+          "missing_env": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Missing Env"
+          },
+          "enabled_subscriptions": {
+            "type": "integer",
+            "title": "Enabled Subscriptions"
+          }
+        },
+        "type": "object",
+        "required": [
+          "available",
+          "reason",
+          "vapid_public_key",
+          "missing_env",
+          "enabled_subscriptions"
+        ],
+        "title": "PushStatusOut",
+        "description": "``GET /api/push/status`` \u2014 browser-push availability snapshot."
+      },
       "PushUnsubscribeBody": {
         "properties": {
           "endpoint": {
@@ -6442,6 +9847,106 @@
           "endpoint"
         ],
         "title": "PushUnsubscribeBody"
+      },
+      "QuotaWindowsOut": {
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "title": "Enabled"
+          },
+          "mode": {
+            "type": "string",
+            "title": "Mode"
+          },
+          "adapters": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Adapters"
+          },
+          "buckets": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Buckets"
+          },
+          "latest_snapshots": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Latest Snapshots"
+          },
+          "window_states": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Window States"
+          },
+          "prewarm": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Prewarm"
+          }
+        },
+        "type": "object",
+        "required": [
+          "enabled",
+          "mode",
+          "adapters",
+          "buckets",
+          "latest_snapshots",
+          "window_states",
+          "prewarm"
+        ],
+        "title": "QuotaWindowsOut"
+      },
+      "ReconcileWorkerWaitsOut": {
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "title": "Ok"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "resolved": {
+            "items": {
+              "$ref": "#/components/schemas/WaitOutcome"
+            },
+            "type": "array",
+            "title": "Resolved"
+          },
+          "pending": {
+            "items": {
+              "$ref": "#/components/schemas/PendingTask"
+            },
+            "type": "array",
+            "title": "Pending"
+          }
+        },
+        "type": "object",
+        "required": [
+          "ok",
+          "resolved",
+          "pending"
+        ],
+        "title": "ReconcileWorkerWaitsOut"
       },
       "RecordReviewOut": {
         "properties": {
@@ -6465,6 +9970,535 @@
           "event_id"
         ],
         "title": "RecordReviewOut"
+      },
+      "RecordSpecReviewOut": {
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "title": "Ok"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "spec_id": {
+            "type": "string",
+            "title": "Spec Id"
+          },
+          "verdict": {
+            "type": "string",
+            "title": "Verdict"
+          },
+          "passed": {
+            "type": "boolean",
+            "title": "Passed"
+          },
+          "total": {
+            "type": "integer",
+            "title": "Total"
+          },
+          "max": {
+            "type": "integer",
+            "title": "Max"
+          },
+          "threshold": {
+            "type": "integer",
+            "title": "Threshold"
+          },
+          "critical_zero": {
+            "type": "boolean",
+            "title": "Critical Zero"
+          },
+          "missing": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Missing"
+          },
+          "out_of_range": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Out Of Range"
+          },
+          "event_id": {
+            "type": "string",
+            "title": "Event Id"
+          },
+          "event_type": {
+            "type": "string",
+            "title": "Event Type"
+          }
+        },
+        "type": "object",
+        "required": [
+          "ok",
+          "spec_id",
+          "verdict",
+          "passed",
+          "total",
+          "max",
+          "threshold",
+          "critical_zero",
+          "missing",
+          "out_of_range",
+          "event_id",
+          "event_type"
+        ],
+        "title": "RecordSpecReviewOut"
+      },
+      "RecordWorkerWaitOut": {
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "title": "Ok"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "event_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Event Id"
+          }
+        },
+        "type": "object",
+        "required": [
+          "ok"
+        ],
+        "title": "RecordWorkerWaitOut"
+      },
+      "ReviewSummary": {
+        "properties": {
+          "verdict": {
+            "type": "string",
+            "title": "Verdict"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "event_type": {
+            "type": "string",
+            "title": "Event Type"
+          }
+        },
+        "type": "object",
+        "required": [
+          "verdict",
+          "reason",
+          "event_type"
+        ],
+        "title": "ReviewSummary"
+      },
+      "Rollup": {
+        "properties": {
+          "ts": {
+            "type": "string",
+            "title": "Ts"
+          },
+          "window_s": {
+            "type": "number",
+            "title": "Window S"
+          },
+          "lag_p95_ms": {
+            "type": "number",
+            "title": "Lag P95 Ms"
+          },
+          "lag_max_ms": {
+            "type": "number",
+            "title": "Lag Max Ms"
+          },
+          "lag_over_100ms": {
+            "type": "integer",
+            "title": "Lag Over 100Ms"
+          },
+          "req_total": {
+            "type": "integer",
+            "title": "Req Total"
+          },
+          "req_slow": {
+            "type": "integer",
+            "title": "Req Slow"
+          },
+          "req_5xx": {
+            "type": "integer",
+            "title": "Req 5Xx"
+          },
+          "host_avg": {
+            "additionalProperties": {
+              "type": "number"
+            },
+            "type": "object",
+            "title": "Host Avg"
+          },
+          "host_max": {
+            "additionalProperties": {
+              "type": "number"
+            },
+            "type": "object",
+            "title": "Host Max"
+          },
+          "routes": {
+            "items": {
+              "$ref": "#/components/schemas/RouteStat"
+            },
+            "type": "array",
+            "title": "Routes"
+          }
+        },
+        "type": "object",
+        "required": [
+          "ts",
+          "window_s",
+          "lag_p95_ms",
+          "lag_max_ms",
+          "lag_over_100ms",
+          "req_total",
+          "req_slow",
+          "req_5xx",
+          "host_avg",
+          "host_max",
+          "routes"
+        ],
+        "title": "Rollup"
+      },
+      "RosterCounts": {
+        "properties": {
+          "sessions": {
+            "type": "integer",
+            "title": "Sessions"
+          },
+          "jobs": {
+            "type": "integer",
+            "title": "Jobs"
+          },
+          "running_jobs": {
+            "type": "integer",
+            "title": "Running Jobs"
+          }
+        },
+        "type": "object",
+        "required": [
+          "sessions",
+          "jobs",
+          "running_jobs"
+        ],
+        "title": "RosterCounts"
+      },
+      "RosterJob": {
+        "properties": {
+          "job_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Job Id"
+          },
+          "label": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Label"
+          },
+          "command_summary": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Command Summary"
+          },
+          "session_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Session Id"
+          },
+          "node": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Node"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "started_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Started At"
+          },
+          "started_epoch": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Started Epoch"
+          },
+          "finished_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Finished At"
+          },
+          "exit_code": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Exit Code"
+          },
+          "tail": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tail"
+          },
+          "orphaned": {
+            "type": "boolean",
+            "title": "Orphaned"
+          },
+          "is_agent_spawn": {
+            "type": "boolean",
+            "title": "Is Agent Spawn"
+          }
+        },
+        "type": "object",
+        "required": [
+          "status",
+          "orphaned",
+          "is_agent_spawn"
+        ],
+        "title": "RosterJob"
+      },
+      "RosterSession": {
+        "properties": {
+          "session_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Session Id"
+          },
+          "role": {
+            "type": "string",
+            "title": "Role"
+          },
+          "present": {
+            "type": "boolean",
+            "title": "Present"
+          },
+          "backend": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Backend"
+          },
+          "status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Status"
+          },
+          "model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model"
+          },
+          "node": {
+            "type": "string",
+            "title": "Node"
+          },
+          "last_activity": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Activity"
+          },
+          "last_report": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Report"
+          },
+          "turn_count": {
+            "type": "integer",
+            "title": "Turn Count"
+          },
+          "tokens": {
+            "$ref": "#/components/schemas/TokenTotals"
+          }
+        },
+        "type": "object",
+        "required": [
+          "role",
+          "present",
+          "node",
+          "turn_count",
+          "tokens"
+        ],
+        "title": "RosterSession"
+      },
+      "RouteStat": {
+        "properties": {
+          "component": {
+            "type": "string",
+            "title": "Component"
+          },
+          "method": {
+            "type": "string",
+            "title": "Method"
+          },
+          "route": {
+            "type": "string",
+            "title": "Route"
+          },
+          "n": {
+            "type": "integer",
+            "title": "N"
+          },
+          "p50_ms": {
+            "type": "number",
+            "title": "P50 Ms"
+          },
+          "p95_ms": {
+            "type": "number",
+            "title": "P95 Ms"
+          },
+          "max_ms": {
+            "type": "number",
+            "title": "Max Ms"
+          },
+          "slow": {
+            "type": "integer",
+            "title": "Slow"
+          },
+          "err5xx": {
+            "type": "integer",
+            "title": "Err5Xx"
+          }
+        },
+        "type": "object",
+        "required": [
+          "component",
+          "method",
+          "route",
+          "n",
+          "p50_ms",
+          "p95_ms",
+          "max_ms",
+          "slow",
+          "err5xx"
+        ],
+        "title": "RouteStat"
       },
       "RuntimeFlagBody": {
         "properties": {
@@ -6491,6 +10525,112 @@
         ],
         "title": "RuntimeFlagBody"
       },
+      "SeriesBucket": {
+        "properties": {
+          "bucket": {
+            "type": "string",
+            "title": "Bucket"
+          },
+          "dim": {
+            "type": "string",
+            "title": "Dim"
+          },
+          "tokens": {
+            "$ref": "#/components/schemas/TokenTotals"
+          },
+          "usd": {
+            "$ref": "#/components/schemas/UsdSummary"
+          },
+          "models": {
+            "items": {
+              "$ref": "#/components/schemas/ModelSpend"
+            },
+            "type": "array",
+            "title": "Models"
+          }
+        },
+        "type": "object",
+        "required": [
+          "bucket",
+          "dim",
+          "tokens",
+          "usd",
+          "models"
+        ],
+        "title": "SeriesBucket"
+      },
+      "SessionAffiliation": {
+        "properties": {
+          "session_id": {
+            "type": "string",
+            "title": "Session Id"
+          },
+          "flow_run_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Flow Run Id"
+          },
+          "role": {
+            "type": "string",
+            "title": "Role"
+          },
+          "objective_lock": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Objective Lock"
+          },
+          "case_status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Case Status"
+          }
+        },
+        "type": "object",
+        "required": [
+          "session_id",
+          "role"
+        ],
+        "title": "SessionAffiliation"
+      },
+      "SessionAffiliationsOut": {
+        "properties": {
+          "affiliations": {
+            "items": {
+              "$ref": "#/components/schemas/SessionAffiliation"
+            },
+            "type": "array",
+            "title": "Affiliations"
+          },
+          "total": {
+            "type": "integer",
+            "title": "Total"
+          }
+        },
+        "type": "object",
+        "required": [
+          "affiliations",
+          "total"
+        ],
+        "title": "SessionAffiliationsOut"
+      },
       "SessionListOut": {
         "properties": {
           "sessions": {
@@ -6506,6 +10646,41 @@
           "sessions"
         ],
         "title": "SessionListOut"
+      },
+      "SessionMutationOut": {
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "title": "Ok"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "session": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SessionOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "ok"
+        ],
+        "title": "SessionMutationOut",
+        "description": "The ``{ok, reason}`` lifecycle envelope plus the mutated session view\n(``None`` on a structured refusal)."
       },
       "SessionOut": {
         "properties": {
@@ -6696,6 +10871,660 @@
         ],
         "title": "SessionReasonOut"
       },
+      "SessionSpend": {
+        "properties": {
+          "session_id": {
+            "type": "string",
+            "title": "Session Id"
+          },
+          "role": {
+            "type": "string",
+            "title": "Role"
+          },
+          "tokens": {
+            "$ref": "#/components/schemas/TokenTotals"
+          },
+          "usd": {
+            "$ref": "#/components/schemas/UsdSummary"
+          },
+          "models": {
+            "items": {
+              "$ref": "#/components/schemas/ModelSpend"
+            },
+            "type": "array",
+            "title": "Models"
+          }
+        },
+        "type": "object",
+        "required": [
+          "session_id",
+          "role",
+          "tokens",
+          "usd",
+          "models"
+        ],
+        "title": "SessionSpend"
+      },
+      "SetCaseStateOut": {
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "title": "Ok"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "changed": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Changed"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "cancelled_tasks": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cancelled Tasks"
+          },
+          "already": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Already"
+          }
+        },
+        "type": "object",
+        "required": [
+          "ok",
+          "status"
+        ],
+        "title": "SetCaseStateOut"
+      },
+      "StopOut": {
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "title": "Ok"
+          },
+          "cancelled": {
+            "type": "boolean",
+            "title": "Cancelled"
+          },
+          "task_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Task Id"
+          }
+        },
+        "type": "object",
+        "required": [
+          "ok",
+          "cancelled"
+        ],
+        "title": "StopOut"
+      },
+      "SystemAlertsOut": {
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "title": "Ok"
+          },
+          "alerts": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Alerts"
+          }
+        },
+        "type": "object",
+        "required": [
+          "ok",
+          "alerts"
+        ],
+        "title": "SystemAlertsOut"
+      },
+      "TaskSections": {
+        "properties": {
+          "attention": {
+            "anyOf": [
+              {
+                "items": {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Attention"
+          },
+          "running": {
+            "anyOf": [
+              {
+                "items": {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Running"
+          },
+          "queued": {
+            "anyOf": [
+              {
+                "items": {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Queued"
+          },
+          "failed": {
+            "anyOf": [
+              {
+                "items": {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Failed"
+          },
+          "recent": {
+            "anyOf": [
+              {
+                "items": {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Recent"
+          }
+        },
+        "type": "object",
+        "title": "TaskSections"
+      },
+      "TasksOut": {
+        "properties": {
+          "tasks": {
+            "anyOf": [
+              {
+                "items": {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tasks"
+          },
+          "sections": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TaskSections"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object",
+        "title": "TasksOut"
+      },
+      "TimelineEvent": {
+        "properties": {
+          "id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Id"
+          },
+          "event_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Event Type"
+          },
+          "actor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Actor"
+          },
+          "from_state": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "From State"
+          },
+          "to_state": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "To State"
+          },
+          "entity_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Entity Type"
+          },
+          "entity_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Entity Id"
+          },
+          "payload_json": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Payload Json"
+          },
+          "created_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Created At"
+          }
+        },
+        "type": "object",
+        "title": "TimelineEvent"
+      },
+      "TimelineOut": {
+        "properties": {
+          "items": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Items"
+          },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Cursor"
+          },
+          "generated_at": {
+            "type": "string",
+            "title": "Generated At"
+          },
+          "coverage": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Coverage"
+          },
+          "context_fill": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Context Fill"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          }
+        },
+        "type": "object",
+        "required": [
+          "items",
+          "generated_at",
+          "coverage",
+          "context_fill"
+        ],
+        "title": "TimelineOut"
+      },
+      "TokenTotals": {
+        "properties": {
+          "input": {
+            "type": "integer",
+            "title": "Input"
+          },
+          "output": {
+            "type": "integer",
+            "title": "Output"
+          },
+          "cache_read": {
+            "type": "integer",
+            "title": "Cache Read"
+          },
+          "cache_creation": {
+            "type": "integer",
+            "title": "Cache Creation"
+          },
+          "total": {
+            "type": "integer",
+            "title": "Total"
+          }
+        },
+        "type": "object",
+        "required": [
+          "input",
+          "output",
+          "cache_read",
+          "cache_creation",
+          "total"
+        ],
+        "title": "TokenTotals",
+        "description": "Token breakdown shared by the cost/usage/roster projections."
+      },
+      "TopRow": {
+        "properties": {
+          "session_id": {
+            "type": "string",
+            "title": "Session Id"
+          },
+          "repo_path": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Repo Path"
+          },
+          "backend": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Backend"
+          },
+          "role": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Role"
+          },
+          "tokens": {
+            "$ref": "#/components/schemas/TokenTotals"
+          },
+          "usd": {
+            "$ref": "#/components/schemas/UsdSummary"
+          },
+          "models": {
+            "items": {
+              "$ref": "#/components/schemas/ModelSpend"
+            },
+            "type": "array",
+            "title": "Models"
+          }
+        },
+        "type": "object",
+        "required": [
+          "session_id",
+          "tokens",
+          "usd",
+          "models"
+        ],
+        "title": "TopRow"
+      },
+      "Totals": {
+        "properties": {
+          "tokens": {
+            "$ref": "#/components/schemas/TokenTotals"
+          },
+          "usd": {
+            "$ref": "#/components/schemas/UsdSummary"
+          }
+        },
+        "type": "object",
+        "required": [
+          "tokens",
+          "usd"
+        ],
+        "title": "Totals"
+      },
+      "TurnDiagnosticsOut": {
+        "properties": {
+          "turn": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Turn"
+          },
+          "invocations": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Invocations"
+          },
+          "model_requests": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Model Requests"
+          },
+          "processes": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Processes"
+          }
+        },
+        "type": "object",
+        "required": [
+          "turn",
+          "invocations",
+          "model_requests",
+          "processes"
+        ],
+        "title": "TurnDiagnosticsOut"
+      },
+      "TurnEnrollmentOut": {
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "title": "Ok"
+          },
+          "session_id": {
+            "type": "string",
+            "title": "Session Id"
+          },
+          "enrolled": {
+            "type": "boolean",
+            "title": "Enrolled"
+          },
+          "changed": {
+            "type": "boolean",
+            "title": "Changed"
+          }
+        },
+        "type": "object",
+        "required": [
+          "ok",
+          "session_id",
+          "enrolled",
+          "changed"
+        ],
+        "title": "TurnEnrollmentOut"
+      },
+      "TurnEventsOut": {
+        "properties": {
+          "events": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Events"
+          }
+        },
+        "type": "object",
+        "required": [
+          "events"
+        ],
+        "title": "TurnEventsOut"
+      },
+      "TurnGraphOut": {
+        "properties": {
+          "nodes": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Nodes"
+          },
+          "edges": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Edges"
+          }
+        },
+        "type": "object",
+        "required": [
+          "nodes",
+          "edges"
+        ],
+        "title": "TurnGraphOut"
+      },
+      "TurnOut": {
+        "properties": {},
+        "additionalProperties": true,
+        "type": "object",
+        "title": "TurnOut"
+      },
       "TurnQueueControlOut": {
         "properties": {
           "session_id": {
@@ -6725,6 +11554,50 @@
         ],
         "title": "TurnQueueControlOut",
         "description": "[A82 Stage 6] Operator queue pause/resume outcome."
+      },
+      "TurnQueueCoverageOut": {
+        "properties": {
+          "checked": {
+            "type": "boolean",
+            "title": "Checked"
+          },
+          "coverage_ok": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Coverage Ok"
+          },
+          "managed_carrier_missing": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Managed Carrier Missing",
+            "default": []
+          },
+          "retired_backend_sessions": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Retired Backend Sessions"
+          }
+        },
+        "type": "object",
+        "required": [
+          "checked"
+        ],
+        "title": "TurnQueueCoverageOut"
       },
       "TurnQueueOut": {
         "properties": {
@@ -6777,6 +11650,23 @@
         ],
         "title": "TurnQueueOut"
       },
+      "TurnQueueStatusOut": {
+        "properties": {
+          "coverage_ok": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Coverage Ok"
+          }
+        },
+        "type": "object",
+        "title": "TurnQueueStatusOut"
+      },
       "TurnRecoveryResolveBody": {
         "properties": {
           "decision": {
@@ -6803,6 +11693,29 @@
         ],
         "title": "TurnRecoveryResolveBody",
         "description": "[A82 Stage 3 rework] Operator unwedge for a held managed turn. Minimal\n(full UI is Stage 6): the decision + note are recorded on the row."
+      },
+      "TurnRecoveryResolveOut": {
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "title": "Ok"
+          },
+          "task_id": {
+            "type": "string",
+            "title": "Task Id"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status"
+          }
+        },
+        "type": "object",
+        "required": [
+          "ok",
+          "task_id",
+          "status"
+        ],
+        "title": "TurnRecoveryResolveOut"
       },
       "TurnRequestDetailOut": {
         "properties": {
@@ -7124,6 +12037,95 @@
         "title": "TurnRequestPageOut",
         "description": "[A82 Stage 6] Cursor page of one session's open managed turns, in run\norder, plus the queue-level state (counts, active slot, operator pause)."
       },
+      "TurnRequestReceiptOut": {
+        "properties": {
+          "turn_id": {
+            "type": "string",
+            "title": "Turn Id"
+          },
+          "task_id": {
+            "type": "string",
+            "title": "Task Id"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "revision": {
+            "type": "integer",
+            "title": "Revision"
+          },
+          "queue_sequence": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Queue Sequence"
+          },
+          "queue_position": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Queue Position"
+          },
+          "accepted_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Accepted At"
+          },
+          "idempotent_replay": {
+            "type": "boolean",
+            "title": "Idempotent Replay",
+            "default": false
+          },
+          "source": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source"
+          },
+          "sender_session_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sender Session Id"
+          }
+        },
+        "type": "object",
+        "required": [
+          "turn_id",
+          "task_id",
+          "status",
+          "revision"
+        ],
+        "title": "TurnRequestReceiptOut",
+        "description": "[A82 Stage 6] 202 acknowledgement of a durable admission: stable id,\ncurrent status/revision, acceptance time and a queue-position SNAPSHOT\n(not a start-time promise)."
+      },
       "TurnRequestSummaryOut": {
         "properties": {
           "id": {
@@ -7256,6 +12258,114 @@
         "title": "TurnRequestSummaryOut",
         "description": "[A82 Stage 6] One queue card (design \u00a79). A read model of the managed\nledger \u2014 NOT the telemetry turn DTO of ``/api/turns``. Never carries the\nfull prompt, payload, claim token or sender capability."
       },
+      "TurnsOut": {
+        "properties": {
+          "turns": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Turns"
+          }
+        },
+        "type": "object",
+        "required": [
+          "turns"
+        ],
+        "title": "TurnsOut"
+      },
+      "Unattributed": {
+        "properties": {
+          "tokens": {
+            "$ref": "#/components/schemas/TokenTotals"
+          },
+          "usd": {
+            "$ref": "#/components/schemas/UsdSummary"
+          },
+          "models": {
+            "items": {
+              "$ref": "#/components/schemas/ModelSpend"
+            },
+            "type": "array",
+            "title": "Models"
+          }
+        },
+        "type": "object",
+        "required": [
+          "tokens",
+          "usd",
+          "models"
+        ],
+        "title": "Unattributed"
+      },
+      "UploadOut": {
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "title": "Ok"
+          },
+          "filename": {
+            "type": "string",
+            "title": "Filename"
+          },
+          "size": {
+            "type": "integer",
+            "title": "Size"
+          },
+          "path": {
+            "type": "string",
+            "title": "Path"
+          },
+          "delivery": {
+            "type": "string",
+            "title": "Delivery"
+          },
+          "task_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Task Id"
+          },
+          "instruction": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Instruction"
+          },
+          "staged_file": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Staged File"
+          }
+        },
+        "type": "object",
+        "required": [
+          "ok",
+          "filename",
+          "size",
+          "path",
+          "delivery"
+        ],
+        "title": "UploadOut"
+      },
       "UploadedFileAttachment": {
         "properties": {
           "path": {
@@ -7282,6 +12392,62 @@
           "path"
         ],
         "title": "UploadedFileAttachment"
+      },
+      "UsageOut": {
+        "properties": {
+          "session_id": {
+            "type": "string",
+            "title": "Session Id"
+          },
+          "model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model"
+          },
+          "tokens": {
+            "$ref": "#/components/schemas/TokenTotals"
+          },
+          "cost": {
+            "$ref": "#/components/schemas/CostEstimate"
+          }
+        },
+        "type": "object",
+        "required": [
+          "session_id",
+          "tokens",
+          "cost"
+        ],
+        "title": "UsageOut"
+      },
+      "UsdSummary": {
+        "properties": {
+          "known": {
+            "type": "number",
+            "title": "Known"
+          },
+          "unpriced_tokens": {
+            "type": "integer",
+            "title": "Unpriced Tokens"
+          },
+          "coverage_pct": {
+            "type": "number",
+            "title": "Coverage Pct"
+          }
+        },
+        "type": "object",
+        "required": [
+          "known",
+          "unpriced_tokens",
+          "coverage_pct"
+        ],
+        "title": "UsdSummary",
+        "description": "Aggregated USD spend with honest pricing coverage (unpriced tokens are\nsurfaced, never silently dropped)."
       },
       "ValidationError": {
         "properties": {
@@ -7323,6 +12489,172 @@
         ],
         "title": "ValidationError"
       },
+      "WaitGroupBrief": {
+        "properties": {
+          "wait_group_id": {
+            "type": "string",
+            "title": "Wait Group Id"
+          },
+          "condition": {
+            "type": "string",
+            "title": "Condition"
+          },
+          "members": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Members"
+          },
+          "satisfied": {
+            "type": "boolean",
+            "title": "Satisfied"
+          },
+          "presented_task_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Presented Task Ids"
+          },
+          "retire": {
+            "type": "boolean",
+            "title": "Retire"
+          }
+        },
+        "type": "object",
+        "required": [
+          "wait_group_id",
+          "condition",
+          "members",
+          "satisfied",
+          "presented_task_ids",
+          "retire"
+        ],
+        "title": "WaitGroupBrief"
+      },
+      "WaitOutcome": {
+        "properties": {
+          "task_id": {
+            "type": "string",
+            "title": "Task Id"
+          },
+          "outcome": {
+            "type": "string",
+            "title": "Outcome"
+          }
+        },
+        "type": "object",
+        "required": [
+          "task_id",
+          "outcome"
+        ],
+        "title": "WaitOutcome"
+      },
+      "WorkBucketCounts": {
+        "properties": {
+          "needs_decision": {
+            "type": "integer",
+            "title": "Needs Decision"
+          },
+          "blocked": {
+            "type": "integer",
+            "title": "Blocked"
+          },
+          "review": {
+            "type": "integer",
+            "title": "Review"
+          },
+          "active": {
+            "type": "integer",
+            "title": "Active"
+          },
+          "closed": {
+            "type": "integer",
+            "title": "Closed"
+          },
+          "unknown": {
+            "type": "integer",
+            "title": "Unknown"
+          }
+        },
+        "type": "object",
+        "required": [
+          "needs_decision",
+          "blocked",
+          "review",
+          "active",
+          "closed",
+          "unknown"
+        ],
+        "title": "WorkBucketCounts"
+      },
+      "WorkListOut": {
+        "properties": {
+          "cases": {
+            "items": {
+              "$ref": "#/components/schemas/CaseSummary"
+            },
+            "type": "array",
+            "title": "Cases"
+          },
+          "bucket_counts": {
+            "$ref": "#/components/schemas/WorkBucketCounts"
+          },
+          "total": {
+            "type": "integer",
+            "title": "Total"
+          }
+        },
+        "type": "object",
+        "required": [
+          "cases",
+          "bucket_counts",
+          "total"
+        ],
+        "title": "WorkListOut"
+      },
+      "WorkerBrief": {
+        "properties": {
+          "task_id": {
+            "type": "string",
+            "title": "Task Id"
+          },
+          "finished": {
+            "type": "boolean",
+            "title": "Finished"
+          },
+          "outcome": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Outcome"
+          },
+          "latest_review": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ReviewSummary"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "task_id",
+          "finished",
+          "outcome",
+          "latest_review"
+        ],
+        "title": "WorkerBrief"
+      },
       "ErrorEnvelope": {
         "type": "object",
         "properties": {
@@ -7343,24 +12675,6 @@
         "required": [
           "ok",
           "reason"
-        ]
-      },
-      "CommandResult": {
-        "type": "object",
-        "description": "Success envelope returned by lifecycle/mutation endpoints.",
-        "properties": {
-          "ok": {
-            "type": "boolean",
-            "example": true
-          },
-          "reason": {
-            "type": "string",
-            "nullable": true,
-            "example": null
-          }
-        },
-        "required": [
-          "ok"
         ]
       }
     },
