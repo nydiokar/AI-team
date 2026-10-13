@@ -281,24 +281,22 @@ def build_session_timeline(
             )
         )
 
-    items.sort(key=lambda item: item.timestamp, reverse=True)
-    # [A83] Prepend a session-scoped head item carrying the derived secondary
-    # reason, so it leads the first page and is present even when there are no
-    # task/turn/job items. Reason is computed on the read path by the caller
-    # (never here, never on a timer — #145/#147); we only render it.
+    # [A83] A session-scoped head item carrying the derived secondary reason, so
+    # the reason is present even when there are no task/turn/job items. Reason is
+    # computed on the read path by the caller (never here, never on a timer —
+    # #145/#147); we only render it. It is sorted into the stream by its honest
+    # timestamp (below) rather than force-pinned to the top: pinning + a render-
+    # time stamp made a stale "idle" always appear newer than a live worker/turn
+    # row below it (the operator's reported inversion). Its timestamp is the
+    # session's real status-change time (``updated_at``), so order AND time are
+    # truthful — a genuinely newer live row now sorts above it.
     if session_reason is not None:
         kind_txt = str(session_reason.get("kind") or "")
-        items.insert(
-            0,
+        items.append(
             SessionTimelineItem(
                 id=f"session:{session_id}:reason",
                 kind="session_state",
                 source="session_reason",
-                # Honest timestamp: when the session's status was last written
-                # (``updated_at``), NOT ``generated_at`` (response build time).
-                # Stamping it with render time made the head always look like the
-                # newest event, so a stale "idle" appeared to post-date a live
-                # worker/turn below it — the operator's reported inversion.
                 timestamp=_timestamp(
                     (session_row or {}).get("updated_at"),
                     (session_row or {}).get("created_at"),
@@ -312,6 +310,8 @@ def build_session_timeline(
                 reason=session_reason,
             ),
         )
+    # Single honest ordering pass over ALL items (incl. the session head).
+    items.sort(key=lambda item: item.timestamp, reverse=True)
     page: list[SessionTimelineItem] = items[offset : offset + bounded_limit]
     next_offset: int = offset + bounded_limit
     return SessionTimelineResponse(

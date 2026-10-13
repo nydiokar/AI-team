@@ -205,6 +205,10 @@ _TRUTHY_FLAG_VALUES = ("1", "true", "yes", "on")
 # [A82 Stage 4a] The managed open-row predicate, spelled EXACTLY like the
 # `idx_mesh_turns_session_open` partial-index WHERE clause so SQLite can prove
 # the index usable (partial-index use requires the index terms verbatim).
+# The non-terminal mesh_task statuses = "work still in flight". Single source of
+# truth so the managed-open predicate and the session-liveness read
+# (``live_task_sessions``) can never drift apart.
+_MANAGED_OPEN_STATUSES = ("queued", "pending", "claimed", "running", "recovery_required")
 _MANAGED_OPEN_PREDICATE = (
     "queue_protocol = 1 "
     "AND status IN ('queued', 'pending', 'claimed', 'running', 'recovery_required')"
@@ -6424,15 +6428,6 @@ class MeshDB:
             out.append(d)
         return out
 
-    # Non-terminal mesh_task statuses = "work the session still owns in flight".
-    # Terminal (completed/failed/failed_node_offline/cancelled/withdrawn) is
-    # excluded; everything else means a task/turn is live. Kept as a literal so a
-    # new live status fails the truth-table test loudly rather than silently.
-    _LIVE_TASK_STATUSES = (
-        "accepted", "pending", "queued", "claimed", "running",
-        "cancel_requested", "recovery_required",
-    )
-
     def live_task_sessions(self, session_ids: List[str]) -> set:
         """Sessions (from the given page) that own at least one non-terminal task.
 
@@ -6441,17 +6436,18 @@ class MeshDB:
         ``list_jobs_for_sessions``/``inbox_waiting_for``. This is the single cheap
         condition that unifies session-state awareness: a session parked IDLE/
         AWAITING_INPUT while this returns it is the "stale idle" tell (the
-        operator's reported mismatch). Read-path only — never on a timer (#145/
-        #147)."""
+        operator's reported mismatch). Non-terminal statuses come from the shared
+        ``_MANAGED_OPEN_STATUSES`` tuple (no drift vs the managed-open predicate).
+        Read-path only — never on a timer (#145/#147)."""
         ids = [str(s) for s in session_ids if s]
         if not ids:
             return set()
         placeholders = ",".join("?" for _ in ids)
-        status_ph = ",".join("?" for _ in self._LIVE_TASK_STATUSES)
+        status_ph = ",".join("?" for _ in _MANAGED_OPEN_STATUSES)
         rows = self._conn().execute(
             f"SELECT DISTINCT session_id FROM mesh_tasks "
             f"WHERE session_id IN ({placeholders}) AND status IN ({status_ph})",
-            [*ids, *self._LIVE_TASK_STATUSES],
+            [*ids, *_MANAGED_OPEN_STATUSES],
         ).fetchall()
         return {str(r["session_id"]) for r in rows if r["session_id"]}
 

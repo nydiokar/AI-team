@@ -477,3 +477,17 @@ def test_work_in_flight_against_real_meshdb(tmp_path):
 
     # Direct query contract: only the live session comes back for the page.
     assert db.live_task_sessions(["sess_live", "sess_done"]) == {"sess_live"}
+
+
+def test_live_task_statuses_do_not_drift_from_managed_open_predicate():
+    # The liveness read and the canonical managed-open predicate must share the
+    # same non-terminal status vocabulary, or a session could show the wrong
+    # state. _MANAGED_OPEN_STATUSES is the single source of truth; assert the
+    # predicate string is built from exactly those statuses.
+    from src.control.db import _MANAGED_OPEN_STATUSES, _MANAGED_OPEN_PREDICATE
+
+    for status in _MANAGED_OPEN_STATUSES:
+        assert f"'{status}'" in _MANAGED_OPEN_PREDICATE
+    # No terminal status may sneak into the live set.
+    assert not ({"completed", "failed", "failed_node_offline", "cancelled", "withdrawn"}
+                & set(_MANAGED_OPEN_STATUSES))

@@ -51,6 +51,36 @@ def test_session_state_head_uses_session_updated_at_not_render_time() -> None:
     assert head.timestamp != response.generated_at
 
 
+def test_session_state_head_sorts_by_time_not_force_pinned_above_live_rows() -> None:
+    # Honest ordering: a task observed AFTER the session's last status write must
+    # sort ABOVE the session_state head — the head is no longer force-pinned to
+    # the top wearing a misleading timestamp (the reported "idle newer than a
+    # running worker" inversion).
+    class _DB(_EmptyDB):
+        def list_tasks(self, session_id=None, limit=50):
+            return [{
+                "id": "task_live", "session_id": session_id, "status": "running",
+                "claimed_by": "node1", "updated_at": "2026-10-14T17:05:00+00:00",
+                "started_at": "2026-10-14T17:05:00+00:00",
+            }]
+
+        def list_nodes(self):
+            return [{"node_id": "node1", "status": "online"}]
+
+    response = build_session_timeline(
+        db=_DB(),
+        telemetry_store=None,
+        session_id="sess_ord",
+        session_row={"session_id": "sess_ord", "status": "idle",
+                     "updated_at": "2026-10-14T17:00:00+00:00"},
+        session_reason={"kind": "idle", "confidence": "high"},
+    )
+    kinds = [it.kind for it in response.items]
+    task_idx = kinds.index("task_state")
+    head_idx = kinds.index("session_state")
+    assert task_idx < head_idx, "a newer live task row must sort above the session head"
+
+
 def test_session_timeline_pages_newest_first_from_stable_bounded_window() -> None:
     class _ManyTasksDB(_EmptyDB):
         def list_tasks(self, session_id=None, limit=50):
