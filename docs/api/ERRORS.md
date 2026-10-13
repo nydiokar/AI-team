@@ -1,6 +1,6 @@
 # Control API — Error Catalog
 
-_Generated 2026-10-12 by `scripts/api_docs/generate_api_docs.py` from `_REASON_STATUS` in `src/control/control_api.py`. Do not edit by hand._
+_Generated 2026-10-13 by `scripts/api_docs/generate_api_docs.py` from `_REASON_STATUS` in `src/control/control_api.py`. Do not edit by hand._
 
 Failed requests return a stable envelope:
 

@@ -12,6 +12,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, StreamingResponse
+from pydantic import BaseModel, ConfigDict
 
 from src.control import control_api as core
 from src.control.control_api import (
@@ -22,10 +23,147 @@ from src.core import observability
 from src.core.build_info import build_info
 
 
+# --- Response schemas (documentation only) ---------------------------------
+# These models document each handler's 200 success shape for the generated API
+# reference; they are attached via ``responses={200: {"model": ...}}`` and do
+# NOT filter or alter runtime output. DB-row payloads with variable columns are
+# typed as ``list[dict]`` / ``dict`` rather than enumerating columns.
+
+
+class GovernorOut(BaseModel):
+    sdk_max_turns: Optional[int] = None
+    sdk_max_budget_usd: Optional[float] = None
+
+
+class TurnQueueStatusOut(BaseModel):
+    coverage_ok: Optional[bool] = None
+
+
+class BuildOut(BaseModel):
+    version: str
+    git_sha: str
+
+
+class HealthOut(BaseModel):
+    status: str
+    governor: GovernorOut
+    turn_queue: TurnQueueStatusOut
+    build: BuildOut
+
+
+class TurnQueueCoverageOut(BaseModel):
+    checked: bool
+    coverage_ok: Optional[bool] = None
+    managed_carrier_missing: list[dict] = []
+    retired_backend_sessions: Optional[int] = None
+
+
+class TaskSections(BaseModel):
+    attention: Optional[list[dict]] = None
+    running: Optional[list[dict]] = None
+    queued: Optional[list[dict]] = None
+    failed: Optional[list[dict]] = None
+    recent: Optional[list[dict]] = None
+
+
+class TasksOut(BaseModel):
+    tasks: Optional[list[dict]] = None
+    sections: Optional[TaskSections] = None
+
+
+class NodesOut(BaseModel):
+    nodes: list[dict]
+
+
+class ArtifactsOut(BaseModel):
+    artifacts: list[dict]
+
+
+class ArtifactOut(BaseModel):
+    artifact: dict
+    files: list[dict]
+
+
+class EventsOut(BaseModel):
+    events: list[dict]
+    offset: int
+
+
+class TurnsOut(BaseModel):
+    turns: list[dict]
+
+
+class TurnOut(BaseModel):
+    # A bare decoded turn row with variable columns; open schema.
+    model_config = ConfigDict(extra="allow")
+
+
+class TurnDiagnosticsOut(BaseModel):
+    turn: dict
+    invocations: list[dict]
+    model_requests: list[dict]
+    processes: list[dict]
+
+
+class TurnGraphOut(BaseModel):
+    nodes: list[dict]
+    edges: list[dict]
+
+
+class TurnEventsOut(BaseModel):
+    events: list[dict]
+
+
+class BackendsUsageOut(BaseModel):
+    telemetry_available: bool
+    backends: list[dict]
+    limits_source: Optional[str] = None
+    limits_reason: str
+
+
+class ProjectOut(BaseModel):
+    name: str
+    path: str
+
+
+class ProjectsOut(BaseModel):
+    projects: list[ProjectOut]
+
+
+class ModelsOut(BaseModel):
+    backend: Optional[str] = None
+    node_id: str
+    models: Any
+
+
+class JobsOut(BaseModel):
+    running: list[dict]
+    recent: list[dict]
+
+
+class MeshHealthHistoryOut(BaseModel):
+    recent: list[dict]
+
+
+class MeshReconcileOut(BaseModel):
+    total: int
+    pending: int
+    reconciled: int
+    invalid: int
+    oldest_pending_at: Optional[str] = None
+    latest_reconciled_at: Optional[str] = None
+
+
+class MeshHealthOut(BaseModel):
+    current: dict
+    history: MeshHealthHistoryOut
+    reconcile: MeshReconcileOut
+
+
 def build_router(orchestrator: Any, *, require_auth: Callable[..., Any]) -> APIRouter:
     router = APIRouter()
 
-    @router.get("/health")
+    @router.get("/health", responses={200: {"model": HealthOut, "description": "Liveness + SDK governor ceilings, carrier-coverage flag, and build identity."}})
     def health() -> Dict[str, Any]:
         # [A53] Surface the effective SDK-driver governor ceilings so the operator
         # can verify the turn/cost cap is actually configured (read-only). None ⇒
@@ -50,7 +188,7 @@ def build_router(orchestrator: Any, *, require_auth: Callable[..., Any]) -> APIR
             "build": build_info().model_dump(),
         }
 
-    @router.get("/api/turn-queue/coverage", dependencies=[Depends(require_auth)])
+    @router.get("/api/turn-queue/coverage", dependencies=[Depends(require_auth)], responses={200: {"model": TurnQueueCoverageOut, "description": "Latest managed-carrier coverage check + open retired-backend session count."}})
     def api_turn_queue_coverage() -> Dict[str, Any]:
         """[A82 Stage 8a, review F4] The latest managed-carrier coverage check:
         (carrier, pin, backend, sessions) groups no live managed carrier covers
@@ -66,7 +204,7 @@ def build_router(orchestrator: Any, *, require_auth: Callable[..., Any]) -> APIR
             "retired_backend_sessions": retired if isinstance(retired, int) else None,
         }
 
-    @router.get("/api/tasks", dependencies=[Depends(require_auth)])
+    @router.get("/api/tasks", dependencies=[Depends(require_auth)], responses={200: {"model": TasksOut, "description": "Flat {tasks:[...]} by default; {sections:{...}} when sectioned=true."}})
     def api_tasks(
         limit: int = Query(50, ge=1, le=500),
         sectioned: bool = Query(False),
@@ -109,7 +247,7 @@ def build_router(orchestrator: Any, *, require_auth: Callable[..., Any]) -> APIR
             sections[section].append(t)
         return JSONResponse({"sections": sections})
 
-    @router.get("/api/nodes", dependencies=[Depends(require_auth)])
+    @router.get("/api/nodes", dependencies=[Depends(require_auth)], responses={200: {"model": NodesOut, "description": "Live mesh execution nodes."}})
     def api_nodes() -> JSONResponse:
         nodes = core._live_nodes()
         return JSONResponse({"nodes": nodes})
@@ -119,7 +257,7 @@ def build_router(orchestrator: Any, *, require_auth: Callable[..., Any]) -> APIR
     # results/<task_id>.json artifacts via the pure src.control.artifacts helpers
     # (confined to results_dir — path-traversal rejected like the SPA resolver).
 
-    @router.get("/api/artifacts", dependencies=[Depends(require_auth)])
+    @router.get("/api/artifacts", dependencies=[Depends(require_auth)], responses={200: {"model": ArtifactsOut, "description": "Newest-first artifact summaries."}})
     def api_artifacts(limit: int = Query(50, ge=1, le=500)) -> JSONResponse:
         """Newest-first artifact summaries. Canonical source is mesh_tasks (DB);
         falls back to results/*.json only when the DB is unavailable."""
@@ -130,7 +268,7 @@ def build_router(orchestrator: Any, *, require_auth: Callable[..., Any]) -> APIR
             rows = _artifacts.list_artifacts(core._results_dir(), limit=limit)
         return JSONResponse({"artifacts": rows})
 
-    @router.get("/api/artifacts/{task_id}", dependencies=[Depends(require_auth)])
+    @router.get("/api/artifacts/{task_id}", dependencies=[Depends(require_auth)], responses={200: {"model": ArtifactOut, "description": "One artifact header + normalized changed files."}})
     def api_artifact(task_id: str) -> JSONResponse:
         """One artifact's full header + normalized changed files (RemoteFile rows).
 
@@ -149,7 +287,7 @@ def build_router(orchestrator: Any, *, require_auth: Callable[..., Any]) -> APIR
             "files": _artifacts.to_remote_files(artifact),
         })
 
-    @router.get("/api/events", dependencies=[Depends(require_auth)])
+    @router.get("/api/events", dependencies=[Depends(require_auth)], responses={200: {"model": EventsOut, "description": "Live event deltas; pass offset back as since."}})
     def api_events(
         since: int = Query(0, ge=0),
         limit: int = Query(100, ge=1, le=1000),
@@ -162,7 +300,7 @@ def build_router(orchestrator: Any, *, require_auth: Callable[..., Any]) -> APIR
         data = observability.read_recent_events(limit=limit, since_offset=since)
         return JSONResponse(data)
 
-    @router.get("/api/turns", dependencies=[Depends(require_auth)])
+    @router.get("/api/turns", dependencies=[Depends(require_auth)], responses={200: {"model": TurnsOut, "description": "Turn telemetry rows (filterable)."}})
     def api_turns(
         session_id: Optional[str] = None,
         status: Optional[str] = None,
@@ -183,7 +321,7 @@ def build_router(orchestrator: Any, *, require_auth: Callable[..., Any]) -> APIR
         return JSONResponse({"turns": turns})
 
     # REVISIT (2026-10-05): no UI caller yet (tests only); meant for worker diagnostics.
-    @router.get("/api/turns/{turn_id}", dependencies=[Depends(require_auth)])
+    @router.get("/api/turns/{turn_id}", dependencies=[Depends(require_auth)], responses={200: {"model": TurnOut, "description": "A single decoded turn row (open schema)."}})
     def api_turn_detail(turn_id: str) -> JSONResponse:
         store = core._telemetry_store()
         turn = store.get_turn(turn_id) if store is not None else None
@@ -192,7 +330,7 @@ def build_router(orchestrator: Any, *, require_auth: Callable[..., Any]) -> APIR
         return JSONResponse(turn)
 
     # REVISIT (2026-10-05): no UI caller yet (tests only); meant for worker diagnostics.
-    @router.get("/api/turns/{turn_id}/diagnostics", dependencies=[Depends(require_auth)])
+    @router.get("/api/turns/{turn_id}/diagnostics", dependencies=[Depends(require_auth)], responses={200: {"model": TurnDiagnosticsOut, "description": "Turn + invocations, model requests, and processes."}})
     def api_turn_diagnostics(turn_id: str) -> JSONResponse:
         store = core._telemetry_store()
         diagnostics = store.diagnostics(turn_id) if store is not None else None
@@ -200,7 +338,7 @@ def build_router(orchestrator: Any, *, require_auth: Callable[..., Any]) -> APIR
             raise HTTPException(status_code=404, detail="turn_not_found")
         return JSONResponse(diagnostics)
 
-    @router.get("/api/turns/{turn_id}/graph", dependencies=[Depends(require_auth)])
+    @router.get("/api/turns/{turn_id}/graph", dependencies=[Depends(require_auth)], responses={200: {"model": TurnGraphOut, "description": "Turn execution graph: nodes + edges."}})
     def api_turn_graph(turn_id: str, expand_tools: bool = False) -> JSONResponse:
         store = core._telemetry_store()
         graph = store.graph(turn_id, expand_tools=expand_tools) if store is not None else None
@@ -208,7 +346,7 @@ def build_router(orchestrator: Any, *, require_auth: Callable[..., Any]) -> APIR
             raise HTTPException(status_code=404, detail="turn_not_found")
         return JSONResponse(graph)
 
-    @router.get("/api/turns/{turn_id}/events", dependencies=[Depends(require_auth)])
+    @router.get("/api/turns/{turn_id}/events", dependencies=[Depends(require_auth)], responses={200: {"model": TurnEventsOut, "description": "Event rows for a single turn."}})
     def api_turn_events(
         turn_id: str,
         after: Optional[str] = None,
@@ -257,7 +395,7 @@ def build_router(orchestrator: Any, *, require_auth: Callable[..., Any]) -> APIR
     # Write surface (U3) — thin adapters over the same services Telegram calls.
     # ----------------------------------------------------------------------
 
-    @router.get("/api/backends/usage", dependencies=[Depends(require_auth)])
+    @router.get("/api/backends/usage", dependencies=[Depends(require_auth)], responses={200: {"model": BackendsUsageOut, "description": "Honest per-backend account/usage view; null + reason for unprovable limits."}})
     def api_backends_usage() -> JSONResponse:
         """Honest per-backend account/usage view. Emits ONLY provable facts
         (configured/observed model, recent token usage from telemetry) and returns
@@ -276,7 +414,7 @@ def build_router(orchestrator: Any, *, require_auth: Callable[..., Any]) -> APIR
 
     # --- A65 cost monitoring: explorer / case usage / top spenders / projects ---
 
-    @router.get("/api/projects", dependencies=[Depends(require_auth)])
+    @router.get("/api/projects", dependencies=[Depends(require_auth)], responses={200: {"model": ProjectsOut, "description": "Discoverable repos for a node."}})
     def api_projects(
         node_id: str = Query("__local__"),
         limit: int = Query(20, ge=1, le=50),
@@ -287,7 +425,7 @@ def build_router(orchestrator: Any, *, require_auth: Callable[..., Any]) -> APIR
         projects = core._list_projects_for_node(node_id, limit=limit)
         return JSONResponse({"projects": projects})
 
-    @router.get("/api/models", dependencies=[Depends(require_auth)])
+    @router.get("/api/models", dependencies=[Depends(require_auth)], responses={200: {"model": ModelsOut, "description": "Model catalog for a node; models is a list (single backend) or dict keyed by backend."}})
     def api_models(
         backend: Optional[str] = Query(default=None),
         node_id: str = Query("__local__"),
@@ -325,7 +463,7 @@ def build_router(orchestrator: Any, *, require_auth: Callable[..., Any]) -> APIR
             result[be] = serialize(be)
         return JSONResponse({"node_id": node_id, "models": result})
 
-    @router.get("/api/jobs", dependencies=[Depends(require_auth)])
+    @router.get("/api/jobs", dependencies=[Depends(require_auth)], responses={200: {"model": JobsOut, "description": "Watched jobs: running + recent."}})
     def api_jobs(
         limit: int = Query(20, ge=1, le=50),
         session_id: Optional[str] = Query(default=None, max_length=_ID_STR_MAX),
@@ -360,7 +498,7 @@ def build_router(orchestrator: Any, *, require_auth: Callable[..., Any]) -> APIR
         )
         return JSONResponse({"running": running, "recent": recent})
 
-    @router.get("/api/mesh/health", dependencies=[Depends(require_auth)])
+    @router.get("/api/mesh/health", dependencies=[Depends(require_auth)], responses={200: {"model": MeshHealthOut, "description": "Mesh health trend + reconcile backlog."}})
     def api_mesh_health(limit: int = Query(24, ge=1, le=200)) -> JSONResponse:
         """Read-only mesh health trend and reconcile backlog for the Web UI."""
         db = core._db()

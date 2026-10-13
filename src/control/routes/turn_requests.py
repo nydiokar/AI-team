@@ -13,6 +13,7 @@ from typing import Any, Callable, Dict, Optional
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Security
 from fastapi.responses import JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from pydantic import BaseModel
 
 from src.control import control_api as core
 
@@ -31,12 +32,29 @@ from src.control.control_api import (
 )
 
 
+# --- OpenAPI response models (documentation only; handlers return JSONResponse,
+# so FastAPI passes the body through untouched — see routes/_responses.py) -----
+class TurnRecoveryResolveOut(BaseModel):
+    ok: bool
+    task_id: str
+    status: str
+
+
+class TurnEnrollmentOut(BaseModel):
+    ok: bool
+    session_id: str
+    enrolled: bool
+    changed: bool
+
+
 def build_router(
     orchestrator: Any, *, require_auth: Callable[..., Any], bearer: HTTPBearer
 ) -> APIRouter:
     router = APIRouter()
 
-    @router.post("/api/turn-requests/{task_id}/resolve-recovery", dependencies=[Depends(require_auth)])
+    @router.post("/api/turn-requests/{task_id}/resolve-recovery", dependencies=[Depends(require_auth)],
+                 responses={200: {"model": TurnRecoveryResolveOut,
+                                  "description": "The held managed turn's new resolved status."}})
     def api_resolve_turn_recovery(task_id: str, body: TurnRecoveryResolveBody) -> JSONResponse:
         """[A82 Stage 3 rework] Operator exit for every held managed state.
 
@@ -112,7 +130,10 @@ def build_router(
         await require_auth(creds)
         return None
 
-    @router.post("/api/sessions/{session_id}/turn-requests")
+    @router.post("/api/sessions/{session_id}/turn-requests", status_code=202,
+                 responses={202: {"model": TurnRequestReceiptOut,
+                                  "description": "Admission receipt for the queued turn "
+                                                 "(the handler responds 202 Accepted)."}})
     async def api_create_turn_request(
         session_id: str, request: Request,
         sender: Optional[Any] = Depends(_turn_request_principal),
@@ -327,7 +348,9 @@ def build_router(
         provider-deadline and approval gates keep holding."""
         return await _set_queue_paused(session_id, False)
 
-    @router.post("/api/sessions/{session_id}/turn-requests/enroll", dependencies=[Depends(require_auth)])
+    @router.post("/api/sessions/{session_id}/turn-requests/enroll", dependencies=[Depends(require_auth)],
+                 responses={200: {"model": TurnEnrollmentOut,
+                                  "description": "Enrollment state after the operation."}})
     async def api_enroll_turn_queue(session_id: str) -> JSONResponse:
         """[A82 Stage 7] Operator enrollment onto the managed turn queue (design
         §10 step 6). Default-OFF flag ``TURN_QUEUE_ENROLLMENT_ENABLED``; typed
@@ -345,7 +368,9 @@ def build_router(
         return JSONResponse({"ok": True, "session_id": session_id, "enrolled": True,
                              "changed": bool(changed)})
 
-    @router.post("/api/sessions/{session_id}/turn-requests/unenroll", dependencies=[Depends(require_auth)])
+    @router.post("/api/sessions/{session_id}/turn-requests/unenroll", dependencies=[Depends(require_auth)],
+                 responses={200: {"model": TurnEnrollmentOut,
+                                  "description": "Enrollment state after the operation."}})
     async def api_unenroll_turn_queue(session_id: str) -> JSONResponse:
         """[A82 Stage 7] Rollback exit (design §10 step 8): remove enrollment only
         when no waiting/active/recovery managed obligation remains (409

@@ -10,6 +10,7 @@ from typing import Any, Callable, Optional
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 
 from src.control import control_api as core
 from src.control.control_api import (
@@ -21,6 +22,137 @@ from src.control.control_api import (
     PushUnsubscribeBody,
     RuntimeFlagBody,
 )
+from src.control.routes._responses import CommandResult
+
+
+# --- OpenAPI success-response models (documentation only; handlers still
+# return raw JSONResponse, so FastAPI passes the body through untouched). ---
+
+
+class FlagOut(BaseModel):
+    """A single effective runtime flag."""
+
+    flag_name: str
+    value: bool
+    raw_value: str
+    source: str
+    effect_scope: str
+    registry_writable: bool
+    description: str
+    registry: Optional[dict] = None
+    env_value: Optional[str] = None
+
+
+class ApprovalOut(BaseModel):
+    """A single approval request record."""
+
+    id: str
+    session_id: Optional[str]
+    task_id: Optional[str]
+    action: str
+    risk: str
+    reversible: int
+    status: str
+    requested_by: str
+    resolved_by: Optional[str]
+    payload: Optional[str]
+    created_at: str
+    resolved_at: Optional[str]
+    expires_at: Optional[str]
+    flow_run_id: Optional[str] = None
+
+
+class FlagsOut(CommandResult):
+    """``GET /api/flags`` — the command envelope plus the flag list."""
+
+    flags: list[FlagOut]
+
+
+class FlagSetOut(CommandResult):
+    """``PUT /api/flags/{flag_name}`` — envelope plus the updated flag."""
+
+    flag: FlagOut
+
+
+class FlagDeleteOut(CommandResult):
+    """``DELETE /api/flags/{flag_name}`` — envelope plus the cleared flag."""
+
+    deleted: bool
+    flag: FlagOut
+
+
+class ApprovalsOut(BaseModel):
+    """``GET /api/approvals`` — the list of pending/resolved approvals."""
+
+    approvals: list[ApprovalOut]
+
+
+class ApprovalCreateOut(CommandResult):
+    """``POST /api/approvals`` — envelope plus the created approval."""
+
+    approval: ApprovalOut
+
+
+class ApprovalResolveOut(CommandResult):
+    """``POST /api/approvals/{approval_id}/resolve`` — envelope plus the approval."""
+
+    reason: str
+    approval: ApprovalOut
+
+
+class PushStatusOut(BaseModel):
+    """``GET /api/push/status`` — browser-push availability snapshot."""
+
+    available: bool
+    reason: str
+    vapid_public_key: str
+    missing_env: list[str]
+    enabled_subscriptions: int
+
+
+class GitStatusChanges(BaseModel):
+    modified: list[str]
+    created: list[str]
+    deleted: list[str]
+    total: int
+
+
+class GitStatusSafety(BaseModel):
+    safe_files: list[str]
+    sensitive_files: list[str]
+    has_sensitive_files: bool
+
+
+class GitStatusOut(BaseModel):
+    """``POST /api/git/status`` — working-tree status + safety classification."""
+
+    current_branch: str
+    working_directory_clean: bool
+    changes: GitStatusChanges
+    staged_files: list[str]
+    unstaged_files: list[str]
+    safety: GitStatusSafety
+
+
+class GitCommitOut(BaseModel):
+    """``POST /api/git/commit`` — commit result with safety blocking."""
+
+    success: bool
+    branch_name: Optional[str]
+    commit_hash: Optional[str]
+    files_committed: list[str]
+    sensitive_files_blocked: list[str]
+    errors: list[str]
+
+
+class GitCommitAllOut(BaseModel):
+    """``POST /api/git/commit_all`` — commit-all result."""
+
+    success: bool
+    branch_name: Optional[str]
+    commit_hash: Optional[str]
+    files_committed: list[str]
+    errors: list[str]
 
 
 def build_router(
@@ -32,7 +164,7 @@ def build_router(
 ) -> APIRouter:
     router = APIRouter(dependencies=[Depends(require_auth)])
 
-    @router.get("/api/flags")
+    @router.get("/api/flags", responses={200: {"model": FlagsOut, "description": "Effective runtime flags."}})
     def api_list_flags() -> JSONResponse:
         """List effective runtime flags.
 
@@ -51,7 +183,7 @@ def build_router(
             ],
         })
 
-    @router.put("/api/flags/{flag_name}")
+    @router.put("/api/flags/{flag_name}", responses={200: {"model": FlagSetOut, "description": "Updated runtime flag."}})
     def api_set_flag(flag_name: str, body: RuntimeFlagBody) -> JSONResponse:
         from src.control.db import (
             RUNTIME_FLAG_DEFINITIONS,
@@ -86,7 +218,7 @@ def build_router(
         db.set_runtime_flag(name, body.value, source="api", set_by=body.set_by or "")
         return JSONResponse({"ok": True, "flag": render_runtime_flag(name, db=db)})
 
-    @router.delete("/api/flags/{flag_name}")
+    @router.delete("/api/flags/{flag_name}", responses={200: {"model": FlagDeleteOut, "description": "Cleared runtime flag override."}})
     def api_delete_flag(flag_name: str) -> JSONResponse:
         from src.control.db import (
             RUNTIME_FLAG_DEFINITIONS,
@@ -134,7 +266,7 @@ def build_router(
         from src.services.approval_service import ApprovalService
         return ApprovalService(db)
 
-    @router.get("/api/approvals")
+    @router.get("/api/approvals", responses={200: {"model": ApprovalsOut, "description": "Approval requests."}})
     def api_list_approvals(
         status: Optional[str] = Query(default="pending"),
         limit: int = Query(50, ge=1, le=200),
@@ -147,7 +279,7 @@ def build_router(
         approvals = svc.list(status=status or None, limit=limit)
         return JSONResponse({"approvals": approvals})
 
-    @router.post("/api/approvals")
+    @router.post("/api/approvals", responses={200: {"model": ApprovalCreateOut, "description": "Created approval request."}})
     def api_request_approval(
         body: ApprovalRequestBody,
         idempotency_key: Optional[str] = Header(default=None, alias="Idempotency-Key"),
@@ -172,7 +304,7 @@ def build_router(
             idem_put("request_approval", idempotency_key, resp)
             return JSONResponse(resp)
 
-    @router.post("/api/approvals/{approval_id}/resolve")
+    @router.post("/api/approvals/{approval_id}/resolve", responses={200: {"model": ApprovalResolveOut, "description": "Resolved approval request."}})
     async def api_resolve_approval(approval_id: str, body: ApprovalResolveBody) -> JSONResponse:
         """Approve or reject a pending approval. The guarded transition makes a
         double-resolve return 409 (already_resolved), not a second dispatch."""
@@ -187,7 +319,7 @@ def build_router(
 
     # --- web push (#21) ---
 
-    @router.get("/api/push/status")
+    @router.get("/api/push/status", responses={200: {"model": PushStatusOut, "description": "Browser-push availability."}})
     def api_push_status() -> JSONResponse:
         """Report whether push is available (VAPID configured + transport present)
         and expose the public VAPID key the browser needs to subscribe."""
@@ -214,7 +346,7 @@ def build_router(
             "enabled_subscriptions": sub_count,
         })
 
-    @router.post("/api/push/subscribe")
+    @router.post("/api/push/subscribe", responses={200: {"model": CommandResult, "description": "Subscription stored."}})
     async def api_push_subscribe(request: Request) -> JSONResponse:
         """Register/refresh a browser push subscription (idempotent by endpoint).
 
@@ -256,7 +388,7 @@ def build_router(
         )
         return JSONResponse({"ok": True})
 
-    @router.post("/api/push/unsubscribe")
+    @router.post("/api/push/unsubscribe", responses={200: {"model": CommandResult, "description": "Subscription removed."}})
     def api_push_unsubscribe(body: PushUnsubscribeBody) -> JSONResponse:
         db = core._db()
         if db is None:
@@ -267,13 +399,13 @@ def build_router(
     # --- backend account + usage visibility (#30/#33) ---
 
     # REVISIT (2026-10-05): no caller yet; meant for the Web UI git panel - wire it or drop it.
-    @router.post("/api/git/status")
+    @router.post("/api/git/status", responses={200: {"model": GitStatusOut, "description": "Working-tree status and safety."}})
     def api_git_status() -> JSONResponse:
         from src.services.git_automation import GitAutomationService
         return JSONResponse(GitAutomationService().get_git_status_summary())
 
     # REVISIT (2026-10-05): no caller yet; meant for the Web UI git panel - wire it or drop it.
-    @router.post("/api/git/commit")
+    @router.post("/api/git/commit", responses={200: {"model": GitCommitOut, "description": "Commit result."}})
     def api_git_commit(body: GitCommitBody) -> JSONResponse:
         from src.services.git_automation import GitAutomationService
         result = GitAutomationService().safe_commit_task(
@@ -285,7 +417,7 @@ def build_router(
         return JSONResponse(result)
 
     # REVISIT (2026-10-05): no caller yet; meant for the Web UI git panel - wire it or drop it.
-    @router.post("/api/git/commit_all")
+    @router.post("/api/git/commit_all", responses={200: {"model": GitCommitAllOut, "description": "Commit-all result."}})
     def api_git_commit_all(body: GitCommitBody) -> JSONResponse:
         from src.services.git_automation import GitAutomationService
         result = GitAutomationService().commit_all_staged(
