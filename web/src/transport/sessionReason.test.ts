@@ -31,6 +31,15 @@ describe("A83 sessionAdapter — secondary reason", () => {
     expect(s.reason).toEqual({ kind: "waiting_workers", confidence: "high", detail: null });
   });
 
+  it("maps work_in_flight (idle/awaiting primary but own task live) through", () => {
+    const r = deriveReason({
+      ...base,
+      status: "idle",
+      reason: { kind: "work_in_flight", confidence: "high" },
+    });
+    expect(r).toEqual({ kind: "work_in_flight", confidence: "high", detail: null });
+  });
+
   it("carries node_offline detail", () => {
     const r = deriveReason({
       ...base,

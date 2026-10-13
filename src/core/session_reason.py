@@ -65,6 +65,7 @@ _REASON_KINDS = frozenset(
         "waiting_workers",
         "waiting_job",
         "open_case_idle",
+        "work_in_flight",
         "idle",
         "node_offline",
     }
@@ -100,6 +101,11 @@ class _ReasonBatch:
     # [A104 I3] sessions for which ``pending_for`` reports work outstanding
     # (requests still running, or messages not yet delivered) — any role.
     waiting_sessions: frozenset = frozenset()
+    # Sessions that own at least one non-terminal mesh task (claimed/running/
+    # queued/…). A session parked IDLE/AWAITING_INPUT yet present here is the
+    # "stale idle" mismatch: its own work is live. Unifies the reason across the
+    # session list AND the durable timeline panel from one batched read.
+    live_task_sessions: frozenset = frozenset()
 
 
 def build_reason_batch(db: Any, sessions: List[Session]) -> _ReasonBatch:
@@ -152,6 +158,16 @@ def build_reason_batch(db: Any, sessions: List[Session]) -> _ReasonBatch:
         except Exception:
             waiting_sessions = set()
 
+    # (1c) Own-work liveness: one batched read over the SAME waiting sessions —
+    # which of them still own a non-terminal task. A hit here on a session whose
+    # primary state is IDLE/AWAITING_INPUT is the mismatch the operator saw.
+    live_task_sessions: set = set()
+    if waiting_ids:
+        try:
+            live_task_sessions = set(db.live_task_sessions(waiting_ids))
+        except Exception:
+            live_task_sessions = set()
+
     open_cases: set = set()
     case_quota_paused: set = set()
     case_retry_paused: set = set()
@@ -203,6 +219,7 @@ def build_reason_batch(db: Any, sessions: List[Session]) -> _ReasonBatch:
         case_retry_paused=frozenset(case_retry_paused),
         open_cases=frozenset(open_cases),
         waiting_sessions=frozenset(waiting_sessions),
+        live_task_sessions=frozenset(live_task_sessions),
     )
 
 
@@ -238,6 +255,14 @@ def derive_session_reason(session: Session, batch: _ReasonBatch) -> Optional[Ses
     # 2. paused_retry
     if case_id and case_id in batch.case_retry_paused:
         return SessionReason(kind="paused_retry", confidence="high")
+    # 2b. work_in_flight — the primary state says the session is waiting/idle, but
+    #     it still OWNS a non-terminal task (its own worker/turn is live). This is
+    #     the honest reconciliation of the "idle while a worker is running"
+    #     mismatch: the ledger (authoritative) wins over a stale primary enum, and
+    #     the operator never sees a bare "idle" sitting atop live work. Ranks above
+    #     the absence-based waits (a live task is positive proof, not an inference).
+    if session.session_id in batch.live_task_sessions:
+        return SessionReason(kind="work_in_flight", confidence="high")
     # 3. waiting_workers — ``pending_for`` reports requests this session made
     #    that are still running, or messages for it not yet delivered.
     if session.session_id in batch.waiting_sessions:

@@ -294,11 +294,20 @@ def build_session_timeline(
                 id=f"session:{session_id}:reason",
                 kind="session_state",
                 source="session_reason",
-                timestamp=generated_at,
+                # Honest timestamp: when the session's status was last written
+                # (``updated_at``), NOT ``generated_at`` (response build time).
+                # Stamping it with render time made the head always look like the
+                # newest event, so a stale "idle" appeared to post-date a live
+                # worker/turn below it — the operator's reported inversion.
+                timestamp=_timestamp(
+                    (session_row or {}).get("updated_at"),
+                    (session_row or {}).get("created_at"),
+                    generated_at,
+                ),
                 session_id=session_id,
                 status=_session_status_text(session_row),
                 confidence=str(session_reason.get("confidence") or "") or None,
-                summary=f"Session reason: {kind_txt}" if kind_txt else "Session reason",
+                summary=_reason_summary(kind_txt),
                 detail={"reason": session_reason},
                 reason=session_reason,
             ),
@@ -366,6 +375,28 @@ def _timestamp(*values: object) -> str:
 
 def _text(value: object) -> str:
     return value if isinstance(value, str) else ""
+
+
+# Human-readable phrasing for the derived session reason (shown verbatim in the
+# durable-state panel). Keeps the operator surface free of raw enum tokens like
+# ``work_in_flight``; unknown kinds degrade to a de-underscored humanization.
+_REASON_SUMMARY: dict[str, str] = {
+    "paused_quota": "Paused — quota",
+    "paused_retry": "Paused — retrying",
+    "waiting_workers": "Waiting on workers",
+    "waiting_job": "Waiting on a script",
+    "open_case_idle": "Open case — nothing pending",
+    "work_in_flight": "Work in flight",
+    "idle": "Idle",
+    "node_offline": "Held — node offline",
+}
+
+
+def _reason_summary(kind: str) -> str:
+    if not kind:
+        return "Session reason"
+    phrase = _REASON_SUMMARY.get(kind) or kind.replace("_", " ").strip().capitalize()
+    return f"Session reason: {phrase}"
 
 
 def _session_status_text(session_row: dict[str, object] | None) -> str | None:

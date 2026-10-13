@@ -6424,6 +6424,37 @@ class MeshDB:
             out.append(d)
         return out
 
+    # Non-terminal mesh_task statuses = "work the session still owns in flight".
+    # Terminal (completed/failed/failed_node_offline/cancelled/withdrawn) is
+    # excluded; everything else means a task/turn is live. Kept as a literal so a
+    # new live status fails the truth-table test loudly rather than silently.
+    _LIVE_TASK_STATUSES = (
+        "accepted", "pending", "queued", "claimed", "running",
+        "cancel_requested", "recovery_required",
+    )
+
+    def live_task_sessions(self, session_ids: List[str]) -> set:
+        """Sessions (from the given page) that own at least one non-terminal task.
+
+        ONE index-served query for the whole page (``session_id IN (...) AND
+        status IN (...)``) — N+1-free and bounded by the page size, mirroring
+        ``list_jobs_for_sessions``/``inbox_waiting_for``. This is the single cheap
+        condition that unifies session-state awareness: a session parked IDLE/
+        AWAITING_INPUT while this returns it is the "stale idle" tell (the
+        operator's reported mismatch). Read-path only — never on a timer (#145/
+        #147)."""
+        ids = [str(s) for s in session_ids if s]
+        if not ids:
+            return set()
+        placeholders = ",".join("?" for _ in ids)
+        status_ph = ",".join("?" for _ in self._LIVE_TASK_STATUSES)
+        rows = self._conn().execute(
+            f"SELECT DISTINCT session_id FROM mesh_tasks "
+            f"WHERE session_id IN ({placeholders}) AND status IN ({status_ph})",
+            [*ids, *self._LIVE_TASK_STATUSES],
+        ).fetchall()
+        return {str(r["session_id"]) for r in rows if r["session_id"]}
+
     # ------------------------------------------------------------------
     # FlowRun record (v0.4 §13 item 1, A19) — one row per dispatch flow.
     #

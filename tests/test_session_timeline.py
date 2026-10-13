@@ -31,6 +31,26 @@ def test_session_timeline_reports_unavailable_source_instead_of_complete() -> No
     assert response.items == []
 
 
+def test_session_state_head_uses_session_updated_at_not_render_time() -> None:
+    # The head session_state row must carry the session's real status-change time
+    # (``updated_at``), NOT the response build time. Stamping it with render time
+    # made a stale "idle" always look newer than the live worker/turn below it.
+    session_updated = "2026-10-14T17:00:00+00:00"
+    response = build_session_timeline(
+        db=_EmptyDB(),
+        telemetry_store=None,
+        session_id="sess_ts",
+        session_row={"session_id": "sess_ts", "status": "idle",
+                     "updated_at": session_updated,
+                     "created_at": "2026-10-14T16:00:00+00:00"},
+        session_reason={"kind": "idle", "confidence": "high"},
+    )
+    head = response.items[0]
+    assert head.kind == "session_state"
+    assert head.timestamp == session_updated
+    assert head.timestamp != response.generated_at
+
+
 def test_session_timeline_pages_newest_first_from_stable_bounded_window() -> None:
     class _ManyTasksDB(_EmptyDB):
         def list_tasks(self, session_id=None, limit=50):

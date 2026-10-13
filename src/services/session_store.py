@@ -31,6 +31,11 @@ class SessionStore:
     def __init__(self):
         _SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
         _BINDINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        # session_id -> last status value we emitted a change event for. Lets
+        # save() push a `session_status_changed` event ONLY on a real transition
+        # (the single choke point — every status write funnels through save(), so
+        # the push can never drift out of sync with a new transition site).
+        self._last_status: Dict[str, str] = {}
 
     # ------------------------------------------------------------------
     # Session CRUD
@@ -109,6 +114,37 @@ class SessionStore:
             session.updated_at = now_iso()
         self._write(session)
         self._shadow_write(session)
+        self._emit_status_change(session)
+
+    def _emit_status_change(self, session: Session) -> None:
+        """Push a `session_status_changed` SSE event when (and only when) the
+        session's status actually transitioned since the last save.
+
+        This is the missing half of the push contract: status writes previously
+        persisted silently, so the UI only caught up on a poll or a remount (the
+        operator's "frozen until I leave and come back"). Any event carrying a
+        ``session_id`` drives the frontend's live invalidation of that session's
+        read-models (incl. the durable-state panel). Best-effort: observability
+        must never break a persist."""
+        try:
+            sid = session.session_id
+            if not sid:
+                return
+            status = getattr(session.status, "value", None) or str(session.status)
+            prev = self._last_status.get(sid)
+            if prev == status:
+                return
+            self._last_status[sid] = status
+            from src.core.observability import emit_event
+            emit_event(
+                "session_status_changed",
+                session_id=sid,
+                status=status,
+                previous_status=prev,
+            )
+        except Exception as e:
+            logger.debug("session_status_emit_failed id=%s err=%s",
+                         getattr(session, "session_id", "?"), e)
 
     def _shadow_write(self, session: Session) -> None:
         """Mirror session into the mesh DB if shadow writes are enabled."""
@@ -158,6 +194,9 @@ class SessionStore:
         path = _SESSIONS_DIR / f"{session_id}.json"
         if path.exists():
             path.unlink()
+        # Drop the status-change cache entry so it can't grow unbounded over the
+        # process lifetime (one entry per session ever saved).
+        self._last_status.pop(session_id, None)
 
     def prune_empty_closed_sessions(self, limit: int = 100, *, dry_run: bool = True) -> Dict[str, Any]:
         """Prune closed sessions that have no durable conversation/evidence.

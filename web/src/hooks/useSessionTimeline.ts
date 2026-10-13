@@ -148,6 +148,11 @@ export function useSessionTimeline(
           text: m.text,
           createdAt: m.createdAt,
         },
+        // Carry the optimistic delivery state so the bubble can tell the operator
+        // their message is being processed (sending → sent → failed). "idle" is
+        // never surfaced. Only reaches here in the send→ack window — once the
+        // managed request is queued it's skipped above and the queue card owns it.
+        delivery: m.delivery === "idle" ? undefined : m.delivery,
       });
     }
 
