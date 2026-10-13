@@ -15,8 +15,18 @@ export interface TokenUsage {
   reasoningOutputTokens?: number;
 }
 
+// Optimistic send lifecycle surfaced under a just-typed user bubble (undefined
+// for server-reconstructed transcript bubbles, which are already delivered).
+export type MessageDelivery = "sending" | "acknowledged" | "rejected";
+
 export type TimelineItem =
-  | { kind: "message"; at: string; message: Message; usage?: TokenUsage | null }
+  | {
+      kind: "message";
+      at: string;
+      message: Message;
+      usage?: TokenUsage | null;
+      delivery?: MessageDelivery;
+    }
   | { kind: "task_state"; at: string; taskId: string; state: TaskState; objective: string }
   | { kind: "notice"; at: string; notice: SystemNotice }
   | { kind: "approval"; at: string; approval: ApprovalRequest }

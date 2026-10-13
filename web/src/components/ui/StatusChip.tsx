@@ -69,6 +69,7 @@ function reasonSublabel(reason: SessionReason | null | undefined): string | null
     case "waiting_workers": return "on workers";
     case "waiting_job": return "on a script";
     case "open_case_idle": return "open case · nothing pending";
+    case "work_in_flight": return "work in flight";
     case "node_offline": return reason.detail ? `held for node ${reason.detail}` : "held for node";
     case "idle": return null; // plain idle needs no refinement
     default: return null;

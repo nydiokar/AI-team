@@ -12,7 +12,7 @@ import {
   Copy,
   Check,
 } from "lucide-react";
-import type { TimelineItem, TokenUsage } from "../../fixtures/timeline";
+import type { TimelineItem, TokenUsage, MessageDelivery } from "../../fixtures/timeline";
 import type { ApprovalRequest } from "../../domain/models";
 import { TaskStatusChip } from "../ui/StatusChip";
 import { Button } from "../ui/Button";
@@ -218,6 +218,35 @@ function ExpandableRichText({ text }: { text: string }) {
  * same line as the timestamp) so it never overlaps the text content.
  * On desktop it fades in on hover; on touch it is always softly visible.
  */
+/** Quiet per-message delivery indicator (sending → sent → failed). Deliberately
+ *  subtle: one small line under the bubble so the operator is never left staring
+ *  at a frozen screen wondering if their message was received. */
+function DeliveryChip({ delivery }: { delivery: MessageDelivery }) {
+  if (delivery === "sending") {
+    return (
+      <span className="flex items-center gap-1 text-[10px] text-ink-muted" aria-live="polite">
+        <Loader2 className="size-2.5 animate-spin" />
+        Sending…
+      </span>
+    );
+  }
+  if (delivery === "rejected") {
+    return (
+      <span className="flex items-center gap-1 text-[10px] text-bad" aria-live="polite">
+        <AlertCircle className="size-2.5" />
+        Not delivered
+      </span>
+    );
+  }
+  // acknowledged
+  return (
+    <span className="flex items-center gap-1 text-[10px] text-ink-muted" aria-live="polite">
+      <Check className="size-2.5" />
+      Sent
+    </span>
+  );
+}
+
 function MessageBubble({
   id,
   messageId,
@@ -227,6 +256,7 @@ function MessageBubble({
   isFirst,
   isLast,
   usage,
+  delivery,
   selection,
 }: {
   id?: string;
@@ -237,6 +267,7 @@ function MessageBubble({
   isFirst: boolean;
   isLast: boolean;
   usage?: TokenUsage | null;
+  delivery?: MessageDelivery;
   selection?: MessageSelection;
 }) {
   const mine = role === "user";
@@ -378,6 +409,11 @@ function MessageBubble({
             {at && timeLabel(at)}
             {usage && <TokenBadge usage={usage} />}
           </span>
+
+          {/* Delivery status — a quiet, single-line reassurance for a just-sent
+              message that the system received it (sending → sent → failed). Only
+              present on optimistic user bubbles; transcript bubbles omit it. */}
+          {mine && delivery && <DeliveryChip delivery={delivery} />}
         </div>
       )}
     </div>
@@ -445,6 +481,7 @@ export function SessionTimeline({
               isFirst={!sameGroup(prev)}
               isLast={!sameGroup(next)}
               usage={item.usage}
+              delivery={item.delivery}
               selection={selection}
             />
           );

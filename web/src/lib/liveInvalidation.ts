@@ -116,6 +116,12 @@ export function invalidateLiveTargets(
   for (const sessionId of queueOnly) {
     if (target.sessions.has(sessionId)) continue; // full refresh below covers it
     queryClient.invalidateQueries({ queryKey: ["session-turn-queue", sessionId] });
+    // A non-terminal queue transition (admit/claim/start) flips a task to a
+    // live state on a session that may NOT change its own primary status (the
+    // "stale idle while my own task just started" case). The durable-state panel
+    // (session-activity) derives worker_running / work_in_flight, so it must
+    // refresh here too — otherwise it only catches up on the poll/remount.
+    queryClient.invalidateQueries({ queryKey: ["session-activity", sessionId] });
   }
   if (target.tasks) {
     queryClient.invalidateQueries({ queryKey: ["tasks"] });

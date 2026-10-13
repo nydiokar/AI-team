@@ -61,6 +61,7 @@ class _FakeDB:
         quota_paused: Optional[List[str]] = None,
         retry_paused: Optional[List[str]] = None,
         inbox_waiting: Optional[List[str]] = None,  # sids pending_for reports waiting
+        live_task_session_ids: Optional[List[str]] = None,  # sids owning a non-terminal task
     ) -> None:
         self._running = set(running_job_session_ids or [])
         # case_status None value or missing key => no flow_run row (get_flow_run None)
@@ -69,6 +70,7 @@ class _FakeDB:
         self._quota = set(quota_paused or [])
         self._retry = set(retry_paused or [])
         self._inbox_waiting = set(inbox_waiting or [])
+        self._live_tasks = set(live_task_session_ids or [])
         self.calls: Dict[str, int] = {}
 
     def _bump(self, name: str) -> None:
@@ -109,6 +111,11 @@ class _FakeDB:
     def inbox_waiting_for(self, session_ids: List[str]) -> Dict[str, bool]:
         self._bump("inbox_waiting_for")
         return {sid: sid in self._inbox_waiting for sid in session_ids}
+
+    def live_task_sessions(self, session_ids: List[str]) -> set:
+        # One batched read for the whole page — the own-work liveness condition.
+        self._bump("live_task_sessions")
+        return {sid for sid in session_ids if sid in self._live_tasks}
 
     def list_flow_events(self, flow_run_id: str, limit: int = 500):
         # A104: the reason must NEVER fold a Case event log — counted to pin 0.
@@ -213,6 +220,40 @@ def test_waiting_job_when_a_running_job_exists():
     db = _FakeDB(running_job_session_ids=["s1"], case_status={"c1": ""}, case_events={"c1": []})
     s = _FakeSession("s1", SessionStatus.AWAITING_INPUT, "worker", "c1")
     assert _reason_of(db, s) == SessionReason(kind="waiting_job", confidence="high")
+
+
+def test_work_in_flight_when_session_owns_a_live_task():
+    # The reported mismatch: primary state IDLE but the session still owns a
+    # non-terminal task. The ledger's positive proof wins — honest "work in
+    # flight", never a bare "idle" atop a running worker/turn.
+    db = _FakeDB(case_status={"c1": ""}, live_task_session_ids=["s1"])
+    s = _FakeSession("s1", SessionStatus.IDLE, "worker", "c1")
+    assert _reason_of(db, s) == SessionReason(kind="work_in_flight", confidence="high")
+
+
+def test_work_in_flight_ranks_below_pauses_but_above_absence_based_waits():
+    # A paused session is still paused (pause wins over live-task proof) ...
+    paused = _FakeDB(case_status={"c1": ""}, case_events={"c1": [{"event_type": "x"}]},
+                     quota_paused=["c1"], live_task_session_ids=["s1"])
+    s = _FakeSession("s1", SessionStatus.AWAITING_INPUT, "manager", "c1")
+    assert _reason_of(paused, s) == SessionReason(kind="paused_quota", confidence="high")
+    # ... but a live task outranks waiting_workers / waiting_job / open_case_idle,
+    # all of which are inference/absence-based next to positive ledger proof.
+    db = _FakeDB(running_job_session_ids=["s1"], case_status={"c1": ""},
+                 case_events={"c1": [{"event_type": "x"}]},
+                 inbox_waiting=["s1"], live_task_session_ids=["s1"])
+    assert _reason_of(db, s) == SessionReason(kind="work_in_flight", confidence="high")
+
+
+def test_live_task_read_is_bounded_once_per_page():
+    # One batched live-task read for the whole page, never per session (no N+1).
+    db = _FakeDB(case_status={"c1": ""},
+                 live_task_session_ids=["s1", "s2"])
+    sessions = [
+        _FakeSession(f"s{i}", SessionStatus.IDLE, "worker", "c1") for i in (1, 2, 3)
+    ]
+    derive_session_reasons(db, sessions)
+    assert db.calls.get("live_task_sessions", 0) == 1
 
 
 def test_open_case_idle_for_manager_is_the_stuck_tell():
@@ -338,6 +379,7 @@ def test_vocabulary_matches_spec():
         "waiting_workers",
         "waiting_job",
         "open_case_idle",
+        "work_in_flight",
         "idle",
         "node_offline",
     }
@@ -395,3 +437,57 @@ def test_against_real_meshdb(tmp_path):
     # BUSY => empty even against the real db.
     busy = _FakeSession("sess_busy", SessionStatus.BUSY, "manager", mgr_case)
     assert derive_session_reasons(db, [busy])[busy.session_id] is None
+
+
+def test_work_in_flight_against_real_meshdb(tmp_path):
+    from src.control.db import MeshDB
+
+    db = MeshDB(str(tmp_path / "mesh.db"))
+
+    from src.core.interfaces import Session
+
+    def _seed_session(sid: str) -> None:
+        db.upsert_session(Session(
+            session_id=sid, backend="claude", repo_path="/tmp",
+            status=SessionStatus.IDLE, created_at="2026-10-14T00:00:00+00:00",
+            updated_at="2026-10-14T00:00:00+00:00",
+        ))
+
+    # A session parked IDLE that still owns a RUNNING mesh task => work_in_flight.
+    _seed_session("sess_live")
+    _seed_session("sess_done")
+    db.enqueue_task(
+        task_id="t_live", session_id="sess_live", machine_id="node1",
+        backend="claude", action="chat", payload={"prompt": "x"}, status="running",
+    )
+    live = _FakeSession("sess_live", SessionStatus.IDLE, "worker", None)
+    assert derive_session_reasons(db, [live])[live.session_id] == SessionReason(
+        kind="work_in_flight", confidence="high"
+    )
+
+    # A terminal (completed) task is NOT live => falls through to plain idle.
+    db.enqueue_task(
+        task_id="t_done", session_id="sess_done", machine_id="node1",
+        backend="claude", action="chat", payload={"prompt": "x"}, status="completed",
+    )
+    done = _FakeSession("sess_done", SessionStatus.IDLE, None, None)
+    assert derive_session_reasons(db, [done])[done.session_id] == SessionReason(
+        kind="idle", confidence="high"
+    )
+
+    # Direct query contract: only the live session comes back for the page.
+    assert db.live_task_sessions(["sess_live", "sess_done"]) == {"sess_live"}
+
+
+def test_live_task_statuses_do_not_drift_from_managed_open_predicate():
+    # The liveness read and the canonical managed-open predicate must share the
+    # same non-terminal status vocabulary, or a session could show the wrong
+    # state. _MANAGED_OPEN_STATUSES is the single source of truth; assert the
+    # predicate string is built from exactly those statuses.
+    from src.control.db import _MANAGED_OPEN_STATUSES, _MANAGED_OPEN_PREDICATE
+
+    for status in _MANAGED_OPEN_STATUSES:
+        assert f"'{status}'" in _MANAGED_OPEN_PREDICATE
+    # No terminal status may sneak into the live set.
+    assert not ({"completed", "failed", "failed_node_offline", "cancelled", "withdrawn"}
+                & set(_MANAGED_OPEN_STATUSES))

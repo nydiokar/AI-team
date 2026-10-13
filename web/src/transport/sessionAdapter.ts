@@ -14,6 +14,7 @@ const REASON_KINDS: ReadonlySet<string> = new Set<SessionReasonKind>([
   "waiting_workers",
   "waiting_job",
   "open_case_idle",
+  "work_in_flight",
   "idle",
   "node_offline",
 ]);

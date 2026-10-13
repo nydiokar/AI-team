@@ -122,6 +122,7 @@ export type SessionReasonKind =
   | "waiting_workers"
   | "waiting_job"
   | "open_case_idle"
+  | "work_in_flight"
   | "idle"
   | "node_offline";
 

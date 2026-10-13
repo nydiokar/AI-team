@@ -81,6 +81,34 @@ describe("liveInvalidation", () => {
     expect(invalidateQueries).not.toHaveBeenCalledWith({ queryKey: ["tasks"] });
   });
 
+  it("a non-terminal queue transition also refreshes the durable panel (session-activity)", () => {
+    // A task going live (claimed/started) on a session whose own primary status
+    // doesn't change must still refresh the durable-state panel so work_in_flight
+    // / worker_running appear live — not only on the next poll/remount.
+    const invalidateQueries = vi.fn();
+    const client = { invalidateQueries } as unknown as QueryClient;
+
+    invalidateLiveTargets(client, {
+      sessions: new Set(),
+      activitySessions: new Set(),
+      queueSessions: new Set(["s1"]),
+      cases: new Set(),
+      tasks: false,
+      approvals: false,
+    });
+
+    expect(invalidateQueries).toHaveBeenCalledWith({
+      queryKey: ["session-turn-queue", "s1"],
+    });
+    expect(invalidateQueries).toHaveBeenCalledWith({
+      queryKey: ["session-activity", "s1"],
+    });
+    // Still NOT the expensive transcript reads.
+    expect(invalidateQueries).not.toHaveBeenCalledWith({
+      queryKey: ["session-messages", "s1"],
+    });
+  });
+
   it("a real event supersedes a same-batch progress ping for the same session", () => {
     // task_activity + mesh_result for s1 in one batch → s1 gets the FULL refresh,
     // not the activity-only path (no double-invalidation, no missed transcript).

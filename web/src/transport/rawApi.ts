@@ -72,7 +72,7 @@ export interface RawSessionTurnQueue {
 // [A83] Shape of SessionReason.to_dict(): {kind, confidence, detail}.
 export interface RawSessionReason {
   /** Vocabulary (spec §4): paused_quota | paused_retry | waiting_workers |
-   *  waiting_job | open_case_idle | idle | node_offline. */
+   *  waiting_job | open_case_idle | work_in_flight | idle | node_offline. */
   kind: string;
   /** "high" | "medium" — medium marks absence-based inferences. */
   confidence: string;
