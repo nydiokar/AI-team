@@ -19,6 +19,7 @@ import { Button } from "../ui/Button";
 import { cn } from "../../lib/cn";
 import { useResolveApproval } from "../../hooks/useSessionActions";
 import { RichText } from "./RichText";
+import { copyTextToClipboard } from "../../lib/clipboard";
 
 /** DOM id for a user message bubble — shared with SessionDetailScreen so the
  *  "jump to message" controls can scroll straight to it. */
@@ -153,24 +154,6 @@ function TokenBadge({ usage }: { usage: TokenUsage }) {
   );
 }
 
-async function copyToClipboard(text: string): Promise<void> {
-  try {
-    await navigator.clipboard.writeText(text);
-    return;
-  } catch {
-    // Clipboard API unavailable/blocked (older WebView, insecure context) —
-    // fall back to the hidden-textarea + execCommand trick.
-  }
-  const ta = document.createElement("textarea");
-  ta.value = text;
-  ta.style.position = "fixed";
-  ta.style.opacity = "0";
-  document.body.appendChild(ta);
-  ta.select();
-  document.execCommand("copy");
-  document.body.removeChild(ta);
-}
-
 /** Char threshold past which an agent reply is collapsed to a preview. Long
  *  replies (including salvaged context-overflow progress) never flood the thread;
  *  the full text is one tap away. */
@@ -275,7 +258,7 @@ function MessageBubble({
 
   const handleCopy = (e: React.MouseEvent) => {
     e.stopPropagation();
-    copyToClipboard(text);
+    void copyTextToClipboard(text);
     setCopied(true);
     setTimeout(() => setCopied(false), 1500);
   };
@@ -321,7 +304,17 @@ function MessageBubble({
           mine && "flex-row-reverse",
           selectMode && "cursor-pointer",
         )}
+        role={selectMode ? "checkbox" : undefined}
+        tabIndex={selectMode ? 0 : undefined}
+        aria-checked={selectMode ? isSelected : undefined}
+        aria-label={selectMode ? `Select ${mine ? "your" : "agent"} message: ${text.slice(0, 120)}` : undefined}
         onClick={onBubbleClick}
+        onKeyDown={(event) => {
+          if (selectMode && (event.key === " " || event.key === "Enter")) {
+            event.preventDefault();
+            selection?.onToggle(messageId);
+          }
+        }}
       >
         {selectMode && (
           <span className="shrink-0" aria-hidden>
