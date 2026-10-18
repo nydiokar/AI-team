@@ -31,6 +31,7 @@ from src.core.failure_markers import (
     USAGE_LIMIT_MARKERS,
 )
 from src.core.interfaces import ExecutionResult, TaskResult
+from src.core.turn_liveness import turn_control
 from src.orchestrator import TaskOrchestrator
 from src.services import result_text
 
@@ -238,7 +239,7 @@ def _through_driver_and_orchestrator(outcome) -> TaskResult:
     with patch.object(_SDKSession, "send", lambda self_inner, message, **_kw: outcome), \
             patch.object(_SDKSession, "start", lambda self_inner: None), \
             patch("src.core.test_guard.assert_live_calls_allowed", lambda *a, **k: None):
-        raw = ClaudeSDKClientDriver().run_oneoff("/repo", "do it")
+        raw = ClaudeSDKClientDriver().run_oneoff("/repo", "do it", turn=turn_control("t-sdk"))
     orch = TaskOrchestrator.__new__(TaskOrchestrator)
     orch._backends = {"claude": SimpleNamespace(run_oneoff=lambda cwd, prompt: raw)}
     orch._task_cancel_events = {}
