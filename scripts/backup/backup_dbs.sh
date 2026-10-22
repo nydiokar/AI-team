@@ -2,7 +2,10 @@
 # backup_dbs.sh — verified, rotating snapshots of the controller's operational SQLite DBs.
 #
 # What: mesh.db (sessions, cases, task/flow/llm events) and quota_windows.db
-#   (quota coordinator events + snapshots), read from the controller state dir.
+#   (quota coordinator events + snapshots), read from the controller state dir,
+#   plus quota_archive.db (pruned quota history, never re-observable) when it
+#   exists. AI_TEAM_BACKUP_DBS / AI_TEAM_BACKUP_OPTIONAL_DBS override the lists
+#   (e.g. a worker-local state dir that has no mesh.db).
 #
 # How, per DB: `VACUUM INTO` (one read transaction → a consistent copy even
 #   while the gateway writes; never `cp` a live WAL DB) → `PRAGMA integrity_check`
@@ -42,7 +45,11 @@ DEST_DIR="${AI_TEAM_BACKUP_DIR:-$HOME/ai-team-backups/db}"
 KEEP_RECENT="${AI_TEAM_BACKUP_KEEP_RECENT:-7}"
 KEEP_DAILY="${AI_TEAM_BACKUP_KEEP_DAILY:-30}"
 SCRATCH_ROOT="${AI_TEAM_BACKUP_SCRATCH:-/dev/shm}"
-DBS=(mesh.db quota_windows.db)
+read -r -a DBS <<<"${AI_TEAM_BACKUP_DBS:-mesh.db quota_windows.db}"
+read -r -a OPTIONAL_DBS <<<"${AI_TEAM_BACKUP_OPTIONAL_DBS-quota_archive.db}"
+for db in "${OPTIONAL_DBS[@]}"; do
+    [[ -f "$SRC_DIR/$db" ]] && DBS+=("$db")
+done
 
 pin_label=""
 if [[ "${1:-}" == "--pin" ]]; then
@@ -85,6 +92,11 @@ renice -n 19 $$ >/dev/null 2>&1 || true
 ionice -c 3 -p $$ >/dev/null 2>&1 || true
 
 stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+# A published run name is never reused (mv would nest the new run inside it).
+while [[ -e "$SNAP_DIR/$stamp" || -e "$ARCHIVE_DIR/$stamp-$pin_label" ]]; do
+    sleep 1
+    stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+done
 work="$TMP_ROOT/$stamp"
 rm -rf "$TMP_ROOT"/* && mkdir -p "$work" || { fail "cannot prepare $work"; exit 1; }
 
