@@ -141,3 +141,26 @@ def test_bad_label_rejected(src: Path, tmp_path: Path) -> None:
         capture_output=True, text=True, timeout=60,
     )
     assert res.returncode == 2
+
+
+def test_optional_db_skipped_when_absent_and_included_when_present(src: Path, tmp_path: Path) -> None:
+    dest: Path = tmp_path / "backups"
+    res = _run(src, dest)
+    assert res.returncode == 0, res.stderr
+    first: Path = dest / "snapshots" / (dest / "LATEST").read_text().strip()
+    assert not (first / "quota_archive.db.zst").exists()
+
+    _make_db(src / "quota_archive.db", rows=5)
+    res = _run(src, dest)
+    assert res.returncode == 0, res.stderr
+    second: Path = dest / "snapshots" / (dest / "LATEST").read_text().strip()
+    assert (second / "quota_archive.db.zst").exists()
+
+
+def test_db_list_override(src: Path, tmp_path: Path) -> None:
+    dest: Path = tmp_path / "backups"
+    (src / "mesh.db").unlink()
+    res = _run(src, dest, AI_TEAM_BACKUP_DBS="quota_windows.db")
+    assert res.returncode == 0, res.stderr
+    snap: Path = dest / "snapshots" / (dest / "LATEST").read_text().strip()
+    assert sorted(p.name for p in snap.iterdir()) == ["SHA256SUMS", "quota_windows.db.zst"]
