@@ -16,7 +16,11 @@ reference so nobody has to rediscover that later.
 `PUT /api/flags/{FLAG}` and fall back to `.env`/defaults when no DB override exists. Bootstrap,
 worker-local, and settings-only booleans are listed there as `registry_writable=false` so the
 operator can see their effective env/default value without the API pretending it can safely flip
-them.
+them. **Typed values (A62):** each entry declares a `value_type` (`bool` | `int` | `float` |
+`str`; absent ⇒ `bool`), shown in `GET /api/flags`. A PUT is validated against it — a wrong JSON
+type (e.g. `"40"` for an int flag) is a `422 invalid_flag_value`, never coerced. Bool flags keep
+their `"1"`/`"0"` rows and lax inputs unchanged. Numeric/str flags: `scripts/ops_flag.sh set
+<FLAG> <VALUE>` (`on`/`off` stay bool-only).
 
 **Two classes of key:**
 - **Managed** — in `_MANAGED_ENV_KEYS`. When `AI_TEAM_ENV_FILE` is set, a key absent from
@@ -74,6 +78,8 @@ them.
 | `CLAUDE_TIMEOUT_SEC` | ✅ YES | (settings default) | Per-task wall-clock timeout. | `config/settings.py:318` |
 | `CLAUDE_DEFAULT_MODEL` | ✅ YES | (settings default) | Default Claude model string. | `config/settings.py:532` |
 | `CLAUDE_DRIVER_TYPE` | ✅ YES | (settings default) | `cli` or `sdk` driver. | `config/settings.py:324` |
+| `CLAUDE_SDK_MAX_TURNS` | ✅ YES · ✅ registry-writable (`int`, A62) | unset (no cap) | **M3.3/A53 SDK-driver turn ceiling** (`max_turns` on new SDK session processes). Resolves registry → env → no cap (`db.sdk_governor_ceilings`). Registry values must be > 0 (a PUT of 0 or less is a 422); registry `null` (stored as an empty row) = **no cap, overriding env** — the only way to store "no cap"; `unset`/DELETE drops the row ⇒ env. (The env var keeps its A53 convention: 0 or less = no cap.) `ops_flag.sh migrate` never pins a null knob. Scope `session_boot`: read when the SDK driver creates a session process — on a worker from the A88 controller snapshot (refreshed ~30 s), so no restart is needed once the worker runs A62 code; a live process keeps the ceiling it booted with. A worker on pre-A62 code, or one without a controller snapshot, uses its own env. Set: `scripts/ops_flag.sh set CLAUDE_SDK_MAX_TURNS 40` / `... null`. Effective value: `GET /health` → `governor`. | `control/db.py:sdk_governor_ceilings` · `backends/claude_driver.py:_get_or_create` · `config/settings.py:_apply_sdk_governor_env` |
+| `CLAUDE_SDK_MAX_BUDGET_USD` | ✅ YES · ✅ registry-writable (`float`, A62) | unset (no cap) | **M3.3/A53 SDK-driver USD budget ceiling** (`max_budget_usd`); the A65 cost-alert enforcement lever. Same resolution, > 0 / null convention and `session_boot` scope as `CLAUDE_SDK_MAX_TURNS`. Set: `scripts/ops_flag.sh set CLAUDE_SDK_MAX_BUDGET_USD 2.5`. | same as above |
 | `CLAUDE_SDK_CLI_PATH` | ✅ YES | "" | Optional Claude CLI binary used by SDK sessions instead of the SDK-bundled CLI. Use this to keep gateway sessions on the installed Claude Code version. | `config/settings.py` |
 | `CLAUDE_ALLOWED_ROOT` | ✅ YES | (settings default) | Filesystem root Claude is permitted to write. | `config/settings.py:438` |
 | `CLAUDE_BASE_CWD` | ✅ YES | (settings default) | Default working directory for Claude. | `config/settings.py:433` |

@@ -6,7 +6,7 @@ so tests that monkeypatch ``control_api`` keep reaching these handlers.
 """
 from __future__ import annotations
 
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, Union
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
@@ -33,8 +33,9 @@ class FlagOut(BaseModel):
     """A single effective runtime flag."""
 
     flag_name: str
-    value: bool
+    value: Union[bool, int, float, str, None]
     raw_value: str
+    value_type: str
     source: str
     effect_scope: str
     registry_writable: bool
@@ -187,8 +188,10 @@ def build_router(
     def api_set_flag(flag_name: str, body: RuntimeFlagBody) -> JSONResponse:
         from src.control.db import (
             RUNTIME_FLAG_DEFINITIONS,
+            coerce_runtime_flag_value,
             render_runtime_flag,
             runtime_flag_registry_writable,
+            runtime_flag_value_type,
         )
 
         name = (flag_name or "").strip().upper()
@@ -209,6 +212,18 @@ def build_router(
                     ),
                 },
             )
+        try:
+            coerce_runtime_flag_value(name, body.value)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "ok": False,
+                    "reason": "invalid_flag_value",
+                    "value_type": runtime_flag_value_type(name),
+                    "message": str(exc),
+                },
+            ) from None
         db = core._db()
         if db is None:
             raise HTTPException(

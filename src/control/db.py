@@ -252,6 +252,16 @@ _COST_DIMENSIONS: Dict[str, str] = {
     "session": "t.session_id",
 }
 
+# [A62] Each entry may declare ``value_type`` (``bool`` | ``int`` | ``float`` |
+# ``str``); an entry without one is ``bool`` and keeps the original "1"/"0"
+# semantics byte-identically. Values are stored as TEXT in ``runtime_flags.value``
+# (no schema change) and validated against ``value_type`` on write.
+# Null convention (R2): a ``"nullable": "1"`` numeric entry stores an EMPTY string
+# for an explicit "unset" (JSON ``null`` on PUT); it renders as ``value: null``
+# and, for the SDK governor knobs, means "no cap" — it WINS over env, unlike
+# DELETE, which removes the row and falls back to env → default. A ``"positive":
+# "1"`` numeric entry rejects values <= 0 on write, so null is the ONLY way to
+# store "no cap" (a 0 must never silently mean "unlimited" on a money knob).
 RUNTIME_FLAG_DEFINITIONS: Dict[str, Dict[str, str]] = {
     "HARNESS_FLOW_DRIVE": {
         "default": "0",
@@ -501,6 +511,7 @@ RUNTIME_FLAG_DEFINITIONS: Dict[str, Dict[str, str]] = {
     },
     "TOOL_PROFILES_OVERLAY": {
         "default": "",
+        "value_type": "str",
         "effect_scope": "live",
         "registry_writable": "1",
         "description": (
@@ -511,11 +522,105 @@ RUNTIME_FLAG_DEFINITIONS: Dict[str, Dict[str, str]] = {
             "static map (fail-closed, least-privilege)."
         ),
     },
+    # [A62] SDK-driver governor ceilings (M3.3/A53). R1: read where the SDK driver
+    # creates an SDK session process (``ClaudeSDKClientDriver._get_or_create``) — on the
+    # worker via the A88 controller snapshot — so a write reaches the next session
+    # process with no restart; a running process keeps the ceilings it booted with.
+    "CLAUDE_SDK_MAX_TURNS": {
+        "default": "",
+        "value_type": "int",
+        "nullable": "1",
+        "positive": "1",
+        "effect_scope": "session_boot",
+        "registry_writable": "1",
+        "description": "SDK-driver turn ceiling (max_turns) for new Claude SDK session processes. Registry → env CLAUDE_SDK_MAX_TURNS → no cap. Value must be > 0; null (empty row) = no cap, overriding env; DELETE falls back to env. Read when a session process is created (on the worker, from the controller snapshot, refreshed ~every 30 s); a live process keeps its booted ceiling.",
+    },
+    "CLAUDE_SDK_MAX_BUDGET_USD": {
+        "default": "",
+        "value_type": "float",
+        "nullable": "1",
+        "positive": "1",
+        "effect_scope": "session_boot",
+        "registry_writable": "1",
+        "description": "SDK-driver USD budget ceiling (max_budget_usd) for new Claude SDK session processes. Registry → env CLAUDE_SDK_MAX_BUDGET_USD → no cap. Value must be > 0; null (empty row) = no cap, overriding env; DELETE falls back to env. Read when a session process is created (on the worker, from the controller snapshot, refreshed ~every 30 s); a live process keeps its booted ceiling.",
+    },
 }
+
+RUNTIME_FLAG_VALUE_TYPES = ("bool", "int", "float", "str")
+# Upper bound for a stored ``str`` value; the worker snapshot client
+# (src/worker/controller_state_client.py) accepts rows up to the same size.
+RUNTIME_FLAG_MAX_VALUE_CHARS = 32_768
 
 
 def _truthy_flag(value: Optional[str]) -> bool:
     return str(value or "").strip().lower() in _TRUTHY_FLAG_VALUES
+
+
+def runtime_flag_value_type(flag_name: str) -> str:
+    """[A62] The declared ``value_type`` of a known flag (absent ⇒ ``bool``)."""
+    definition = RUNTIME_FLAG_DEFINITIONS.get(flag_name)
+    if definition is None:
+        raise ValueError(f"unknown runtime flag: {flag_name}")
+    return definition.get("value_type", "bool")
+
+
+def _parse_runtime_flag_raw(value_type: str, raw: str) -> Any:
+    """Typed value of a stored/env raw string. Raises ValueError when ``raw`` is
+    not a valid ``value_type``; an empty numeric raw is ``None`` (unset)."""
+    if value_type == "bool":
+        return _truthy_flag(raw)
+    if value_type == "str":
+        return raw
+    text = raw.strip()
+    if text == "":
+        return None
+    if value_type == "int":
+        return int(text)
+    return float(text)
+
+
+def coerce_runtime_flag_value(flag_name: str, value: Any) -> str:
+    """[A62] Validate ``value`` against the flag's ``value_type`` and return the
+    TEXT stored in ``runtime_flags.value``. Raises ValueError on a mismatch.
+
+    ``bool`` keeps the original API contract exactly (Pydantic lax ``bool``:
+    true/false, 0/1, "true"/"yes"/"on"/…) and stores "1"/"0". Numeric types are
+    strict — a string or a bool is rejected, never coerced."""
+    import math
+
+    value_type = runtime_flag_value_type(flag_name)
+    nullable = _truthy_flag(RUNTIME_FLAG_DEFINITIONS[flag_name].get("nullable"))
+    if value is None:
+        if nullable:
+            return ""
+        raise ValueError(f"{flag_name} is not nullable; expected a {value_type} value")
+    if value_type == "bool":
+        from pydantic import TypeAdapter, ValidationError
+
+        try:
+            return "1" if TypeAdapter(bool).validate_python(value) else "0"
+        except ValidationError:
+            raise ValueError(f"{flag_name} expects a bool value, got {value!r}") from None
+    positive = _truthy_flag(RUNTIME_FLAG_DEFINITIONS[flag_name].get("positive"))
+    if value_type == "int":
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError(f"{flag_name} expects an int value, got {type(value).__name__}")
+        if positive and value <= 0:
+            raise ValueError(f"{flag_name} must be > 0; use null for no cap")
+        return str(value)
+    if value_type == "float":
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError(f"{flag_name} expects a float value, got {type(value).__name__}")
+        if not math.isfinite(float(value)):
+            raise ValueError(f"{flag_name} expects a finite float value")
+        if positive and value <= 0:
+            raise ValueError(f"{flag_name} must be > 0; use null for no cap")
+        return repr(float(value))
+    if not isinstance(value, str):
+        raise ValueError(f"{flag_name} expects a str value, got {type(value).__name__}")
+    if len(value) > RUNTIME_FLAG_MAX_VALUE_CHARS:
+        raise ValueError(f"{flag_name} value exceeds {RUNTIME_FLAG_MAX_VALUE_CHARS} characters")
+    return value
 
 
 def runtime_flag_registry_writable(flag_name: str) -> bool:
@@ -593,10 +698,20 @@ def render_runtime_flag(flag_name: str, db: Optional[Any] = None) -> Dict[str, A
     else:
         source = "default"
         raw_value = definition["default"]
+    value_type = runtime_flag_value_type(flag_name)
+    if value_type == "bool":
+        value: Any = _truthy_flag(raw_value)
+        raw_value = "1" if value else "0"
+    else:
+        try:
+            value = _parse_runtime_flag_raw(value_type, raw_value)
+        except ValueError:
+            value = None  # unparseable env value — the consumer ignores it too
     return {
         "flag_name": flag_name,
-        "value": _truthy_flag(raw_value),
-        "raw_value": "1" if _truthy_flag(raw_value) else "0",
+        "value": value,
+        "raw_value": raw_value,
+        "value_type": value_type,
         "source": source,
         "effect_scope": definition["effect_scope"],
         "registry_writable": writable,
@@ -604,6 +719,50 @@ def render_runtime_flag(flag_name: str, db: Optional[Any] = None) -> Dict[str, A
         "registry": row,
         "env_value": env_raw,
     }
+
+
+_SDK_GOVERNOR_FLAGS = (
+    ("CLAUDE_SDK_MAX_TURNS", "sdk_max_turns"),
+    ("CLAUDE_SDK_MAX_BUDGET_USD", "sdk_max_budget_usd"),
+)
+
+
+def sdk_governor_ceilings() -> Dict[str, Any]:
+    """[A62] Effective SDK-driver governor ceilings: registry → env → no cap.
+
+    The env/default layer is the existing ``config.claude`` parse (A53), so with
+    no registry row the result is byte-identical to the pre-A62 config read. A
+    registry row wins: empty (null) ⇒ ``None`` (no cap). Writes reject <= 0 and
+    non-finite values, so a non-positive, non-finite or unparseable row (only
+    reachable by a direct DB write) is ignored with a warning and env applies —
+    never read as "unlimited". Rows
+    resolve through ``_runtime_flag_row`` — the local DB on a controller, the A88
+    controller snapshot on a worker (memory-only); a worker without a snapshot
+    (old controller, unreachable) falls back to env.
+    Never raises: a glitch here must not block a session boot."""
+    import math
+
+    out: Dict[str, Any] = {attr: None for _flag, attr in _SDK_GOVERNOR_FLAGS}
+    try:
+        from config import config as _cfg
+        for _flag, attr in _SDK_GOVERNOR_FLAGS:
+            out[attr] = getattr(_cfg.claude, attr, None)
+    except Exception:
+        pass
+    for flag, attr in _SDK_GOVERNOR_FLAGS:
+        row = _runtime_flag_row(flag)
+        if row is None:
+            continue
+        try:
+            parsed = _parse_runtime_flag_raw(runtime_flag_value_type(flag), str(row.get("value") or ""))
+            valid = parsed is None or (math.isfinite(parsed) and parsed > 0)
+        except ValueError:
+            valid = False
+        if not valid:
+            logger.warning("event=sdk_governor_registry_value_invalid flag=%s", flag)
+            continue
+        out[attr] = parsed
+    return out
 
 
 def review_emitter_enabled() -> bool:
@@ -2015,7 +2174,7 @@ class MeshDB:
     def set_runtime_flag(
         self,
         flag_name: str,
-        enabled: bool,
+        value: Any,
         *,
         source: str = "api",
         set_by: str = "",
@@ -2025,7 +2184,7 @@ class MeshDB:
             raise ValueError(f"unknown runtime flag: {flag_name}")
         if not runtime_flag_registry_writable(name):
             raise ValueError(f"runtime flag is not registry-writable: {flag_name}")
-        val = "1" if bool(enabled) else "0"
+        val = coerce_runtime_flag_value(name, value)
         src = (source or "api").strip()[:32] or "api"
         actor = (set_by or "").strip()[:128]
         now = _now()

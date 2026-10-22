@@ -23,6 +23,11 @@ Usage:
   $SELF get   <FLAG_NAME>       show one flag's full detail
   $SELF on    <FLAG_NAME>       set flag to true
   $SELF off   <FLAG_NAME>       set flag to false
+  $SELF set   <FLAG_NAME> <VALUE>
+                                set a typed (non-bool) flag: VALUE must match the flag's
+                                value_type (int/float/str; true/false for bool). 'null'
+                                stores an explicit unset (nullable numeric flags only —
+                                e.g. "no cap" for CLAUDE_SDK_MAX_TURNS, overriding env)
   $SELF unset <FLAG_NAME>       remove the registry override, revert to env/default
   $SELF migrate                 write every registry_writable flag's CURRENT effective
                                  value into the registry (source: env/default -> registry).
@@ -51,6 +56,8 @@ Examples:
   $SELF get CASE_CONTINUATION_ENABLED
   $SELF on  CASE_CONTINUATION_ENABLED
   $SELF off QUOTA_COORDINATOR_ENABLED && pm2 restart ai-team-gateway
+  $SELF set CLAUDE_SDK_MAX_TURNS 40
+  $SELF set CLAUDE_SDK_MAX_BUDGET_USD null
 EOF
 }
 
@@ -163,18 +170,53 @@ case "$cmd" in
         fi
         echo "$resp" | jq .
         ;;
+    set)
+        val="${3-}"
+        [[ -n "$flag" && $# -ge 3 ]] || { echo "usage: $SELF set <FLAG_NAME> <VALUE>" >&2; exit 1; }
+        vtype="$(api GET /api/flags | jq -r --arg f "$flag" '.flags[] | select(.flag_name == $f) | .value_type // "bool"')"
+        [[ -n "$vtype" ]] || { echo "unknown flag: $flag" >&2; exit 1; }
+        if [[ "$val" == "null" ]]; then
+            json_val=null
+        else
+            case "$vtype" in
+                int)   [[ "$val" =~ ^-?[0-9]+$ ]] || { echo "error: $flag expects an int value, got '$val'" >&2; exit 1; }
+                       json_val="$val" ;;
+                float) [[ "$val" =~ ^-?([0-9]+\.?[0-9]*|\.[0-9]+)([eE][-+]?[0-9]+)?$ ]] || { echo "error: $flag expects a float value, got '$val'" >&2; exit 1; }
+                       json_val="$(jq -n --arg v "$val" '$v | tonumber')" ;;
+                bool)  [[ "$val" == "true" || "$val" == "false" ]] || { echo "error: $flag expects true/false (or use on/off), got '$val'" >&2; exit 1; }
+                       json_val="$val" ;;
+                *)     json_val="$(jq -n --arg v "$val" '$v')" ;;
+            esac
+        fi
+        body="$(jq -nc --argjson v "$json_val" --arg by "$(whoami)@$SELF" '{value: $v, set_by: $by}')"
+        resp="$(api PUT "/api/flags/$flag" "$body")"
+        if [[ "$(echo "$resp" | jq -r '.ok // .detail.ok // empty')" != "true" ]]; then
+            msg="$(echo "$resp" | jq -r '.detail.message // .detail.reason // "unknown error"')"
+            echo "error: $msg" >&2
+            exit 1
+        fi
+        echo "$resp" | jq .
+        ;;
     unset)
         [[ -n "$flag" ]] || { echo "usage: $SELF unset <FLAG_NAME>" >&2; exit 1; }
         api DELETE "/api/flags/$flag" | jq .
         ;;
     migrate)
         current="$(api GET /api/flags)"
-        writable_pending="$(echo "$current" | jq -r '.flags[] | select(.registry_writable == true and .source != "registry") | [.flag_name, .value] | @tsv')"
+        # Value carried as a JSON literal (true/false unchanged for bools) so numeric,
+        # null and str values PUT back verbatim; tojson escapes tabs/newlines.
+        # A null effective value (e.g. no governor cap: env unset) is NOT pinned: an
+        # explicit null row would silently override a cap set in .env later.
+        writable_pending="$(echo "$current" | jq -r '.flags[] | select(.registry_writable == true and .source != "registry" and .value != null) | "\(.flag_name)\t\(.value | tojson)"')"
+        unset_left="$(echo "$current" | jq -r '.flags[] | select(.registry_writable == true and .source != "registry" and .value == null) | .flag_name')"
         skipped="$(echo "$current" | jq -r '.flags[] | select(.registry_writable == false) | .flag_name')"
         already="$(echo "$current" | jq -r '.flags[] | select(.registry_writable == true and .source == "registry") | .flag_name')"
 
         if [[ -n "$already" ]]; then
             echo "already in registry (skipping): $(echo "$already" | tr '\n' ' ')"
+        fi
+        if [[ -n "$unset_left" ]]; then
+            echo "no effective value (null), left unpinned on env/default: $(echo "$unset_left" | tr '\n' ' ')"
         fi
         if [[ -n "$skipped" ]]; then
             echo "not registry-writable, cannot migrate (bootstrap/worker-side, left on env/default): $(echo "$skipped" | tr '\n' ' ')"
@@ -189,10 +231,14 @@ case "$cmd" in
         while IFS=$'\t' read -r fname fval; do
             [[ -n "$fname" ]] || continue
             resp="$(api PUT "/api/flags/$fname" "{\"value\": $fval, \"set_by\": \"$(whoami)@$SELF:migrate\"}")"
-            got_val="$(echo "$resp" | jq -r '.flag.value')"
+            got_val="$(echo "$resp" | jq -c '.flag.value')"
             got_src="$(echo "$resp" | jq -r '.flag.source')"
             if [[ "$got_src" == "registry" && "$got_val" == "$fval" ]]; then
                 echo "  OK    $fname -> $fval (registry)"
+            elif [[ "$(echo "$resp" | jq -r '.detail.reason // empty')" == "invalid_flag_value" ]]; then
+                # The env value is valid for env but not storable in the registry
+                # (e.g. a governor cap of 0, env's "no cap" spelling): leave it on env.
+                echo "  SKIP  $fname ($fval not storable: $(echo "$resp" | jq -r '.detail.message'); left on env)"
             else
                 echo "  FAIL  $fname (expected $fval, got value=$got_val source=$got_src)" >&2
                 fail=1

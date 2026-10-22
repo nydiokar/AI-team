@@ -32,14 +32,14 @@ import socket
 import threading
 from collections import OrderedDict
 from contextlib import asynccontextmanager, contextmanager
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 from fastapi import FastAPI, HTTPException, Request, Security
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from pydantic import BaseModel, Field, ValidationError, field_validator
+from pydantic import BaseModel, Field, StrictBool, StrictFloat, StrictInt, StrictStr, ValidationError, field_validator
 
 from src.core import observability
 from src.control.app_metrics import RequestTimingMiddleware
@@ -712,7 +712,10 @@ class TurnRecoveryResolveBody(BaseModel):
 
 
 class RuntimeFlagBody(BaseModel):
-    value: bool
+    # [A62] Required (null only for a nullable flag). Strict members keep the JSON
+    # type intact; the route validates it against the flag's declared value_type
+    # (db.coerce_runtime_flag_value) and answers a mismatch with 422.
+    value: Union[StrictBool, StrictInt, StrictFloat, StrictStr, None]
     set_by: Optional[str] = Field(default=None, max_length=128)
 
 

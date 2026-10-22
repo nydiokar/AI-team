@@ -327,8 +327,8 @@ def build_router(orchestrator: Any, *, require_auth: Callable[..., Any]) -> APIR
 
         governor_budget: Optional[float] = None
         try:
-            from config import config as _cfg
-            governor_budget = getattr(_cfg.claude, "sdk_max_budget_usd", None)
+            from src.control.db import sdk_governor_ceilings
+            governor_budget = sdk_governor_ceilings()["sdk_max_budget_usd"]
         except Exception:
             pass
         result = check_cost_alerts(_cost_db())

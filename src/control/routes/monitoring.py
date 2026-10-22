@@ -168,11 +168,11 @@ def build_router(orchestrator: Any, *, require_auth: Callable[..., Any]) -> APIR
         # [A53] Surface the effective SDK-driver governor ceilings so the operator
         # can verify the turn/cost cap is actually configured (read-only). None ⇒
         # no cap enforced ⇒ legacy unbounded session.
+        # [A62] Same registry → env → no-cap resolution the SDK driver uses.
         governor: Dict[str, Any] = {"sdk_max_turns": None, "sdk_max_budget_usd": None}
         try:
-            from config import config as _cfg
-            governor["sdk_max_turns"] = getattr(_cfg.claude, "sdk_max_turns", None)
-            governor["sdk_max_budget_usd"] = getattr(_cfg.claude, "sdk_max_budget_usd", None)
+            from src.control.db import sdk_governor_ceilings
+            governor.update(sdk_governor_ceilings())
         except Exception:
             pass
         # [A82 Stage 8a, review F4] Unauthenticated probe: only whether every
