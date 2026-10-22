@@ -1,12 +1,12 @@
 ```yaml
 job_id: AGENT_97_FAILURE_TEXT_ERROR_CLASS_FIX
 created_at: "2026-10-05T08:46:36.619883+00:00"        # CANONICAL — set once at dispatch, never derive again
-status: ready              # ready | active | blocked | done | dead
-owner: ""
+status: done              # ready | active | blocked | done | dead
+owner: cloud-burn #4 (PR #18)
 depends_on: []
 results_ref: DISPATCH_LOG.md#A97             # -> DISPATCH_LOG.md section with the verdict prose
-evidence: []                  # artifact paths that PROVE it ran (checked to exist)
-updated_at: "2026-10-05T08:46:50.314095+00:00"
+evidence: tests/test_failure_text_scope.py                  # artifact paths that PROVE it ran (checked to exist)
+updated_at: "2026-10-06T16:29:40.327328+00:00"
 ```
 
 # DISPATCH — A97 · `_classify_error` reads the agent's own reply as error text (misclassification fix)
@@ -66,10 +66,51 @@ structured signals (SDK `subtype`, `api_error_status`, `rate_limit_event`) stay 
 
 ---
 ## Milestone (burndown)
-- [ ] Failing test reproduces misclassification
-- [ ] Scoped failure text + tightened status patterns
-- [ ] Shared marker tuple; drift removed
-- [ ] `_run_backend_local` error_class finding recorded
-- [ ] Targeted tests green; PR merged
+- [x] Failing test reproduces misclassification
+- [x] Scoped failure text + tightened status patterns
+- [x] Shared marker tuple; drift removed
+- [x] `_run_backend_local` error_class finding recorded
+- [x] Targeted tests green; PR opened (#18 — merge is the operator's/governor's during the burn-down)
 
 ## Closure (fill on completion)
+**2026-10-06 — done on `feat/failure-text-scope`, PR Yuird/AI-team#18 (issue #4; not self-merged per
+`.claude/rules/cloud-burn.md`).**
+- **TASK 1/2:** `_failure_text` (and `result_text.failure_text`) read only error-bearing fields —
+  `errors`, `raw_stderr`, error events in `raw_stdout` (is_error result, REJECTED rate_limit_event,
+  `error` events / CLI-synthesised API-error messages), a terminal-error `parsed_output` (never its
+  `assistant_text`). The reply is read only when nothing error-bearing exists (fallback = today's
+  reading). Bare `503`/`504` → standalone-token regex `UPSTREAM_STATUS_RE`.
+- **TASK 3:** one marker vocabulary, `src/core/failure_markers.py`, imported by the driver,
+  `_classify_error`, `_short_failure_reason`, `result_text.short_failure_reason`; drifted copies gone.
+- **TASK 4 finding:** confirmed — BOTH `TaskResult` builders (`_run_backend_local` and the main
+  in-process path) dropped `raw.error_class`, and `_classify_error` overwrote it anyway. Fixed: the
+  field is copied, and `_classify_error` prefers backend classes in `PREFERRED_BACKEND_ERROR_CLASSES`
+  (`max_turns`, `upstream_error`, `sdk_stream_closed`, `context_overflow`, `rate_limit`; `usage_limit`
+  via `_usage_limit_class`). NOT preferred (still re-derived from text): `session_lost`,
+  `cache_unhealthy`, `permission_block`, `transient`, `managed_conflict`, `recovery_required` and the
+  OpenCode classes — they have no retry-policy entry, so honouring them would route them to the
+  default (2 retries): a retry-policy decision, out of scope. Follow-up only if the owner wants it.
+- **Class changes for common cases** (RESERVED DECISIONS): listed in full in PR #18 §3 — chiefly
+  reply prose no longer yields usage_limit/rate_limit/timeout/network; allowed_warning
+  rate_limit_events no longer usage_limit; remote 5xx now `upstream_error` via the worker's class;
+  `sdk_stream_closed` now gets its own 0-retry policy.
+- **Review round 1 (CHANGES REQUESTED on `570b4dc`) — both findings fixed:**
+  (1) where `raw_stdout` only mirrors the reply (legacy worker, managed-turn, reattach builders),
+  no reader takes structure from it (`stdout_is_reply_mirror`, applied to the text pass AND the
+  `rate_limit_event` / terminal-result parsers), and only RECOGNISED event types count;
+  (2) the mesh session path (`_dispatch_to_node` failed + completed builders, and
+  `_reattach_remote_task`) now keeps the worker's `error_class`, so remote `sdk_stream_closed` /
+  `upstream_error` are honoured.
+- **Review round 2 (CHANGES REQUESTED on `d5810c3`) — both findings fixed:**
+  (1) "reply mirror" is now decided where the mirror is MADE: the four gateway builders that copy
+  `output` into `raw_stdout` (`_dispatch_to_node` failed/completed when the worker shipped no
+  transcript, `_reattach_remote_task`, `_managed_turn_effect_inputs`) call `mark_reply_mirror`;
+  equality alone no longer counts, so print_resume's `output == raw_stdout` stream keeps its rejected
+  `rate_limit_event` over the mesh; (2) when the gateway falls back to the worker's `error_detail`
+  for `raw_stderr`, its `stdout_tail` (the agent's stream) is dropped (`error_detail_without_stdout`).
+  Status was set back to `active` in round 2, then returned to `done` on head `3747921`, the state
+  submitted for round-3 review (a PASS counts only for the reviewed head, so no post-PASS commit).
+- **Evidence:** `tests/test_failure_text_scope.py` (35 tests; round 2 added 3 that fail on `d5810c3`; the original 24 — 17 fail on `main` —
+  plus 8 for round 1, 7 of which fail on `570b4dc`; all pass on the branch). Targeted `pytest` of `test_claude_driver`, `test_retry_transient`,
+  `test_case_quota_resume`, `test_output_truncation`, `test_quota_window_coordinator` green (2
+  `test_case_quota_resume` cases fail identically on `main`: container tzdata lacks `Europe/Kiev`).

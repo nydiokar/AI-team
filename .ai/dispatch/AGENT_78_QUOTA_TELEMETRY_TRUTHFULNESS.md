@@ -1,12 +1,12 @@
 ```yaml
 job_id: AGENT_78_QUOTA_TELEMETRY_TRUTHFULNESS
 created_at: "2026-08-17T21:10:00+00:00"        # CANONICAL — set once at dispatch, never derive again
-status: ready              # ready | active | blocked | done | dead
+status: active              # ready | active | blocked | done | dead
 owner: ""
 depends_on: []
-results_ref: null
+results_ref: DISPATCH_LOG.md#A78
 evidence: []
-updated_at: "2026-08-17T21:10:00+00:00"
+updated_at: "2026-10-06T12:34:20.795986+00:00"
 ```
 
 # DISPATCH — A78 · Quota telemetry that is actually trustworthy (windows, exhaustion, restore)
@@ -110,3 +110,25 @@ longer only observed.
 - Before/after timings for `status()` on a full-size store.
 - The live comparison from §6 (real 429 vs what the store reported that minute).
 - The decision on §1 (threaded through vs deleted) with the reasoning.
+
+## Status record (2026-10-06, cloud-burn issue #4 / PR Yuird/AI-team#18)
+- **§1 — decision: keep the plumbing, document the missing sensor.** `active_session_state` is
+  threaded from `detect_active_user_session()` into each stored snapshot (`5c92ce3`), so the flag is
+  no longer structurally unreachable *in code*. But the production `ClaudeGetUsageQuotaAdapter`
+  returns `None` (no session sensor), so the state stays `unknown` and `automation_ready` stays
+  `False` in production. Deleting the plumbing would throw away a correct seam; building a sensor is
+  new scope. Docs corrected: `docs/SESSION_WINDOW_WARMING_SPEC.md` §19.4/§19.5,
+  `docs/backend/ENV_FEATURE_FLAGS.md`.
+- **§2, §5, §4 (controller side):** fixed on `main` before this record (`d8ab63a` `latest_snapshots`,
+  `5c92ce3`, `637c487`; `observed_age_sec`, `latest_snapshots`, `prune_snapshots`, volume guards
+  `test_latest_snapshots_stays_indexed_on_volume` / `test_prune_snapshots_stays_fast_on_volume`).
+  §4's worker/events remainder belongs to issue #6.
+- **§3 — closed for the default SDK path in PR #18.** The driver mirrors a REJECTED
+  `RateLimitEvent` (SDK 0.2.110 yields it through `receive_messages()`) into the turn NDJSON in the
+  CLI's wire shape; the existing `_extract_rate_limit_info` → `_usage_limit_class` →
+  `record_refusal_snapshot` path then sees the provider's `resetsAt`. Proof:
+  `tests/test_failure_text_scope.py::test_sdk_429_with_rate_limit_event_records_refusal_snapshot`.
+  Not covered: the mesh path (gateway `raw_stdout` mirrors the reply there) — the worker's class
+  still yields `usage_limit`, but without `resetsAt`.
+- **§6 — OPEN, operator-only.** Needs a real 429 on the host to compare against the store. This is
+  the job's only remainder; it stays `active` until the owner splits §6 off (issue #3).

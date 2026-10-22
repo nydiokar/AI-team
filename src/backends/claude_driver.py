@@ -42,6 +42,7 @@ from dataclasses import asdict, dataclass, field, is_dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from src.core.failure_markers import RATE_LIMIT_MARKERS, USAGE_LIMIT_MARKERS
 from src.core.interfaces import ExecutionResult, Session
 from src.core.turn_liveness import ProgressClock, TurnControl
 from src.core.roles import (
@@ -137,33 +138,14 @@ _CONTEXT_OVERFLOW_MARKERS = (
     "too many tokens",
 )
 
-# Phrases that mean "the Claude ACCOUNT hit its subscription/usage cap". This is a
-# TRANSIENT, self-healing condition (it reopens at a known time) — NOT a hard backend
-# failure — so it earns its own class and an honest, non-alarming banner. It is also
-# what PAUSES a Manager's Case until the window reopens (orchestrator
-# `_record_quota_pause`), so keep it to wording that really means the account window.
-# Kept in sync with src/orchestrator.py `_classify_error`.
-_USAGE_LIMIT_MARKERS = (
-    "usage limit",
-    "session limit",
-    "hit your limit",
-    "hit your session limit",
-    "you've hit your limit",
-)
-
-# Generic burst/throttle wording. NOT evidence that the account's window is spent —
-# "Rate limit exceeded. Please retry later." is the classic transient a couple of
-# quick retries fix. Kept in its own class so the orchestrator's retry policy can
-# treat the two differently (2 quick retries here, none for a five-hour window).
-_RATE_LIMIT_MARKERS = (
-    "rate limit",
-    "rate-limit",
-    "too many requests",
-)
+# The quota wording (account window spent vs generic burst) is the ONE shared
+# vocabulary in src/core/failure_markers.py, also read by the orchestrator's
+# `_classify_error` and the failure label — never a local copy (A97).
 
 
 def classify_error_text(
     text: str, *, subtype: str = "", api_error_status: Optional[int] = None,
+    rate_limit_rejected: bool = False,
 ) -> str:
     """Map a backend error result to an ExecutionResult.error_class.
 
@@ -179,12 +161,22 @@ def classify_error_text(
     ``"upstream_error"`` when the terminal result carries an ``api_error_status``
     (429/500/502/503/529 — the turn's own lifecycle finished fine, but the
     Anthropic API call underneath it failed, almost always transient
-    infra); ``"context_overflow"``/``"usage_limit"`` from free-text markers as
-    before; else the true fallback ``"backend_error"``.
+    infra); ``"usage_limit"`` when the turn saw a REJECTED ``RateLimitEvent``
+    (the provider's own refusal, A78 §3 — same precedence as the orchestrator:
+    a 5xx status still wins); ``"context_overflow"``/``"usage_limit"`` from
+    free-text markers as before; else the true fallback ``"backend_error"``.
+
+    ``text`` is the SDK's own error string (``errors``, else the ``is_error``
+    result string, which the CLI fills from its API-error message) — never the
+    agent's narration, which travels separately as ``salvaged_output``.
     """
     if subtype == "error_max_turns":
         return "max_turns"
     if api_error_status == 429:
+        return "usage_limit"
+    if api_error_status is not None and api_error_status >= 500:
+        return "upstream_error"
+    if rate_limit_rejected:
         return "usage_limit"
     if api_error_status is not None:
         return "upstream_error"
@@ -198,9 +190,9 @@ def classify_error_text(
     # turn. Do not reorder either side to "align" them without weighing that.)
     if any(m in low for m in _CONTEXT_OVERFLOW_MARKERS):
         return "context_overflow"
-    if any(m in low for m in _USAGE_LIMIT_MARKERS):
+    if any(m in low for m in USAGE_LIMIT_MARKERS):
         return "usage_limit"
-    if any(m in low for m in _RATE_LIMIT_MARKERS):
+    if any(m in low for m in RATE_LIMIT_MARKERS):
         return "rate_limit"
     return "backend_error"
 
@@ -355,6 +347,9 @@ class _TurnAccumulator:
     last_assistant_text: str = ""
     backend_session_id: str = ""
     ndjson_lines: List[str] = field(default_factory=list)
+    # True once this turn saw a REJECTED RateLimitEvent — the provider's own
+    # structured refusal (A78 §3), a classification signal for the driver.
+    rate_limit_rejected: bool = False
 
 
 # [A82 Stage 4b rework] Operator cancels armed for a managed turn uuid whose
@@ -1107,6 +1102,13 @@ class _SDKSession:
         except Exception:  # pragma: no cover - depends on installed SDK version
             TaskNotificationMessage = TaskUpdatedMessage = ()  # type: ignore
             TERMINAL_TASK_STATUSES = frozenset()  # type: ignore
+        # [A78 §3] The provider's structured refusal (SDK 0.2.110). Defensive
+        # like the imports above: without it a refusal is classified from the
+        # result's own api_error_status / error string, as before.
+        try:
+            from claude_agent_sdk import RateLimitEvent
+        except Exception:  # pragma: no cover - depends on installed SDK version
+            RateLimitEvent = ()  # type: ignore
 
         acc = _TurnAccumulator(backend_session_id=self.backend_session_id)
         end_reason = "normal EOF from SDK stream"
@@ -1155,6 +1157,13 @@ class _SDKSession:
                     outcome = self._outcome_from_result(acc, msg)
                     self._dispatch(outcome)
                     acc = _TurnAccumulator(backend_session_id=self.backend_session_id)
+                elif RateLimitEvent and isinstance(msg, RateLimitEvent):
+                    # [A78 §3] Mirror a REJECTED refusal into the NDJSON in the
+                    # CLI's own wire shape, which the orchestrator's existing
+                    # `_extract_rate_limit_info` parses — so the provider's
+                    # `resetsAt` reaches the quota store on this path too. An
+                    # allowed/allowed_warning event is not a refusal: skipped.
+                    self._note_rate_limit_event(acc, msg)
                 elif TaskUpdatedMessage and isinstance(msg, TaskUpdatedMessage):
                     # [A82 Stage 2] A background task changed status. Track the
                     # latest per task_id so the oracle knows whether any
@@ -1219,6 +1228,24 @@ class _SDKSession:
                     )
                 )
 
+    @staticmethod
+    def _note_rate_limit_event(acc: "_TurnAccumulator", msg: Any) -> None:
+        """Record a REJECTED ``RateLimitEvent`` on the turn: flag it for
+        classification and append ``{"type": "rate_limit_event",
+        "rate_limit_info": {...}}`` (the CLI's wire keys, e.g. ``resetsAt``,
+        ``rateLimitType``) to the turn's NDJSON."""
+        info = getattr(msg, "rate_limit_info", None)
+        if getattr(info, "status", None) != "rejected":
+            return
+        wire = dict(getattr(info, "raw", None) or {})
+        wire.setdefault("status", "rejected")
+        for key, attr in (("resetsAt", "resets_at"), ("rateLimitType", "rate_limit_type")):
+            value = getattr(info, attr, None)
+            if value is not None:
+                wire.setdefault(key, value)
+        acc.rate_limit_rejected = True
+        acc.ndjson_lines.append(json.dumps({"type": "rate_limit_event", "rate_limit_info": wire}))
+
     def _outcome_from_result(self, acc: "_TurnAccumulator", msg: Any) -> "TurnOutcome":
         """Build a :class:`TurnOutcome` from the accumulated turn + its terminal
         ``ResultMessage``.
@@ -1281,7 +1308,10 @@ class _SDKSession:
                 backend_session_id=acc.backend_session_id,
                 raw_ndjson=raw_ndjson,
                 is_error=True,
-                error_class=classify_error_text(error_text, subtype=subtype, api_error_status=api_error_status),
+                error_class=classify_error_text(
+                    error_text, subtype=subtype, api_error_status=api_error_status,
+                    rate_limit_rejected=acc.rate_limit_rejected,
+                ),
                 error_text=error_text,
                 salvaged_output=acc.last_assistant_text,
             )

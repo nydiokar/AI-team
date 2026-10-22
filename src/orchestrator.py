@@ -98,6 +98,17 @@ from src.backends.registry import build_backends
 from src.core.session_task_queue import SessionTaskQueue
 from config import config
 from src.validation.engine import ValidationEngine
+from src.core.failure_markers import (
+    QUOTA_FAILURE_LABEL_MARKERS,
+    RATE_LIMIT_MARKERS,
+    UPSTREAM_STATUS_RE,
+    USAGE_LIMIT_MARKERS,
+    error_bearing_stdout_lines,
+    error_bearing_values,
+    error_detail_without_stdout,
+    mark_reply_mirror,
+    stdout_is_reply_mirror,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -107,6 +118,19 @@ logger = logging.getLogger(__name__)
 #: the agent or the harness. The single vocabulary every quota-aware branch reads
 #: (session status, Case pause record, resume proposal, retry policy).
 QUOTA_PAUSE_ERROR_CLASSES: Tuple[str, ...] = ("usage_limit", "rate_limit")
+
+#: [A97] Backend-provided error classes ``_classify_error`` takes as-is instead
+#: of re-reading text. The Claude driver derives them from structured signals
+#: (``subtype``, ``api_error_status``, a rejected ``RateLimitEvent``, the stream
+#: dying before a terminal result) or from the SDK's own error string — never
+#: from the agent's reply. Deliberately limited to classes this classifier
+#: already returns, so no class reaches the retry policy that it has no entry
+#: for; other backend classes (``session_lost``, ``permission_block``,
+#: ``transient``, ...) are still re-derived from text. ``usage_limit`` is
+#: preferred too, but routed through ``_usage_limit_class``.
+PREFERRED_BACKEND_ERROR_CLASSES: Tuple[str, ...] = (
+    "max_turns", "upstream_error", "sdk_stream_closed", "context_overflow", "rate_limit",
+)
 
 #: [transient-resume] Error classes that mean "a transient PROVIDER-side failure,
 #: not a broken session or a spent quota" — an Anthropic 5xx (``api_error_status
@@ -997,7 +1021,10 @@ class TaskOrchestrator(ITaskOrchestrator):
 
     @classmethod
     def _extract_rate_limit_info(cls, result: TaskResult) -> Optional[Dict[str, Any]]:
-        """Parse the first rejected rate_limit_event from raw_stdout NDJSON, or None."""
+        """Parse the first rejected rate_limit_event from raw_stdout NDJSON, or None.
+        A raw_stdout that only mirrors the reply holds no stream events (A97)."""
+        if stdout_is_reply_mirror(result):
+            return None
         stdout = getattr(result, "raw_stdout", "") or ""
         for line in stdout.splitlines():
             line = line.strip()
@@ -1026,7 +1053,7 @@ class TaskOrchestrator(ITaskOrchestrator):
         no structured signal is present.
         """
         sources = (
-            getattr(result, "raw_stdout", "") or "",
+            "" if stdout_is_reply_mirror(result) else (getattr(result, "raw_stdout", "") or ""),
             getattr(result, "raw_stderr", "") or "",
             getattr(result, "error_detail", "") or "",
         )
@@ -1067,7 +1094,15 @@ class TaskOrchestrator(ITaskOrchestrator):
 
     @classmethod
     def _failure_text(cls, result: TaskResult) -> str:
-        """Aggregate likely error-bearing text from the result payload."""
+        """Aggregate the error-bearing text of a failed result (A97).
+
+        Only fields that carry the failure itself are read (``errors``,
+        ``raw_stderr``, error events in ``raw_stdout``, a terminal error
+        ``parsed_output``): text in which the agent merely *wrote about* a
+        timeout or a usage limit must never change the class. The agent's reply
+        is consulted only when no error-bearing text exists, so a result that
+        carries its error nowhere else keeps today's reading.
+        """
         parts: List[str] = []
 
         def _append(value: Any) -> None:
@@ -1079,9 +1114,11 @@ class TaskOrchestrator(ITaskOrchestrator):
             elif isinstance(value, str) and value.strip():
                 parts.append(value.strip())
 
-        for err in (result.errors or []):
-            _append(err)
-        _append(getattr(result, "raw_stderr", ""))
+        for value in error_bearing_values(result):
+            _append(value)
+        parts.extend(error_bearing_stdout_lines(result))
+        if parts:
+            return "\n".join(parts)
         _append(getattr(result, "raw_stdout", ""))
         _append(getattr(result, "parsed_output", None))
         _append(getattr(result, "output", ""))
@@ -1101,7 +1138,7 @@ class TaskOrchestrator(ITaskOrchestrator):
             return "Task cancelled"
         if cls._is_missing_backend_conversation(result):
             return "Claude session expired"
-        if any(s in haystack_lower for s in ("rate_limit_event", "rate limit", "rate-limit", "too many requests", "hit your limit", "hit your session limit", "session limit", "usage limit", "\"error\":\"rate_limit\"", "overagestatus")):
+        if any(s in haystack_lower for s in QUOTA_FAILURE_LABEL_MARKERS):
             info = cls._extract_rate_limit_info(result)
             if info:
                 limit_type = info.get("rateLimitType", "")
@@ -4699,8 +4736,13 @@ class TaskOrchestrator(ITaskOrchestrator):
                     timestamp=result_dict.get("timestamp", now_iso()) if result_dict else now_iso(),
                     return_code=result_dict.get("return_code", 1) if result_dict else 1,
                     raw_stdout=result_dict.get("output", "") if result_dict else "",
-                    raw_stderr=(result_dict.get("error_detail", "") if result_dict else ""),
+                    raw_stderr=error_detail_without_stdout(result_dict.get("error_detail", "") if result_dict else ""),
+                    error_class=str(
+                        (result_dict.get("error_class") if result_dict else "")
+                        or (row.get("error_class") if row else "") or ""
+                    ),
                 )
+                mark_reply_mirror(result)
                 setattr(result, "error_detail", result_dict.get("error_detail", "") if result_dict else "")
                 setattr(result, "usage", result_dict.get("usage") if result_dict else None)
                 setattr(result, "backend_name", session.backend or "claude")
@@ -8604,6 +8646,7 @@ class TaskOrchestrator(ITaskOrchestrator):
                                 raw_stderr=getattr(raw, "raw_stderr", ""),
                                 parsed_output=getattr(raw, "parsed_output", None),
                                 return_code=getattr(raw, "return_code", 0),
+                                error_class=getattr(raw, "error_class", "") or "",
                             )
                             setattr(result, "backend_name", backend_name)
                             if raw.telemetry is not None:
@@ -9673,23 +9716,35 @@ created: {task.created}
             # off as "rate_limit" would give the identical failure two retry
             # policies and hide half the quota pauses from the resume path.
             return self._usage_limit_class(result)
+        # A class the BACKEND derived from its own structured signals (the
+        # driver's api_error_status / subtype / rejected RateLimitEvent, or its
+        # stream dying before a terminal result) outranks any re-reading of
+        # text — on the mesh path it is the only structure that survives, since
+        # raw_stdout there mirrors the reply. Only classes this classifier
+        # already returns (and the retry policy already knows) are taken; any
+        # other backend class is still re-derived below (A97 item 4).
+        backend_class = str(getattr(result, "error_class", "") or "")
+        if backend_class == "usage_limit":
+            return self._usage_limit_class(result)
+        if backend_class in PREFERRED_BACKEND_ERROR_CLASSES:
+            return backend_class
         text = self._failure_text(result)
         text_lower = text.lower()
         # SUBSCRIPTION-WINDOW wording ("you've hit your limit", "session limit",
         # "usage limit", the overage banner) means the ACCOUNT's window is spent:
         # it reopens hours later, so it is a quota PAUSE with no quick retry.
-        if any(s in text_lower for s in ("hit your limit", "hit your session limit", "session limit", "usage limit", "you've hit your limit", "overagestatus")):
+        if any(s in text_lower for s in USAGE_LIMIT_MARKERS):
             return "usage_limit"
         # GENERIC burst wording ("rate limit exceeded, please retry later", "too
         # many requests") is NOT evidence of a spent window — it is the classic
         # transient the retry policy exists for. Kept in its own class so a burst
         # still gets its two quick retries. Both classes still PAUSE a Case if
         # they end up terminal (QUOTA_PAUSE_ERROR_CLASSES covers both).
-        if any(s in text_lower for s in ("rate limit", "rate-limit", "too many requests", "\"error\":\"rate_limit\"")):
+        if any(s in text_lower for s in RATE_LIMIT_MARKERS):
             return "rate_limit"
         if any(s in text_lower for s in ("timeout", "timed out", "inactivity")):
             return "timeout"
-        if any(s in text_lower for s in ("connection reset", "connection aborted", "network error", "503", "504", "temporarily unavailable", "terminated process", "cannot write to")):
+        if any(s in text_lower for s in ("connection reset", "connection aborted", "network error", "temporarily unavailable", "terminated process", "cannot write to")) or UPSTREAM_STATUS_RE.search(text_lower):
             return "network"
         if any(s in text_lower for s in ("prompt is too long", "blocking_limit", "context_window", "context window")):
             return "context_overflow"
@@ -10198,6 +10253,7 @@ Generated from user description: {description}
                     raw_stderr=getattr(raw, "raw_stderr", ""),
                     parsed_output=getattr(raw, "parsed_output", None),
                     return_code=getattr(raw, "return_code", 0),
+                    error_class=getattr(raw, "error_class", "") or "",
                 )
                 setattr(result, "backend_name", backend_name)
                 return result
@@ -10439,7 +10495,9 @@ Generated from user description: {description}
                         # raw_stdout, not output) never ends up empty (T2).
                         raw_stdout=r.get("raw_stdout") or worker_output,
                         raw_stderr=r.get("raw_stderr") or "",
+                        error_class=str(r.get("error_class") or row.get("error_class") or ""),
                     )
+                    mark_reply_mirror(result, not r.get("raw_stdout") and bool(worker_output))
                     setattr(result, "usage", r.get("usage"))
                     setattr(result, "backend_name", row.get("backend", "claude"))
                     if r.get("error_detail"):
@@ -10492,8 +10550,15 @@ Generated from user description: {description}
                         # which erased the error_during_execution marker and hid
                         # the agent's complete payload from the artifact.
                         raw_stdout=(r.get("raw_stdout") if r else "") or (r.get("output", "") if r else ""),
-                        raw_stderr=(r.get("raw_stderr") if r else "") or error_detail,
+                        # error_detail's stdout_tail is the agent's stream, not
+                        # an error: only its error parts may stand in (A97).
+                        raw_stderr=(r.get("raw_stderr") if r else "") or error_detail_without_stdout(error_detail),
+                        # The worker's structured class (its driver's own
+                        # signal) — dropping it made _classify_error re-derive
+                        # from text on every mesh session turn (A97).
+                        error_class=str((r.get("error_class") if r else "") or row.get("error_class") or ""),
                     )
+                    mark_reply_mirror(result, not (r.get("raw_stdout") if r else "") and bool(result.raw_stdout))
                     setattr(result, "error_detail", error_detail)
                     setattr(result, "usage", r.get("usage") if r else None)
                     setattr(result, "backend_name", row.get("backend", "claude"))
@@ -12478,6 +12543,7 @@ Generated from user description: {description}
             usage=res.get("usage") if isinstance(res.get("usage"), dict) else None,
             error_class=str(row.get("error_class") or ""),
         )
+        mark_reply_mirror(result, bool(output))
         if res.get("error_detail"):
             setattr(result, "error_detail", res.get("error_detail"))
         setattr(result, "telemetry_invocation_id", res.get("telemetry_invocation_id") or None)

@@ -14,6 +14,13 @@ import re
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
+from src.core.failure_markers import (
+    QUOTA_FAILURE_LABEL_MARKERS,
+    error_bearing_stdout_lines,
+    error_bearing_values,
+    stdout_is_reply_mirror,
+)
+
 
 def _text_from_content_blocks(content: Any) -> str:
     """Join the ``text`` of a claude-style content block array (skip tool_use etc.)."""
@@ -222,7 +229,10 @@ def extract_text_from_payload(payload: Any) -> str:
 
 
 def extract_rate_limit_info(result) -> Optional[Dict[str, Any]]:
-    """Parse the first rejected rate_limit_event from raw_stdout NDJSON, or None."""
+    """Parse the first rejected rate_limit_event from raw_stdout NDJSON, or None.
+    A raw_stdout that only mirrors the reply holds no stream events (A97)."""
+    if stdout_is_reply_mirror(result):
+        return None
     stdout = getattr(result, "raw_stdout", "") or ""
     for line in stdout.splitlines():
         line = line.strip()
@@ -269,7 +279,9 @@ def session_reply_text(result) -> str:
 
 
 def failure_text(result) -> str:
-    """Aggregate likely error-bearing text from the result payload."""
+    """Aggregate the error-bearing text of a failed result; the agent's reply is
+    read only when nothing error-bearing exists (A97 — same scoping as the
+    orchestrator's ``_failure_text``, see ``src.core.failure_markers``)."""
     parts: List[str] = []
 
     def _append(value: Any) -> None:
@@ -281,9 +293,11 @@ def failure_text(result) -> str:
         elif isinstance(value, str) and value.strip():
             parts.append(value.strip())
 
-    for err in (getattr(result, "errors", None) or []):
-        _append(err)
-    _append(getattr(result, "raw_stderr", ""))
+    for value in error_bearing_values(result):
+        _append(value)
+    parts.extend(error_bearing_stdout_lines(result))
+    if parts:
+        return "\n".join(parts)
     _append(getattr(result, "raw_stdout", ""))
     _append(getattr(result, "parsed_output", None))
     _append(getattr(result, "output", ""))
@@ -303,7 +317,7 @@ def short_failure_reason(result) -> str:
         return "Task cancelled"
     if is_missing_backend_conversation(result):
         return "Claude session expired"
-    if any(s in haystack_lower for s in ("rate_limit_event", "rate limit", "rate-limit", "too many requests", "hit your limit", '"error":"rate_limit"', "overagestatus")):
+    if any(s in haystack_lower for s in QUOTA_FAILURE_LABEL_MARKERS):
         info = extract_rate_limit_info(result)
         if info:
             limit_type = info.get("rateLimitType", "")
