@@ -107,6 +107,11 @@ class Runtime(CodexAppServerClient):
             return {}
         if method == "thread/unsubscribe":
             return {"status": "unsubscribed"}
+        if method == "thread/archive":
+            # [#236] Native teardown: unloads the thread AND stops its per-thread
+            # MCP children (unlike unsubscribe, which leaves both running).
+            self.threads.pop(tid, None)
+            return {"status": "archived"}
         raise AssertionError(method)
 
 
@@ -320,3 +325,74 @@ def test_thread_identity_in_tool_configuration_is_scoped(native):
     configs = [params["config"] for method, params in runtime.calls if method == "thread/start"]
     assert configs[0]["shell_environment_policy.set"]["SESSION_ID"] == "first"
     assert configs[1]["shell_environment_policy.set"]["SESSION_ID"] == "second"
+
+
+# [#236] Codex per-thread MCP servers leaked because close() sent
+# thread/unsubscribe (which only drops the subscription — the thread and its
+# mcp_jobs/mcp_sender children stay alive). close() now archives the thread.
+
+def test_close_archives_thread_instead_of_unsubscribing(native):
+    backend, runtime, cwd = native
+    result = run(backend, cwd)
+    tid = result.backend_session_id
+    assert tid in backend._loaded
+    backend._client = runtime  # real _runtime() sets this; the fixture's stub does not
+    session = SimpleNamespace(session_id="gateway", backend_session_id=tid)
+
+    backend.close(session)
+
+    methods = [method for method, _ in runtime.calls]
+    assert ("thread/archive", {"threadId": tid}) in runtime.calls
+    assert "thread/unsubscribe" not in methods  # the leaky teardown is gone
+    assert tid not in backend._loaded
+    assert tid not in backend._sender_attached
+
+
+def test_close_defers_archive_while_a_turn_is_held(native):
+    backend, runtime, cwd = native
+    result = run(backend, cwd)
+    tid = result.backend_session_id
+    backend._client = runtime
+    backend._held["gateway"] = object()  # a held turn must keep the thread loaded
+    session = SimpleNamespace(session_id="gateway", backend_session_id=tid)
+
+    backend.close(session)
+
+    # Deferred: not archived yet (would release the ownership fence early), but
+    # recorded so the archive is NOT lost — the old unsubscribe-or-nothing path
+    # leaked the MCP children forever here.
+    assert "thread/archive" not in [method for method, _ in runtime.calls]
+    assert backend._pending_close["gateway"] == tid
+    assert tid in backend._loaded
+
+
+def test_pending_close_archives_once_completed(native):
+    backend, runtime, cwd = native
+    result = run(backend, cwd)
+    tid = result.backend_session_id
+    backend._client = runtime
+    backend._pending_close["gateway"] = tid
+
+    backend._complete_pending_close("gateway")
+
+    assert ("thread/archive", {"threadId": tid}) in runtime.calls
+    assert "gateway" not in backend._pending_close
+    assert tid not in backend._loaded
+
+
+def test_reactivated_session_cancels_a_deferred_close(native):
+    backend, runtime, cwd = native
+    first = run(backend, cwd)
+    backend._pending_close["gateway"] = first.backend_session_id
+
+    # A new turn reuses the thread: the deferred close must be cancelled so the
+    # thread we are about to run on is not archived out from under it.
+    run(backend, cwd, native_id=first.backend_session_id, task="second")
+
+    assert "gateway" not in backend._pending_close
+    assert first.backend_session_id in backend._loaded
+
+
+def test_archive_is_a_known_rpc_method():
+    from src.backends.codex_app_server import REQUEST_METHODS
+    assert "thread/archive" in REQUEST_METHODS

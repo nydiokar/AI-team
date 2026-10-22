@@ -28,8 +28,8 @@ INTERRUPT_TIMEOUT = 5.0
 MAX_LATE = 256
 REQUEST_METHODS = frozenset({
     "initialize", "thread/start", "thread/resume", "thread/unsubscribe",
-    "thread/compact/start", "turn/start", "turn/interrupt", "model/list",
-    "thread/read",
+    "thread/archive", "thread/compact/start", "turn/start", "turn/interrupt",
+    "model/list", "thread/read",
 })
 CONSUMED_NOTIFICATIONS = frozenset({
     "turn/started", "turn/completed", "thread/tokenUsage/updated",
@@ -212,6 +212,14 @@ class CodexAppServerClient:
 
     def unload(self, thread_id: str) -> None:
         self.request("thread/unsubscribe", {"threadId": thread_id})
+
+    def archive(self, thread_id: str) -> None:
+        """Tear the thread down natively. Unlike :meth:`unload`'s
+        ``thread/unsubscribe`` (which only drops our subscription and leaves
+        the thread — and its per-thread MCP stdio children — running under the
+        shared app-server), ``thread/archive`` unloads the thread so those MCP
+        servers are stopped. Caller ensures the turn is quiet first."""
+        self.request("thread/archive", {"threadId": thread_id})
 
     def list_models(self) -> dict[str, JsonValue]:
         return self.request("model/list", {"includeHidden": False, "limit": 1000})
