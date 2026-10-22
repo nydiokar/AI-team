@@ -16,6 +16,9 @@ import { useAuthStore } from "./stores/authStore";
 import { EventStreamProvider } from "./hooks/eventStreamContext";
 import { invalidateRouteTarget } from "./lib/liveInvalidation";
 
+const HomeScreen = lazy(() =>
+  import("./screens/HomeScreen").then((m) => ({ default: m.HomeScreen })),
+);
 const SessionsScreen = lazy(() =>
   import("./screens/SessionsScreen").then((m) => ({ default: m.SessionsScreen })),
 );
@@ -86,12 +89,14 @@ export function App() {
             element={
               <MobileAppShell>
                 <Routes>
+                  <Route path="/" element={<Navigate to="/home" replace />} />
+                  <Route path="/home" element={<HomeScreen />} />
                   <Route path="/work" element={<WorkScreen />} />
                   <Route path="/sessions" element={<SessionsScreen />} />
                   <Route path="/cost" element={<CostScreen />} />
                   <Route path="/tasks" element={<Navigate to="/system" replace />} />
                   <Route path="/system" element={<SystemScreen />} />
-                  <Route path="*" element={<Navigate to="/sessions" replace />} />
+                  <Route path="*" element={<Navigate to="/home" replace />} />
                 </Routes>
               </MobileAppShell>
             }
