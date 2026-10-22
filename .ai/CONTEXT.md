@@ -78,6 +78,14 @@ Only jobs that are genuinely open. Everything merged/done is in git and the disp
 
 ## Recent shift notes
 
+**2026-10-22 — Operational DB backups: hourly, on-host only (off-host target still OPEN).**
+`scripts/backup/backup_dbs.sh` (cron `17 * * * *`, tag `aiteam-db-backup`) snapshots `mesh.db` + `quota_windows.db`
+via `VACUUM INTO` → `integrity_check` → zstd → SHA256SUMS into `~/ai-team-backups/db/snapshots/<UTC stamp>/`
+(48 recent + 30 daily kept; ~57 MB/run, ~14 s). `LATEST` = newest fully-good run; failures → journal tag
+`aiteam-backup` + `backup.log`. **Same physical disk as the live DBs** — protects against bad writes/migrations/
+corruption, NOT disk loss. Deferred until the operator picks the off-host target: sync `snapshots/` as-is and
+alert when `LATEST` is older than ~2 h. Ad-hoc pre-deploy copies in `~/ai-team-data/backups/` are separate and unpruned.
+
 **2026-10-09 — A104 done: the agent inbox is the ONLY answer to "what is waiting for this agent".**
 Completions are addressed to the session that REQUESTED the work (`mesh_tasks.sender_session_id`), written in the
 child's terminal txn, delivered as one wake, acked by the wake's completion or a tagged review; bounded (5 attempts,
