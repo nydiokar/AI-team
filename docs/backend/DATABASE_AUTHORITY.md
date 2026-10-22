@@ -129,11 +129,14 @@ Gateway, task-server, local-execution gateway and tests never install a client â
   batch and the rest of the pass delete nothing (`event=quota_archive_failed`) and the next tick
   retries. Two append-only tables:
   `snapshots_archive` holds pruned snapshots column-for-column, keyed on `snapshot_id`. Boundary
-  anchors never leave the live store, so the full series is the archive plus the live `snapshots`.
+  anchors (first sighting of each `reset_at` cluster within `_BOUNDARY_JITTER`, 2 s: the provider
+  drifts sub-second) never leave the live store, so the full series is the archive plus the live `snapshots`.
   `event_runs` compacts pruned `coordinator_events`: each run of consecutive (by `id`) events with the
   same `(event_name, provider, principal_hash, bucket_id, reason)` becomes one row with
-  `first_id`/`last_id`, `first_at`/`last_at`, `count` and first/last payload. This is lossless for
-  timing and counts, and a singleton such as `quota.refusal_recorded` keeps its payload. The
+  `first_id`/`last_id`, `first_at`/`last_at`, `count` and first/last payload. Counts and each run's first/last time are exact; timestamps and
+  payloads strictly inside a run are dropped. A singleton keeps its payload in `first_payload`
+  (`last_payload` is empty). On live data (2026-10-23) runs average 1.01 (controller) to 1.05
+  (worker) events, because event types interleave, so the archive is close to row-for-row. The
   archive takes the contiguous `id` prefix older than the cutoff, up to the newest row present when
   the pass starts. A row stamped in the future by clock skew holds back the rows after it until it
   ages out, and an event written mid-pass is never taken.
