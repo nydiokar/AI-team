@@ -105,3 +105,39 @@ def test_retention_keeps_recent_and_one_per_day(src: Path, tmp_path: Path) -> No
     # Recent 2 = new run + 20200105T1700Z; daily 3 = the newest run of each of
     # the 3 newest days (today, 0105, 0104); everything else is pruned.
     assert kept == sorted([new, "20200105T1700Z", "20200104T1700Z"])
+
+
+def test_pin_goes_to_archive_and_survives_retention(src: Path, tmp_path: Path) -> None:
+    dest: Path = tmp_path / "backups"
+    env: dict[str, str] = {"AI_TEAM_BACKUP_KEEP_RECENT": "1", "AI_TEAM_BACKUP_KEEP_DAILY": "1"}
+    pin = subprocess.run(
+        ["bash", str(SCRIPT), "--pin", "pre-prune"],
+        env={**os.environ, "AI_TEAM_DB_SOURCE_DIR": str(src), "AI_TEAM_BACKUP_DIR": str(dest), **env},
+        capture_output=True, text=True, timeout=60,
+    )
+    assert pin.returncode == 0, pin.stderr
+    archived: list[Path] = list((dest / "archive").iterdir())
+    assert len(archived) == 1 and archived[0].name.endswith("-pre-prune")
+    assert (archived[0] / "mesh.db.zst").exists() and (archived[0] / "SHA256SUMS").exists()
+    assert not (dest / "LATEST").exists()
+
+    for _ in range(2):
+        assert _run(src, dest, **env).returncode == 0
+    assert [p.name for p in (dest / "archive").iterdir()] == [archived[0].name]
+
+
+def test_raw_copy_staged_in_scratch_and_cleaned(src: Path, tmp_path: Path) -> None:
+    scratch: Path = tmp_path / "shm"
+    scratch.mkdir()
+    res = _run(src, tmp_path / "backups", AI_TEAM_BACKUP_SCRATCH=str(scratch))
+    assert res.returncode == 0, res.stderr
+    assert list(scratch.iterdir()) == []
+
+
+def test_bad_label_rejected(src: Path, tmp_path: Path) -> None:
+    res = subprocess.run(
+        ["bash", str(SCRIPT), "--pin", "../evil"],
+        env={**os.environ, "AI_TEAM_DB_SOURCE_DIR": str(src), "AI_TEAM_BACKUP_DIR": str(tmp_path / "b")},
+        capture_output=True, text=True, timeout=60,
+    )
+    assert res.returncode == 2

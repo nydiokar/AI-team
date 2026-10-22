@@ -15,6 +15,13 @@
 # Retention: newest AI_TEAM_BACKUP_KEEP_RECENT runs, plus the newest run of each
 #   of the newest AI_TEAM_BACKUP_KEEP_DAILY days.
 #
+# Pinning: `backup_dbs.sh --pin <label>` writes the run to archive/<stamp>-<label>/
+#   instead — never pruned, LATEST untouched. Take one before any data prune or
+#   risky migration; it is the permanent copy of what the prune deletes.
+#
+# Strain: the raw copy is staged in RAM (AI_TEAM_BACKUP_SCRATCH, default /dev/shm,
+#   used only when it has room) so only the compressed file is written to disk.
+#
 # Off-host integration point: snapshots/ is append-only immutable directories
 #   (sync it as-is, e.g. `rclone copy snapshots/ remote:...`; verify with
 #   `sha256sum -c SHA256SUMS` inside a run dir). Nothing here pushes off-host yet.
@@ -23,7 +30,7 @@
 #   gateway + task-server, move mesh.db{,-wal,-shm} aside, then
 #   `zstd -d snapshots/<run>/mesh.db.zst -o <state>/mesh.db`, start again.
 #
-# Install: crontab line tagged `aiteam-db-backup`; remove with
+# Install: daily crontab line tagged `aiteam-db-backup`; remove with
 #   crontab -l | grep -v aiteam-db-backup | crontab -
 set -uo pipefail
 
@@ -32,11 +39,25 @@ export PATH="/usr/local/bin:/usr/bin:/bin:${PATH:-}"
 
 SRC_DIR="${AI_TEAM_DB_SOURCE_DIR:-$HOME/ai-team-data/controller/state}"
 DEST_DIR="${AI_TEAM_BACKUP_DIR:-$HOME/ai-team-backups/db}"
-KEEP_RECENT="${AI_TEAM_BACKUP_KEEP_RECENT:-48}"
+KEEP_RECENT="${AI_TEAM_BACKUP_KEEP_RECENT:-7}"
 KEEP_DAILY="${AI_TEAM_BACKUP_KEEP_DAILY:-30}"
+SCRATCH_ROOT="${AI_TEAM_BACKUP_SCRATCH:-/dev/shm}"
 DBS=(mesh.db quota_windows.db)
 
+pin_label=""
+if [[ "${1:-}" == "--pin" ]]; then
+    pin_label="${2:-}"
+    if [[ ! "$pin_label" =~ ^[A-Za-z0-9._-]+$ || "$pin_label" == .* ]]; then
+        echo "usage: $0 [--pin <label: letters, digits, . _ ->]" >&2
+        exit 2
+    fi
+elif [[ $# -gt 0 ]]; then
+    echo "usage: $0 [--pin <label>]" >&2
+    exit 2
+fi
+
 SNAP_DIR="$DEST_DIR/snapshots"
+ARCHIVE_DIR="$DEST_DIR/archive"
 TMP_ROOT="$DEST_DIR/.tmp"
 LOG_FILE="$DEST_DIR/backup.log"
 
@@ -51,7 +72,7 @@ fail() {
     logger -t aiteam-backup -p user.err -- "$*" 2>/dev/null || true
 }
 
-mkdir -p "$SNAP_DIR" "$TMP_ROOT" || { echo "cannot create $DEST_DIR" >&2; exit 1; }
+mkdir -p "$SNAP_DIR" "$ARCHIVE_DIR" "$TMP_ROOT" || { echo "cannot create $DEST_DIR" >&2; exit 1; }
 
 exec 9>"$DEST_DIR/.lock"
 if ! flock -n 9; then
@@ -67,11 +88,25 @@ stamp="$(date -u +%Y%m%dT%H%M%SZ)"
 work="$TMP_ROOT/$stamp"
 rm -rf "$TMP_ROOT"/* && mkdir -p "$work" || { fail "cannot prepare $work"; exit 1; }
 
+# RAM staging when the scratch fs can hold the largest DB (+ its WAL) twice over.
+need_kb=0
+for db in "${DBS[@]}"; do
+    kb=$(du -sk "$SRC_DIR/$db" "$SRC_DIR/$db-wal" 2>/dev/null | awk '{s+=$1} END {print s+0}')
+    (( kb > need_kb )) && need_kb=$kb
+done
+stage="$work"
+scratch="$SCRATCH_ROOT/aiteam-backup-$$"
+avail_kb=$(df -Pk "$SCRATCH_ROOT" 2>/dev/null | awk 'NR==2 {print $4}')
+if [[ -n "$avail_kb" ]] && (( avail_kb > 2 * need_kb )) && mkdir -p "$scratch" 2>/dev/null; then
+    stage="$scratch"
+fi
+trap '[[ "$stage" != "$work" ]] && rm -rf -- "$stage"' EXIT
+
 failed=0
 done_count=0
 for db in "${DBS[@]}"; do
     src="$SRC_DIR/$db"
-    out="$work/$db"
+    out="$stage/$db"
     if [[ ! -f "$src" ]]; then
         fail "$db: source $src missing"; failed=1; continue
     fi
@@ -82,8 +117,8 @@ for db in "${DBS[@]}"; do
     if [[ "$check" != "ok" ]]; then
         fail "$db: integrity_check: ${check:0:200}"; rm -f "$out"; failed=1; continue
     fi
-    if ! zstd -q -T0 -3 --rm "$out" -o "$out.zst"; then
-        fail "$db: zstd failed"; rm -f "$out" "$out.zst"; failed=1; continue
+    if ! zstd -q -T0 -3 --rm "$out" -o "$work/$db.zst"; then
+        fail "$db: zstd failed"; rm -f "$out" "$work/$db.zst"; failed=1; continue
     fi
     done_count=$((done_count + 1))
 done
@@ -95,6 +130,12 @@ if (( done_count == 0 )); then
 fi
 
 (cd "$work" && sha256sum -- *.zst >SHA256SUMS) || { fail "checksum failed"; rm -rf "$work"; exit 1; }
+if [[ -n "$pin_label" ]]; then
+    mv "$work" "$ARCHIVE_DIR/$stamp-$pin_label" || { fail "publish failed"; exit 1; }
+    (( failed )) && { log "PARTIAL pin $stamp-$pin_label ($done_count/${#DBS[@]} DBs)"; exit 1; }
+    log "PINNED $stamp-$pin_label ($(du -sh "$ARCHIVE_DIR/$stamp-$pin_label" | cut -f1))"
+    exit 0
+fi
 mv "$work" "$SNAP_DIR/$stamp" || { fail "publish failed"; exit 1; }
 
 if (( failed )); then
