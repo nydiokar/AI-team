@@ -2311,7 +2311,9 @@ class WorkerAgent:
         coordinator (observe_locally=True). Opening a window costs one real
         (haiku, max_turns=1) turn, which only a claude-capable worker can spend —
         the controller container has no binary/credentials. Warming therefore
-        lives here, co-located with the harness that can actually fire it."""
+        lives here, co-located with the harness that can actually fire it.
+        Its store is this worker's private cache, so space is reclaimed after
+        the daily prune (A93)."""
         try:
             from src.services.quota_window_coordinator import (
                 build_quota_coordinator_from_config,
@@ -2321,7 +2323,7 @@ class WorkerAgent:
             )
 
             coordinator = build_quota_coordinator_from_config(
-                enabled=True, observe_locally=True,
+                enabled=True, observe_locally=True, reclaim_space=True,
             )
             return build_prewarmer_from_config(
                 coordinator=coordinator,

@@ -378,6 +378,7 @@ class QuotaWindowPrewarmer:
         of firing on a clock that used to be right.
         """
         await self._observe()
+        await self._prune()
         before = self._latest_five_hour()
         self.note_anchor_drift(before)
         decision = self.decide(before)
@@ -520,6 +521,19 @@ class QuotaWindowPrewarmer:
             await observe()
         except Exception as e:
             logger.debug("event=quota_prewarm_observe_failed err=%s", e)
+
+    async def _prune(self) -> None:
+        """Bounded store (A93): the worker drives its coordinator only through
+        this prewarmer and never starts the coordinator's own loop, so retention
+        rides this tick through the coordinator's SAME once-per-UTC-day seam —
+        not a second scheduler. Best-effort: never stops the prewarm loop."""
+        prune = getattr(self.coordinator, "prune_once_daily", None)
+        if prune is None:
+            return
+        try:
+            await prune()
+        except Exception as e:
+            logger.warning("event=quota_prewarm_prune_failed err=%s", e)
 
     async def _principal_known(self, adapter: Any) -> bool:
         """Spec §9A: activation requires a known quota-owning identity. The read
