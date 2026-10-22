@@ -2058,16 +2058,20 @@ class ClaudeSDKClientDriver(ClaudeDriver):
                 # connected — dispatch_worker silently absent. Keeping "user" restores
                 # the MCP wiring while still loading the project CLAUDE.md.
                 setting_sources = ["user", "project"] if system_prompt is not None else None
-                # [A53] Resolve the SDK-driver governor ceilings from config
-                # (None ⇒ no cap ⇒ byte-identical legacy boot). Best-effort: a
-                # config glitch must never block a session boot.
+                # [A53] Resolve the SDK-driver governor ceilings (None ⇒ no cap ⇒
+                # byte-identical legacy boot). [A62] Registry → env → no cap via
+                # the runtime-flag seam (the controller snapshot on a worker), read
+                # here at session-process creation. Best-effort: a config glitch
+                # must never block a session boot.
                 gov_max_turns: Optional[int] = None
                 gov_max_budget: Optional[float] = None
                 cli_path: Optional[str] = None
                 try:
                     from config import config as _cfg
-                    gov_max_turns = getattr(_cfg.claude, "sdk_max_turns", None)
-                    gov_max_budget = getattr(_cfg.claude, "sdk_max_budget_usd", None)
+                    from src.control.db import sdk_governor_ceilings
+                    _gov = sdk_governor_ceilings()
+                    gov_max_turns = _gov["sdk_max_turns"]
+                    gov_max_budget = _gov["sdk_max_budget_usd"]
                     cli_path = getattr(_cfg.claude, "sdk_cli_path", None)
                 except Exception:
                     pass

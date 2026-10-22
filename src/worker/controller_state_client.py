@@ -39,7 +39,10 @@ class RuntimeFlagRow(BaseModel):
     model_config = ConfigDict(extra="ignore", frozen=True)
 
     flag_name: str = Field(min_length=1, max_length=64)
-    value: str = Field(max_length=32)
+    # [A62] Must admit every value the controller can store
+    # (db.RUNTIME_FLAG_MAX_VALUE_CHARS, e.g. the TOOL_PROFILES_OVERLAY JSON):
+    # one oversized row would otherwise reject the WHOLE snapshot.
+    value: str = Field(max_length=32_768)
     set_at: str = Field(default="", max_length=64)
 
 
