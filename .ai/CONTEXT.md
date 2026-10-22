@@ -84,7 +84,7 @@ via `VACUUM INTO` → `integrity_check` → zstd → SHA256SUMS into `~/ai-team-
 (30 daily kept; ~57 MB/run, ~6 s, raw copy staged in /dev/shm). `--pin <label>` → `archive/` (never pruned); pinned `20261022T184657Z-pre-quota-prune` before the quota prune. `LATEST` = newest fully-good run; failures → journal tag
 `aiteam-backup` + `backup.log`. **Same physical disk as the live DBs** — protects against bad writes/migrations/
 corruption, NOT disk loss. Deferred until the operator picks the off-host target: sync `snapshots/` as-is and
-alert when `LATEST` is older than ~2 h. Ad-hoc pre-deploy copies in `~/ai-team-data/backups/` are separate and unpruned.
+alert when `LATEST` is older than ~26 h. Worker-local store (`state/quota_windows.db`, kanebra PM2) has its own job (cron `27 4`, → `~/ai-team-backups/worker-kanebra/`, pinned `20261022T220144Z-pre-quota-prune`); `quota_archive.db` is picked up automatically once A93 creates it. **Horse's store is NOT backed up.** Ad-hoc pre-deploy copies in `~/ai-team-data/backups/` are separate and unpruned.
 
 **2026-10-09 — A104 done: the agent inbox is the ONLY answer to "what is waiting for this agent".**
 Completions are addressed to the session that REQUESTED the work (`mesh_tasks.sender_session_id`), written in the
