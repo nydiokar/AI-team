@@ -1,12 +1,12 @@
 ```yaml
 job_id: AGENT_65_COST_MONITORING_VISIBILITY
 created_at: "2026-08-03T16:59:09.868948+00:00"        # CANONICAL — set once at dispatch, never derive again
-status: active              # ready | active | blocked | done | dead
+status: done              # ready | active | blocked | done | dead
 owner: ""
 depends_on: []
 results_ref: 8792f9f             # -> DISPATCH_LOG.md section with the verdict prose
-evidence: ["docs/cost_monitoring_audit.md", "tests/test_cost_alerts.py", "web/src/components/cost/CostAlertBanner.tsx"]                  # artifact paths that PROVE it ran (checked to exist)
-updated_at: "2026-08-03T23:22:31.116751+00:00"
+evidence: ["docs/cost_monitoring_audit.md", "tests/test_cost_alerts.py", "web/src/components/cost/CostAlertBanner.tsx", "tests/test_cost_alert_push.py"]                  # artifact paths that PROVE it ran (checked to exist)
+updated_at: "2026-10-06T12:21:05.651834+00:00"
 ```
 
 # DISPATCH — A65 · Cost monitoring & visibility: cost explorer + dashboards + budgets/alerts
@@ -247,3 +247,31 @@ the Cost tab; the closure’s “deliberately” wording documents the deviation
 the packet. **Resolution:** wire a bounded, best-effort budget-alert notification at the existing
 terminal-outcome notification seam, reusing `PushService` fanout/timeout/concurrency and adding a
 targeted regression test. The alert remains billable-USD-only and enforcement remains OFF.
+
+## Closure (2026-10-06 — P3 F1 remediation, Yuird/AI-team#5)
+
+**What changed:** `NotificationService.notify_task_outcome` (the terminal-outcome seam every
+completion path shares, including the A84 managed-completion consumer) now calls
+`_maybe_push_cost_alerts()` next to the existing outcome push. It never awaits anything inline:
+with any budget knob set and push available, it schedules a detached task that waits 5 s (so the
+finishing turn's telemetry is projected), runs `check_cost_alerts` through `asyncio.to_thread`, and
+pushes each
+newly crossed alert through `PushService.fanout` (same concurrency/timeout bounds) with deep link
+`/cost`. At most one check runs per 60 s; a completion inside that window (or during a running
+check) arms one trailing check for the window's end instead of being dropped (review F1 on PR #16).
+Dedupe is per (rule, scope, UTC day) and held in process: it resets at the UTC-day
+rollover, and a gateway restart can repeat an already-pushed alert at most once that day (accepted;
+no table, no migration). Unset/0/negative/garbage knobs, or push unavailable, mean no check and no
+push. Only the gateway process builds `TaskOrchestrator`/`NotificationService`; the standalone task
+server (`server_main.py`) does not, so pushes are not doubled.
+
+**Verification:** `.venv/bin/python -m pytest -q tests/test_cost_alert_push.py tests/test_cost_alerts.py
+tests/test_push_notifications.py` → 53 passed. Without the source change, 9 of the 16 new tests fail.
+
+**Scope held:** billable-USD only, no kill or enforcement path, enforcement flag still OFF, no quota
+coordinator wiring, no pricing or UI change, no Telegram delivery.
+
+**Operator remainder:** `pm2 restart ai-team-gateway` to make it live, then a real-device check:
+set a low `COST_ALERT_DAILY_BUDGET_USD` and confirm one "Budget alert" push after the next task
+completes.
+
