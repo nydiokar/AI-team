@@ -264,6 +264,11 @@ class CodexBackend(CodingBackend):
         # quiet or that app-server is gone (recycled when unresponsive).
         self._unanswered: dict[str, _Forgotten] = {}
         self._busy_reasons: dict[str, str] = {}  # [A82 pre-cutover, m2] last not-quiescent reason
+        # [#236] session key → thread id for a ``close`` that had to be deferred
+        # (a held/forgotten turn kept the thread loaded). The archive — which
+        # stops the thread's per-thread MCP children — is completed once the
+        # session is provably quiescent.
+        self._pending_close: dict[str, str] = {}
 
     def provision_sender_capability(self, session_id: str, token: str | None) -> bool:
         """[A82 Stage 5] Per-thread sender tool: the next attach of this
@@ -383,13 +388,38 @@ class CodexBackend(CodingBackend):
             # app-server, releasing the ownership fence early. Keep it loaded;
             # the hold / forgotten entry settles on native truth.
             if session.session_id in self._held or session.session_id in self._unanswered:
+                # [#236] The thread must stay loaded until the turn settles, but
+                # unsubscribe (the old behaviour) would never archive it — the
+                # MCP children would leak forever. Defer the archive to the next
+                # quiescent poll (:meth:`is_quiescent`).
+                if session.backend_session_id:
+                    self._pending_close[session.session_id] = session.backend_session_id
                 return
+        thread_id = session.backend_session_id
+        with self._lock:
+            self._pending_close.pop(session.session_id, None)
+        # [#236] A cleanly closed session archives its thread (stops the
+        # per-thread MCP servers) instead of merely unsubscribing.
+        self._archive_thread(thread_id)
+
+    def _archive_thread(self, thread_id: str | None) -> None:
+        """[#236] Natively unload ``thread_id`` (``thread/archive``) so its
+        per-thread MCP stdio children are stopped, not merely unsubscribed.
+        A no-op when the thread is not loaded on this carrier's app-server."""
+        if not thread_id:
+            return
         with self._runtime_lock:
-            thread_id = session.backend_session_id
             if self._client and thread_id in self._loaded:
-                self._client.unload(thread_id)
+                self._client.archive(thread_id)
                 self._loaded.pop(thread_id, None)
                 self._sender_attached.pop(thread_id, None)
+
+    def _complete_pending_close(self, key: str) -> None:
+        """[#236] Finish a deferred :meth:`close` once the session is quiescent:
+        archive the thread that a held/forgotten turn had kept loaded."""
+        with self._lock:
+            thread_id = self._pending_close.pop(key, None)
+        self._archive_thread(thread_id)
 
     def terminate_active_processes(self) -> None:
         """Compatibility spelling for the existing carrier shutdown hook."""
@@ -623,6 +653,10 @@ class CodexBackend(CodingBackend):
                 self._busy_reasons[key] = reason
             else:
                 self._busy_reasons.pop(key, None)
+        if not reason:
+            # [#236] Provably quiescent: a deferred close can now archive the
+            # thread it had to keep loaded, stopping its per-thread MCP children.
+            self._complete_pending_close(key)
         return not reason
 
     def quiescence_reason(self, session: Session) -> str | None:
@@ -844,6 +878,10 @@ class CodexBackend(CodingBackend):
             # clear this owner's no-TTL rows.
             client = self._runtime()
             identity = process_identity(client.process.pid)
+            # [#236] A new turn reactivates the session: cancel any deferred
+            # close so we never archive the thread we are about to reuse.
+            with self._lock:
+                self._pending_close.pop(key, None)
             if not self._settle_hold(key):
                 raise _NotSubmitted("codex_managed_turn_held")
             try:
@@ -868,6 +906,13 @@ class CodexBackend(CodingBackend):
             if native_id in self._loaded and self._sender_attached.get(native_id) != self._sender_tokens.get(key):
                 # [A82 Stage 5] The session's sender capability changed: re-attach
                 # (no turn is active for this key) so its tool config is current.
+                # [#236] KNOWN LEAK (deferred): ``unload`` here unsubscribes but
+                # keeps the thread loaded, so the previous sender/jobs MCP pair
+                # is orphaned while ``attach_thread`` below spawns a fresh pair.
+                # ``archive`` would stop them, but resume-after-archive and the
+                # thread/unarchive history side-effects are unverified against a
+                # live codex app-server (see issue #236 open questions) — do NOT
+                # swap it blindly on this active-session hot path.
                 client.unload(native_id)
                 self._loaded.pop(native_id, None)
             if native_id not in self._loaded:

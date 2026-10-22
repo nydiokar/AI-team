@@ -586,9 +586,13 @@ def test_S8_09d_codex_close_keeps_a_held_or_forgotten_thread_loaded_N_A(monkeypa
     class _Client:
         def __init__(self) -> None:
             self.unloaded: List[str] = []
+            self.archived: List[str] = []
 
         def unload(self, thread_id: str) -> None:
             self.unloaded.append(thread_id)
+
+        def archive(self, thread_id: str) -> None:
+            self.archived.append(thread_id)
 
     be = cn.CodexBackend()
     client = _Client()
@@ -599,10 +603,16 @@ def test_S8_09d_codex_close_keeps_a_held_or_forgotten_thread_loaded_N_A(monkeypa
         be._loaded["thr-1"] = "x"
         getattr(be, slot)["k1"] = object()
         be.close(s)
-        assert client.unloaded == [] and "thr-1" in be._loaded, slot
+        # [#236] A held/forgotten turn still keeps the thread loaded — but the
+        # close is now recorded as pending so the archive is NOT lost later.
+        assert client.unloaded == [] and client.archived == [] and "thr-1" in be._loaded, slot
+        assert be._pending_close.get("k1") == "thr-1", slot
         getattr(be, slot).pop("k1")
+        be._pending_close.pop("k1", None)
     be.close(s)
-    assert client.unloaded == ["thr-1"] and "thr-1" not in be._loaded
+    # [#236] A cleanly closed session archives the thread (stops its per-thread
+    # MCP children) instead of merely unsubscribing (which left them running).
+    assert client.archived == ["thr-1"] and client.unloaded == [] and "thr-1" not in be._loaded
 
 
 def test_S8_09e_close_of_a_never_run_session_leaves_no_teardown_row_N_B(tmp_path, monkeypatch):
