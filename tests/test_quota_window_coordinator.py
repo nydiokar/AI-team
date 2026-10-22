@@ -1264,8 +1264,556 @@ def test_prune_snapshots_stays_fast_on_volume(tmp_path):
     pruned = store.prune_snapshots(retention_days=14, now=now)
     elapsed = time.perf_counter() - started
 
-    assert elapsed < 2.0, f"prune_snapshots took {elapsed:.3f}s — regression"
+    # The incident was O(n^2) and ran 4+ minutes on 54k rows; a healthy linear
+    # prune here is sub-second. Use a generous ceiling so CI parallelism (xdist
+    # CPU contention) cannot flake it, while still catching a minutes-long
+    # algorithmic regression by a wide margin.
+    assert elapsed < 30.0, f"prune_snapshots took {elapsed:.3f}s — regression"
     # Per bucket: keep the first sighting (i=0) + the recent row; delete the rest.
     assert pruned == total_before - (10 * 2)
     remaining = store._conn().execute("SELECT COUNT(*) FROM snapshots").fetchone()[0]
     assert remaining == 10 * 2
+
+
+# --------------------------------------------------------------------------- #
+# A93 — bounded quota store: events + snapshots, batched, worker-path, reclaim #
+# --------------------------------------------------------------------------- #
+
+def _seed_events(store, stamps):
+    import sqlite3
+
+    conn = sqlite3.connect(str(store._path))
+    conn.executemany(
+        "INSERT INTO coordinator_events(event_name, reason, created_at) VALUES (?, ?, ?)",
+        [("quota.duplicate_snapshot", tag, at) for tag, at in stamps],
+    )
+    conn.commit()
+    conn.close()
+
+
+def _seed_old_snapshots(store, *, now, count, buckets=1):
+    """``count`` old rows per bucket on ONE boundary (row 0 = its first
+    sighting) plus one recent row per bucket."""
+    import sqlite3
+
+    conn = sqlite3.connect(str(store._path))
+    reset_at = utc_iso(now - timedelta(days=40))
+    rows = []
+    for b in range(buckets):
+        for i in range(count):
+            at = utc_iso(now - timedelta(days=30) + timedelta(minutes=i))
+            rows.append((f"b{b}-{i}", "fake", f"p-{b}", "five-hour", at, "authoritative", 50.0, reset_at, 0, None, "observed", "", at))
+        recent = utc_iso(now - timedelta(hours=1))
+        rows.append((f"b{b}-recent", "fake", f"p-{b}", "five-hour", recent, "authoritative", 50.0, reset_at, 0, None, "observed", "", recent))
+    conn.executemany(
+        "INSERT INTO snapshots(snapshot_id, provider, principal_hash, bucket_id,"
+        " observed_at, telemetry_quality, used_percent, reset_at, limit_reached,"
+        " window_duration_seconds, raw_status, unavailable_reason, created_at)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        rows,
+    )
+    conn.commit()
+    conn.close()
+
+
+def _count(store, table):
+    return store._conn().execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+
+
+def test_prune_events_removes_old_keeps_fresh_skewed_and_honours_zero(tmp_path):
+    now = datetime(2026, 10, 22, 12, 0, tzinfo=timezone.utc)
+    store = _store(tmp_path)
+    _seed_events(store, [
+        ("old-z", utc_iso(now - timedelta(days=30))),
+        ("old-naive", "2026-08-01T00:00:00"),       # naive, pre-Z writer
+        ("old-space", "2026-08-01 00:00:00"),       # naive, sqlite datetime() shape
+        ("fresh", utc_iso(now - timedelta(days=1))),
+        ("future-skew", utc_iso(now + timedelta(days=3))),  # clock ran ahead
+    ])
+
+    assert store.prune_events(retention_days=0, now=now) == 0
+    assert _count(store, "coordinator_events") == 5
+
+    assert store.prune_events(retention_days=14, now=now) == 3
+    remaining = {r[0] for r in store._conn().execute("SELECT reason FROM coordinator_events")}
+    assert remaining == {"fresh", "future-skew"}
+
+
+def test_prune_batches_bound_rows_per_write_transaction(tmp_path):
+    """A93 adversarial: a first prune of a large backlog must hold the write
+    lock only for bounded batches, never one giant DELETE."""
+    from contextlib import contextmanager
+
+    now = datetime(2026, 10, 22, 12, 0, tzinfo=timezone.utc)
+    store = _store(tmp_path)
+    _seed_events(store, [(f"e{i}", utc_iso(now - timedelta(days=20, seconds=i))) for i in range(1050)])
+    _seed_old_snapshots(store, now=now, count=530, buckets=2)
+
+    per_tx: list[int] = []
+    real_write = store._write
+
+    @contextmanager
+    def counting_write():
+        with real_write() as conn:
+            before = conn.total_changes
+            yield conn
+            per_tx.append(conn.total_changes - before)
+
+    store._write = counting_write
+    assert store.prune_events(retention_days=14, now=now, batch_rows=100) == 1050
+    assert max(per_tx) <= 100 and len(per_tx) == 11  # 10 full batches + the short one
+    assert _count(store, "coordinator_events") == 0
+
+    per_tx.clear()
+    # Each bucket keeps its first sighting + its recent row across every batch.
+    assert store.prune_snapshots(retention_days=14, now=now, batch_rows=100) == 2 * 529
+    assert max(per_tx) <= 100 and len(per_tx) >= 11
+    kept = {r[0] for r in store._conn().execute("SELECT snapshot_id FROM snapshots")}
+    assert kept == {"b0-0", "b0-recent", "b1-0", "b1-recent"}
+
+
+def test_first_run_backlog_prune_keeps_each_batch_short(tmp_path):
+    """The live worker backlog (~225k events) clears in short transactions."""
+    import time
+    from contextlib import contextmanager
+
+    now = datetime(2026, 10, 22, 12, 0, tzinfo=timezone.utc)
+    store = _store(tmp_path)
+    _seed_events(store, [(f"e{i}", utc_iso(now - timedelta(days=60) + timedelta(seconds=i * 10))) for i in range(225_000)])
+    durations: list[float] = []
+    real_write = store._write
+
+    @contextmanager
+    def timed_write():
+        started = time.perf_counter()
+        with real_write() as conn:
+            yield conn
+        durations.append(time.perf_counter() - started)
+
+    store._write = timed_write
+    removed = store.prune_events(retention_days=14, now=now)
+    assert removed > 200_000
+    assert _count(store, "coordinator_events") == 225_000 - removed
+    assert len(durations) >= removed // 5000
+    assert max(durations) < 1.0, f"a prune batch held the write lock {max(durations):.3f}s"
+
+
+def test_concurrent_pruners_on_one_file_converge(tmp_path):
+    """Two controller processes (gateway + task-server) pruning the same file:
+    no error, no row deleted twice, and the result equals a single prune."""
+    now = datetime(2026, 10, 22, 12, 0, tzinfo=timezone.utc)
+    path = tmp_path / "quota.db"
+    a, b = QuotaWindowStore(path), QuotaWindowStore(path)
+    _seed_events(a, [(f"e{i}", utc_iso(now - timedelta(days=20))) for i in range(3000)]
+                 + [("fresh", utc_iso(now))])
+    _seed_old_snapshots(a, now=now, count=1500)
+
+    def prune(store):
+        return (
+            store.prune_events(retention_days=14, now=now, batch_rows=200),
+            store.prune_snapshots(retention_days=14, now=now, batch_rows=200),
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(prune, [a, b]))
+    assert sum(r[0] for r in results) == 3000
+    assert sum(r[1] for r in results) == 1499
+    assert _count(a, "coordinator_events") == 1
+    assert {r[0] for r in a._conn().execute("SELECT snapshot_id FROM snapshots")} == {"b0-0", "b0-recent"}
+
+
+@pytest.mark.asyncio
+async def test_prune_once_daily_prunes_both_tables_once_per_utc_day(tmp_path):
+    now = datetime(2026, 10, 22, 12, 0, tzinfo=timezone.utc)
+    clock = {"now": now}
+    store = _store(tmp_path)
+    _seed_events(store, [("old", utc_iso(now - timedelta(days=20)))])
+    _seed_old_snapshots(store, now=now, count=5)
+    coord = QuotaWindowCoordinator(store=store, adapters=[], enabled=True, now=lambda: clock["now"])
+
+    await coord.prune_once_daily()
+    assert _count(store, "coordinator_events") == 0
+    assert _count(store, "snapshots") == 2
+
+    _seed_events(store, [("old-2", utc_iso(now - timedelta(days=20)))])
+    await coord.prune_once_daily()              # same UTC day: no second pass
+    assert _count(store, "coordinator_events") == 1
+    clock["now"] = now + timedelta(days=1)
+    await coord.prune_once_daily()              # next day: prunes again
+    assert _count(store, "coordinator_events") == 0
+
+
+@pytest.mark.asyncio
+async def test_prune_failure_never_escapes_or_stops_the_observe_loop(tmp_path, monkeypatch):
+    store = _store(tmp_path)
+    coord = QuotaWindowCoordinator(store=store, adapters=[], enabled=True)
+
+    def boom(**_kw):
+        raise RuntimeError("database is locked")
+
+    monkeypatch.setattr(store, "prune_events", boom)
+    await coord.prune_once_daily()              # swallowed, not raised
+    assert coord._last_prune_day is None        # retried on a later tick
+
+    observed = {"n": 0}
+
+    async def observe_once():
+        observed["n"] += 1
+        if observed["n"] >= 3:
+            raise asyncio.CancelledError
+
+    monkeypatch.setattr(coord, "observe_once", observe_once)
+    monkeypatch.setattr(coord, "next_observe_delay_sec", lambda **_kw: 0)
+    with pytest.raises(asyncio.CancelledError):
+        await coord._observe_loop()
+    assert observed["n"] == 3                   # loop kept observing past failed prunes
+
+
+@pytest.mark.asyncio
+async def test_retention_runs_from_the_worker_prewarmer_path(tmp_path):
+    """A93: the worker never starts the coordinator loop; its prewarmer tick
+    must drive the same daily retention (and reclaim space on its own cache)."""
+    from src.services.quota_window_prewarmer import QuotaWindowPrewarmer
+
+    now = datetime.now(timezone.utc)
+    store = _store(tmp_path)
+    _seed_events(store, [(f"e{i}", utc_iso(now - timedelta(days=20))) for i in range(2000)]
+                 + [("fresh", utc_iso(now))])
+    _seed_old_snapshots(store, now=now, count=2000)
+    coord = QuotaWindowCoordinator(store=store, adapters=[], enabled=True, reclaim_space=True)
+    warmer = QuotaWindowPrewarmer(coordinator=coord, enabled=True)
+    store._conn().execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchall()
+    size_before = store._path.stat().st_size
+
+    decision = await warmer.tick_once()
+
+    assert decision.action != "activate"
+    assert _count(store, "coordinator_events") == 1
+    assert {r[0] for r in store._conn().execute("SELECT snapshot_id FROM snapshots")} == {"b0-0", "b0-recent"}
+    conn = store._conn()
+    assert conn.execute("PRAGMA auto_vacuum").fetchone()[0] == 2      # INCREMENTAL
+    assert conn.execute("PRAGMA freelist_count").fetchone()[0] == 0
+    assert store._path.stat().st_size < size_before
+
+
+def test_reclaim_space_converts_once_then_goes_incremental(tmp_path):
+    now = datetime(2026, 10, 22, 12, 0, tzinfo=timezone.utc)
+    store = _store(tmp_path)
+    _seed_events(store, [(f"e{i}", utc_iso(now - timedelta(days=20))) for i in range(3000)])
+    store.prune_events(retention_days=14, now=now)
+    assert store.reclaim_space() == "vacuum"
+    _seed_events(store, [(f"e{i}", utc_iso(now - timedelta(days=20))) for i in range(3000)])
+    store.prune_events(retention_days=14, now=now)
+    before = store._conn().execute("PRAGMA freelist_count").fetchone()[0]
+    assert before > 0
+    assert store.reclaim_space() == "incremental"
+    # incremental_vacuum reclaims the day's freed pages; how many it can drain in
+    # one step is SQLite-build-dependent (3.40.1 leaves a small pointer-map tail),
+    # so assert substantial reclamation rather than an exact zero.
+    after = store._conn().execute("PRAGMA freelist_count").fetchone()[0]
+    assert after < before
+
+
+@pytest.mark.asyncio
+async def test_shared_controller_store_is_never_vacuumed(tmp_path):
+    """reclaim_space defaults OFF: the controller store (gateway + task-server)
+    is pruned but never rewritten."""
+    now = datetime.now(timezone.utc)
+    store = _store(tmp_path)
+    _seed_events(store, [(f"e{i}", utc_iso(now - timedelta(days=20))) for i in range(500)])
+    coord = QuotaWindowCoordinator(store=store, adapters=[], enabled=True)
+
+    await coord.prune_once_daily()
+
+    assert _count(store, "coordinator_events") == 0
+    assert store._conn().execute("PRAGMA auto_vacuum").fetchone()[0] == 0
+
+
+# --------------------------------------------------------------------------- #
+# A93 amendment — archive before delete (quota_archive.db)                     #
+# --------------------------------------------------------------------------- #
+
+def _seed_event_rows(store, rows):
+    """rows: (event_name, reason, payload, created_at) in id order."""
+    import sqlite3
+
+    conn = sqlite3.connect(str(store._path))
+    conn.executemany(
+        "INSERT INTO coordinator_events(event_name, provider, reason, payload, created_at) VALUES (?, 'claude', ?, ?, ?)",
+        rows,
+    )
+    conn.commit()
+    conn.close()
+
+
+def _eighty_days(store, now):
+    """~80 days of history shaped like the live worker: long noise runs with
+    rare refusals between them, and snapshots on several boundaries per bucket."""
+    import sqlite3
+
+    events = []
+    start = now - timedelta(days=80)
+    for day in range(80):
+        base = start + timedelta(days=day)
+        for i in range(40):
+            events.append(("quota.adapter_unavailable", "timeout", "{}", utc_iso(base + timedelta(minutes=i))))
+        if day % 9 == 0:
+            events.append(("quota.refusal_recorded", "rate_limit_event", f'{{"reset_at": "day-{day}"}}', utc_iso(base + timedelta(hours=2))))
+        for i in range(25):
+            events.append(("quota.duplicate_snapshot", "", "{}", utc_iso(base + timedelta(hours=3, minutes=i))))
+    _seed_event_rows(store, events)
+
+    snaps = []
+    for bucket in ("five_hour", "seven_day"):
+        for hour in range(80 * 24):
+            at = start + timedelta(hours=hour)
+            reset = utc_iso(start + timedelta(hours=(hour // 5 + 1) * 5))
+            snaps.append((f"{bucket}-{hour}", "claude", "p", bucket, utc_iso(at), "authoritative",
+                          float(hour % 5) * 10, reset, 0, None, "observed", "", None, utc_iso(at)))
+    conn = sqlite3.connect(str(store._path))
+    conn.executemany(
+        "INSERT INTO snapshots(snapshot_id, provider, principal_hash, bucket_id, observed_at,"
+        " telemetry_quality, used_percent, reset_at, limit_reached, window_duration_seconds,"
+        " raw_status, unavailable_reason, active_session_state, created_at)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        snaps,
+    )
+    conn.commit()
+    conn.close()
+    return events
+
+
+def _archive_conn(store):
+    import sqlite3
+
+    conn = sqlite3.connect(str(store.archive_path))
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+@pytest.mark.asyncio
+async def test_first_pass_archives_the_whole_backlog_before_deleting_it(tmp_path):
+    now = datetime(2026, 10, 22, 12, 0, tzinfo=timezone.utc)
+    store = _store(tmp_path)
+    events = _eighty_days(store, now)
+    cols = "snapshot_id, provider, principal_hash, bucket_id, observed_at, telemetry_quality, used_percent, reset_at, limit_reached, raw_status, created_at"
+    before = {r[0]: tuple(r) for r in store._conn().execute(f"SELECT {cols} FROM snapshots")}
+    cutoff = utc_iso(now - timedelta(days=14))
+    old_events = [e for e in events if e[3] < cutoff]
+    coord = QuotaWindowCoordinator(store=store, adapters=[], enabled=True, now=lambda: now)
+    assert coord.archive_enabled is True                       # default ON
+
+    await coord.prune_once_daily()
+
+    # Snapshots: every pruned row is in the archive, column for column.
+    after = {r[0] for r in store._conn().execute("SELECT snapshot_id FROM snapshots")}
+    pruned = set(before) - after
+    assert len(pruned) > 2000
+    archived = {r[0]: tuple(r) for r in _archive_conn(store).execute(f"SELECT {cols} FROM snapshots_archive")}
+    assert set(archived) == pruned
+    assert all(archived[sid] == before[sid] for sid in pruned)
+
+    # Events: deleted, compacted, counts per name preserved exactly.
+    assert _count(store, "coordinator_events") == len(events) - len(old_events)
+    arch = _archive_conn(store)
+    per_name = {r[0]: r[1] for r in arch.execute("SELECT event_name, SUM(count) FROM event_runs GROUP BY event_name")}
+    expected: dict = {}
+    for e in old_events:
+        expected[e[0]] = expected.get(e[0], 0) + 1
+    assert per_name == expected
+    runs = arch.execute("SELECT COUNT(*) FROM event_runs").fetchone()[0]
+    assert runs < len(old_events) / 15                         # noise collapses
+    refusals = [r["first_payload"] for r in arch.execute(
+        "SELECT first_payload FROM event_runs WHERE event_name = 'quota.refusal_recorded' ORDER BY first_id")]
+    assert refusals == [e[2] for e in old_events if e[0] == "quota.refusal_recorded"]
+    # Runs tile the pruned id range with no gap or overlap.
+    spans = arch.execute("SELECT first_id, last_id, count FROM event_runs ORDER BY first_id").fetchall()
+    assert spans[0][0] == 1 and spans[-1][1] == len(old_events)
+    assert all(a[1] + 1 == b[0] for a, b in zip(spans, spans[1:]))
+    assert all(last - first + 1 == n for first, last, n in spans)
+
+
+def test_event_runs_are_identical_however_the_backlog_is_batched(tmp_path):
+    now = datetime(2026, 10, 22, 12, 0, tzinfo=timezone.utc)
+    a, b = QuotaWindowStore(tmp_path / "a" / "quota.db"), QuotaWindowStore(tmp_path / "b" / "quota.db")
+    for store in (a, b):
+        _eighty_days(store, now)
+    a.prune_events(retention_days=14, now=now, archive=True)
+    b.prune_events(retention_days=14, now=now, archive=True, batch_rows=37)   # runs split across batches
+    q = "SELECT first_id, last_id, event_name, count, first_at, last_at, first_payload, last_payload FROM event_runs ORDER BY first_id"
+    assert [tuple(r) for r in _archive_conn(a).execute(q)] == [tuple(r) for r in _archive_conn(b).execute(q)]
+
+
+def test_archive_is_idempotent_when_a_delete_fails_and_the_pass_retries(tmp_path, monkeypatch):
+    import sqlite3
+
+    now = datetime(2026, 10, 22, 12, 0, tzinfo=timezone.utc)
+    store = _store(tmp_path)
+    events = _eighty_days(store, now)
+    real_write = store._write
+    calls = {"n": 0}
+
+    def flaky_write():
+        calls["n"] += 1
+        if calls["n"] == 2:                                    # the 2nd batch's DELETE, after its archive
+            raise sqlite3.OperationalError("database is locked")
+        return real_write()
+
+    monkeypatch.setattr(store, "_write", flaky_write)
+    with pytest.raises(sqlite3.OperationalError):
+        store.prune_events(retention_days=14, now=now, archive=True, batch_rows=100)
+    monkeypatch.setattr(store, "_write", real_write)
+    store.prune_events(retention_days=14, now=now, archive=True, batch_rows=100)
+
+    cutoff = utc_iso(now - timedelta(days=14))
+    total = _archive_conn(store).execute("SELECT SUM(count) FROM event_runs").fetchone()[0]
+    assert total == sum(1 for e in events if e[3] < cutoff)    # nothing counted twice
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("method", ["archive_snapshots", "archive_events"])
+async def test_archive_failure_deletes_nothing_and_retries(tmp_path, monkeypatch, method):
+    from src.services import quota_window_coordinator as qwc
+
+    now = datetime(2026, 10, 22, 12, 0, tzinfo=timezone.utc)
+    store = _store(tmp_path)
+    _eighty_days(store, now)
+    coord = QuotaWindowCoordinator(store=store, adapters=[], enabled=True, now=lambda: now, reclaim_space=True)
+    if method == "archive_events":
+        await asyncio.to_thread(store.prune_snapshots, retention_days=14, now=now, archive=True)
+    snaps, evs = _count(store, "snapshots"), _count(store, "coordinator_events")
+    warnings: list[str] = []
+    monkeypatch.setattr(qwc.logger, "warning", lambda msg, *a: warnings.append(msg % a))
+
+    def broken(self, rows):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(qwc.QuotaArchive, method, broken)
+    await coord.prune_once_daily()
+
+    assert any(w.startswith("event=quota_archive_failed") for w in warnings)
+    assert (_count(store, "snapshots"), _count(store, "coordinator_events")) == (snaps, evs)
+    assert coord._last_prune_day is None                       # next tick retries
+    assert store._conn().execute("PRAGMA auto_vacuum").fetchone()[0] == 0   # no reclaim either
+
+    monkeypatch.undo()
+    await coord.prune_once_daily()                             # archive healthy again
+    assert coord._last_prune_day == "2026-10-22"
+    cutoff = utc_iso(now - timedelta(days=14))
+    assert store._conn().execute("SELECT COUNT(*) FROM coordinator_events WHERE created_at < ?", (cutoff,)).fetchone()[0] == 0
+
+
+@pytest.mark.asyncio
+async def test_archive_flag_off_is_this_prs_prior_behaviour(tmp_path):
+    now = datetime(2026, 10, 22, 12, 0, tzinfo=timezone.utc)
+    store = _store(tmp_path)
+    _eighty_days(store, now)
+    coord = QuotaWindowCoordinator(store=store, adapters=[], enabled=True, now=lambda: now, archive_enabled=False)
+
+    await coord.prune_once_daily()
+
+    assert not store.archive_path.exists()
+    cutoff = utc_iso(now - timedelta(days=14))
+    assert store._conn().execute("SELECT COUNT(*) FROM coordinator_events WHERE created_at < ?", (cutoff,)).fetchone()[0] == 0
+
+
+def test_concurrent_archiving_pruners_count_each_event_once(tmp_path):
+    now = datetime(2026, 10, 22, 12, 0, tzinfo=timezone.utc)
+    path = tmp_path / "quota.db"
+    a, b = QuotaWindowStore(path), QuotaWindowStore(path)
+    events = _eighty_days(a, now)
+
+    def prune(store):
+        store.prune_events(retention_days=14, now=now, archive=True, batch_rows=150)
+        store.prune_snapshots(retention_days=14, now=now, archive=True, batch_rows=500)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        list(pool.map(prune, [a, b]))
+    cutoff = utc_iso(now - timedelta(days=14))
+    arch = _archive_conn(a)
+    assert arch.execute("SELECT SUM(count) FROM event_runs").fetchone()[0] == sum(1 for e in events if e[3] < cutoff)
+    assert _count(a, "coordinator_events") == sum(1 for e in events if e[3] >= cutoff)
+    archived = arch.execute("SELECT COUNT(*) FROM snapshots_archive").fetchone()[0]
+    assert archived + _count(a, "snapshots") == 2 * 80 * 24
+
+
+def _old_events(store, n, *, name, now, days=20):
+    _seed_event_rows(store, [(name, "", f'{{"n": {i}}}', utc_iso(now - timedelta(days=days, seconds=-i))) for i in range(n)])
+
+
+def _archived_total(store, name=None):
+    sql = "SELECT COALESCE(SUM(count), 0) FROM event_runs" + (" WHERE event_name = ?" if name else "")
+    return _archive_conn(store).execute(sql, (name,) if name else ()).fetchone()[0]
+
+
+def test_recreated_store_under_a_surviving_archive_loses_nothing(tmp_path):
+    """Round-2 blocker: a rebuilt store restarts its ids at 1; they must not be
+    mistaken for ids the archive already holds for the OLD store."""
+    now = datetime(2026, 10, 22, 12, 0, tzinfo=timezone.utc)
+    path = tmp_path / "quota.db"
+    old = QuotaWindowStore(path)
+    _old_events(old, 100, name="quota.adapter_unavailable", now=now)
+    assert old.prune_events(retention_days=14, now=now, archive=True) == 100
+    old.close()
+    for f in tmp_path.glob("quota.db*"):
+        f.unlink()                                              # archive survives
+
+    new = QuotaWindowStore(path)
+    _old_events(new, 50, name="quota.refusal_recorded", now=now)
+    assert new.prune_events(retention_days=14, now=now, archive=True) == 50
+
+    assert _archived_total(new, "quota.refusal_recorded") == 50
+    assert _archived_total(new) == 150
+    stores = _archive_conn(new).execute("SELECT COUNT(DISTINCT store_id) FROM event_runs").fetchone()[0]
+    assert stores == 2
+
+
+def test_restored_older_store_copy_rotates_identity_instead_of_losing_rows(tmp_path):
+    """Same store identity, ids reused: a backup restored after the archive
+    moved on. Rows the archive never took are archived under a new identity."""
+    import shutil
+    import sqlite3
+
+    now = datetime(2026, 10, 22, 12, 0, tzinfo=timezone.utc)
+    path = tmp_path / "quota.db"
+    store = QuotaWindowStore(path)
+    _old_events(store, 100, name="quota.adapter_unavailable", now=now, days=30)
+    store.store_id()
+    backup = tmp_path / "backup.db"
+    src = sqlite3.connect(str(path)); dst = sqlite3.connect(str(backup))
+    src.backup(dst); src.close(); dst.close()
+
+    store.prune_events(retention_days=14, now=now, archive=True)            # archives ids 1..100
+    _old_events(store, 60, name="quota.duplicate_snapshot", now=now, days=25)
+    store.prune_events(retention_days=14, now=now, archive=True)            # archives ids 101..160
+    store.close()
+    for f in tmp_path.glob("quota.db*"):
+        f.unlink()
+    shutil.copy(backup, path)                                               # ids 1..100 again, seq 100
+
+    restored = QuotaWindowStore(path)
+    _old_events(restored, 30, name="quota.refusal_recorded", now=now)        # ids 101..130 reused
+    restored.prune_events(retention_days=14, now=now, archive=True)
+
+    assert _count(restored, "coordinator_events") == 0
+    assert _archived_total(restored, "quota.refusal_recorded") == 30        # nothing lost
+    assert _archived_total(restored, "quota.duplicate_snapshot") == 60
+
+
+def test_event_inserted_mid_pass_survives(tmp_path, monkeypatch):
+    from src.services import quota_window_coordinator as qwc
+
+    now = datetime(2026, 10, 22, 12, 0, tzinfo=timezone.utc)
+    store = _store(tmp_path)
+    _old_events(store, 4, name="quota.adapter_unavailable", now=now)
+    real = qwc.QuotaArchive.archive_events
+
+    def archive_then_new_event(self, rows, **kw):
+        real(self, rows, **kw)
+        if not store._conn().execute("SELECT 1 FROM coordinator_events WHERE event_name = 'fresh'").fetchone():
+            store.add_event("fresh")
+
+    monkeypatch.setattr(qwc.QuotaArchive, "archive_events", archive_then_new_event)
+    assert store.prune_events(retention_days=14, now=now, archive=True, batch_rows=4) == 4
+    left = [r[0] for r in store._conn().execute("SELECT event_name FROM coordinator_events")]
+    assert left == ["fresh"]

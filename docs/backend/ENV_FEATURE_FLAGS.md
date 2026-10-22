@@ -140,6 +140,8 @@ them.
 | `QUOTA_PREWARM_DELAY_AFTER_RESET_SEC` | ✅ YES | 120 | How long after a window's `reset_at` to re-check and open the next one. | `config/settings.py`, `quota_window_prewarmer.py` |
 | `QUOTA_PREWARM_MAX_ACTIVATION_PERCENT` | ✅ YES | 2.0 | Spec §13 cost gate: max `used_percent` the activation itself may consume, measured as the provider's own delta across it. Two breaches open the circuit. | `config/settings.py`, `quota_window_prewarmer.py` |
 | `QUOTA_SNAPSHOT_RETENTION_DAYS` | ✅ YES | 14 | Bounded history (A78 §4): redundant confirmation snapshots older than this are pruned daily; the FIRST sighting of each window boundary is always kept (it is the anchored-window evidence). `0` disables pruning (keep everything forever). | `config/settings.py`, `quota_window_coordinator.py` |
+| `QUOTA_EVENT_RETENTION_DAYS` | ✅ YES | 14 | Bounded `coordinator_events` (A93): diagnostic events older than this are pruned in the same daily pass as snapshots, on the controller and the worker. Nothing in code reads the table back. `0` disables event pruning. | `config/settings.py`, `quota_window_coordinator.py` |
+| `QUOTA_ARCHIVE_ENABLED` | ✅ YES | `true` | A93 history archive: before each retention batch is deleted, it is copied to `quota_archive.db` next to `QUOTA_DB_PATH` (snapshots at full fidelity; events compacted into `event_runs`). If archiving fails, nothing is deleted and the pass retries. The archive is never pruned. `false` = prune without archiving. | `config/settings.py`, `quota_window_coordinator.py` |
 
 **Spec conformance.** The full record — what was built, what diverges, and why — lives in
 `docs/SESSION_WINDOW_WARMING_SPEC.md` §19 (that document owns this design). The headline divergence:
