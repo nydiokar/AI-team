@@ -37,6 +37,9 @@ const WorkDetailScreen = lazy(() =>
 const CostScreen = lazy(() =>
   import("./screens/CostScreen").then((m) => ({ default: m.CostScreen })),
 );
+const ApprovalsScreen = lazy(() =>
+  import("./screens/ApprovalsScreen").then((m) => ({ default: m.ApprovalsScreen })),
+);
 
 function ScreenFallback() {
   return (
@@ -82,6 +85,7 @@ export function App() {
           {/* Full-screen detail — outside the bottom-nav shell. */}
           <Route path="/sessions/:id" element={<SessionDetailScreen />} />
           <Route path="/work/:id" element={<WorkDetailScreen />} />
+          <Route path="/approvals" element={<ApprovalsScreen />} />
 
           {/* Root tabs — inside the shell. */}
           <Route

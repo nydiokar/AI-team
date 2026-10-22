@@ -1,8 +1,10 @@
 // @vitest-environment jsdom
 /**
- * HomeScreen smoke tests: brand + quick actions always render; nodes render
- * with their health; usage degrades honestly (no fake 0%); the attention glance
- * flips between "healthy" and a real actionable list.
+ * HomeScreen smoke tests for the redesigned landing view: accounts/usage is the
+ * hero (terminal meters, honest unknown), attention is a compact approvals pill
+ * that links to the real /approvals decisions view (NOT the Work tab), nodes
+ * show ONLINE only with offline folded to a count, and there are no duplicate
+ * tab-shortcut buttons.
  */
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
@@ -15,6 +17,7 @@ const hooks = vi.hoisted(() => ({
   quota: { data: undefined as unknown },
   sessions: { data: [] as unknown[] },
   approvals: { data: [] as unknown[] },
+  cost: { data: undefined as unknown },
 }));
 
 vi.mock("../hooks/useLiveData", () => ({
@@ -22,6 +25,10 @@ vi.mock("../hooks/useLiveData", () => ({
   useQuotaWindows: () => hooks.quota,
   useSessions: () => hooks.sessions,
   useApprovals: () => hooks.approvals,
+}));
+vi.mock("../hooks/useCost", () => ({ useCostExplorer: () => hooks.cost }));
+vi.mock("../components/sessions/NewSessionSheet", () => ({
+  NewSessionSheet: () => createElement("div", null, "new-session-sheet"),
 }));
 
 import { HomeScreen } from "./HomeScreen";
@@ -44,6 +51,7 @@ afterEach(() => {
   hooks.quota = { data: undefined };
   hooks.sessions = { data: [] };
   hooks.approvals = { data: [] };
+  hooks.cost = { data: undefined };
 });
 
 function render() {
@@ -65,56 +73,61 @@ const node = (id: string, health: string) => ({
   activeTasks: [],
 });
 
-it("always shows the brand and a New session quick action", () => {
+const quotaWith = (fiveH: number | null, sevenD: number | null) => ({
+  enabled: true,
+  mode: "observe_only",
+  adapters: [],
+  buckets: [
+    { bucket_id: "b5h", window_duration_seconds: 18000, provider: "claude", principal_hash: "x", bucket_name: "", window_semantics: "", telemetry_quality: "", first_seen_at: "", last_seen_at: "" },
+    { bucket_id: "b7d", window_duration_seconds: 604800, provider: "claude", principal_hash: "x", bucket_name: "", window_semantics: "", telemetry_quality: "", first_seen_at: "", last_seen_at: "" },
+  ],
+  latest_snapshots: [],
+  window_states: [
+    { provider: "claude", principal_hash: "x", bucket_id: "b5h", telemetry_state: "ok", telemetry_quality: "", window_semantics: "", classification_status: "", used_percent: fiveH, observed_at: null, window_start_at: null, window_start_inferred_at: null, window_start_source: "", window_end_at: null, active_session_state: "false", window_known: true, automation_ready: false, blockers: [], observed_reset_count: 0, current_reset_observed_since: null, last_reset_change_at: null, reset_boundary_evidence: [] },
+    { provider: "claude", principal_hash: "x", bucket_id: "b7d", telemetry_state: sevenD == null ? "unavailable" : "ok", telemetry_quality: "", window_semantics: "", classification_status: "", used_percent: sevenD, observed_at: null, window_start_at: null, window_start_inferred_at: null, window_start_source: "", window_end_at: null, active_session_state: "false", window_known: true, automation_ready: false, blockers: [], observed_reset_count: 0, current_reset_observed_since: null, last_reset_change_at: null, reset_boundary_evidence: [] },
+  ],
+});
+
+it("always shows the brand and a New action, and no tab-shortcut buttons", () => {
   render();
   expect(container.textContent).toContain("AI-Team");
-  expect(container.textContent).toContain("New session");
+  expect(container.textContent).toContain("New");
+  // The dead shortcut buttons from the first version are gone.
+  expect(container.textContent).not.toContain("Dispatch work");
+  expect(container.textContent).not.toContain("Everything healthy");
 });
 
-it("shows a calm healthy glance when nothing needs the operator", () => {
-  hooks.targets = { data: [node("kanebra-worker", "online")], isLoading: false, isError: false };
+it("renders accounts/usage meters and an honest n/a when unknown", () => {
+  hooks.quota = { data: quotaWith(31, null) };
   render();
-  expect(container.textContent).toContain("Everything healthy");
-  expect(container.textContent).toContain("kanebra-worker");
-  expect(container.textContent).toContain("Online");
+  expect(container.textContent).toContain("claude");
+  expect(container.textContent).toContain("31%");
+  expect(container.textContent).toContain("n/a"); // 7d unknown — never a fake 0%
 });
 
-it("surfaces an actionable attention list and counts offline nodes", () => {
-  hooks.targets = { data: [node("horse", "offline")], isLoading: false, isError: false };
+it("flags a near-limit window", () => {
+  hooks.quota = { data: quotaWith(31, 81) };
+  render();
+  expect(container.textContent).toContain("81%!");
+});
+
+it("approvals pill links to the real /approvals decisions view, not Work", () => {
   hooks.approvals = { data: [{ id: "a1" }, { id: "a2" }] };
-  hooks.sessions = { data: [{ id: "s1", needsAttention: true }] };
   render();
-  expect(container.textContent).toContain("Needs attention");
-  expect(container.textContent).toContain("2 approvals waiting");
-  expect(container.textContent).toContain("1 session need"); // singular-ish copy
-  expect(container.textContent).toContain("1 node offline");
+  const link = container.querySelector('a[href="/approvals"]');
+  expect(link).not.toBeNull();
+  expect(link?.textContent).toContain("2");
+  expect(container.querySelector('a[href="/work"]')).toBeNull();
 });
 
-it("renders usage meters and never fabricates a 0% when unknown", () => {
-  hooks.quota = {
-    data: {
-      enabled: true,
-      mode: "observe_only",
-      adapters: [],
-      buckets: [
-        { bucket_id: "b5h", window_duration_seconds: 18000, provider: "claude", principal_hash: "x", bucket_name: "", window_semantics: "", telemetry_quality: "", first_seen_at: "", last_seen_at: "" },
-        { bucket_id: "b7d", window_duration_seconds: 604800, provider: "claude", principal_hash: "x", bucket_name: "", window_semantics: "", telemetry_quality: "", first_seen_at: "", last_seen_at: "" },
-      ],
-      latest_snapshots: [],
-      window_states: [
-        { provider: "claude", principal_hash: "x", bucket_id: "b5h", telemetry_state: "ok", telemetry_quality: "", window_semantics: "", classification_status: "", used_percent: 90, observed_at: null, window_start_at: null, window_start_inferred_at: null, window_start_source: "", window_end_at: null, active_session_state: "false", window_known: true, automation_ready: false, blockers: [], observed_reset_count: 0, current_reset_observed_since: null, last_reset_change_at: null, reset_boundary_evidence: [] },
-        { provider: "claude", principal_hash: "x", bucket_id: "b7d", telemetry_state: "unavailable", telemetry_quality: "", window_semantics: "", classification_status: "", used_percent: null, observed_at: null, window_start_at: null, window_start_inferred_at: null, window_start_source: "", window_end_at: null, active_session_state: "false", window_known: true, automation_ready: false, blockers: [], observed_reset_count: 0, current_reset_observed_since: null, last_reset_change_at: null, reset_boundary_evidence: [] },
-      ],
-    },
+it("shows only online nodes and folds offline into a count", () => {
+  hooks.targets = {
+    data: [node("kanebra", "online"), node("horse-canary", "offline"), node("lp-1", "offline")],
+    isLoading: false,
+    isError: false,
   };
   render();
-  expect(container.textContent).toContain("90%");
-  expect(container.textContent).toContain("near"); // near-limit cue, not colour-only
-  expect(container.textContent).toContain("unknown"); // 7d honest unknown, not "0%"
-});
-
-it("says usage is off when the quota adapter is disabled", () => {
-  hooks.quota = { data: { enabled: false, mode: "observe_only", adapters: [], buckets: [], latest_snapshots: [], window_states: [] } };
-  render();
-  expect(container.textContent).toContain("Usage telemetry is off");
+  expect(container.textContent).toContain("kanebra");
+  expect(container.textContent).not.toContain("horse-canary");
+  expect(container.textContent).toContain("2 offline");
 });
