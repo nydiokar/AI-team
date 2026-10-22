@@ -31,7 +31,7 @@ await shoot("home-desktop", { width: 1280, height: 900 });
   const page = await ctx.newPage();
   await page.goto(`${BASE}/#token=${TOKEN}`, { waitUntil: "domcontentloaded" });
   await page.goto(`${BASE}/home`, { waitUntil: "domcontentloaded" });
-  await page.waitForSelector("text=Accounts & usage", { timeout: 15000 });
+  await page.waitForSelector("text=accounts · usage", { timeout: 15000 });
   await page.waitForTimeout(1500);
   await page.evaluate(() => {
     const main = document.querySelector("main");
