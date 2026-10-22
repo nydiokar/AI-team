@@ -1176,6 +1176,35 @@ def test_prune_keeps_first_sightings_recent_rows_and_honours_zero(tmp_path):
     assert total_before == total_after
 
 
+def test_prune_treats_jittered_reset_at_as_one_boundary(tmp_path):
+    """The provider reports reset_at with sub-second drift (live: 11:19:59.6 ..
+    11:20:00.5 for one window). Retention must cluster within _BOUNDARY_JITTER
+    like the evidence reader does — exact-string anchors kept ~98% of old rows
+    on the live controller — while boundaries farther apart stay distinct."""
+    now = datetime(2026, 10, 22, 12, 0, tzinfo=timezone.utc)
+    old = now - timedelta(days=30)
+    store = _store(tmp_path)
+    boundary_a = datetime(2026, 9, 22, 11, 20, tzinfo=timezone.utc)
+    boundary_b = boundary_a + timedelta(seconds=3)   # > jitter: a different window
+    drifts = (0.106364, -0.373754, 0.375913, -0.169618, 0.48447, -0.405295)
+
+    def snap(i, reset, tag):
+        return QuotaSnapshot(
+            provider="fake", bucket_id="five-hour", principal_hash="fake-principal",
+            observed_at=old + timedelta(minutes=2 * i), telemetry_quality=TelemetryQuality.AUTHORITATIVE,
+            used_percent=10.0 + i, reset_at=reset, limit_reached=False, raw_status=tag,
+        )
+
+    for i, d in enumerate(drifts):
+        store.insert_snapshot(snap(i, boundary_a + timedelta(seconds=d), f"a{i}"))
+    for i, d in enumerate(drifts[:3]):
+        store.insert_snapshot(snap(10 + i, boundary_b + timedelta(seconds=d), f"b{i}"))
+
+    assert store.prune_snapshots(retention_days=14, now=now) == 7
+    remaining = {row["raw_status"] for row in store._conn().execute("SELECT raw_status FROM snapshots")}
+    assert remaining == {"a0", "b0"}
+
+
 def test_latest_snapshots_stays_indexed_on_volume(tmp_path):
     """A78 §5 regression guard: the bounded read stays fast and index-backed on
     a seeded-volume store; the correlated-subquery disaster cannot return."""
@@ -1507,11 +1536,9 @@ def test_reclaim_space_converts_once_then_goes_incremental(tmp_path):
     before = store._conn().execute("PRAGMA freelist_count").fetchone()[0]
     assert before > 0
     assert store.reclaim_space() == "incremental"
-    # incremental_vacuum reclaims the day's freed pages; how many it can drain in
-    # one step is SQLite-build-dependent (3.40.1 leaves a small pointer-map tail),
-    # so assert substantial reclamation rather than an exact zero.
-    after = store._conn().execute("PRAGMA freelist_count").fetchone()[0]
-    assert after < before
+    # Every freed page is returned. (Stepping the pragma via execute().fetchall()
+    # freed ONE page per call on py3.11/SQLite 3.40.1; `after < before` hid that.)
+    assert store._conn().execute("PRAGMA freelist_count").fetchone()[0] == 0
 
 
 @pytest.mark.asyncio
@@ -1817,3 +1844,22 @@ def test_event_inserted_mid_pass_survives(tmp_path, monkeypatch):
     assert store.prune_events(retention_days=14, now=now, archive=True, batch_rows=4) == 4
     left = [r[0] for r in store._conn().execute("SELECT event_name FROM coordinator_events")]
     assert left == ["fresh"]
+
+
+def test_singleton_event_run_stores_its_payload_once(tmp_path):
+    """Live events interleave, so ~95-99% of runs are singletons; storing the
+    payload as both first and last doubled the archive. A singleton keeps it in
+    first_payload only; a run that grows (even across passes) gets last_payload."""
+    now = datetime(2026, 10, 22, 12, 0, tzinfo=timezone.utc)
+    store = _store(tmp_path)
+    old = now - timedelta(days=30)
+    for i, (name, payload) in enumerate([("quota.a", '{"n": 1}'), ("quota.b", '{"n": 2}'), ("quota.b", '{"n": 3}')]):
+        store._conn().execute(
+            "INSERT INTO coordinator_events(event_name, reason, payload, created_at) VALUES (?, '', ?, ?)",
+            (name, payload, utc_iso(old + timedelta(minutes=i))),
+        )
+    store._conn().commit()
+    store.prune_events(retention_days=14, now=now, archive=True, batch_rows=2)   # run b spans two batches
+    rows = [tuple(r) for r in _archive_conn(store).execute(
+        "SELECT event_name, count, first_payload, last_payload FROM event_runs ORDER BY first_id")]
+    assert rows == [("quota.a", 1, '{"n": 1}', ""), ("quota.b", 2, '{"n": 2}', '{"n": 3}')]

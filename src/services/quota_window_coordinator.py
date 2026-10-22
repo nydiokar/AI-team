@@ -349,16 +349,46 @@ CREATE TABLE IF NOT EXISTS coordinator_events (
 #: re-scanned each row's whole bucket per candidate (near-quadratic on this
 #: table). Deleting non-anchor rows never changes which row is an anchor, so
 #: recomputing it per batch is safe. Params: (cutoff, batch_rows).
-_PRUNABLE_SNAPSHOT_IDS_SQL = """
+#: A boundary is a cluster of ``reset_at`` instants within ``_BOUNDARY_JITTER``
+#: of the previous one (sorted per bucket) — the same clustering the evidence
+#: reader uses; the provider drifts sub-second, so exact strings made nearly
+#: every row its own "boundary" and nothing old was ever pruned. NULL
+#: ``reset_at`` rows form one boundary per bucket, as before.
+_PRUNABLE_SNAPSHOT_IDS_SQL = f"""
     SELECT snapshot_id FROM snapshots WHERE observed_at < ?
       AND snapshot_id NOT IN (
         SELECT snapshot_id FROM (
           SELECT snapshot_id,
                  ROW_NUMBER() OVER (
-                   PARTITION BY provider, principal_hash, bucket_id, reset_at
+                   PARTITION BY provider, principal_hash, bucket_id, boundary
                    ORDER BY observed_at ASC, created_at ASC
                  ) AS rn
-          FROM snapshots
+          FROM (
+            SELECT snapshot_id, provider, principal_hash, bucket_id, observed_at, created_at,
+                   SUM(starts_boundary) OVER (
+                     PARTITION BY provider, principal_hash, bucket_id
+                     ORDER BY reset_ts, observed_at, created_at
+                     ROWS UNBOUNDED PRECEDING
+                   ) AS boundary
+            FROM (
+              SELECT *, CASE
+                  WHEN prev_ts = -1 THEN 1
+                  WHEN reset_ts IS NULL THEN 0
+                  WHEN prev_ts IS NULL THEN 1
+                  WHEN (reset_ts - prev_ts) * 86400.0 > {_BOUNDARY_JITTER.total_seconds()} THEN 1
+                  ELSE 0
+                END AS starts_boundary
+              FROM (
+                SELECT snapshot_id, provider, principal_hash, bucket_id, observed_at, created_at,
+                       julianday(reset_at) AS reset_ts,
+                       LAG(julianday(reset_at), 1, -1) OVER (
+                         PARTITION BY provider, principal_hash, bucket_id
+                         ORDER BY julianday(reset_at), observed_at, created_at
+                       ) AS prev_ts
+                FROM snapshots
+              )
+            )
+          )
         )
         WHERE rn = 1
       )
@@ -546,7 +576,9 @@ class QuotaArchive:
                         " last_payload) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                         (store_id, run["first_id"], run["last_id"], run["event_name"], run["provider"],
                          run["principal_hash"], run["bucket_id"], run["reason"], run["first_at"],
-                         run["last_at"], run["count"], run["first_payload"], run["last_payload"]),
+                         run["last_at"], run["count"], run["first_payload"],
+                         # A singleton's payload lives in first_payload only.
+                         run["last_payload"] if int(run["count"]) > 1 else ""),
                     )
                 else:
                     conn.execute(
@@ -970,8 +1002,9 @@ class QuotaWindowStore:
                 conn.execute("VACUUM")
                 mode = "vacuum"
             else:
-                # fetchall(): the pragma frees one page per step.
-                conn.execute("PRAGMA incremental_vacuum").fetchall()
+                # The pragma frees one page per step; executescript (sqlite3_exec)
+                # steps it to completion — execute().fetchall() freed ONE page.
+                conn.executescript("PRAGMA incremental_vacuum;")
                 mode = "incremental"
             conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchall()
         return mode
