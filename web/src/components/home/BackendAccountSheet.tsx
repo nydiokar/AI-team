@@ -9,7 +9,7 @@ export type AccountBackend = "claude" | "codex";
 export function safeAuthUrl(value: string, backend: AccountBackend): boolean {
   try {
     const url = new URL(value);
-    const hosts = backend === "claude" ? ["claude.ai", "console.anthropic.com", "platform.claude.com"] : ["auth.openai.com"];
+    const hosts = backend === "claude" ? ["claude.com", "claude.ai", "console.anthropic.com", "platform.claude.com"] : ["auth.openai.com"];
     return url.protocol === "https:" && !url.username && !url.password && (!url.port || url.port === "443") && hosts.includes(url.hostname);
   } catch { return false; }
 }
