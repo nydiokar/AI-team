@@ -24,6 +24,7 @@ import {
 import { useCostExplorer } from "../hooks/useCost";
 import { NewSessionSheet } from "../components/sessions/NewSessionSheet";
 import { BackendLogo, normalizeBackend } from "../components/home/BackendLogo";
+import { BackendAccountSheet, type AccountBackend } from "../components/home/BackendAccountSheet";
 import { cn } from "../lib/cn";
 import type { Target } from "../domain/models";
 import { summarizeProviderUsage, type UsageWindow } from "../lib/homeUsage";
@@ -51,7 +52,13 @@ function BlockMeter({ window: w }: { window: UsageWindow }) {
   );
 }
 
-function AccountsTerminal() {
+function AccountMark({ backend, onOpen, size = 7 }: { backend: string; onOpen: (backend: AccountBackend) => void; size?: 6 | 7 }) {
+  return backend === "claude" || backend === "codex"
+    ? <button type="button" aria-label={`Manage ${backend} accounts`} onClick={() => onOpen(backend)} className="inline-flex min-h-11 min-w-11 items-center justify-center rounded-lg focus-visible:outline-2 focus-visible:outline-accent"><BackendLogo backend={backend} size={size} /></button>
+    : <BackendLogo backend={backend} size={size} />;
+}
+
+function AccountsTerminal({ onOpen }: { onOpen: (backend: AccountBackend) => void }) {
   const quota = useQuotaWindows();
   const providers = summarizeProviderUsage(quota.data);
   const enabled = Boolean(quota.data?.enabled);
@@ -63,6 +70,10 @@ function AccountsTerminal() {
           <span className="size-2 rounded-full bg-warn/70" />
           <span className="size-2 rounded-full bg-ok/70" />
           <span className="ml-2 font-mono text-[11px] text-ink-muted">accounts · usage</span>
+          <div className="ml-auto flex">
+            <AccountMark backend="claude" onOpen={onOpen} />
+            <AccountMark backend="codex" onOpen={onOpen} />
+          </div>
         </div>
         <div className="divide-y divide-hairline/50">
           {!enabled || providers.length === 0 ? (
@@ -72,7 +83,7 @@ function AccountsTerminal() {
           ) : (
             providers.map((p) => (
               <div key={p.provider} className="flex items-start gap-3 px-3 py-3">
-                <BackendLogo backend={p.provider} />
+                <AccountMark backend={p.provider} onOpen={onOpen} />
                 <div className="min-w-0 flex-1">
                   <div className="flex items-baseline gap-2">
                     <span className="font-mono text-[13px] font-semibold capitalize text-ink">
@@ -124,7 +135,7 @@ function AttentionStrip({ approvals, sessions }: { approvals: number; sessions: 
   );
 }
 
-function OnlineNodeRow({ node }: { node: Target }) {
+function OnlineNodeRow({ node, onOpen }: { node: Target; onOpen: (backend: AccountBackend) => void }) {
   const running = node.activeTasks.length;
   const backends = [...new Set(node.backends.map(normalizeBackend))].filter((b) => b !== "unknown");
   return (
@@ -139,14 +150,14 @@ function OnlineNodeRow({ node }: { node: Target }) {
       </div>
       <div className="flex shrink-0 -space-x-1.5">
         {backends.map((b) => (
-          <BackendLogo key={b} backend={b} size={6} />
+          <AccountMark key={b} backend={b} size={6} onOpen={onOpen} />
         ))}
       </div>
     </div>
   );
 }
 
-function NodesSection({ nodes, loading }: { nodes: Target[]; loading: boolean }) {
+function NodesSection({ nodes, loading, onOpen }: { nodes: Target[]; loading: boolean; onOpen: (backend: AccountBackend) => void }) {
   const online = nodes.filter((n) => n.health === "online");
   const offline = nodes.length - online.length;
   return (
@@ -167,7 +178,7 @@ function NodesSection({ nodes, loading }: { nodes: Target[]; loading: boolean })
             No nodes online.
           </div>
         ) : (
-          online.map((n) => <OnlineNodeRow key={n.id} node={n} />)
+          online.map((n) => <OnlineNodeRow key={n.id} node={n} onOpen={onOpen} />)
         )}
       </div>
     </section>
@@ -225,6 +236,7 @@ export function HomeScreen() {
   const sessions = useSessions();
   const approvals = useApprovals("pending");
   const [newOpen, setNewOpen] = useState(false);
+  const [accountBackend, setAccountBackend] = useState<AccountBackend | null>(null);
 
   const nodes = targets.data ?? [];
   const attentionSessions = (sessions.data ?? []).filter((s) => s.needsAttention).length;
@@ -261,15 +273,16 @@ export function HomeScreen() {
         ) : null}
       </header>
 
-      <AccountsTerminal />
+      <AccountsTerminal onOpen={setAccountBackend} />
 
       <AttentionStrip approvals={approvals.data?.length ?? 0} sessions={attentionSessions} />
 
-      <NodesSection nodes={nodes} loading={targets.isLoading} />
+      <NodesSection nodes={nodes} loading={targets.isLoading} onOpen={setAccountBackend} />
 
       <SpendSparkline />
 
       {newOpen ? <NewSessionSheet onClose={() => setNewOpen(false)} /> : null}
+      {accountBackend ? <BackendAccountSheet key={accountBackend} backend={accountBackend} nodes={nodes} onClose={() => setAccountBackend(null)} /> : null}
     </div>
   );
 }

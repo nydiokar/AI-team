@@ -12,10 +12,11 @@ import json
 import threading
 import urllib.error
 import urllib.request
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
+from fastapi.routing import APIRoute
 from pydantic import BaseModel, ConfigDict, Field
 
 from src.control import control_api as core
@@ -25,6 +26,26 @@ from src.control.control_api import (
 )
 from src.core import observability
 from src.core.build_info import build_info
+
+
+class _BoundedAuthRoute(APIRoute):
+    """Bound simultaneous auth requests, including parsing and worker waits."""
+    _slots = threading.BoundedSemaphore(8)
+
+    def get_route_handler(self) -> Callable[[Request], Awaitable[Response]]:
+        handler = super().get_route_handler()
+
+        async def bounded(request: Request) -> Response:
+            if "/backend-auth/" not in request.url.path and "/claude-auth/" not in request.url.path:
+                return await handler(request)
+            if not self._slots.acquire(blocking=False):
+                return JSONResponse({"detail": "backend_auth_busy"}, status_code=429)
+            try:
+                return await handler(request)
+            finally:
+                self._slots.release()
+
+        return bounded
 
 
 # --- Response schemas (documentation only) ---------------------------------
@@ -80,12 +101,16 @@ class NodesOut(BaseModel):
 
 
 class ClaudeAuthInput(BaseModel):
+    model_config = ConfigDict(strict=True, extra="forbid")
     login_id: str = Field(min_length=32, max_length=32, pattern=r"^[0-9a-f]{32}$")
     input: str = Field(default="", max_length=4096)
     offset: int = Field(default=0, ge=0, le=2**31 - 1)
 
 
 class ClaudeAuthOut(BaseModel):
+    backend: Optional[str] = None
+    state: Optional[str] = None
+    input_supported: bool = False
     login_id: Optional[str] = None
     status: Optional[str] = None
     active: bool = False
@@ -94,6 +119,9 @@ class ClaudeAuthOut(BaseModel):
     done: bool = False
     authenticated: Optional[bool] = None
     error: Optional[str] = None
+    exit_code: Optional[int] = None
+    truncated: bool = False
+    ok: Optional[bool] = None
 
 
 def _node_for_claude_auth(node_id: str) -> Optional[Dict[str, Any]]:
@@ -118,6 +146,19 @@ def _node_for_claude_auth(node_id: str) -> Optional[Dict[str, Any]]:
     if node is not None:
         core._annotate_node_liveness(node)
     return node
+
+
+def _auth_backends(node: dict[str, object]) -> list[str]:
+    capabilities = node.get("capabilities")
+    value = capabilities.get("backends") if isinstance(capabilities, dict) else None
+    if value is None:
+        value = node.get("backends", [])
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except ValueError:
+            return []
+    return [item for item in value if isinstance(item, str)] if isinstance(value, list) else []
 
 
 class ArtifactsOut(BaseModel):
@@ -206,18 +247,20 @@ class MeshHealthOut(BaseModel):
 
 
 def build_router(orchestrator: Any, *, require_auth: Callable[..., Any]) -> APIRouter:
-    router = APIRouter()
+    router = APIRouter(route_class=_BoundedAuthRoute)
     claude_auth_rpc_slots = threading.BoundedSemaphore(8)
 
-    def claude_auth_rpc(node_id: str, action: str, payload: dict[str, object]) -> dict[str, object]:
+    def claude_auth_rpc(node_id: str, action: str, payload: dict[str, object], backend: str = "claude", legacy: bool = True) -> dict[str, object]:
         """Proxy the fixed Claude auth RPC to one registered tailnet worker."""
+        if backend not in ("claude", "codex"):
+            raise HTTPException(status_code=422, detail="backend_unsupported")
         node = _node_for_claude_auth(node_id)
         if node is None:
             raise HTTPException(status_code=404, detail="node_not_found")
         if not node.get("live"):
             raise HTTPException(status_code=409, detail="node_offline")
-        if "claude" not in (node.get("capabilities") or {}).get("backends", []):
-            raise HTTPException(status_code=409, detail="claude_backend_unavailable")
+        if backend not in _auth_backends(node):
+            raise HTTPException(status_code=409, detail=f"{backend}_backend_unavailable")
         try:
             ip = ipaddress.ip_address(str(node.get("tailscale_ip") or ""))
         except ValueError as exc:
@@ -227,25 +270,31 @@ def build_router(orchestrator: Any, *, require_auth: Callable[..., Any]) -> APIR
         token = core._worker_token()
         if not token:
             raise HTTPException(status_code=503, detail="worker_auth_unavailable")
-        port = int(node.get("api_port") or 9001)
+        try:
+            port = int(node.get("api_port") or 9001)
+        except (ValueError, TypeError) as exc:
+            raise HTTPException(status_code=409, detail="node_address_unavailable") from exc
         if not 1 <= port <= 65535:
             raise HTTPException(status_code=409, detail="node_address_unavailable")
         body = json.dumps(payload).encode("utf-8")
         host = f"[{ip.compressed}]" if ip.version == 6 else ip.compressed
-        url = f"http://{host}:{port}/claude-auth/{action}"
+        path = "claude-auth" if legacy else f"backend-auth/{backend}"
+        url = f"http://{host}:{port}/{path}/{action}"
 
         def send() -> dict[str, object]:
             request = urllib.request.Request(
-                url, data=body, method="POST",
+                url, data=None if action == "status" else body, method="GET" if action == "status" else "POST",
                 headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
             )
             try:
-                with urllib.request.urlopen(request, timeout=3) as response:
-                    raw = response.read(70_000)
+                with urllib.request.urlopen(request, timeout=6 if action in ("status", "poll") else 3) as response:
+                    raw = response.read(524_289)
+                    if len(raw) > 524_288:
+                        raise HTTPException(status_code=502, detail="worker_response_too_large")
             except urllib.error.HTTPError as exc:
                 if exc.code in (400, 401, 404):
                     try:
-                        detail = json.loads(exc.read(1024)).get("reason", "worker_rejected_request")
+                        detail = "worker_rejected_request"
                     except Exception:
                         detail = "worker_rejected_request"
                     raise HTTPException(status_code=409, detail=detail) from exc
@@ -257,6 +306,21 @@ def build_router(orchestrator: Any, *, require_auth: Callable[..., Any]) -> APIR
             except (ValueError, UnicodeDecodeError) as exc:
                 raise HTTPException(status_code=502, detail="worker_invalid_response") from exc
             if not isinstance(result, dict):
+                raise HTTPException(status_code=502, detail="worker_invalid_response")
+            if action == "status" and result.get("state") not in ("signed_in", "signed_out", "unavailable"):
+                raise HTTPException(status_code=502, detail="worker_invalid_response")
+            if action in ("start", "poll") and (result.get("status") not in ("running", "exited") or not isinstance(result.get("login_id"), str)):
+                raise HTTPException(status_code=502, detail="worker_invalid_response")
+            if action in ("start", "poll"):
+                login_id = result["login_id"]
+                if len(login_id) != 32 or any(c not in "0123456789abcdef" for c in login_id):
+                    raise HTTPException(status_code=502, detail="worker_invalid_response")
+            if action == "poll" and (
+                not isinstance(result.get("output"), str)
+                or type(result.get("offset")) is not int
+                or not 0 <= result["offset"] <= 2**31 - 1
+                or (result.get("authenticated") is not None and type(result["authenticated"]) is not bool)
+            ):
                 raise HTTPException(status_code=502, detail="worker_invalid_response")
             return result
 
@@ -355,6 +419,28 @@ def build_router(orchestrator: Any, *, require_auth: Callable[..., Any]) -> APIR
     def api_nodes() -> JSONResponse:
         nodes = core._live_nodes()
         return JSONResponse({"nodes": nodes})
+
+    @router.get("/api/nodes/{node_id}/backend-auth/{backend}/status", dependencies=[Depends(require_auth)], responses={200: {"model": ClaudeAuthOut}})
+    def backend_auth_status(node_id: str, backend: str) -> dict[str, object]:
+        return claude_auth_rpc(node_id, "status", {}, backend, False)
+
+    @router.post("/api/nodes/{node_id}/backend-auth/{backend}/start", dependencies=[Depends(require_auth)], responses={200: {"model": ClaudeAuthOut}})
+    def backend_auth_start(node_id: str, backend: str) -> dict[str, object]:
+        return claude_auth_rpc(node_id, "start", {}, backend, False)
+
+    @router.post("/api/nodes/{node_id}/backend-auth/{backend}/poll", dependencies=[Depends(require_auth)], responses={200: {"model": ClaudeAuthOut}})
+    def backend_auth_poll(node_id: str, backend: str, body: ClaudeAuthInput) -> dict[str, object]:
+        return claude_auth_rpc(node_id, "poll", {"login_id": body.login_id, "offset": body.offset}, backend, False)
+
+    @router.post("/api/nodes/{node_id}/backend-auth/{backend}/input", dependencies=[Depends(require_auth)], responses={200: {"model": ClaudeAuthOut}})
+    def backend_auth_input(node_id: str, backend: str, body: ClaudeAuthInput) -> dict[str, object]:
+        if not body.input or len(body.input.encode("utf-8")) > 4096:
+            raise HTTPException(status_code=422, detail="invalid_input")
+        return claude_auth_rpc(node_id, "input", {"login_id": body.login_id, "input": body.input}, backend, False)
+
+    @router.post("/api/nodes/{node_id}/backend-auth/{backend}/cancel", dependencies=[Depends(require_auth)], responses={200: {"model": ClaudeAuthOut}})
+    def backend_auth_cancel(node_id: str, backend: str, body: ClaudeAuthInput) -> dict[str, object]:
+        return claude_auth_rpc(node_id, "cancel", {"login_id": body.login_id}, backend, False)
 
     @router.post("/api/nodes/{node_id}/claude-auth/start", dependencies=[Depends(require_auth)], responses={200: {"model": ClaudeAuthOut}})
     def claude_auth_start(node_id: str) -> dict[str, object]:

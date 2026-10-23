@@ -58,8 +58,9 @@ export class ApiError extends Error {
   }
 }
 
-async function get<T>(path: string, token: string): Promise<T> {
+async function get<T>(path: string, token: string, signal?: AbortSignal): Promise<T> {
   const res = await fetch(path, {
+    signal,
     headers: { Authorization: `Bearer ${token}` },
   });
   if (!res.ok) {
@@ -78,6 +79,7 @@ async function post<T>(
   token: string,
   body: unknown,
   idempotencyKey?: string,
+  signal?: AbortSignal,
 ): Promise<T> {
   const headers: Record<string, string> = {
     Authorization: `Bearer ${token}`,
@@ -85,6 +87,7 @@ async function post<T>(
   };
   if (idempotencyKey) headers["Idempotency-Key"] = idempotencyKey;
   const res = await fetch(path, {
+    signal,
     method: "POST",
     headers,
     body: JSON.stringify(body ?? {}),
@@ -151,6 +154,7 @@ export interface InstructionResponse {
 }
 
 export interface ClaudeAuthLogin {
+  input_supported?: boolean;
   login_id: string;
   status: "running" | "exited";
   output?: string;
@@ -256,6 +260,13 @@ async function turnMutation<T>(
 }
 
 export const api = {
+  backendAuthStatus(token: string, nodeId: string, backend: string): Promise<{ state: "signed_in" | "signed_out" | "unavailable" }> {
+    return get(`/api/nodes/${encodeURIComponent(nodeId)}/backend-auth/${backend}/status`, token, AbortSignal.timeout(12000));
+  },
+
+  backendAuth(token: string, nodeId: string, backend: string, action: "start" | "poll" | "input" | "cancel", body: { login_id?: string; offset?: number; input?: string } = {}): Promise<ClaudeAuthLogin> {
+    return post(`/api/nodes/${encodeURIComponent(nodeId)}/backend-auth/${backend}/${action}`, token, body, undefined, AbortSignal.timeout(12000));
+  },
   startClaudeAuth(token: string, nodeId: string): Promise<ClaudeAuthLogin> {
     return post<ClaudeAuthLogin>(`/api/nodes/${encodeURIComponent(nodeId)}/claude-auth/start`, token, {});
   },
