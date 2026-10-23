@@ -459,27 +459,104 @@ async def _run_nudge_listener(
     port: int,
     poll_event: asyncio.Event,
     heartbeat_event: Optional[asyncio.Event] = None,
+    worker_token: str = "",
 ) -> None:
-    """Accept POST /nudge and wake polling plus heartbeat state publication."""
+    """Accept nudges and narrowly scoped, token-authenticated Claude login RPCs."""
+    request_slots = asyncio.Semaphore(8)
 
     async def _handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        acquired = False
         try:
-            data = await asyncio.wait_for(reader.read(512), timeout=2)
+            if request_slots.locked():
+                writer.write(b"HTTP/1.1 503 Busy\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                await writer.drain()
+                return
+            await request_slots.acquire()
+            acquired = True
+            import hmac
+            import json
+
+            head = await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), timeout=2)
+            if len(head) > 8192:
+                raise ValueError("headers_too_large")
+            lines = head.decode("latin-1").split("\r\n")
+            method, path, _version = lines[0].split(" ", 2)
+            headers = {
+                key.strip().lower(): value.strip()
+                for line in lines[1:] if ":" in line
+                for key, value in (line.split(":", 1),)
+            }
+            length = int(headers.get("content-length", "0"))
+            if length < 0 or length > 8192:
+                raise ValueError("body_too_large")
+            body = await asyncio.wait_for(reader.readexactly(length), timeout=2) if length else b""
             # Minimal method/path validation — avoid treating arbitrary TCP
             # probes (port scanners, health checks) as a real nudge, which
             # would reset the poll backoff and cause spurious tight polling.
-            is_nudge = data.startswith(b"POST /nudge")
+            is_nudge = method == "POST" and path == "/nudge"
             if is_nudge:
                 response = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"
                 _mark_nudge_received(poll_event, heartbeat_event)
                 logger.debug("event=nudge_received")
+            elif path.startswith("/claude-auth/"):
+                from src.worker.claude_auth import ClaudeAuthError, claude_auth_session
+
+                supplied = headers.get("authorization", "")
+                if not worker_token or not hmac.compare_digest(supplied, f"Bearer {worker_token}"):
+                    status, payload = 401, {"reason": "unauthorized"}
+                else:
+                    try:
+                        payload_in = json.loads(body or b"{}")
+                        if path == "/claude-auth/start" and method == "POST":
+                            payload_out = await asyncio.to_thread(claude_auth_session.start)
+                        elif path == "/claude-auth/poll" and method == "POST":
+                            payload_out = await asyncio.to_thread(
+                                claude_auth_session.poll,
+                                str(payload_in["login_id"]), int(payload_in.get("offset", 0)),
+                            )
+                        elif path == "/claude-auth/input" and method == "POST":
+                            await asyncio.to_thread(
+                                claude_auth_session.send,
+                                str(payload_in["login_id"]), str(payload_in["input"]),
+                            )
+                            payload_out = {"ok": True}
+                        elif path == "/claude-auth/cancel" and method == "POST":
+                            await asyncio.to_thread(claude_auth_session.cancel, str(payload_in["login_id"]))
+                            payload_out = {"ok": True}
+                        else:
+                            status, payload = 404, {"reason": "not_found"}
+                            payload_out = None
+                        if payload_out is not None:
+                            status, payload = 200, payload_out
+                    except (ClaudeAuthError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+                        status = 400
+                        payload = {"reason": str(exc) if isinstance(exc, ClaudeAuthError) else "invalid_request"}
+                encoded = json.dumps(payload, ensure_ascii=True).encode("utf-8")
+                response = (
+                    f"HTTP/1.1 {status} {'OK' if status == 200 else 'Error'}\r\n"
+                    "Content-Type: application/json\r\n"
+                    f"Content-Length: {len(encoded)}\r\nConnection: close\r\n\r\n"
+                ).encode("ascii") + encoded
             else:
                 response = b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n"
             writer.write(response)
             await writer.drain()
+        except (asyncio.IncompleteReadError, asyncio.LimitOverrunError, ValueError, UnicodeDecodeError):
+            malformed = b'{"reason":"invalid_request"}'
+            try:
+                writer.write(
+                    b"HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\n"
+                    + f"Content-Length: {len(malformed)}\r\nConnection: close\r\n\r\n".encode("ascii")
+                    + malformed
+                )
+                await writer.drain()
+            except Exception:
+                pass
         except Exception:
-            pass
+            logger.debug("event=worker_control_request_failed")
         finally:
+            if acquired:
+                request_slots.release()
             writer.close()
 
     try:
@@ -3452,6 +3529,7 @@ class WorkerAgent:
                 self.cfg.api_port,
                 self._poll_now,
                 self._heartbeat_now,
+                self.cfg.worker_token,
             )
         )
         heartbeat = asyncio.create_task(self._heartbeat_loop())
@@ -3515,6 +3593,11 @@ class WorkerAgent:
         for t in (poller, heartbeat, nudge_listener, job_watcher, quota_observer, quota_prewarm, controller_state_refresh, session_reconcile):
             t.cancel()
         await asyncio.gather(poller, heartbeat, nudge_listener, job_watcher, quota_observer, quota_prewarm, controller_state_refresh, session_reconcile, return_exceptions=True)
+
+        # Authentication is a separately-owned PTY, not a backend process. Close
+        # it explicitly so SIGTERM cannot orphan an interactive CLI.
+        from src.worker.claude_auth import claude_auth_session
+        claude_auth_session.shutdown()
 
         # Terminate any backend subprocesses still alive (e.g. a hung
         # claude.exe that outlived its task). Without this, a worker restart

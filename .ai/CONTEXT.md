@@ -78,6 +78,8 @@ Only jobs that are genuinely open. Everything merged/done is in git and the disp
 
 ## Recent shift notes
 
+**2026-10-23 — Remote Claude Code login handoff (built on `feat/remote-claude-login`; activation pending).** System → node details now has a node-scoped `claude auth login` PTY relay, including URL/code handoff and a post-login `claude auth status` check. Worker bound: one login, 10-minute timeout, 64 KiB output, 4 KiB input, 8 concurrent HTTP requests, 8 KiB request body, 2-second read timeout; authenticated by the mesh token on the worker and dashboard auth in the app. Focused fake-CLI/loopback tests and `pnpm --dir web build` pass; no paid login attempted. **Not yet live:** the worker restart in the operator’s 2026-10-23 log predates this code; after merge, deploy gateway + worker and test on the logged-out node. The local `127.0.0.1:9003/health` probe could not connect from this checkout, so live gateway state remains unverified.
+
 **2026-10-22 — Operational DB backups: daily, on-host only (off-host target still OPEN).**
 `scripts/backup/backup_dbs.sh` (cron `17 4 * * *`, tag `aiteam-db-backup`) snapshots `mesh.db` + `quota_windows.db`
 via `VACUUM INTO` → `integrity_check` → zstd → SHA256SUMS into `~/ai-team-backups/db/snapshots/<UTC stamp>/`

@@ -7,12 +7,16 @@ Mounted by ``control_api.build_control_api``; route map: docs/backend/ARCHITECTU
 """
 from __future__ import annotations
 
+import ipaddress
 import json
+import threading
+import urllib.error
+import urllib.request
 from typing import Any, Callable, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, StreamingResponse
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from src.control import control_api as core
 from src.control.control_api import (
@@ -73,6 +77,47 @@ class TasksOut(BaseModel):
 
 class NodesOut(BaseModel):
     nodes: list[dict]
+
+
+class ClaudeAuthInput(BaseModel):
+    login_id: str = Field(min_length=32, max_length=32, pattern=r"^[0-9a-f]{32}$")
+    input: str = Field(default="", max_length=4096)
+    offset: int = Field(default=0, ge=0, le=2**31 - 1)
+
+
+class ClaudeAuthOut(BaseModel):
+    login_id: Optional[str] = None
+    status: Optional[str] = None
+    active: bool = False
+    output: str = ""
+    offset: int = 0
+    done: bool = False
+    authenticated: Optional[bool] = None
+    error: Optional[str] = None
+
+
+def _node_for_claude_auth(node_id: str) -> Optional[Dict[str, Any]]:
+    """Read one node's current address/liveness without scanning every node."""
+    try:
+        from src.control.node_registry import get_registry
+
+        registry = get_registry()
+        if not registry.is_empty():
+            info = registry.get(node_id)
+            if info is None:
+                return None
+            node = info.to_dict()
+            node["live"] = info.status == "online"
+            return node
+    except Exception:
+        pass
+    db = core._db()
+    if db is None:
+        return None
+    node = db.get_node(node_id)
+    if node is not None:
+        core._annotate_node_liveness(node)
+    return node
 
 
 class ArtifactsOut(BaseModel):
@@ -162,6 +207,65 @@ class MeshHealthOut(BaseModel):
 
 def build_router(orchestrator: Any, *, require_auth: Callable[..., Any]) -> APIRouter:
     router = APIRouter()
+    claude_auth_rpc_slots = threading.BoundedSemaphore(8)
+
+    def claude_auth_rpc(node_id: str, action: str, payload: dict[str, object]) -> dict[str, object]:
+        """Proxy the fixed Claude auth RPC to one registered tailnet worker."""
+        node = _node_for_claude_auth(node_id)
+        if node is None:
+            raise HTTPException(status_code=404, detail="node_not_found")
+        if not node.get("live"):
+            raise HTTPException(status_code=409, detail="node_offline")
+        if "claude" not in (node.get("capabilities") or {}).get("backends", []):
+            raise HTTPException(status_code=409, detail="claude_backend_unavailable")
+        try:
+            ip = ipaddress.ip_address(str(node.get("tailscale_ip") or ""))
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail="node_address_unavailable") from exc
+        if not core._is_tailnet(str(ip)):
+            raise HTTPException(status_code=409, detail="node_address_not_tailnet")
+        token = core._worker_token()
+        if not token:
+            raise HTTPException(status_code=503, detail="worker_auth_unavailable")
+        port = int(node.get("api_port") or 9001)
+        if not 1 <= port <= 65535:
+            raise HTTPException(status_code=409, detail="node_address_unavailable")
+        body = json.dumps(payload).encode("utf-8")
+        host = f"[{ip.compressed}]" if ip.version == 6 else ip.compressed
+        url = f"http://{host}:{port}/claude-auth/{action}"
+
+        def send() -> dict[str, object]:
+            request = urllib.request.Request(
+                url, data=body, method="POST",
+                headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            )
+            try:
+                with urllib.request.urlopen(request, timeout=3) as response:
+                    raw = response.read(70_000)
+            except urllib.error.HTTPError as exc:
+                if exc.code in (400, 401, 404):
+                    try:
+                        detail = json.loads(exc.read(1024)).get("reason", "worker_rejected_request")
+                    except Exception:
+                        detail = "worker_rejected_request"
+                    raise HTTPException(status_code=409, detail=detail) from exc
+                raise HTTPException(status_code=502, detail="worker_rpc_failed") from exc
+            except (OSError, TimeoutError) as exc:
+                raise HTTPException(status_code=502, detail="worker_unreachable") from exc
+            try:
+                result = json.loads(raw)
+            except (ValueError, UnicodeDecodeError) as exc:
+                raise HTTPException(status_code=502, detail="worker_invalid_response") from exc
+            if not isinstance(result, dict):
+                raise HTTPException(status_code=502, detail="worker_invalid_response")
+            return result
+
+        if not claude_auth_rpc_slots.acquire(blocking=False):
+            raise HTTPException(status_code=429, detail="claude_auth_busy")
+        try:
+            return send()
+        finally:
+            claude_auth_rpc_slots.release()
 
     @router.get("/health", responses={200: {"model": HealthOut, "description": "Liveness + SDK governor ceilings, carrier-coverage flag, and build identity."}})
     def health() -> Dict[str, Any]:
@@ -251,6 +355,24 @@ def build_router(orchestrator: Any, *, require_auth: Callable[..., Any]) -> APIR
     def api_nodes() -> JSONResponse:
         nodes = core._live_nodes()
         return JSONResponse({"nodes": nodes})
+
+    @router.post("/api/nodes/{node_id}/claude-auth/start", dependencies=[Depends(require_auth)], responses={200: {"model": ClaudeAuthOut}})
+    def claude_auth_start(node_id: str) -> dict[str, object]:
+        return claude_auth_rpc(node_id, "start", {})
+
+    @router.post("/api/nodes/{node_id}/claude-auth/poll", dependencies=[Depends(require_auth)], responses={200: {"model": ClaudeAuthOut}})
+    def claude_auth_poll(node_id: str, body: ClaudeAuthInput) -> dict[str, object]:
+        return claude_auth_rpc(node_id, "poll", {"login_id": body.login_id, "offset": body.offset})
+
+    @router.post("/api/nodes/{node_id}/claude-auth/input", dependencies=[Depends(require_auth)], responses={200: {"model": ClaudeAuthOut}})
+    def claude_auth_input(node_id: str, body: ClaudeAuthInput) -> dict[str, object]:
+        if len(body.input.encode("utf-8")) > 4096:
+            raise HTTPException(status_code=422, detail="invalid_input")
+        return claude_auth_rpc(node_id, "input", {"login_id": body.login_id, "input": body.input})
+
+    @router.post("/api/nodes/{node_id}/claude-auth/cancel", dependencies=[Depends(require_auth)], responses={200: {"model": ClaudeAuthOut}})
+    def claude_auth_cancel(node_id: str, body: ClaudeAuthInput) -> dict[str, object]:
+        return claude_auth_rpc(node_id, "cancel", {"login_id": body.login_id})
 
     # --- artifacts / files (UI-4) -----------------------------------------
     # The phone review loop: "what did the agent change?" Reads the on-disk

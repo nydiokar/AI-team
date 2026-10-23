@@ -6,6 +6,7 @@
 import { X, HeartPulse, Layers, FolderOpen, Cpu } from "lucide-react";
 import { useProjects } from "../../hooks/useLiveData";
 import type { Target } from "../../domain/models";
+import { ClaudeLoginPanel } from "./ClaudeLoginPanel";
 
 interface Props {
   target: Target;
@@ -109,6 +110,8 @@ export function NodeDetailSheet({ target, onClose }: Props) {
             </ul>
           </div>
         </div>
+
+        <ClaudeLoginPanel target={target} />
       </div>
     </div>
   );
