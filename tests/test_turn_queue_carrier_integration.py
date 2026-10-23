@@ -118,7 +118,7 @@ def _worker(tmp_path, http, *, managed: bool = True, incarnation: str = "inc-1",
     w.cfg = SimpleNamespace(
         node_id=NODE, backends=["claude"], max_concurrent=2, accept_unpinned=True,
         managed_turns=managed, tailscale_ip="127.0.0.1", api_port=0,
-        projects_root="", controller_url="http://test", list_repos=lambda: [],
+        projects_root="", controller_url="http://test", worker_token=TOKEN, list_repos=lambda: [],
     )
     w._http = http
     w._incarnation_id = incarnation

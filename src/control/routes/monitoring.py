@@ -85,6 +85,17 @@ class ClaudeAuthInput(BaseModel):
     offset: int = Field(default=0, ge=0, le=2**31 - 1)
 
 
+class ClaudeAuthOut(BaseModel):
+    login_id: Optional[str] = None
+    status: Optional[str] = None
+    active: bool = False
+    output: str = ""
+    offset: int = 0
+    done: bool = False
+    authenticated: Optional[bool] = None
+    error: Optional[str] = None
+
+
 def _node_for_claude_auth(node_id: str) -> Optional[Dict[str, Any]]:
     """Read one node's current address/liveness without scanning every node."""
     try:
@@ -345,21 +356,21 @@ def build_router(orchestrator: Any, *, require_auth: Callable[..., Any]) -> APIR
         nodes = core._live_nodes()
         return JSONResponse({"nodes": nodes})
 
-    @router.post("/api/nodes/{node_id}/claude-auth/start", dependencies=[Depends(require_auth)])
+    @router.post("/api/nodes/{node_id}/claude-auth/start", dependencies=[Depends(require_auth)], responses={200: {"model": ClaudeAuthOut}})
     def claude_auth_start(node_id: str) -> dict[str, object]:
         return claude_auth_rpc(node_id, "start", {})
 
-    @router.post("/api/nodes/{node_id}/claude-auth/poll", dependencies=[Depends(require_auth)])
+    @router.post("/api/nodes/{node_id}/claude-auth/poll", dependencies=[Depends(require_auth)], responses={200: {"model": ClaudeAuthOut}})
     def claude_auth_poll(node_id: str, body: ClaudeAuthInput) -> dict[str, object]:
         return claude_auth_rpc(node_id, "poll", {"login_id": body.login_id, "offset": body.offset})
 
-    @router.post("/api/nodes/{node_id}/claude-auth/input", dependencies=[Depends(require_auth)])
+    @router.post("/api/nodes/{node_id}/claude-auth/input", dependencies=[Depends(require_auth)], responses={200: {"model": ClaudeAuthOut}})
     def claude_auth_input(node_id: str, body: ClaudeAuthInput) -> dict[str, object]:
         if len(body.input.encode("utf-8")) > 4096:
             raise HTTPException(status_code=422, detail="invalid_input")
         return claude_auth_rpc(node_id, "input", {"login_id": body.login_id, "input": body.input})
 
-    @router.post("/api/nodes/{node_id}/claude-auth/cancel", dependencies=[Depends(require_auth)])
+    @router.post("/api/nodes/{node_id}/claude-auth/cancel", dependencies=[Depends(require_auth)], responses={200: {"model": ClaudeAuthOut}})
     def claude_auth_cancel(node_id: str, body: ClaudeAuthInput) -> dict[str, object]:
         return claude_auth_rpc(node_id, "cancel", {"login_id": body.login_id})
 
