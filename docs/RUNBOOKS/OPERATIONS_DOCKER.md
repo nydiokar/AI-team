@@ -52,6 +52,28 @@ curl http://$MESH_BIND_IP:9002/health
 Open `http://<controller-tailscale-ip>:9003/`. The Web UI is in the gateway
 image—there is no separate frontend container or PM2 process.
 
+### Home account management and native-worker connectivity
+
+Home's Claude/Codex marks open accounts for online supporting nodes. The gateway
+must reach each native worker's advertised tailnet address and `WORKER_API_PORT`
+(default 9001), in addition to workers reaching the task-server for heartbeats.
+An online heartbeat alone does not prove this reverse RPC path works.
+
+For a native worker on the controller host, UFW can drop Docker bridge traffic
+to the host's tailnet address. Inspect the Compose network's subnet and bridge
+before adding a rule scoped to that bridge, source subnet, worker address and
+TCP port. The rule applied on Kanebra is:
+
+```bash
+sudo ufw allow in on br-42c355b9d2c7 proto tcp from 172.26.0.0/16 to 100.88.11.88 port 9001 comment 'AI-Team controller to Kanebra worker auth'
+```
+
+Recheck the subnet/bridge after recreating the Docker network. Keep the listener
+bound to the tailnet address and its worker-token authentication enabled. For
+remote nodes, check routing and the remote host's inbound worker-port policy.
+Home reports unavailable per node when that RPC path fails. Worker code updates
+also require an operator-authorized worker restart.
+
 ## Worker machine (Codex target)
 
 Clone the same release, create an independent data root and secret file, and mount

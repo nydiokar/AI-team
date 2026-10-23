@@ -66,6 +66,7 @@ it("supports device auth without a code-paste input and cancels explicitly", asy
   expect(mocks.auth.mock.calls.filter((c) => c[3] === "poll")).toHaveLength(1);
 });
 it("allows only exact provider auth hosts", () => {
+  expect(safeAuthUrl("https://claude.com/cai/oauth/authorize", "claude")).toBe(true);
   expect(safeAuthUrl("https://claude.ai/oauth/authorize", "claude")).toBe(true);
-  for (const value of ["http://claude.ai/login", "https://claude.ai.evil.example/", "https://evil@claude.ai/", "https://claude.ai:444/", "javascript:alert(1)", "https://auth.openai.com/"]) expect(safeAuthUrl(value, "claude")).toBe(false);
+  for (const value of ["http://claude.ai/login", "https://claude.com.evil.example/", "https://claude.ai.evil.example/", "https://evil@claude.ai/", "https://claude.ai:444/", "javascript:alert(1)", "https://auth.openai.com/"]) expect(safeAuthUrl(value, "claude")).toBe(false);
 });
