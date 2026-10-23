@@ -191,6 +191,13 @@ This mirrors OpenClaw's structured `req/res` (`id` + `ok` + `error`, no prose in
 protocol). Telegram's `_create_and_bind_session` is now a **thin wrapper** over 4a and is the
 reference example for a second surface.
 
+**Node-scoped auth exception:** System → node details exposes Claude Code sign-in through the
+authenticated `/api/nodes/{node_id}/claude-auth/*` control routes. It starts only
+`claude auth login` in a worker-owned PTY; prompt output and user input are transient and never
+stored in gateway state. The worker requires `WORKER_TOKEN`, accepts one login process at a time,
+caps PTY output/input, and expires the process after ten minutes. This control path does not grant
+general shell access and does not alter session lifecycle state.
+
 ---
 
 ## 5. `SessionOrigin` — where a session came from

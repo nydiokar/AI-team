@@ -150,6 +150,16 @@ export interface InstructionResponse {
   session: RawSessionView | null;
 }
 
+export interface ClaudeAuthLogin {
+  login_id: string;
+  status: "running" | "exited";
+  output?: string;
+  offset?: number;
+  exit_code?: number | null;
+  authenticated?: boolean | null;
+  ok?: boolean;
+}
+
 // [A82 Stage 6] Managed turn-request resources (design §9) — a read model of
 // the session queue, distinct from the telemetry `/api/turns` DTOs.
 export interface TurnRequestSummary {
@@ -246,6 +256,22 @@ async function turnMutation<T>(
 }
 
 export const api = {
+  startClaudeAuth(token: string, nodeId: string): Promise<ClaudeAuthLogin> {
+    return post<ClaudeAuthLogin>(`/api/nodes/${encodeURIComponent(nodeId)}/claude-auth/start`, token, {});
+  },
+
+  pollClaudeAuth(token: string, nodeId: string, loginId: string, offset: number): Promise<ClaudeAuthLogin> {
+    return post<ClaudeAuthLogin>(`/api/nodes/${encodeURIComponent(nodeId)}/claude-auth/poll`, token, { login_id: loginId, offset });
+  },
+
+  sendClaudeAuthInput(token: string, nodeId: string, loginId: string, input: string): Promise<ClaudeAuthLogin> {
+    return post<ClaudeAuthLogin>(`/api/nodes/${encodeURIComponent(nodeId)}/claude-auth/input`, token, { login_id: loginId, input });
+  },
+
+  cancelClaudeAuth(token: string, nodeId: string, loginId: string): Promise<ClaudeAuthLogin> {
+    return post<ClaudeAuthLogin>(`/api/nodes/${encodeURIComponent(nodeId)}/claude-auth/cancel`, token, { login_id: loginId });
+  },
+
   turnRequests(token: string, sessionId: string, cursor = 0, limit = 50): Promise<TurnRequestPage> {
     const qs = new URLSearchParams({ cursor: String(cursor), limit: String(limit) });
     return get<TurnRequestPage>(
