@@ -30,6 +30,9 @@ vi.mock("../hooks/useCost", () => ({ useCostExplorer: () => hooks.cost }));
 vi.mock("../components/sessions/NewSessionSheet", () => ({
   NewSessionSheet: () => createElement("div", null, "new-session-sheet"),
 }));
+vi.mock("../components/home/BackendAccountSheet", () => ({
+  BackendAccountSheet: ({ backend }: { backend: string }) => createElement("div", { role: "dialog" }, `${backend} accounts`),
+}));
 
 import { HomeScreen } from "./HomeScreen";
 
@@ -95,6 +98,16 @@ it("always shows the brand and a New action, and no tab-shortcut buttons", () =>
   // The dead shortcut buttons from the first version are gone.
   expect(container.textContent).not.toContain("Dispatch work");
   expect(container.textContent).not.toContain("Everything healthy");
+});
+
+it("opens the selected provider account sheet from accessible Home buttons without telemetry", () => {
+  render();
+  const claude = container.querySelector<HTMLButtonElement>('button[aria-label="Manage claude accounts"]')!;
+  expect(claude.type).toBe("button");
+  act(() => claude.click());
+  expect(container.querySelector('[role="dialog"]')?.textContent).toBe("claude accounts");
+  act(() => container.querySelector<HTMLButtonElement>('button[aria-label="Manage codex accounts"]')!.click());
+  expect(container.querySelector('[role="dialog"]')?.textContent).toBe("codex accounts");
 });
 
 it("renders accounts/usage meters and an honest n/a when unknown", () => {

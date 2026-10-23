@@ -461,7 +461,7 @@ async def _run_nudge_listener(
     heartbeat_event: Optional[asyncio.Event] = None,
     worker_token: str = "",
 ) -> None:
-    """Accept nudges and narrowly scoped, token-authenticated Claude login RPCs."""
+    """Accept nudges and fixed, token-authenticated backend auth RPCs."""
     request_slots = asyncio.Semaphore(8)
 
     async def _handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
@@ -469,7 +469,7 @@ async def _run_nudge_listener(
         try:
             if request_slots.locked():
                 writer.write(b"HTTP/1.1 503 Busy\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
-                await writer.drain()
+                await asyncio.wait_for(writer.drain(), timeout=2)
                 return
             await request_slots.acquire()
             acquired = True
@@ -498,8 +498,8 @@ async def _run_nudge_listener(
                 response = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"
                 _mark_nudge_received(poll_event, heartbeat_event)
                 logger.debug("event=nudge_received")
-            elif path.startswith("/claude-auth/"):
-                from src.worker.claude_auth import ClaudeAuthError, claude_auth_session
+            elif path.startswith(("/claude-auth/", "/backend-auth/")):
+                from src.worker.claude_auth import BackendAuthError, backend_auth_session
 
                 supplied = headers.get("authorization", "")
                 if not worker_token or not hmac.compare_digest(supplied, f"Bearer {worker_token}"):
@@ -507,31 +507,51 @@ async def _run_nudge_listener(
                 else:
                     try:
                         payload_in = json.loads(body or b"{}")
-                        if path == "/claude-auth/start" and method == "POST":
-                            payload_out = await asyncio.to_thread(claude_auth_session.start)
-                        elif path == "/claude-auth/poll" and method == "POST":
+                        if not isinstance(payload_in, dict):
+                            raise ValueError("invalid_request")
+                        parts = path.strip("/").split("/")
+                        if len(parts) == 2 and parts[0] == "claude-auth":
+                            backend, action = "claude", parts[1]
+                        elif len(parts) == 3 and parts[0] == "backend-auth":
+                            backend, action = parts[1], parts[2]
+                        else:
+                            backend, action = "", ""
+                        if backend not in ("claude", "codex"):
+                            raise BackendAuthError("backend_unsupported")
+                        if action in ("poll", "input", "cancel"):
+                            login_id = payload_in.get("login_id")
+                            if not isinstance(login_id, str) or len(login_id) != 32 or any(c not in "0123456789abcdef" for c in login_id):
+                                raise ValueError("invalid_request")
+                            await asyncio.to_thread(backend_auth_session.validate_backend, login_id, backend)
+                            if type(payload_in.get("offset", 0)) is not int or not isinstance(payload_in.get("input", ""), str):
+                                raise ValueError("invalid_request")
+                        if action == "status" and method == "GET":
+                            payload_out = await asyncio.to_thread(backend_auth_session.status, backend)
+                        elif action == "start" and method == "POST":
+                            payload_out = await asyncio.to_thread(backend_auth_session.start, backend)
+                        elif action == "poll" and method == "POST":
                             payload_out = await asyncio.to_thread(
-                                claude_auth_session.poll,
+                                backend_auth_session.poll,
                                 str(payload_in["login_id"]), int(payload_in.get("offset", 0)),
                             )
-                        elif path == "/claude-auth/input" and method == "POST":
+                        elif action == "input" and method == "POST":
                             await asyncio.to_thread(
-                                claude_auth_session.send,
+                                backend_auth_session.send,
                                 str(payload_in["login_id"]), str(payload_in["input"]),
                             )
                             payload_out = {"ok": True}
-                        elif path == "/claude-auth/cancel" and method == "POST":
-                            await asyncio.to_thread(claude_auth_session.cancel, str(payload_in["login_id"]))
+                        elif action == "cancel" and method == "POST":
+                            await asyncio.to_thread(backend_auth_session.cancel, str(payload_in["login_id"]))
                             payload_out = {"ok": True}
                         else:
                             status, payload = 404, {"reason": "not_found"}
                             payload_out = None
                         if payload_out is not None:
                             status, payload = 200, payload_out
-                    except (ClaudeAuthError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+                    except (BackendAuthError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
                         status = 400
-                        payload = {"reason": str(exc) if isinstance(exc, ClaudeAuthError) else "invalid_request"}
-                encoded = json.dumps(payload, ensure_ascii=True).encode("utf-8")
+                        payload = {"reason": str(exc) if isinstance(exc, BackendAuthError) else "invalid_request"}
+                encoded = json.dumps(payload, ensure_ascii=False).encode("utf-8")
                 response = (
                     f"HTTP/1.1 {status} {'OK' if status == 200 else 'Error'}\r\n"
                     "Content-Type: application/json\r\n"
@@ -540,7 +560,7 @@ async def _run_nudge_listener(
             else:
                 response = b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n"
             writer.write(response)
-            await writer.drain()
+            await asyncio.wait_for(writer.drain(), timeout=2)
         except (asyncio.IncompleteReadError, asyncio.LimitOverrunError, ValueError, UnicodeDecodeError):
             malformed = b'{"reason":"invalid_request"}'
             try:
@@ -549,7 +569,7 @@ async def _run_nudge_listener(
                     + f"Content-Length: {len(malformed)}\r\nConnection: close\r\n\r\n".encode("ascii")
                     + malformed
                 )
-                await writer.drain()
+                await asyncio.wait_for(writer.drain(), timeout=2)
             except Exception:
                 pass
         except Exception:
@@ -3596,8 +3616,8 @@ class WorkerAgent:
 
         # Authentication is a separately-owned PTY, not a backend process. Close
         # it explicitly so SIGTERM cannot orphan an interactive CLI.
-        from src.worker.claude_auth import claude_auth_session
-        claude_auth_session.shutdown()
+        from src.worker.claude_auth import backend_auth_session
+        backend_auth_session.shutdown()
 
         # Terminate any backend subprocesses still alive (e.g. a hung
         # claude.exe that outlived its task). Without this, a worker restart

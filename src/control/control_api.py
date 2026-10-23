@@ -312,6 +312,8 @@ def _preparse_byte_guard(app: Any) -> None:
     app.add_middleware(
         BodyCapMiddleware,
         rules=[
+            (r"/api/nodes/[^/]+/backend-auth/[^/]+/(start|poll|input|cancel)", 8192),
+            (r"/api/nodes/[^/]+/claude-auth/(start|poll|input|cancel)", 8192),
             (r"/api/turn-requests/[^/]+/resolve-recovery", 16 * 1024),
             (r"/api/turn-requests/[^/]+/withdraw", 16 * 1024),
             (r"/api/turn-requests/[^/]+", _TURN_REQUESTS_MAX_REQUEST_BYTES),
