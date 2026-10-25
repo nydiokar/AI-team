@@ -102,6 +102,11 @@ for (const width of [320, 390, 768]) {
     await expect(page.getByRole("region", { name: "Cost summary", exact: true })).toContainText("$290.5");
     const overflow = await page.evaluate(() => [...document.querySelectorAll(".cost-dashboard, .cost-panel, main")].map((el) => ({ width: el.clientWidth, scroll: el.scrollWidth })).filter((el) => el.scroll > el.width + 1));
     expect(overflow).toEqual([]);
+    const rangeTarget = await page.getByRole("button", { name: "24h", exact: true }).boundingBox();
+    expect(rangeTarget?.height).toBeGreaterThanOrEqual(44);
+    const caseTarget = await page.getByRole("button", { name: /View case lifetime cost/ }).boundingBox();
+    expect(caseTarget?.width).toBeGreaterThanOrEqual(44);
+    expect(caseTarget?.height).toBeGreaterThanOrEqual(44);
     await page.screenshot({ path: `/tmp/cost-${width}.png` });
   });
 }
