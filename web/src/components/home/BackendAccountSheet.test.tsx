@@ -35,6 +35,49 @@ it("checks every eligible node independently and isolates status failures", asyn
   expect(document.body.textContent).toContain("Account status unavailable");
   expect(document.body.textContent).not.toContain("offline");
 });
+it("limits status fan-out and eventually checks all nodes", async () => {
+  const pending: Array<() => void> = [];
+  let running = 0;
+  let peak = 0;
+  mocks.status.mockImplementation(() => {
+    running++;
+    peak = Math.max(peak, running);
+    return new Promise((resolve) => pending.push(() => {
+      running--;
+      resolve({ state: "signed_out" });
+    }));
+  });
+  render("claude", Array.from({ length: 25 }, (_, i) => node(`node-${i}`)));
+  await flush();
+  expect(mocks.status).toHaveBeenCalledTimes(4);
+  for (let i = 0; i < 25; i++) {
+    await act(async () => { pending.shift()!(); });
+  }
+  expect(mocks.status).toHaveBeenCalledTimes(25);
+  expect(peak).toBe(4);
+  expect(document.querySelectorAll('[role="status"]')).toHaveLength(25);
+  expect(document.body.textContent).not.toContain("unavailable");
+});
+it("aborts in-flight status reads and discards queued reads on close", async () => {
+  const pending: Array<() => void> = [];
+  mocks.status.mockImplementation(() => new Promise((resolve) => pending.push(() => resolve({ state: "signed_out" }))));
+  render("claude", Array.from({ length: 20 }, (_, i) => node(`node-${i}`)));
+  await flush();
+  expect(mocks.status).toHaveBeenCalledTimes(4);
+  act(() => root.render(null));
+  expect(mocks.status.mock.calls.every((call) => call[3].aborted)).toBe(true);
+  await act(async () => { pending.forEach((resolve) => resolve()); });
+  expect(mocks.status).toHaveBeenCalledTimes(4);
+});
+it("uses the worker's input capability and aborts polling when cancelled", async () => {
+  mocks.auth.mockResolvedValue({ login_id: "a".repeat(32), status: "running", input_supported: true });
+  render(); await flush(); await click("Log in"); await flush();
+  expect(document.querySelector('input[aria-label="Claude login response"]')).not.toBeNull();
+  const poll = mocks.auth.mock.calls.find((call) => call[3] === "poll")!;
+  expect(poll[5].aborted).toBe(false);
+  await click("Cancel login");
+  expect(poll[5].aborted).toBe(true);
+});
 it("stops polling after completion and does not cancel a successful login on unmount", async () => {
   mocks.auth.mockImplementation((_t, _id, _b, action) => Promise.resolve(action === "poll" ? { login_id: "a".repeat(32), status: "exited", authenticated: true, output: "done", offset: 4 } : { login_id: "a".repeat(32), status: "running" }));
   render(); await flush(); await click("Log in"); await flush();

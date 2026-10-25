@@ -1,10 +1,48 @@
-import { useEffect, useRef, useState, type FormEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import * as Dialog from "@radix-ui/react-dialog";
 import { api } from "../../transport/apiClient";
 import { useAuthStore } from "../../stores/authStore";
 import type { Target } from "../../domain/models";
 
 export type AccountBackend = "claude" | "codex";
+type StatusLoader = (token: string, nodeId: string, backend: AccountBackend, signal: AbortSignal) => ReturnType<typeof api.backendAuthStatus>;
+
+// A sheet can contain many nodes. Queue status reads instead of turning the
+// gateway's overload protection into misleading per-node unavailable states.
+function createStatusLoader(): StatusLoader {
+  let running = 0;
+  const waiting = new Set<() => void>();
+  return async (token, nodeId, backend, signal) => {
+    await new Promise<void>((resolve, reject) => {
+      const begin = () => {
+        signal.removeEventListener("abort", abort);
+        running++;
+        resolve();
+      };
+      const abort = () => {
+        waiting.delete(begin);
+        reject(signal.reason);
+      };
+      if (signal.aborted) reject(signal.reason);
+      else if (running < 4) begin();
+      else {
+        waiting.add(begin);
+        signal.addEventListener("abort", abort, { once: true });
+      }
+    });
+    try {
+      signal.throwIfAborted();
+      return await api.backendAuthStatus(token, nodeId, backend, signal);
+    } finally {
+      running--;
+      const next = waiting.values().next().value;
+      if (next) {
+        waiting.delete(next);
+        next();
+      }
+    }
+  };
+}
 
 export function safeAuthUrl(value: string, backend: AccountBackend): boolean {
   try {
@@ -15,12 +53,12 @@ export function safeAuthUrl(value: string, backend: AccountBackend): boolean {
 }
 
 function terminalOutput(output: string, backend: AccountBackend) {
-  return output.split(/(https:\/\/[^\s\x1b<>"']+)/g).map((part, index) => safeAuthUrl(part, backend)
+  return output.split(/(https:\/\/[^\s\x1b<>"']+)/g).map((part, index) => part.startsWith("https://") && safeAuthUrl(part, backend)
     ? <a key={index} href={part} target="_blank" rel="noopener noreferrer" className="break-all text-accent underline">{part}</a>
     : part);
 }
 
-function NodeAccount({ node, backend }: { node: Target; backend: AccountBackend }) {
+function NodeAccount({ node, backend, loadStatus }: { node: Target; backend: AccountBackend; loadStatus: StatusLoader }) {
   const token = useAuthStore((s) => s.token);
   const [state, setState] = useState("loading");
   const [loginId, setLoginId] = useState("");
@@ -28,35 +66,40 @@ function NodeAccount({ node, backend }: { node: Target; backend: AccountBackend 
   const [busy, setBusy] = useState(false);
   const [output, setOutput] = useState("");
   const [input, setInput] = useState("");
+  const [inputSupported, setInputSupported] = useState(false);
   const [error, setError] = useState("");
   const activeLogin = useRef("");
   const mounted = useRef(false);
   const operation = useRef(0);
+  const renderedOutput = useMemo(() => terminalOutput(output.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, ""), backend), [output, backend]);
 
   useEffect(() => {
     mounted.current = true;
     let active = true;
-    void api.backendAuthStatus(token, node.id, backend).then((result) => {
+    const controller = new AbortController();
+    void loadStatus(token, node.id, backend, controller.signal).then((result) => {
       if (active) setState(result.state);
     }).catch(() => { if (active) setState("unavailable"); });
     return () => {
       active = false;
+      controller.abort();
       mounted.current = false;
       operation.current++;
       if (activeLogin.current) void api.backendAuth(token, node.id, backend, "cancel", { login_id: activeLogin.current }).catch(() => undefined);
       activeLogin.current = "";
     };
-  }, [token, node.id, backend]);
+  }, [token, node.id, backend, loadStatus]);
 
   useEffect(() => {
     if (!loginId || !running) return;
     let active = true;
     const current = operation.current;
+    const controller = new AbortController();
     let timer: ReturnType<typeof setTimeout>;
     let offset = 0;
     const poll = async () => {
       try {
-        const result = await api.backendAuth(token, node.id, backend, "poll", { login_id: loginId, offset });
+        const result = await api.backendAuth(token, node.id, backend, "poll", { login_id: loginId, offset }, controller.signal);
         if (!active || current !== operation.current) return;
         offset = result.offset ?? offset;
         if (result.output) setOutput((old) => (old + result.output).slice(-65536));
@@ -76,7 +119,7 @@ function NodeAccount({ node, backend }: { node: Target; backend: AccountBackend 
       }
     };
     void poll();
-    return () => { active = false; clearTimeout(timer); };
+    return () => { active = false; clearTimeout(timer); controller.abort(); };
   }, [loginId, running, token, node.id, backend]);
 
   const start = async () => {
@@ -89,6 +132,7 @@ function NodeAccount({ node, backend }: { node: Target; backend: AccountBackend 
         return;
       }
       activeLogin.current = result.login_id;
+      setInputSupported(result.input_supported === true);
       setLoginId(result.login_id); setRunning(true);
     } catch { if (mounted.current) setError("Could not start login. Check the node and try again."); }
     finally { if (mounted.current) setBusy(false); }
@@ -120,9 +164,9 @@ function NodeAccount({ node, backend }: { node: Target; backend: AccountBackend 
       : <button disabled={busy || state === "loading"} onClick={() => void start()} className="rounded-lg bg-accent px-3 py-2 text-white disabled:opacity-50">{busy ? "Starting…" : state === "signed_in" ? "Sign in again" : "Log in"}</button>}
     {loginId && <>
       <p className="text-xs text-ink-muted">{running ? backend === "claude" ? "Open the auth link, then paste the returned code below." : "Open the auth link and enter the device code. Your workspace administrator may need to enable device-code authentication." : "Login ended."}</p>
-      <pre aria-live="polite" className="max-h-64 overflow-auto whitespace-pre-wrap break-words rounded-lg bg-surface-2 p-3 text-xs">{terminalOutput(output.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, ""), backend)}</pre>
-      {running && backend === "claude" && <form onSubmit={(e) => void send(e)} className="flex gap-2">
-        <input aria-label="Claude login response" value={input} maxLength={1000} onChange={(e) => setInput(e.target.value)} className="min-w-0 flex-1 rounded-lg bg-surface-2 p-2" />
+      <pre aria-live="polite" className="max-h-64 overflow-auto whitespace-pre-wrap break-words rounded-lg bg-surface-2 p-3 text-xs">{renderedOutput}</pre>
+      {running && inputSupported && <form onSubmit={(e) => void send(e)} className="flex gap-2">
+        <input aria-label={`${backend === "claude" ? "Claude" : "Codex"} login response`} value={input} maxLength={1000} onChange={(e) => setInput(e.target.value)} className="min-w-0 flex-1 rounded-lg bg-surface-2 p-2" />
         <button disabled={busy} type="submit" className="rounded-lg border border-hairline p-2">Send</button>
       </form>}
     </>}
@@ -131,6 +175,7 @@ function NodeAccount({ node, backend }: { node: Target; backend: AccountBackend 
 }
 
 export function BackendAccountSheet({ backend, nodes, onClose }: { backend: AccountBackend; nodes: Target[]; onClose: () => void }) {
+  const loadStatus = useMemo(createStatusLoader, []);
   const eligible = nodes.filter((n) => n.live && n.backends.includes(backend));
   return <Dialog.Root open onOpenChange={(open) => { if (!open) onClose(); }}>
     <Dialog.Portal>
@@ -141,7 +186,7 @@ export function BackendAccountSheet({ backend, nodes, onClose }: { backend: Acco
           <Dialog.Close aria-label="Close accounts" className="rounded-lg border border-hairline px-3 py-2">Close</Dialog.Close>
         </div>
         <Dialog.Description className="mb-3 text-sm text-ink-muted">Accounts on online nodes supporting {backend}.</Dialog.Description>
-        {eligible.length ? eligible.map((node) => <NodeAccount key={`${backend}:${node.id}`} node={node} backend={backend} />) : <p>No supporting nodes online.</p>}
+        {eligible.length ? eligible.map((node) => <NodeAccount key={`${backend}:${node.id}`} node={node} backend={backend} loadStatus={loadStatus} />) : <p>No supporting nodes online.</p>}
       </Dialog.Content>
     </Dialog.Portal>
   </Dialog.Root>;

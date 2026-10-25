@@ -248,7 +248,6 @@ class MeshHealthOut(BaseModel):
 
 def build_router(orchestrator: Any, *, require_auth: Callable[..., Any]) -> APIRouter:
     router = APIRouter(route_class=_BoundedAuthRoute)
-    claude_auth_rpc_slots = threading.BoundedSemaphore(8)
 
     def claude_auth_rpc(node_id: str, action: str, payload: dict[str, object], backend: str = "claude", legacy: bool = True) -> dict[str, object]:
         """Proxy the fixed Claude auth RPC to one registered tailnet worker."""
@@ -293,11 +292,7 @@ def build_router(orchestrator: Any, *, require_auth: Callable[..., Any]) -> APIR
                         raise HTTPException(status_code=502, detail="worker_response_too_large")
             except urllib.error.HTTPError as exc:
                 if exc.code in (400, 401, 404):
-                    try:
-                        detail = "worker_rejected_request"
-                    except Exception:
-                        detail = "worker_rejected_request"
-                    raise HTTPException(status_code=409, detail=detail) from exc
+                    raise HTTPException(status_code=409, detail="worker_rejected_request") from exc
                 raise HTTPException(status_code=502, detail="worker_rpc_failed") from exc
             except (OSError, TimeoutError) as exc:
                 raise HTTPException(status_code=502, detail="worker_unreachable") from exc
@@ -324,12 +319,7 @@ def build_router(orchestrator: Any, *, require_auth: Callable[..., Any]) -> APIR
                 raise HTTPException(status_code=502, detail="worker_invalid_response")
             return result
 
-        if not claude_auth_rpc_slots.acquire(blocking=False):
-            raise HTTPException(status_code=429, detail="claude_auth_busy")
-        try:
-            return send()
-        finally:
-            claude_auth_rpc_slots.release()
+        return send()
 
     @router.get("/health", responses={200: {"model": HealthOut, "description": "Liveness + SDK governor ceilings, carrier-coverage flag, and build identity."}})
     def health() -> Dict[str, Any]:

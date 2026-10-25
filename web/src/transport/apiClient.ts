@@ -260,12 +260,14 @@ async function turnMutation<T>(
 }
 
 export const api = {
-  backendAuthStatus(token: string, nodeId: string, backend: string): Promise<{ state: "signed_in" | "signed_out" | "unavailable" }> {
-    return get(`/api/nodes/${encodeURIComponent(nodeId)}/backend-auth/${backend}/status`, token, AbortSignal.timeout(12000));
+  backendAuthStatus(token: string, nodeId: string, backend: string, signal?: AbortSignal): Promise<{ state: "signed_in" | "signed_out" | "unavailable" }> {
+    const deadline = AbortSignal.timeout(12000);
+    return get(`/api/nodes/${encodeURIComponent(nodeId)}/backend-auth/${backend}/status`, token, signal ? AbortSignal.any([signal, deadline]) : deadline);
   },
 
-  backendAuth(token: string, nodeId: string, backend: string, action: "start" | "poll" | "input" | "cancel", body: { login_id?: string; offset?: number; input?: string } = {}): Promise<ClaudeAuthLogin> {
-    return post(`/api/nodes/${encodeURIComponent(nodeId)}/backend-auth/${backend}/${action}`, token, body, undefined, AbortSignal.timeout(12000));
+  backendAuth(token: string, nodeId: string, backend: string, action: "start" | "poll" | "input" | "cancel", body: { login_id?: string; offset?: number; input?: string } = {}, signal?: AbortSignal): Promise<ClaudeAuthLogin> {
+    const deadline = AbortSignal.timeout(12000);
+    return post(`/api/nodes/${encodeURIComponent(nodeId)}/backend-auth/${backend}/${action}`, token, body, undefined, signal ? AbortSignal.any([signal, deadline]) : deadline);
   },
   startClaudeAuth(token: string, nodeId: string): Promise<ClaudeAuthLogin> {
     return post<ClaudeAuthLogin>(`/api/nodes/${encodeURIComponent(nodeId)}/claude-auth/start`, token, {});
