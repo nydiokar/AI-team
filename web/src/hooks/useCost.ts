@@ -17,6 +17,7 @@ import {
 } from "../transport/costAdapter";
 import type { CostDimension, CostGranularity } from "../domain/cost";
 import { useAuthStore } from "../stores/authStore";
+import { rangeToFromTo, type CostRangeKey } from "../lib/costPresentation";
 
 const POLL_MS = 15000;
 
@@ -27,6 +28,11 @@ export interface CostWindow {
   from?: string;
   to?: string;
   repoPath?: string;
+  range?: CostRangeKey;
+}
+
+function rollingWindow(opts: CostWindow): CostWindow {
+  return opts.range ? { ...opts, ...rangeToFromTo(opts.range) } : opts;
 }
 
 export function useCostExplorer(
@@ -37,6 +43,7 @@ export function useCostExplorer(
     to?: string;
     repoPath?: string;
     limit?: number;
+    range?: CostRangeKey;
   } = {},
 ) {
   const token = useAuthStore((s) => s.token);
@@ -49,21 +56,20 @@ export function useCostExplorer(
       opts.to ?? null,
       opts.repoPath ?? null,
       opts.limit ?? 100,
+      opts.range ?? null,
     ],
-    queryFn: async () =>
+    queryFn: async ({ signal }) =>
       toCostExplorer(
         await api.costExplorer(token, {
           dimension: opts.dimension,
           granularity: opts.granularity,
-          from: opts.from,
-          to: opts.to,
+          ...rollingWindow(opts),
           repoPath: opts.repoPath,
           limit: opts.limit,
-        }),
+        }, signal),
       ),
     enabled: Boolean(token),
     refetchInterval: POLL_MS,
-    placeholderData: (prev) => prev,
     retry,
   });
 }
@@ -75,6 +81,7 @@ export function useCostTop(
     to?: string;
     repoPath?: string;
     limit?: number;
+    range?: CostRangeKey;
   } = {},
 ) {
   const token = useAuthStore((s) => s.token);
@@ -86,33 +93,31 @@ export function useCostTop(
       opts.to ?? null,
       opts.repoPath ?? null,
       opts.limit ?? 10,
+      opts.range ?? null,
     ],
-    queryFn: async () =>
+    queryFn: async ({ signal }) =>
       toCostTop(
         await api.costTop(token, {
           by: opts.by,
-          from: opts.from,
-          to: opts.to,
+          ...rollingWindow(opts),
           repoPath: opts.repoPath,
           limit: opts.limit,
-        }),
+        }, signal),
       ),
     enabled: Boolean(token),
     refetchInterval: POLL_MS,
-    placeholderData: (prev) => prev,
     retry,
   });
 }
 
-export function useCostProjects(opts: { from?: string; to?: string } = {}) {
+export function useCostProjects(opts: { from?: string; to?: string; range?: CostRangeKey } = {}) {
   const token = useAuthStore((s) => s.token);
   return useQuery({
-    queryKey: ["cost-projects", opts.from ?? null, opts.to ?? null],
-    queryFn: async () =>
-      toCostProjects(await api.costProjects(token, opts)),
+    queryKey: ["cost-projects", opts.from ?? null, opts.to ?? null, opts.range ?? null],
+    queryFn: async ({ signal }) =>
+      toCostProjects(await api.costProjects(token, rollingWindow(opts), signal)),
     enabled: Boolean(token),
     refetchInterval: POLL_MS,
-    placeholderData: (prev) => prev,
     retry,
   });
 }
@@ -121,10 +126,9 @@ export function useCaseUsage(flowRunId: string | undefined) {
   const token = useAuthStore((s) => s.token);
   return useQuery({
     queryKey: ["case-usage", flowRunId],
-    queryFn: async () => toCaseUsage(await api.caseUsage(token, flowRunId!)),
+    queryFn: async ({ signal }) => toCaseUsage(await api.caseUsage(token, flowRunId!, signal)),
     enabled: Boolean(token) && Boolean(flowRunId),
     refetchInterval: POLL_MS,
-    placeholderData: (prev) => prev,
     retry,
   });
 }
@@ -133,7 +137,7 @@ export function useCostAlerts() {
   const token = useAuthStore((s) => s.token);
   return useQuery({
     queryKey: ["cost-alerts"],
-    queryFn: async () => toCostAlerts(await api.costAlerts(token)),
+    queryFn: async ({ signal }) => toCostAlerts(await api.costAlerts(token, signal)),
     enabled: Boolean(token),
     refetchInterval: POLL_MS,
     placeholderData: (prev) => prev,
