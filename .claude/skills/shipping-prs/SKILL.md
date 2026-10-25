@@ -59,8 +59,9 @@ do not rebase a pushed branch, and `--force` is never used here), re-test, push.
 
 **8. Hand-off.**
 - Code that runs in the gateway/task-server changed → `deploying-the-gateway` (merged ≠ live).
-- Worker-side code (`worker_main.py`, `src/worker/**`) → the worker needs a restart; that is an
-  **operator decision** — say so explicitly instead of doing it.
+- Worker-side code (`worker_main.py`, `src/worker/**`) → follow the worker-context section of
+  `deploying-the-gateway`: inspect active work and caller ancestry, use existing session authorization,
+  and verify a new incarnation/build. Do not ask blindly or repeat an already-approved restart.
 - A dispatch job is complete → `managing-dispatch-jobs` (closure + ledger).
 
 ## Report

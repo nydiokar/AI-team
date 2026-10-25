@@ -1236,3 +1236,19 @@ def test_agent_narration_about_login_is_still_preserved():
     reply = _build_salvaged_reply("auth", "Not logged in to GitHub; I updated the files first.", "Unauthorized")
     assert "I updated the files first" in reply
     assert "No work was completed" not in reply
+
+
+def test_auth_failure_restarts_only_the_failed_cli_before_retrying_after_login() -> None:
+    driver = ClaudeSDKClientDriver()
+    session = _make_session(backend_session_id="sid-auth")
+    failed = TurnOutcome(output="", backend_session_id="sid-auth", raw_ndjson="", is_error=True,
+                         error_class="auth", error_text="Not logged in", salvaged_output="")
+    with patch.object(_SDKSession, "send", side_effect=[failed, _ok("working", "sid-auth")]), patch.object(_SDKSession, "start", lambda self: None):
+        first = driver.start_session(session, "work", turn=turn_control("signed-out"))
+        original = driver._sessions[session.session_id]
+        assert not first.success
+        assert original._closed
+        second = driver.send_turn(session, "work", turn=turn_control("after-login"))
+        assert second.success
+        assert driver._sessions[session.session_id] is not original
+        assert driver._sessions[session.session_id].resume == "sid-auth"
