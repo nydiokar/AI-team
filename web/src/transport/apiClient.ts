@@ -69,6 +69,11 @@ async function get<T>(path: string, token: string, signal?: AbortSignal): Promis
   return (await res.json()) as T;
 }
 
+function costReadSignal(signal?: AbortSignal): AbortSignal {
+  const deadline = AbortSignal.timeout(15000);
+  return signal ? AbortSignal.any([signal, deadline]) : deadline;
+}
+
 /**
  * POST a write. On a non-2xx, the backend returns {ok:false, reason, ...} (or a
  * FastAPI {detail} envelope). We surface `reason` as the ApiError message so the
@@ -1014,6 +1019,7 @@ export const api = {
       repoPath?: string;
       limit?: number;
     } = {},
+    signal?: AbortSignal,
   ): Promise<RawCostExplorerResponse> {
     const qs = new URLSearchParams({
       dimension: opts.dimension ?? "project",
@@ -1023,7 +1029,7 @@ export const api = {
     if (opts.from) qs.set("from", opts.from);
     if (opts.to) qs.set("to", opts.to);
     if (opts.repoPath) qs.set("repo_path", opts.repoPath);
-    return get<RawCostExplorerResponse>(`/api/cost/explorer?${qs.toString()}`, token);
+    return get<RawCostExplorerResponse>(`/api/cost/explorer?${qs.toString()}`, token, costReadSignal(signal));
   },
 
   /**
@@ -1040,6 +1046,7 @@ export const api = {
       repoPath?: string;
       limit?: number;
     } = {},
+    signal?: AbortSignal,
   ): Promise<RawCostTopResponse> {
     const qs = new URLSearchParams({
       by: opts.by ?? "usd",
@@ -1048,7 +1055,7 @@ export const api = {
     if (opts.from) qs.set("from", opts.from);
     if (opts.to) qs.set("to", opts.to);
     if (opts.repoPath) qs.set("repo_path", opts.repoPath);
-    return get<RawCostTopResponse>(`/api/cost/top?${qs.toString()}`, token);
+    return get<RawCostTopResponse>(`/api/cost/top?${qs.toString()}`, token, costReadSignal(signal));
   },
 
   /** GET /api/cost/projects — distinct projects with usage, ordered by size (the
@@ -1056,26 +1063,28 @@ export const api = {
   async costProjects(
     token: string,
     opts: { from?: string; to?: string; limit?: number } = {},
+    signal?: AbortSignal,
   ): Promise<RawCostProjectsResponse> {
     const qs = new URLSearchParams({ limit: String(opts.limit ?? 200) });
     if (opts.from) qs.set("from", opts.from);
     if (opts.to) qs.set("to", opts.to);
-    return get<RawCostProjectsResponse>(`/api/cost/projects?${qs.toString()}`, token);
+    return get<RawCostProjectsResponse>(`/api/cost/projects?${qs.toString()}`, token, costReadSignal(signal));
   },
 
   /** GET /api/cases/{id}/usage — one case's manager/workers cost split (404 on an
    *  unknown case). */
-  async caseUsage(token: string, flowRunId: string): Promise<RawCaseUsageResponse> {
+  async caseUsage(token: string, flowRunId: string, signal?: AbortSignal): Promise<RawCaseUsageResponse> {
     return get<RawCaseUsageResponse>(
       `/api/cases/${encodeURIComponent(flowRunId)}/usage`,
       token,
+      costReadSignal(signal),
     );
   },
 
   /** GET /api/cost/alerts — budget/burn-rate alerts (billable-USD only) plus the
    *  enforcement surface. Read-only; fires only when a budget knob is set. */
-  async costAlerts(token: string): Promise<RawCostAlertsResponse> {
-    return get<RawCostAlertsResponse>(`/api/cost/alerts`, token);
+  async costAlerts(token: string, signal?: AbortSignal): Promise<RawCostAlertsResponse> {
+    return get<RawCostAlertsResponse>(`/api/cost/alerts`, token, costReadSignal(signal));
   },
 
   /** GET /api/system-alerts — recent gateway-liveness outages recorded by the

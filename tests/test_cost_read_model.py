@@ -175,6 +175,27 @@ def test_session_totals_leave_exclusive_cache_untouched(seeded_db):
 
 # --- read-model assemblers ----------------------------------------------------
 
+def test_aggregate_coverage_uses_total_once() -> None:
+    from src.control.cost_read_model import _sum_aggregates
+
+    rows: list[dict[str, dict[str, int | float]]] = [
+        {
+            "tokens": {"input": 60, "output": 40, "cache_read": 0, "cache_creation": 0, "total": 100},
+            "usd": {"known": 1.0, "unpriced_tokens": 0, "coverage_pct": 100.0},
+        },
+        {
+            "tokens": {"input": 200, "output": 100, "cache_read": 0, "cache_creation": 0, "total": 300},
+            "usd": {"known": 0.0, "unpriced_tokens": 300, "coverage_pct": 0.0},
+        },
+    ]
+    mixed = _sum_aggregates(rows)
+    assert mixed["tokens"]["total"] == 400
+    assert mixed["usd"]["coverage_pct"] == 25.0
+    assert _sum_aggregates(rows[1:])["usd"]["coverage_pct"] == 0.0
+    assert _sum_aggregates(rows[:1])["usd"]["coverage_pct"] == 100.0
+    assert _sum_aggregates([])["usd"]["coverage_pct"] == 100.0
+
+
 def test_explorer_model_dimension_prices_per_model(seeded_db):
     from src.control.cost_read_model import assemble_explorer
     out = assemble_explorer(seeded_db, dimension="model", granularity="", limit=10)

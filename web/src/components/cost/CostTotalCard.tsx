@@ -4,9 +4,10 @@
  * that is what inflates codex spend). Includes the honest unattributed note when
  * no-session turns exist.
  */
-import { Wallet } from "lucide-react";
+import { Wallet, Layers3, Database, ScanLine } from "lucide-react";
 import { CoverageChip } from "./CoverageChip";
-import { formatTokens, formatUsd } from "../../lib/costPresentation";
+import { formatTokens } from "../../lib/costPresentation";
+import { formatCostUsd as formatUsd } from "../../lib/costAnalytics";
 import type { CostBucket } from "../../domain/cost";
 
 export function CostTotalCard({
@@ -17,29 +18,33 @@ export function CostTotalCard({
   unattributedTokens: number;
 }) {
   const { tokens, usd } = totals;
+  const cacheShare = tokens.total > 0 ? tokens.cacheRead / tokens.total * 100 : null;
   return (
-    <div className="card-elev rounded-xl px-4 py-3.5">
-      <div className="flex items-center gap-2 text-[12px] text-ink-muted">
-        <Wallet className="size-3.5" />
-        <span className="min-w-0 flex-1 truncate">estimated spend (window)</span>
-        <CoverageChip coveragePct={usd.coveragePct} unpricedTokens={usd.unpricedTokens} />
+    <div className="cost-summary">
+      <div className="cost-stat cost-stat-primary">
+        <div className="cost-stat-label"><Wallet aria-hidden="true" />Estimated spend</div>
+        <div className="cost-stat-value">{formatUsd(usd.known)}</div>
+        <div className="cost-stat-note">Known USD · session-attributed</div>
       </div>
-      <div className="mt-2 flex items-end justify-between gap-3">
-        <div className="text-[26px] font-semibold leading-none tracking-tight tabular-nums text-ink">
-          {formatUsd(usd.known)}
-        </div>
-        <div className="text-right text-[12px] leading-tight tabular-nums text-ink-muted">
-          <div>{formatTokens(tokens.total)} tokens</div>
-          <div className="text-[11px]">
-            {formatTokens(tokens.cacheRead)} cached read
-          </div>
+      <div className="cost-stat">
+        <div className="cost-stat-label"><Layers3 aria-hidden="true" />Token volume</div>
+        <div className="cost-stat-value" title={tokens.total.toLocaleString("en-US")}>{formatTokens(tokens.total)}</div>
+        <div className="cost-stat-note">Across all four token buckets</div>
+      </div>
+      <div className="cost-stat">
+        <div className="cost-stat-label"><Database aria-hidden="true" />Cache-read share</div>
+        <div className="cost-stat-value">{cacheShare == null ? "—" : `${cacheShare.toFixed(1)}%`}</div>
+        <div className="cost-stat-note">{formatTokens(tokens.cacheRead)} tokens read from cache</div>
+      </div>
+      <div className="cost-stat">
+        <div className="cost-stat-label"><ScanLine aria-hidden="true" />Pricing coverage</div>
+        <div className="cost-stat-value">{tokens.total > 0 ? usd.unpricedTokens > 0 && usd.coveragePct >= 100 ? ">99.9%" : `${usd.coveragePct.toFixed(1)}%` : "—"}</div>
+        <div className="mt-2">
+          {tokens.total > 0 ? <CoverageChip coveragePct={usd.coveragePct} unpricedTokens={usd.unpricedTokens} /> : <span className="cost-stat-note">No recorded usage</span>}
         </div>
       </div>
-      {unattributedTokens > 0 && (
-        <div className="mt-2.5 border-t border-hairline/60 pt-2 text-[11px] text-ink-muted">
-          {formatTokens(unattributedTokens)} tokens can't be tied to a session/project.
-        </div>
-      )}
+      {usd.unpricedTokens > 0 && <p className="col-span-full text-xs text-warn">{formatTokens(usd.unpricedTokens)} unpriced tokens are excluded from estimated spend.</p>}
+      {unattributedTokens > 0 && <span className="sr-only">Additional usage without a session is listed separately below.</span>}
     </div>
   );
 }

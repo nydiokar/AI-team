@@ -127,6 +127,7 @@ export function useWorkRoster(flowRunId: string | undefined) {
 export function useSessionAffiliations(): {
   index: Map<string, SessionAffiliation>;
   isLoading: boolean;
+  error: unknown;
 } {
   const token = useAuthStore((s) => s.token);
   const query = useQuery({
@@ -141,6 +142,7 @@ export function useSessionAffiliations(): {
   return {
     index: query.data ?? EMPTY_AFFILIATIONS,
     isLoading: query.isLoading,
+    error: query.error,
   };
 }
 
