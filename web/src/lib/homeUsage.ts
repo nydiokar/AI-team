@@ -53,7 +53,7 @@ export function windowLabel(seconds: number | null): string {
 }
 
 function clampPercent(p: number | null | undefined): number | null {
-  if (p == null || Number.isNaN(p)) return null;
+  if (p == null || !Number.isFinite(p)) return null;
   return Math.max(0, Math.min(100, p));
 }
 
@@ -88,6 +88,12 @@ export function summarizeProviderUsage(
       byProvider.get(key) ??
       { accountHint: principalHash ? principalHash.slice(0, 8) : null, windows: [] as UsageWindow[] };
     const pct = clampPercent(usedPercent);
+    // Home summarizes the overall windows, using the highest observed usage
+    // across accounts. Never mix a model-scoped weekly limit into this meter.
+    const existing = entry.windows.find((w) => w.label === windowLabel(durationSeconds));
+    if (existing && (pct == null || (existing.usedPercent != null && existing.usedPercent >= pct))) return;
+    if (existing) entry.windows = entry.windows.filter((w) => w !== existing);
+    if (entry.accountHint !== (principalHash ? principalHash.slice(0, 8) : null)) entry.accountHint = null;
     entry.windows.push({
       label: windowLabel(durationSeconds),
       durationSeconds,
@@ -102,6 +108,7 @@ export function summarizeProviderUsage(
   const states: RawQuotaWindowState[] = resp.window_states ?? [];
   if (states.length > 0) {
     for (const s of states) {
+      if (s.bucket_id.startsWith("weekly_scoped:")) continue;
       const bucket = bucketById.get(s.bucket_id);
       const unknown =
         s.used_percent == null
@@ -118,6 +125,7 @@ export function summarizeProviderUsage(
     }
   } else {
     for (const snap of resp.latest_snapshots ?? ([] as RawQuotaSnapshot[])) {
+      if (snap.bucket_id.startsWith("weekly_scoped:")) continue;
       const unknown =
         snap.used_percent == null ? snap.unavailable_reason || snap.raw_status || "unavailable" : null;
       push(

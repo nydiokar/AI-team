@@ -1,17 +1,4 @@
-/**
- * HomeScreen — the app's landing view. It is NOT a menu of shortcuts to the
- * other tabs (issue #235 feedback): it does its own job. Top to bottom —
- *   1. a compact brand row with the only two real entry actions (new session,
- *      resume latest) inline beside the logo;
- *   2. ACCOUNTS & USAGE as the hero: a terminal-styled panel with recognizable
- *      backend marks and honest 5h/7d meters (the thing you actually come to
- *      check);
- *   3. a tiny attention strip — approvals (→ a real decisions list) and
- *      sessions needing you — as two small pills, nothing more;
- *   4. ONLINE nodes only, compact, with live job counts (offline folded away);
- *   5. a subtle spend sparkline.
- * Everything binds to existing live read models; no new polling, no new backend.
- */
+/** Home: backend quota summaries, node availability, attention and spend. */
 import { useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { Plus, RotateCcw, ChevronRight } from "lucide-react";
@@ -23,91 +10,52 @@ import {
 } from "../hooks/useLiveData";
 import { useCostExplorer } from "../hooks/useCost";
 import { NewSessionSheet } from "../components/sessions/NewSessionSheet";
-import { BackendLogo, normalizeBackend } from "../components/home/BackendLogo";
+
 import { BackendAccountSheet, type AccountBackend } from "../components/home/BackendAccountSheet";
 import { cn } from "../lib/cn";
 import type { Target } from "../domain/models";
 import { summarizeProviderUsage, type UsageWindow } from "../lib/homeUsage";
 import { dailySpend, totalKnownUsd, sparklinePoints } from "../lib/homeCost";
 
-function BlockMeter({ window: w }: { window: UsageWindow }) {
-  const known = w.usedPercent != null;
-  const filled = known ? Math.round((w.usedPercent as number) / 10) : 0;
-  const color = w.nearLimit ? "text-warn" : "text-accent";
-  return (
-    <div className="flex items-center gap-2 font-mono text-[12px] leading-5">
-      <span className="w-6 shrink-0 text-ink-muted">{w.label}</span>
-      <span aria-hidden className={cn("tracking-tight", known ? color : "text-ink-muted/50")}>
-        {known ? "█".repeat(filled) + "░".repeat(10 - filled) : "░".repeat(10)}
-      </span>
-      <span
-        className={cn(
-          "shrink-0 tabular-nums",
-          !known ? "text-ink-muted" : w.nearLimit ? "font-semibold text-warn" : "text-ink-soft",
-        )}
-      >
-        {known ? `${Math.round(w.usedPercent as number)}%${w.nearLimit ? "!" : ""}` : "n/a"}
-      </span>
+function UsageMeter({ window: w, label }: { window?: UsageWindow; label: string }) {
+  const percent = w?.usedPercent;
+  const known = percent != null;
+  return <div className="min-w-0" title={w?.resetAt ? `Resets ${new Date(w.resetAt).toLocaleString()}` : w?.unknownReason ?? "Usage unavailable"}>
+    <div className="mb-1.5 flex items-center justify-between gap-1 text-[11px]">
+      <span className="text-ink-muted">{label}</span>
+      <span className={cn("tabular-nums", w?.nearLimit ? "font-semibold text-warn" : "text-ink-soft")}>{known ? `${Math.round(percent)}%` : "n/a"}</span>
     </div>
-  );
+    <div role={known ? "meter" : undefined} aria-label={`${label} quota used`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={percent ?? undefined} className="h-1.5 overflow-hidden rounded-full bg-surface-3">
+      {known && <div className={cn("h-full rounded-full", w?.nearLimit ? "bg-warn" : "bg-accent")} style={{ width: `${percent}%` }} />}
+    </div>
+  </div>;
 }
 
-function AccountMark({ backend, onOpen, size = 7 }: { backend: string; onOpen: (backend: AccountBackend) => void; size?: 6 | 7 }) {
-  return backend === "claude" || backend === "codex"
-    ? <button type="button" aria-label={`Manage ${backend} accounts`} onClick={() => onOpen(backend)} className="inline-flex min-h-11 min-w-11 items-center justify-center rounded-lg focus-visible:outline-2 focus-visible:outline-accent"><BackendLogo backend={backend} size={size} /></button>
-    : <BackendLogo backend={backend} size={size} />;
-}
-
-function AccountsTerminal({ onOpen }: { onOpen: (backend: AccountBackend) => void }) {
+function BackendAccounts({ onOpen }: { onOpen: (backend: AccountBackend) => void }) {
   const quota = useQuotaWindows();
   const providers = summarizeProviderUsage(quota.data);
-  const enabled = Boolean(quota.data?.enabled);
-  return (
-    <section aria-label="Accounts and usage" className="px-4 pt-3">
-      <div className="overflow-hidden rounded-2xl border border-hairline bg-[#0a0d12]">
-        <div className="flex items-center gap-1.5 border-b border-hairline/70 px-3 py-2">
-          <span className="size-2 rounded-full bg-bad/70" />
-          <span className="size-2 rounded-full bg-warn/70" />
-          <span className="size-2 rounded-full bg-ok/70" />
-          <span className="ml-2 font-mono text-[11px] text-ink-muted">accounts · usage</span>
-          <div className="ml-auto flex">
-            <AccountMark backend="claude" onOpen={onOpen} />
-            <AccountMark backend="codex" onOpen={onOpen} />
-          </div>
-        </div>
-        <div className="divide-y divide-hairline/50">
-          {!enabled || providers.length === 0 ? (
-            <div className="px-3 py-4 font-mono text-[12px] text-ink-muted">
-              {enabled ? "$ no usage reported yet" : "$ usage telemetry off"}
-            </div>
-          ) : (
-            providers.map((p) => (
-              <div key={p.provider} className="flex items-start gap-3 px-3 py-3">
-                <AccountMark backend={p.provider} onOpen={onOpen} />
-                <div className="min-w-0 flex-1">
-                  <div className="flex items-baseline gap-2">
-                    <span className="font-mono text-[13px] font-semibold capitalize text-ink">
-                      {p.provider}
-                    </span>
-                    {p.accountHint ? (
-                      <span className="truncate font-mono text-[10px] text-ink-muted">
-                        {p.accountHint}
-                      </span>
-                    ) : null}
-                  </div>
-                  <div className="mt-1.5 space-y-0.5">
-                    {p.windows.map((w) => (
-                      <BlockMeter key={w.label + w.durationSeconds} window={w} />
-                    ))}
-                  </div>
-                </div>
-              </div>
-            ))
-          )}
-        </div>
-      </div>
-    </section>
-  );
+  const backends = [...new Set(["claude", "codex", ...providers.map((p) => p.provider)])];
+  return <section aria-label="Accounts and usage" className="px-4 pt-5">
+    <div className="mb-2 flex items-baseline justify-between">
+      <h2 className="text-[13px] font-semibold text-ink-soft">Backends</h2>
+      <span className="text-[11px] text-ink-muted" title="Highest observed overall usage across accounts">Quota used</span>
+    </div>
+    <div className="divide-y divide-hairline overflow-hidden rounded-2xl border border-hairline bg-surface-1">
+      {backends.map((backend) => {
+        const usage = providers.find((p) => p.provider === backend);
+        const manageable = backend === "claude" || backend === "codex";
+        return <div key={backend} className="grid grid-cols-[minmax(0,1.1fr)_minmax(0,1fr)_minmax(0,1fr)] items-center gap-3 px-3.5 py-4">
+          {manageable ? <button type="button" aria-label={`Manage ${backend} accounts`} onClick={() => onOpen(backend)} className="min-h-11 min-w-0 text-left focus-visible:outline-2 focus-visible:outline-accent">
+            <span className="block text-[13px] font-semibold text-ink">{backend === "claude" ? "Claude Code" : "Codex"}</span>
+            <span className="flex items-center gap-0.5 text-[11px] text-ink-muted">Accounts<ChevronRight className="size-3" /></span>
+          </button> : <span className="text-[13px] font-semibold capitalize text-ink">{backend}</span>}
+          <UsageMeter label="5 hours" window={usage?.windows.find((w) => w.label === "5h")} />
+          <UsageMeter label="7 days" window={usage?.windows.find((w) => w.label === "7d")} />
+        </div>;
+      })}
+    </div>
+    {!quota.data?.enabled && <p className="mt-2 text-[11px] text-ink-muted">Usage telemetry unavailable. Accounts can still be managed.</p>}
+  </section>;
 }
 
 function AttentionStrip({ approvals, sessions }: { approvals: number; sessions: number }) {
@@ -135,29 +83,32 @@ function AttentionStrip({ approvals, sessions }: { approvals: number; sessions: 
   );
 }
 
-function OnlineNodeRow({ node, onOpen }: { node: Target; onOpen: (backend: AccountBackend) => void }) {
+function OnlineNodeRow({ node }: { node: Target }) {
   const running = node.activeTasks.length;
-  const backends = [...new Set(node.backends.map(normalizeBackend))].filter((b) => b !== "unknown");
-  return (
-    <div className="flex items-center gap-3 rounded-2xl border border-hairline bg-surface-1 px-3.5 py-3">
-      <span className="size-2 shrink-0 rounded-full bg-ok pulse-dot" />
-      <div className="min-w-0 flex-1">
-        <div className="truncate text-sm font-medium text-ink">{node.id}</div>
-        <div className="text-[11px] text-ink-muted">
-          {running > 0 ? `${running} running` : "idle"}
-          {node.slotsTotal != null ? ` · ${node.slotsUsed ?? 0}/${node.slotsTotal} slots` : ""}
-        </div>
-      </div>
-      <div className="flex shrink-0 -space-x-1.5">
-        {backends.map((b) => (
-          <AccountMark key={b} backend={b} size={6} onOpen={onOpen} />
-        ))}
-      </div>
+  const occupied = Math.max(running, node.slotsUsed ?? 0);
+  const full = node.slotsTotal != null && occupied >= node.slotsTotal;
+  const status = occupied > 0 ? full ? "At capacity" : "Working" : node.slotsUsed == null ? "Online" : "Idle";
+  return <div className="rounded-2xl border border-hairline bg-surface-1 px-3.5 py-3">
+    <div className="flex items-center gap-3">
+      <span className={cn("size-2 shrink-0 rounded-full", occupied > 0 ? "bg-accent" : "bg-ok")} />
+      <h3 className="min-w-0 flex-1 truncate text-sm font-medium text-ink">{node.id}</h3>
+      <span className={cn("rounded-full px-2 py-1 text-[11px] font-medium", occupied > 0 ? "bg-accent-dim text-accent" : "bg-surface-2 text-ink-soft")}>{status}</span>
     </div>
-  );
+    <p className="mt-1.5 pl-5 text-[11px] text-ink-muted">
+      {running > 0 ? `${running} task${running === 1 ? "" : "s"} running` : occupied > 0 ? `${occupied} occupied slot${occupied === 1 ? "" : "s"}` : node.slotsUsed == null ? "Waiting for workload report" : "Ready for a task"}
+      {node.slotsTotal != null ? ` · ${Math.max(0, node.slotsTotal - occupied)} of ${node.slotsTotal} slots available` : ""}
+      {node.heartbeatAgeSec != null ? ` · Updated ${Math.round(node.heartbeatAgeSec)}s ago` : ""}
+    </p>
+    {running > 0 && <ul className="mt-2 space-y-1 pl-5">
+      {node.activeTasks.slice(0, 3).map((task) => <li key={task.taskId} className="truncate text-xs text-ink-soft">
+        <span className="capitalize">{task.backend}</span> · {task.phase || task.action.replaceAll("_", " ")}<span className="text-ink-muted"> · {task.taskId}</span>
+      </li>)}
+      {running > 3 && <li className="text-xs text-ink-muted">+{running - 3} more tasks</li>}
+    </ul>}
+  </div>;
 }
 
-function NodesSection({ nodes, loading, onOpen }: { nodes: Target[]; loading: boolean; onOpen: (backend: AccountBackend) => void }) {
+function NodesSection({ nodes, loading }: { nodes: Target[]; loading: boolean }) {
   const online = nodes.filter((n) => n.health === "online");
   const offline = nodes.length - online.length;
   return (
@@ -178,7 +129,7 @@ function NodesSection({ nodes, loading, onOpen }: { nodes: Target[]; loading: bo
             No nodes online.
           </div>
         ) : (
-          online.map((n) => <OnlineNodeRow key={n.id} node={n} onOpen={onOpen} />)
+          online.map((n) => <OnlineNodeRow key={n.id} node={n} />)
         )}
       </div>
     </section>
@@ -273,11 +224,11 @@ export function HomeScreen() {
         ) : null}
       </header>
 
-      <AccountsTerminal onOpen={setAccountBackend} />
+      <BackendAccounts onOpen={setAccountBackend} />
 
       <AttentionStrip approvals={approvals.data?.length ?? 0} sessions={attentionSessions} />
 
-      <NodesSection nodes={nodes} loading={targets.isLoading} onOpen={setAccountBackend} />
+      <NodesSection nodes={nodes} loading={targets.isLoading} />
 
       <SpendSparkline />
 

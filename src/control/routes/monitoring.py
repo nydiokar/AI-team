@@ -20,6 +20,7 @@ from fastapi.routing import APIRoute
 from pydantic import BaseModel, ConfigDict, Field
 
 from src.control import control_api as core
+from src.control.backend_auth_cache import BackendAuthCache
 from src.control.control_api import (
     _ID_STR_MAX,
     logger,
@@ -110,6 +111,8 @@ class ClaudeAuthInput(BaseModel):
 class ClaudeAuthOut(BaseModel):
     backend: Optional[str] = None
     state: Optional[str] = None
+    checked_at: str | None = None
+    login_verified_at: str | None = None
     input_supported: bool = False
     login_id: Optional[str] = None
     status: Optional[str] = None
@@ -249,8 +252,9 @@ class MeshHealthOut(BaseModel):
 def build_router(orchestrator: Any, *, require_auth: Callable[..., Any]) -> APIRouter:
     router = APIRouter(route_class=_BoundedAuthRoute)
     claude_auth_rpc_slots = threading.BoundedSemaphore(8)
+    auth_cache = BackendAuthCache()
 
-    def claude_auth_rpc(node_id: str, action: str, payload: dict[str, object], backend: str = "claude", legacy: bool = True) -> dict[str, object]:
+    def claude_auth_rpc(node_id: str, action: str, payload: dict[str, object], backend: str = "claude", legacy: bool = True, refresh: bool = False) -> dict[str, object]:
         """Proxy the fixed Claude auth RPC to one registered tailnet worker."""
         if backend not in ("claude", "codex"):
             raise HTTPException(status_code=422, detail="backend_unsupported")
@@ -276,6 +280,7 @@ def build_router(orchestrator: Any, *, require_auth: Callable[..., Any]) -> APIR
             raise HTTPException(status_code=409, detail="node_address_unavailable") from exc
         if not 1 <= port <= 65535:
             raise HTTPException(status_code=409, detail="node_address_unavailable")
+        cache_key = json.dumps([node_id, backend, node.get("incarnation_id"), str(ip), port])
         body = json.dumps(payload).encode("utf-8")
         host = f"[{ip.compressed}]" if ip.version == 6 else ip.compressed
         path = "claude-auth" if legacy else f"backend-auth/{backend}"
@@ -327,7 +332,17 @@ def build_router(orchestrator: Any, *, require_auth: Callable[..., Any]) -> APIR
         if not claude_auth_rpc_slots.acquire(blocking=False):
             raise HTTPException(status_code=429, detail="claude_auth_busy")
         try:
-            return send()
+            if action == "status":
+                return auth_cache.read(cache_key, send, refresh=refresh)
+            if action == "start":
+                auth_cache.invalidate(cache_key)
+            result = send()
+            if action == "poll" and result.get("status") == "exited":
+                authenticated = result.get("authenticated")
+                result.update(auth_cache.verified(cache_key, authenticated if isinstance(authenticated, bool) else None))
+            return result
+        except TimeoutError as exc:
+            raise HTTPException(status_code=504, detail="backend_auth_check_busy") from exc
         finally:
             claude_auth_rpc_slots.release()
 
@@ -421,8 +436,8 @@ def build_router(orchestrator: Any, *, require_auth: Callable[..., Any]) -> APIR
         return JSONResponse({"nodes": nodes})
 
     @router.get("/api/nodes/{node_id}/backend-auth/{backend}/status", dependencies=[Depends(require_auth)], responses={200: {"model": ClaudeAuthOut}})
-    def backend_auth_status(node_id: str, backend: str) -> dict[str, object]:
-        return claude_auth_rpc(node_id, "status", {}, backend, False)
+    def backend_auth_status(node_id: str, backend: str, refresh: bool = False) -> dict[str, object]:
+        return claude_auth_rpc(node_id, "status", {}, backend, False, refresh)
 
     @router.post("/api/nodes/{node_id}/backend-auth/{backend}/start", dependencies=[Depends(require_auth)], responses={200: {"model": ClaudeAuthOut}})
     def backend_auth_start(node_id: str, backend: str) -> dict[str, object]:

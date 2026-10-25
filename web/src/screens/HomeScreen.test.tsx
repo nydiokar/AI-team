@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 /**
  * HomeScreen smoke tests for the redesigned landing view: accounts/usage is the
- * hero (terminal meters, honest unknown), attention is a compact approvals pill
+ * hero (inline meters, honest unknown), attention is a compact approvals pill
  * that links to the real /approvals decisions view (NOT the Work tab), nodes
  * show ONLINE only with offline folded to a count, and there are no duplicate
  * tab-shortcut buttons.
@@ -113,7 +113,7 @@ it("opens the selected provider account sheet from accessible Home buttons witho
 it("renders accounts/usage meters and an honest n/a when unknown", () => {
   hooks.quota = { data: quotaWith(31, null) };
   render();
-  expect(container.textContent).toContain("claude");
+  expect(container.textContent).toContain("Claude Code");
   expect(container.textContent).toContain("31%");
   expect(container.textContent).toContain("n/a"); // 7d unknown — never a fake 0%
 });
@@ -121,7 +121,7 @@ it("renders accounts/usage meters and an honest n/a when unknown", () => {
 it("flags a near-limit window", () => {
   hooks.quota = { data: quotaWith(31, 81) };
   render();
-  expect(container.textContent).toContain("81%!");
+  expect(container.textContent).toContain("81%");
 });
 
 it("approvals pill links to the real /approvals decisions view, not Work", () => {
@@ -143,4 +143,33 @@ it("shows only online nodes and folds offline into a count", () => {
   expect(container.textContent).toContain("kanebra");
   expect(container.textContent).not.toContain("horse-canary");
   expect(container.textContent).toContain("2 offline");
+});
+
+it("uses one text account control per backend and shows both windows without terminal glyphs", () => {
+  hooks.quota = { data: quotaWith(31, 81) }; render();
+  expect(container.querySelectorAll('button[aria-label="Manage claude accounts"]')).toHaveLength(1);
+  const section = container.querySelector('[aria-label="Accounts and usage"]')!;
+  expect(section.querySelectorAll('[role="meter"]')).toHaveLength(2);
+  expect(section.querySelector("img")).toBeNull();
+  expect(section.textContent).not.toMatch(/[█░$]/);
+  expect(section.textContent).toContain("5 hours");
+  expect(section.textContent).toContain("7 days");
+});
+it("shows useful node workload information without account buttons", () => {
+  hooks.targets = { data: [{ ...node("kanebra", "online"), activeTasks: [{ taskId: "task-123", backend: "claude", phase: "executing", action: "resume_session" }] }], isLoading: false, isError: false };
+  render();
+  const section = container.querySelector('[aria-label="Active nodes"]')!;
+  expect(section.textContent).toContain("Working");
+  expect(section.textContent).toContain("1 task running");
+  expect(section.textContent).toContain("task-123");
+  expect(section.textContent).toContain("7 of 8 slots available");
+  expect(section.querySelector("button")).toBeNull();
+});
+it("does not call an occupied or unreported node idle", () => {
+  hooks.targets = { data: [{ ...node("occupied", "online"), slotsUsed: 8 }, { ...node("unreported", "online"), slotsUsed: null }], isLoading: false, isError: false };
+  render();
+  const section = container.querySelector('[aria-label="Active nodes"]')!;
+  expect(section.textContent).toContain("At capacity");
+  expect(section.textContent).toContain("Waiting for workload report");
+  expect(section.textContent).not.toContain("Idle");
 });

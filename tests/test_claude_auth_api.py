@@ -319,3 +319,58 @@ def test_worker_auth_rpc_rejects_missing_worker_token() -> None:
                 await task
 
     asyncio.run(exercise())
+
+
+def test_gateway_caches_status_refreshes_and_records_verified_login(monkeypatch) -> None:
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    async def guard() -> None:
+        pass
+
+    calls: list[str] = []
+    state: list[str] = ["signed_out"]
+
+    from typing import Self
+
+    class Response:
+        def __init__(self, data: dict[str, object]) -> None:
+            self.data = data
+        def __enter__(self) -> Self:
+            return self
+        def __exit__(self, *_: object) -> None:
+            pass
+        def read(self, _: int) -> bytes:
+            return json.dumps(self.data).encode()
+
+    def send(request: urllib.request.Request, timeout: float) -> Response:
+        action = request.full_url.rsplit("/", 1)[-1]
+        calls.append(action)
+        if action == "status":
+            return Response({"state": state[0]})
+        if action == "poll":
+            return Response({"status": "exited", "login_id": "a" * 32, "authenticated": True, "output": "", "offset": 0})
+        return Response({"status": "running", "login_id": "a" * 32})
+
+    monkeypatch.setattr("src.control.routes.monitoring.urllib.request.urlopen", send)
+    app = FastAPI()
+    app.include_router(_router(monkeypatch, guard))
+    prefix: str = "/api/nodes/kanebra/backend-auth/claude"
+    with TestClient(app) as client:
+        first = client.get(f"{prefix}/status").json()
+        assert first["checked_at"]
+        assert first["login_verified_at"] is None
+        assert client.get(f"{prefix}/status").json() == first
+        assert calls == ["status"]
+        client.get(f"{prefix}/status?refresh=true")
+        assert calls == ["status", "status"]
+        assert client.post(f"{prefix}/start").status_code == 200
+        completed = client.post(f"{prefix}/poll", json={"login_id": "a" * 32}).json()
+        assert completed["login_verified_at"]
+        observed = client.get(f"{prefix}/status").json()
+        assert observed["state"] == "signed_in"
+        assert observed["login_verified_at"] == completed["login_verified_at"]
+        assert calls == ["status", "status", "start", "poll"]
+        # A cached observation never bypasses current node eligibility.
+        monkeypatch.setattr("src.control.routes.monitoring._node_for_claude_auth", lambda _: {"live": False})
+        assert client.get(f"{prefix}/status").status_code == 409

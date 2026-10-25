@@ -129,3 +129,11 @@ describe("summarizeProviderUsage", () => {
     expect(out[0].windows[0]).toMatchObject({ label: "5h", usedPercent: 42 });
   });
 });
+
+it("keeps overall weekly usage separate from scoped limits and summarizes accounts deterministically", () => {
+  const out = summarizeProviderUsage(resp({
+    buckets: [bucket("five_hour", 18000), bucket("seven_day", 604800), bucket("weekly_scoped:sonnet", 604800)],
+    window_states: [state("weekly_scoped:sonnet", 99), state("seven_day", 20), state("five_hour", 30), { ...state("five_hour", 60), principal_hash: "another-account" }],
+  }));
+  expect(out[0].windows.map((w) => w.usedPercent)).toEqual([60, 20]);
+});
