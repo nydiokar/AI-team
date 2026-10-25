@@ -34,7 +34,15 @@ export function useBackendAccountStatus(token: string, nodeId: string, backend: 
     queryFn: ({ signal }) => {
       const refresh = forceRefresh.current;
       forceRefresh.current = false;
-      return withStatusSlot(signal, () => api.backendAuthStatus(token, nodeId, backend, signal, refresh));
+      return withStatusSlot(signal, async () => {
+        try { return await api.backendAuthStatus(token, nodeId, backend, signal, refresh); }
+        catch (error) {
+          if (signal.aborted) throw error;
+          // A transport failure is also an unavailable observation. Keep the
+          // same short backoff on reopen instead of retrying on every click.
+          return { state: "unavailable" as const, checked_at: new Date().toISOString() };
+        }
+      });
     },
     enabled: Boolean(token) && enabled,
     staleTime: (query) => {

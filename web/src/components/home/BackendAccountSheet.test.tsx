@@ -219,3 +219,19 @@ it("reports failed refreshes without presenting old signed-in data as verified",
   expect(document.body.textContent).toContain("Account status unavailable");
   expect(document.body.textContent).not.toContain("Signed in");
 });
+
+it("backs off failed status requests across reopen and lets explicit refresh recover", async () => {
+  mocks.status.mockRejectedValue(new Error("worker_unreachable"));
+  render(); await flush();
+  expect(document.body.textContent).toContain("Account status unavailable");
+  act(() => root.render(null)); render(); await flush();
+  expect(mocks.status).toHaveBeenCalledTimes(1);
+  act(() => root.render(null));
+  await act(async () => { await vi.advanceTimersByTimeAsync(30_001); });
+  render(); await flush();
+  expect(mocks.status).toHaveBeenCalledTimes(2);
+  mocks.status.mockResolvedValue({ state: "signed_in" });
+  await click("Refresh status"); await flush();
+  expect(mocks.status).toHaveBeenCalledTimes(3);
+  expect(document.body.textContent).toContain("Signed in");
+});
