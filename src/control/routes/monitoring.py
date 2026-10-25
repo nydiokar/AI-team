@@ -307,7 +307,7 @@ def build_router(orchestrator: Any, *, require_auth: Callable[..., Any]) -> APIR
                     try:
                         error = json.loads(exc.read(8193))
                         reason = error.get("reason") if isinstance(error, dict) else None
-                        if reason in {
+                        if isinstance(reason, str) and reason in {
                             "login_in_progress", "login_not_found", "login_expired", "login_finished",
                             "backend_missing", "pty_unavailable", "backend_start_failed",
                             "login_input_timeout", "login_unavailable", "input_not_supported",
@@ -316,6 +316,7 @@ def build_router(orchestrator: Any, *, require_auth: Callable[..., Any]) -> APIR
                             detail = reason
                     except (ValueError, OSError):
                         pass
+                exc.close()
                 logger.warning("event=backend_auth_rpc_failed node=%s backend=%s action=%s reason=%s status=%s",
                                node_id, backend, action, detail, exc.code)
                 raise HTTPException(status_code=409 if exc.code in (400, 401, 404) else 502, detail=detail) from exc

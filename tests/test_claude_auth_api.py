@@ -381,6 +381,7 @@ def test_gateway_caches_status_refreshes_and_records_verified_login(monkeypatch)
     (400, b'{"reason":"login_not_found"}', "login_not_found"),
     (400, b'{"reason":"unexpected secret text"}', "worker_rejected_request"),
     (400, b'garbage', "worker_rejected_request"),
+    (400, b'{"reason":[]}', "worker_rejected_request"),
     (401, b'', "worker_auth_mismatch"),
     (404, b'', "worker_auth_route_unavailable"),
 ])
