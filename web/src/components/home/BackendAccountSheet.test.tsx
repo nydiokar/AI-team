@@ -2,6 +2,7 @@
 import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { QueryClient, QueryClientProvider, notifyManager } from "@tanstack/react-query";
 import type { Target } from "../../domain/models";
 const mocks = vi.hoisted(() => ({ status: vi.fn(), auth: vi.fn(), copy: vi.fn() }));
 vi.mock("../../lib/clipboard", () => ({ copyTextToClipboard: mocks.copy }));
@@ -10,22 +11,26 @@ vi.mock("../../stores/authStore", () => ({ useAuthStore: (select: (s: { token: s
 import { BackendAccountSheet, safeAuthUrl } from "./BackendAccountSheet";
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 let root: Root;
+let client: QueryClient;
+notifyManager.setScheduler((callback) => queueMicrotask(callback));
 let container: HTMLDivElement;
 const node = (id: string, live = true, backends = ["claude", "codex"]) => ({ id, live, backends }) as Target;
 const flush = async () => { await act(async () => { await Promise.resolve(); }); };
 const click = async (text: string) => { await act(async () => { Array.from(document.querySelectorAll("button")).find((b) => b.textContent === text)!.click(); }); };
 beforeEach(() => {
   vi.useFakeTimers();
+  vi.setSystemTime(new Date("2026-10-25T12:00:00Z"));
+  client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   container = document.createElement("div"); document.body.append(container); root = createRoot(container);
   mocks.status.mockResolvedValue({ state: "signed_out" });
   mocks.copy.mockResolvedValue(undefined);
   mocks.auth.mockResolvedValue({ login_id: "a".repeat(32), status: "running", offset: 0 });
 });
 afterEach(() => {
-  act(() => root.unmount()); container.remove(); vi.useRealTimers(); vi.resetAllMocks();
+  act(() => root.unmount()); client.clear(); container.remove(); vi.useRealTimers(); vi.resetAllMocks();
 });
 function render(backend: "claude" | "codex" = "claude", nodes = [node("kanebra")]) {
-  act(() => root.render(createElement(BackendAccountSheet, { backend, nodes, onClose: vi.fn() })));
+  act(() => root.render(createElement(QueryClientProvider, { client }, createElement(BackendAccountSheet, { backend, nodes, onClose: vi.fn() }))));
 }
 it("checks every eligible node independently and isolates status failures", async () => {
   mocks.status.mockImplementation((_t, id) => id === "broken" ? Promise.reject(new Error()) : Promise.resolve({ state: "signed_in" }));
@@ -156,4 +161,61 @@ it("reports an unsuccessful exit and removes expired login controls", async () =
   expect(document.querySelector("a")).toBeNull();
   expect(document.body.textContent).toContain("Login was not completed");
   expect(document.body.textContent).toContain("Signed out");
+});
+
+it("reuses account checks on reopen, refreshes explicitly, and shows observation times", async () => {
+  mocks.status.mockResolvedValue({ state: "signed_in", checked_at: "2026-10-25T12:00:00Z" });
+  render(); await flush();
+  expect(document.body.textContent).toContain("Status checked");
+  expect(document.body.textContent).not.toContain("Login verified");
+  act(() => root.render(null));
+  render(); await flush();
+  expect(mocks.status).toHaveBeenCalledTimes(1);
+  await click("Refresh status"); await flush();
+  expect(mocks.status).toHaveBeenCalledTimes(2);
+  expect(mocks.status.mock.calls[1][4]).toBe(true);
+});
+it("checks stale data after five minutes and bounds concurrent status calls", async () => {
+  render(); await flush();
+  act(() => root.render(null));
+  await act(async () => { await vi.advanceTimersByTimeAsync(300_001); });
+  render(); await flush();
+  expect(mocks.status).toHaveBeenCalledTimes(2);
+});
+it("queues many nodes, cancels reads on close, and discards queued work", async () => {
+  const pending: Array<() => void> = [];
+  mocks.status.mockImplementation(() => new Promise((resolve) => pending.push(() => resolve({ state: "signed_out" }))));
+  render("claude", Array.from({ length: 20 }, (_, i) => node(`node-${i}`))); await flush();
+  expect(mocks.status).toHaveBeenCalledTimes(4);
+  act(() => root.render(null));
+  expect(mocks.status.mock.calls.every((call) => call[3].aborted)).toBe(true);
+  await act(async () => { pending.forEach((resolve) => resolve()); });
+  expect(mocks.status).toHaveBeenCalledTimes(4);
+});
+it("keeps a verified login cached when reopened without another status check", async () => {
+  mocks.auth.mockImplementation((_t, _id, _b, action) => Promise.resolve(action === "poll"
+    ? { login_id: "a".repeat(32), status: "exited", authenticated: true, offset: 0 }
+    : { login_id: "a".repeat(32), status: "running" }));
+  render(); await flush(); await click("Log in"); await flush();
+  expect(document.body.textContent).toContain("Login verified on kanebra");
+  act(() => root.render(null)); render(); await flush();
+  expect(document.body.textContent).toContain("Signed in");
+  expect(mocks.status).toHaveBeenCalledTimes(1);
+});
+
+it("does not extend gateway cache freshness by another five minutes", async () => {
+  mocks.status.mockResolvedValue({ state: "signed_in", checked_at: "2026-10-25T11:56:00Z" });
+  render(); await flush();
+  act(() => root.render(null));
+  await act(async () => { await vi.advanceTimersByTimeAsync(61_000); });
+  render(); await flush();
+  expect(mocks.status).toHaveBeenCalledTimes(2);
+});
+it("reports failed refreshes without presenting old signed-in data as verified", async () => {
+  mocks.status.mockResolvedValueOnce({ state: "signed_in" });
+  render(); await flush();
+  mocks.status.mockRejectedValueOnce(new Error("offline"));
+  await click("Refresh status"); await flush();
+  expect(document.body.textContent).toContain("Account status unavailable");
+  expect(document.body.textContent).not.toContain("Signed in");
 });

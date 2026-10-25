@@ -4,6 +4,7 @@ import { Check, Copy, ExternalLink, LoaderCircle } from "lucide-react";
 import { api } from "../../transport/apiClient";
 import { useAuthStore } from "../../stores/authStore";
 import { copyTextToClipboard } from "../../lib/clipboard";
+import { useBackendAccountStatus } from "../../hooks/useBackendAccountStatus";
 import type { Target } from "../../domain/models";
 
 export type AccountBackend = "claude" | "codex";
@@ -28,10 +29,11 @@ function loginOutput(output: string, backend: AccountBackend) {
 
 function NodeAccount({ node, backend }: { node: Target; backend: AccountBackend }) {
   const token = useAuthStore((s) => s.token);
-  const [state, setState] = useState("loading");
   const [loginId, setLoginId] = useState("");
   const [running, setRunning] = useState(false);
   const [busy, setBusy] = useState(false);
+  const account = useBackendAccountStatus(token, node.id, backend, !running && !busy);
+  const state = account.isError ? "unavailable" : account.data?.state ?? (account.isPending ? "loading" : "unavailable");
   const [output, setOutput] = useState("");
   const [input, setInput] = useState("");
   const [inputSupported, setInputSupported] = useState(backend === "claude");
@@ -51,12 +53,7 @@ function NodeAccount({ node, backend }: { node: Target; backend: AccountBackend 
 
   useEffect(() => {
     mounted.current = true;
-    let active = true;
-    void api.backendAuthStatus(token, node.id, backend).then((result) => {
-      if (active) setState(result.state);
-    }).catch(() => { if (active) setState("unavailable"); });
     return () => {
-      active = false;
       mounted.current = false;
       operation.current++;
       if (activeLogin.current) void api.backendAuth(token, node.id, backend, "cancel", { login_id: activeLogin.current }).catch(() => undefined);
@@ -68,11 +65,12 @@ function NodeAccount({ node, backend }: { node: Target; backend: AccountBackend 
     if (!loginId || !running) return;
     let active = true;
     const current = operation.current;
+    const controller = new AbortController();
     let timer: ReturnType<typeof setTimeout>;
     let offset = 0;
     const poll = async () => {
       try {
-        const result = await api.backendAuth(token, node.id, backend, "poll", { login_id: loginId, offset });
+        const result = await api.backendAuth(token, node.id, backend, "poll", { login_id: loginId, offset }, controller.signal);
         if (!active || current !== operation.current) return;
         offset = result.offset ?? offset;
         if (result.output) setOutput((old) => (old + result.output).slice(-65536));
@@ -80,7 +78,11 @@ function NodeAccount({ node, backend }: { node: Target; backend: AccountBackend 
         if (result.status === "exited") {
           activeLogin.current = "";
           setRunning(false);
-          setState(result.authenticated === true ? "signed_in" : result.authenticated === false ? "signed_out" : "unavailable");
+          account.record({
+            state: result.authenticated === true ? "signed_in" : result.authenticated === false ? "signed_out" : "unavailable",
+            checked_at: result.checked_at ?? new Date().toISOString(),
+            login_verified_at: result.login_verified_at ?? (result.authenticated === true ? new Date().toISOString() : null),
+          });
           setInput("");
           setError(result.authenticated === true ? "" : result.authenticated === false ? "Login was not completed. Start a new login to try again." : "Login ended, but the node could not verify the account. Try checking again.");
           return;
@@ -90,12 +92,12 @@ function NodeAccount({ node, backend }: { node: Target; backend: AccountBackend 
         if (active && current === operation.current) {
           setError("Login connection failed. Cancel and try again.");
           setRunning(false);
-          setState("unavailable");
+          account.record({ state: "unavailable" });
         }
       }
     };
     void poll();
-    return () => { active = false; clearTimeout(timer); };
+    return () => { active = false; clearTimeout(timer); controller.abort(); };
   }, [loginId, running, token, node.id, backend]);
 
   const start = async () => {
@@ -103,6 +105,7 @@ function NodeAccount({ node, backend }: { node: Target; backend: AccountBackend 
     setBusy(true); setError(""); setOutput(""); setInput(""); setSubmitted(false);
     setCopied(false); setCopyError("");
     try {
+      await account.cancel();
       const result = await api.backendAuth(token, node.id, backend, "start");
       if (!mounted.current || current !== operation.current) {
         void api.backendAuth(token, node.id, backend, "cancel", { login_id: result.login_id }).catch(() => undefined);
@@ -149,8 +152,14 @@ function NodeAccount({ node, backend }: { node: Target; backend: AccountBackend 
   };
 
   return <section aria-label={`${node.id} account`} className="space-y-2 border-t border-hairline py-4">
-    <h3 className="font-semibold text-ink">{node.id}</h3>
+    <div className="flex items-center justify-between gap-3">
+      <h3 className="font-semibold text-ink">{node.id}</h3>
+      <button disabled={account.isFetching || busy || running} onClick={() => void account.refresh()} className="min-h-11 rounded-lg px-3 text-xs text-ink-muted disabled:opacity-50">{account.isFetching ? "Checking…" : "Refresh status"}</button>
+    </div>
+    <p className="text-xs text-ink-muted">Credentials are stored on {node.id}.</p>
     <p role="status" className="text-sm text-ink-soft">{running ? submitted ? "Code sent. Waiting for the node to verify your account…" : "Waiting for you to finish signing in…" : state === "signed_in" ? "Signed in" : state === "signed_out" ? "Signed out" : state === "loading" ? "Checking account…" : "Account status unavailable"}</p>
+    {account.data?.checked_at && <p className="text-xs text-ink-muted">Status checked <time dateTime={account.data.checked_at}>{new Date(account.data.checked_at).toLocaleString()}</time></p>}
+    {account.data?.login_verified_at && <p className="text-xs text-ink-muted">Login verified on {node.id} · <time dateTime={account.data.login_verified_at}>{new Date(account.data.login_verified_at).toLocaleString()}</time></p>}
     {activeLogin.current ? <button disabled={busy} onClick={() => void cancel()} className="rounded-lg border border-hairline px-3 py-2 disabled:opacity-50">Cancel login</button>
       : <button disabled={busy || state === "loading"} onClick={() => void start()} className="min-h-11 rounded-lg bg-accent px-3 py-2 font-medium text-[var(--color-base)] focus-visible:outline-2 focus-visible:outline-accent disabled:opacity-50">{busy ? "Starting…" : state === "signed_in" ? "Sign in again" : "Log in"}</button>}
     {loginId && <div className="space-y-4 pt-2">
@@ -205,7 +214,7 @@ export function BackendAccountSheet({ backend, nodes, onClose }: { backend: Acco
           <Dialog.Title className="text-base font-semibold capitalize text-ink">{backend} accounts</Dialog.Title>
           <Dialog.Close aria-label="Close accounts" className="rounded-lg border border-hairline px-3 py-2">Close</Dialog.Close>
         </div>
-        <Dialog.Description className="mb-3 text-sm text-ink-muted">Accounts on online nodes supporting {backend}.</Dialog.Description>
+        <Dialog.Description className="mb-3 text-sm text-ink-muted">Sign in on each node where you run {backend}. Status is cached for up to five minutes; refresh to check now.</Dialog.Description>
         {eligible.length ? eligible.map((node) => <NodeAccount key={`${backend}:${node.id}`} node={node} backend={backend} />) : <p>No supporting nodes online.</p>}
       </Dialog.Content>
     </Dialog.Portal>

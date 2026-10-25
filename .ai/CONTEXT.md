@@ -78,6 +78,16 @@ Only jobs that are genuinely open. Everything merged/done is in git and the disp
 
 ## Recent shift notes
 
+**2026-10-25 — Home backend/node UX and cached account checks.** Home shows overall 5h/7d
+usage inline (scoped weekly limits remain in System), and node workload/capacity without backend
+logos. Account status uses TanStack Query + a bounded gateway memory cache (300s known / 30s
+unavailable; 256 entries; 8 gateway requests; 4 UI reads; 5s lock wait + existing worker RPC
+socket timeout). No new DB writes: quotas remain in `quota_windows.db`, credentials on workers.
+`checked_at` is an observation; `login_verified_at` only records logins this gateway observed
+and is lost on gateway restart/eviction. No historical login date is inferred. Existing 8 KiB
+body guard, strict input/response validation, and structured per-request worker failures apply.
+
+
 **2026-10-23 — Remote Claude Code login handoff (built on `feat/remote-claude-login`; activation pending).** System → node details now has a node-scoped `claude auth login` PTY relay, including URL/code handoff and a post-login `claude auth status` check. Worker bound: one login, 10-minute timeout, 64 KiB output, 4 KiB input, 8 concurrent HTTP requests, 8 KiB request body, 2-second read timeout; authenticated by the mesh token on the worker and dashboard auth in the app. Focused fake-CLI/loopback tests and `pnpm --dir web build` pass; no paid login attempted. **Not yet live:** the worker restart in the operator’s 2026-10-23 log predates this code; after merge, deploy gateway + worker and test on the logged-out node. The local `127.0.0.1:9003/health` probe could not connect from this checkout, so live gateway state remains unverified.
 
 **2026-10-22 — Operational DB backups: daily, on-host only (off-host target still OPEN).**
