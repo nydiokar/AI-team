@@ -2197,6 +2197,11 @@ class ClaudeSDKClientDriver(ClaudeDriver):
                 # while the terminal error only says error_during_execution.
                 signed_out = _is_login_refusal(outcome.salvaged_output)
                 error_class = "auth" if signed_out else outcome.error_class
+                if error_class == "auth":
+                    # A long-lived CLI can retain the rejected credentials.
+                    # Keep the native conversation ID, but start a fresh CLI
+                    # after login instead of reusing the rejected client.
+                    sdk_sess.close()
                 reply = _build_salvaged_reply(
                     error_class, outcome.salvaged_output, outcome.error_text
                 )

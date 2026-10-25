@@ -9,8 +9,9 @@ The control plane runs as two Compose containers (`ai-team-gateway-1` on :9003,
 `ai-team-task-server-1` on :9002) from one image, `ai-team:local`, which **bakes in** `src/`,
 `config/`, `scripts/` and the built Web UI. A restart alone re-runs the old image; merged code goes
 live only via rebuild + recreate. Deploying the gateway is delegated to you — do it when a merge
-needs it. Restarting a **worker** (PM2 `ai-team-worker`, node Horse) is not; surface that to the
-operator.
+needs it. Worker restarts require the project's operator authorization; use authorization already
+provided in this session instead of asking again. Inspect workload before discussing or executing
+any worker restart (see below).
 
 Not needed for: `.ai/**`, `docs/**`, `tests/**`, `.claude/**`, other `*.md`.
 
@@ -71,6 +72,46 @@ printed (`deploy/<UTC stamp>-<sha>`): it is the off-host deploy history (`git ta
 on GitHub) and survives this host's disk; the Docker tags do not. Only after verification passes —
 a rolled-back deploy gets no `deploy/` tag. Report: SHA deployed, migrations applied
 (from → to), backup path, verification evidence, rollback tag.
+
+## Worker context before a restart decision
+
+Before asking about or executing a worker restart, inspect what it is doing:
+
+```bash
+.venv/bin/python scripts/worker_context.py <exact-node-id>
+```
+
+This read-only probe selects fields from authenticated `/api/nodes` and local PM2/process ancestry.
+It prints task IDs, backend, action, phase, start time, slots, pooled-session count, heartbeat age,
+loaded build/incarnation, exact PM2 name/cwd/script, active login PIDs, and whether the worker hosts
+this agent. It never prints prompts, OAuth links, PM2's full environment, or tokens. Run on the worker
+host for local process evidence; remote PM2 absence is not evidence that the remote worker is idle.
+Missing/stale/malformed state means **unknown**, never idle. `/health` alone proves no workload facts.
+
+- Compare the loaded worker build with the fix's commit. If it already contains the change, exercise
+  the behavior instead of requesting a redundant restart. Do not confuse code on disk with loaded code.
+- Give a concrete impact statement: exact worker/node, running task IDs/backends and age, pooled
+  sessions/login processes affected, and whether this agent would disconnect. Do not dump task prompts.
+- Check session authorization first. If the operator already approved this worker update/restart,
+  proceed within that scope; do not ask the same question again. Without authorization, ask once with
+  the observed workload and recommendation. An idle snapshot does not grant permission.
+- Prefer waiting for active turns/logins to finish over interrupting them. Recheck immediately before
+  restarting, using a fresh heartbeat and host process check. Do not pause/cancel unrelated queues or
+  infer permission to interrupt other nodes. If ongoing work prevents the approved restart, report
+  the actual task IDs and bounded waiting/handoff plan, not a generic request to restart.
+- If this worker hosts the caller, do not run a restart from its child process and lose the remaining
+  work/verification. Finish and commit the changes first. Use a supervised handoff outside the worker
+  tree (for example, a transient user systemd unit) which waits for active turns, including this one,
+  to finish. For `Type=oneshot`, bound execution with `TimeoutStartSec`; systemd ignores `RuntimeMaxSec`
+  during oneshot startup. Give it a deadline, exact expected node/PM2 PID/source commit, one restart attempt, a
+  persistent result/log, and post-restart checks. Do not use an orphaned `nohup` or background shell.
+  Report a deferred restart as pending until its result actually confirms success.
+- Update the checkout that PM2 actually executes, preserving the operator's env, interpreter, data
+  paths and identity. Refuse dirty tracked files or a non-fast-forward update. Avoid `--update-env`
+  unless the environment itself is intentionally changing; an agent environment is not a service env.
+- Verify a **new incarnation/PID and heartbeat after restart**, expected build, node online, gateway
+  coverage, and the changed feature. An old `online` row or a canary startup is not proof of promotion.
+  Reap only processes owned by this restart; never kill another session's backend to make a check pass.
 
 ## Rollback
 
