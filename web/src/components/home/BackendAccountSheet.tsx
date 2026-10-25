@@ -27,10 +27,47 @@ function loginOutput(output: string, backend: AccountBackend) {
   };
 }
 
+function loginKey(nodeId: string, backend: AccountBackend): string {
+  return `backend-login:${backend}:${nodeId}`;
+}
+
+function rememberedLogin(key: string): string {
+  try {
+    const saved = JSON.parse(sessionStorage.getItem(key) ?? "null");
+    return saved && /^[a-f0-9]{32}$/.test(saved.id) && saved.expires > Date.now() ? saved.id : "";
+  } catch { return ""; }
+}
+
+function rememberLogin(key: string, id: string): void {
+  try {
+    if (id) sessionStorage.setItem(key, JSON.stringify({ id, expires: Date.now() + 600_000 }));
+    else sessionStorage.removeItem(key);
+  } catch { /* The worker still owns the bounded login if storage is unavailable. */ }
+}
+
+function loginError(error: unknown): string {
+  const reason = error instanceof Error ? error.message : "unknown_error";
+  const messages: Record<string, string> = {
+    worker_unreachable: "The gateway cannot reach this node's login service. Check its connection and worker port 9001. Your login may still be running.",
+    worker_auth_mismatch: "The node rejected the gateway credential. The worker and gateway mesh tokens must match.",
+    worker_auth_route_unavailable: "This worker does not support the login route. Update the worker before signing in.",
+    login_in_progress: "A login is already running on this node. Reopen its account panel to resume it, or wait for its ten-minute expiry.",
+    login_not_found: "The node no longer has this login (it may have restarted or expired). Start a new login.",
+    login_expired: "This login expired after ten minutes. Start a new login.",
+    login_finished: "This login has ended. Refresh account status before starting again.",
+    backend_missing: "The provider CLI is not installed on this node.",
+    node_offline: "This node is offline. Reconnect it before signing in.",
+    worker_rejected_request: "The worker rejected this login request. Check the gateway log for the node and action.",
+    login_input_timeout: "The node did not accept the code in time. Your code is still here; try sending it again.",
+  };
+  return `${messages[reason] ?? "Login request failed. Retry when the node is available."} (${reason})`;
+}
+
 function NodeAccount({ node, backend }: { node: Target; backend: AccountBackend }) {
   const token = useAuthStore((s) => s.token);
-  const [loginId, setLoginId] = useState("");
-  const [running, setRunning] = useState(false);
+  const storageKey = loginKey(node.id, backend);
+  const [loginId, setLoginId] = useState(() => rememberedLogin(storageKey));
+  const [running, setRunning] = useState(() => Boolean(rememberedLogin(storageKey)));
   const [busy, setBusy] = useState(false);
   const account = useBackendAccountStatus(token, node.id, backend, !running && !busy);
   const state = account.isError ? "unavailable" : account.data?.state ?? (account.isPending ? "loading" : "unavailable");
@@ -44,7 +81,7 @@ function NodeAccount({ node, backend }: { node: Target; backend: AccountBackend 
   const [error, setError] = useState("");
   const inputId = useId();
   const sendingRef = useRef(false);
-  const activeLogin = useRef("");
+  const activeLogin = useRef(loginId);
   const mounted = useRef(false);
   const operation = useRef(0);
   const { url, details, deviceCode } = useMemo(() => loginOutput(output, backend), [output, backend]);
@@ -56,8 +93,7 @@ function NodeAccount({ node, backend }: { node: Target; backend: AccountBackend 
     return () => {
       mounted.current = false;
       operation.current++;
-      if (activeLogin.current) void api.backendAuth(token, node.id, backend, "cancel", { login_id: activeLogin.current }).catch(() => undefined);
-      activeLogin.current = "";
+      // Closing/minimizing detaches the UI; only Cancel login ends the worker process.
     };
   }, [token, node.id, backend]);
 
@@ -68,15 +104,20 @@ function NodeAccount({ node, backend }: { node: Target; backend: AccountBackend 
     const controller = new AbortController();
     let timer: ReturnType<typeof setTimeout>;
     let offset = 0;
+    let failures = 0;
+    setOutput("");
     const poll = async () => {
       try {
         const result = await api.backendAuth(token, node.id, backend, "poll", { login_id: loginId, offset }, controller.signal);
         if (!active || current !== operation.current) return;
+        failures = 0;
+        setError("");
         offset = result.offset ?? offset;
         if (result.output) setOutput((old) => (old + result.output).slice(-65536));
         if (typeof result.input_supported === "boolean") setInputSupported(result.input_supported);
         if (result.status === "exited") {
           activeLogin.current = "";
+          rememberLogin(storageKey, "");
           setRunning(false);
           account.record({
             state: result.authenticated === true ? "signed_in" : result.authenticated === false ? "signed_out" : "unavailable",
@@ -88,11 +129,19 @@ function NodeAccount({ node, backend }: { node: Target; backend: AccountBackend 
           return;
         }
         timer = setTimeout(() => void poll(), 700);
-      } catch {
+      } catch (error) {
         if (active && current === operation.current) {
-          setError("Login connection failed. Cancel and try again.");
-          setRunning(false);
-          account.record({ state: "unavailable" });
+          const reason = error instanceof Error ? error.message : "";
+          if (["login_not_found", "login_expired", "backend_mismatch", "worker_auth_route_unavailable", "worker_auth_mismatch"].includes(reason)) {
+            activeLogin.current = "";
+            rememberLogin(storageKey, "");
+            setLoginId(""); setRunning(false);
+            setError(loginError(error));
+            account.record({ state: "unavailable" });
+          } else {
+            setError(`Reconnecting to ${node.id}… ${loginError(error)}`);
+            timer = setTimeout(() => void poll(), Math.min(5000, 1000 * ++failures));
+          }
         }
       }
     };
@@ -107,14 +156,12 @@ function NodeAccount({ node, backend }: { node: Target; backend: AccountBackend 
     try {
       await account.cancel();
       const result = await api.backendAuth(token, node.id, backend, "start");
-      if (!mounted.current || current !== operation.current) {
-        void api.backendAuth(token, node.id, backend, "cancel", { login_id: result.login_id }).catch(() => undefined);
-        return;
-      }
+      rememberLogin(storageKey, result.login_id);
+      if (!mounted.current || current !== operation.current) return;
       activeLogin.current = result.login_id;
       setInputSupported(result.input_supported ?? backend === "claude");
       setLoginId(result.login_id); setRunning(true);
-    } catch { if (mounted.current) setError("Could not start login. Check the node and try again."); }
+    } catch (error) { if (mounted.current) setError(loginError(error)); }
     finally { if (mounted.current) setBusy(false); }
   };
 
@@ -123,8 +170,9 @@ function NodeAccount({ node, backend }: { node: Target; backend: AccountBackend 
     setRunning(false); setBusy(true);
     try {
       await api.backendAuth(token, node.id, backend, "cancel", { login_id: activeLogin.current });
+      rememberLogin(storageKey, "");
       activeLogin.current = ""; setLoginId(""); setInput(""); setError("");
-    } catch { setError("Could not cancel login. Try again; it expires after ten minutes."); }
+    } catch (error) { setError(loginError(error)); setRunning(true); }
     finally { if (mounted.current) setBusy(false); }
   };
 
@@ -138,7 +186,7 @@ function NodeAccount({ node, backend }: { node: Target; backend: AccountBackend 
     try {
       await api.backendAuth(token, node.id, backend, "input", { login_id: loginId, input: `${code}\n` });
       if (mounted.current && current === operation.current) { setInput(""); setSubmitted(true); }
-    } catch { if (mounted.current && current === operation.current) setError("Could not send code to the node. Your code is still here; try again."); }
+    } catch (error) { if (mounted.current && current === operation.current) setError(`Could not send code to the node. Your code is still here; try again. ${loginError(error)}`); }
     finally { sendingRef.current = false; if (mounted.current) setSending(false); }
   };
 
@@ -167,7 +215,7 @@ function NodeAccount({ node, backend }: { node: Target; backend: AccountBackend 
         <div className="space-y-3 rounded-xl border border-hairline p-4">
           <div className="space-y-1">
             <h4 className="text-sm font-semibold text-ink">1. Sign in with {backend === "claude" ? "Claude" : "OpenAI"}</h4>
-            <p className="text-sm text-ink-muted">Open the secure sign-in page in a new tab. Come back here when you’re done.</p>
+            <p className="text-sm text-ink-muted">Open the secure sign-in page in a new tab. Come back here when you’re done. You can close this panel and reopen it to resume; login expires after ten minutes.</p>
           </div>
           {url ? <div className="grid grid-cols-2 gap-2">
             <button onClick={() => void copyLink()} className="flex min-h-11 items-center justify-center gap-2 rounded-lg border border-hairline px-3 py-2 text-sm font-medium focus-visible:outline-2 focus-visible:outline-accent">

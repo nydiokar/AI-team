@@ -62,6 +62,23 @@ def test_codex_device_flow_and_provider_binding(tmp_path, monkeypatch) -> None:
         session.shutdown()
 
 
+def test_start_reattaches_to_same_provider_without_replacing_process(tmp_path, monkeypatch) -> None:
+    cli = tmp_path / "claude"
+    cli.write_text("#!/bin/sh\nexec cat\n")
+    cli.chmod(0o755)
+    monkeypatch.setattr("src.worker.claude_auth.shutil.which", lambda _: str(cli))
+    session = ClaudeAuthSession()
+    try:
+        first = session.start("claude")
+        process = session._login.process
+        assert session.start("claude")["login_id"] == first["login_id"]
+        assert session._login.process is process
+        with pytest.raises(ClaudeAuthError, match="login_in_progress"):
+            session.start("codex")
+    finally:
+        session.shutdown()
+
+
 def test_partial_and_blocked_writes_expiry_and_cleanup(tmp_path, monkeypatch) -> None:
     cli = tmp_path / "claude"
     cli.write_text("#!/bin/sh\nexec cat\n")
@@ -178,8 +195,7 @@ def test_claude_auth_session_relays_remote_code_without_general_shell(tmp_path, 
     started = session.start()
     login_id = started["login_id"]
     assert _wait_for_text(session, login_id, "Paste code:")["status"] == "running"
-    with pytest.raises(ClaudeAuthError, match="login_in_progress"):
-        session.start()
+    assert session.start()["login_id"] == login_id
 
     session.send(login_id, "TEST-CODE\n")
     result = _wait_for_text(session, login_id, "TEST-CODE")

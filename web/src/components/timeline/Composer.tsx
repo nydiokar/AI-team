@@ -23,9 +23,11 @@ interface PendingUpload {
 export function Composer({
   sessionId,
   running,
+  onLogin,
 }: {
   sessionId: string;
   running: boolean;
+  onLogin?: () => void;
 }) {
   // Seed from any persisted draft for this session so a half-typed instruction
   // survives navigating away and back (and full reloads / PWA restarts).
@@ -83,6 +85,11 @@ export function Composer({
         ? `${baseBody}\n\n${pendingUpload.fileRef}`.trim()
         : baseBody;
     if (!body || submit.isPending) return;
+    if (baseBody === "/login" && onLogin && !pendingUpload) {
+      setText(""); clearDraft(sessionId);
+      onLogin();
+      return;
+    }
     const id = newIdempotencyKey();
     const carry = useForkStore.getState().bySession[sessionId];
     addSent({

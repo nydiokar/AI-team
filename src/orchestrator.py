@@ -129,7 +129,7 @@ QUOTA_PAUSE_ERROR_CLASSES: Tuple[str, ...] = ("usage_limit", "rate_limit")
 #: ``transient``, ...) are still re-derived from text. ``usage_limit`` is
 #: preferred too, but routed through ``_usage_limit_class``.
 PREFERRED_BACKEND_ERROR_CLASSES: Tuple[str, ...] = (
-    "max_turns", "upstream_error", "sdk_stream_closed", "context_overflow", "rate_limit",
+    "max_turns", "upstream_error", "sdk_stream_closed", "context_overflow", "rate_limit", "auth",
 )
 
 #: [transient-resume] Error classes that mean "a transient PROVIDER-side failure,

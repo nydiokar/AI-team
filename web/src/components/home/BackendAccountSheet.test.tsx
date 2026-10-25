@@ -18,6 +18,7 @@ const node = (id: string, live = true, backends = ["claude", "codex"]) => ({ id,
 const flush = async () => { await act(async () => { await Promise.resolve(); }); };
 const click = async (text: string) => { await act(async () => { Array.from(document.querySelectorAll("button")).find((b) => b.textContent === text)!.click(); }); };
 beforeEach(() => {
+  sessionStorage.clear();
   vi.useFakeTimers();
   vi.setSystemTime(new Date("2026-10-25T12:00:00Z"));
   client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -52,7 +53,7 @@ it("stops polling after completion and does not cancel a successful login on unm
   act(() => root.render(null));
   expect(mocks.auth.mock.calls.some((c) => c[3] === "cancel")).toBe(false);
 });
-it("waits for each poll and cancels a running login on unmount", async () => {
+it("waits for each poll and preserves a running login on unmount", async () => {
   let finish: (value: object) => void = () => undefined;
   mocks.auth.mockImplementation((_t, _id, _b, action) => action === "poll" ? new Promise((resolve) => { finish = resolve; }) : Promise.resolve({ login_id: "a".repeat(32), status: "running" }));
   render(); await flush(); await click("Log in"); await flush();
@@ -60,7 +61,7 @@ it("waits for each poll and cancels a running login on unmount", async () => {
   expect(mocks.auth.mock.calls.filter((c) => c[3] === "poll")).toHaveLength(1);
   act(() => root.render(null));
   await act(async () => { finish({ status: "running", output: "stale", offset: 5 }); });
-  expect(mocks.auth.mock.calls.filter((c) => c[3] === "cancel")).toHaveLength(1);
+  expect(mocks.auth.mock.calls.filter((c) => c[3] === "cancel")).toHaveLength(0);
 });
 it("supports device auth without a code-paste input and cancels explicitly", async () => {
   mocks.auth.mockImplementation((_t, _id, _b, action) => Promise.resolve({ login_id: "a".repeat(32), status: "running", output: action === "poll" ? "https://auth.openai.com/codex/device\nABCD-12345 https://evil.example/login" : "", offset: 100 }));
@@ -234,4 +235,56 @@ it("backs off failed status requests across reopen and lets explicit refresh rec
   await click("Refresh status"); await flush();
   expect(mocks.status).toHaveBeenCalledTimes(3);
   expect(document.body.textContent).toContain("Signed in");
+});
+
+it("reattaches after closing and reopening without starting another login", async () => {
+  mocks.auth.mockImplementation((_t, _id, _b, action) => Promise.resolve({ login_id: "a".repeat(32), status: "running", output: action === "poll" ? "https://claude.com/cai/oauth/authorize?state=keep" : "", offset: 50 }));
+  render(); await flush(); await click("Log in"); await flush();
+  act(() => root.render(null));
+  render(); await flush();
+  expect(document.querySelector('a[aria-label="Open link in a new tab"]')).not.toBeNull();
+  expect(mocks.auth.mock.calls.filter((c) => c[3] === "start")).toHaveLength(1);
+  expect(mocks.auth.mock.calls.filter((c) => c[3] === "cancel")).toHaveLength(0);
+});
+
+it("recovers a transient polling failure without losing code entry", async () => {
+  let polls = 0;
+  mocks.auth.mockImplementation((_t, _id, _b, action) => action === "poll" && ++polls === 1
+    ? Promise.reject(new Error("worker_unreachable"))
+    : Promise.resolve({ login_id: "a".repeat(32), status: "running", output: "Paste code", offset: 10 }));
+  render(); await flush(); await click("Log in"); await flush();
+  expect(document.body.textContent).toContain("Reconnecting");
+  expect(document.querySelector("input")).not.toBeNull();
+  await act(async () => { await vi.advanceTimersByTimeAsync(2000); });
+  expect(polls).toBeGreaterThan(1);
+  expect(document.body.textContent).not.toContain("Reconnecting");
+});
+
+
+it("shows the worker reason when starting fails", async () => {
+  mocks.auth.mockRejectedValue(new Error("login_in_progress"));
+  render(); await flush(); await click("Log in"); await flush();
+  expect(document.body.textContent).toContain("A login is already running");
+  expect(document.body.textContent).toContain("login_in_progress");
+});
+
+it("clears a lost worker login and makes a fresh login available", async () => {
+  sessionStorage.setItem("backend-login:claude:kanebra", JSON.stringify({ id: "a".repeat(32), expires: Date.now() + 600_000 }));
+  mocks.auth.mockRejectedValue(new Error("login_not_found"));
+  render(); await flush();
+  expect(document.body.textContent).toContain("The node no longer has this login");
+  expect(sessionStorage.getItem("backend-login:claude:kanebra")).toBeNull();
+  expect(Array.from(document.querySelectorAll("button")).some((b) => b.textContent === "Log in")).toBe(true);
+});
+
+it("retains a start response received after closing for the next open", async () => {
+  let finish: (value: object) => void = () => undefined;
+  mocks.auth.mockImplementation((_t, _id, _b, action) => action === "start" ? new Promise((resolve) => { finish = resolve; }) : Promise.resolve({ status: "running", output: "prompt", offset: 6 }));
+  render(); await flush(); await click("Log in");
+  act(() => root.render(null));
+  await act(async () => { finish({ login_id: "a".repeat(32), status: "running" }); });
+  render(); await flush();
+  expect(document.body.textContent).toContain("Waiting for you to finish signing in");
+  expect(mocks.auth.mock.calls.filter((c) => c[3] === "start")).toHaveLength(1);
+  expect(mocks.auth.mock.calls.filter((c) => c[3] === "cancel")).toHaveLength(0);
 });
