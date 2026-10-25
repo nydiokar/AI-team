@@ -1,6 +1,8 @@
 from concurrent.futures import ThreadPoolExecutor
 from threading import Event
 
+import pytest
+
 from src.control.backend_auth_cache import BackendAuthCache
 
 
@@ -74,3 +76,66 @@ def test_simultaneous_status_checks_share_one_worker_call() -> None:
         results = [future.result(timeout=3) for future in futures]
     assert len(calls) == 1
     assert all(result == results[0] for result in results)
+
+
+def test_unreachable_node_never_blocks_a_different_node_with_a_hash_collision() -> None:
+    cache = BackendAuthCache()
+    blocked = "offline-node"
+    healthy = next(str(i) for i in range(100) if hash(str(i)) % 8 == hash(blocked) % 8)
+    entered = Event()
+    release = Event()
+    healthy_done = Event()
+
+    def slow() -> dict[str, object]:
+        entered.set()
+        assert release.wait(3)
+        return {"state": "unavailable"}
+
+    def fast() -> dict[str, object]:
+        healthy_done.set()
+        return {"state": "signed_out"}
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        offline = pool.submit(cache.read, blocked, slow)
+        try:
+            assert entered.wait(1)
+            online = pool.submit(cache.read, healthy, fast)
+            assert healthy_done.wait(1), "a different node must not wait for the offline node"
+            assert online.result(timeout=1)["state"] == "signed_out"
+        finally:
+            release.set()
+        assert offline.result(timeout=1)["state"] == "unavailable"
+
+
+def test_cached_observation_does_not_wait_for_an_inflight_forced_refresh() -> None:
+    cache = BackendAuthCache()
+    known = cache.read("node", lambda: {"state": "signed_out"})
+    entered = Event()
+    release = Event()
+
+    def refresh() -> dict[str, object]:
+        entered.set()
+        assert release.wait(3)
+        return {"state": "signed_in"}
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(cache.read, "node", refresh, refresh=True)
+        try:
+            assert entered.wait(1)
+            assert cache.read("node", lambda: {"state": "unavailable"}) == known
+        finally:
+            release.set()
+        assert future.result(timeout=1)["state"] == "signed_in"
+
+
+def test_per_key_locks_are_released_after_success_and_failure() -> None:
+    cache = BackendAuthCache()
+    def failed() -> dict[str, object]:
+        raise OSError("offline")
+    with pytest.raises(OSError):
+        cache.read("node", failed)
+    assert not cache._key_locks
+    for i in range(300):
+        cache.read(str(i), lambda: {"state": "signed_out"})
+    assert not cache._key_locks
+    assert len(cache._entries) == 256

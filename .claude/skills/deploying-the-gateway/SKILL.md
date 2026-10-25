@@ -103,7 +103,8 @@ Missing/stale/malformed state means **unknown**, never idle. `/health` alone pro
   work/verification. Finish and commit the changes first. Use a supervised handoff outside the worker
   tree (for example, a transient user systemd unit) which waits for active turns, including this one,
   to finish. For `Type=oneshot`, bound execution with `TimeoutStartSec`; systemd ignores `RuntimeMaxSec`
-  during oneshot startup. Give it a deadline, exact expected node/PM2 PID/source commit, one restart attempt, a
+  during oneshot startup. Register with `systemd-run --user --no-block` so the registration client
+  does not wait for this turn's own drain. Give it a deadline, exact expected node/PM2 PID/source commit, one restart attempt, a
   persistent result/log, and post-restart checks. Do not use an orphaned `nohup` or background shell.
   Report a deferred restart as pending until its result actually confirms success.
 - Update the checkout that PM2 actually executes, preserving the operator's env, interpreter, data
