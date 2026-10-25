@@ -297,14 +297,31 @@ def build_router(orchestrator: Any, *, require_auth: Callable[..., Any]) -> APIR
                     if len(raw) > 524_288:
                         raise HTTPException(status_code=502, detail="worker_response_too_large")
             except urllib.error.HTTPError as exc:
-                if exc.code in (400, 401, 404):
+                detail = "worker_rpc_failed"
+                if exc.code == 401:
+                    detail = "worker_auth_mismatch"
+                elif exc.code == 404:
+                    detail = "worker_auth_route_unavailable"
+                elif exc.code == 400:
+                    detail = "worker_rejected_request"
                     try:
-                        detail = "worker_rejected_request"
-                    except Exception:
-                        detail = "worker_rejected_request"
-                    raise HTTPException(status_code=409, detail=detail) from exc
-                raise HTTPException(status_code=502, detail="worker_rpc_failed") from exc
+                        error = json.loads(exc.read(8193))
+                        reason = error.get("reason") if isinstance(error, dict) else None
+                        if reason in {
+                            "login_in_progress", "login_not_found", "login_expired", "login_finished",
+                            "backend_missing", "pty_unavailable", "backend_start_failed",
+                            "login_input_timeout", "login_unavailable", "input_not_supported",
+                            "invalid_input", "invalid_offset", "backend_mismatch", "backend_unsupported",
+                        }:
+                            detail = reason
+                    except (ValueError, OSError):
+                        pass
+                logger.warning("event=backend_auth_rpc_failed node=%s backend=%s action=%s reason=%s status=%s",
+                               node_id, backend, action, detail, exc.code)
+                raise HTTPException(status_code=409 if exc.code in (400, 401, 404) else 502, detail=detail) from exc
             except (OSError, TimeoutError) as exc:
+                logger.warning("event=backend_auth_rpc_failed node=%s backend=%s action=%s reason=worker_unreachable error=%s",
+                               node_id, backend, action, type(exc).__name__)
                 raise HTTPException(status_code=502, detail="worker_unreachable") from exc
             try:
                 result = json.loads(raw)

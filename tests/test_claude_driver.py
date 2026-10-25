@@ -1207,3 +1207,32 @@ def test_worker_main_startup_scrub_is_idempotent_when_vars_absent():
     )
     for var in _STALE_AGENT_VARS:
         os.environ.pop(var, None)  # no KeyError even when absent
+
+
+def test_signed_out_is_not_salvaged_agent_work():
+    assert classify_error_text("Not logged in · Please run /login") == "auth"
+    assert classify_error_text("Unauthorized", api_error_status=401) == "auth"
+    reply = _build_salvaged_reply("auth", "Not logged in · Please run /login")
+    assert "Claude is signed out" in reply
+    assert "Home → Claude accounts" in reply
+    assert "agent's progress" not in reply
+    assert "Please run /login" not in reply
+
+
+def test_synthetic_login_refusal_is_failed_auth_through_driver():
+    driver = ClaudeSDKClientDriver()
+    outcome = TurnOutcome(output="", backend_session_id="sid-auth", raw_ndjson="",
+                          is_error=True, error_class="backend_error", error_text="error_during_execution",
+                          salvaged_output="Not logged in · Please run /login\n")
+    with patch.object(_SDKSession, "send", return_value=outcome), patch.object(_SDKSession, "start", lambda self: None):
+        result = driver.start_session(_make_session(), "work", turn=turn_control("auth-refusal"))
+    assert not result.success
+    assert result.error_class == "auth"
+    assert "Claude is signed out" in result.output
+    assert result.errors == ["Claude not logged in"]
+
+
+def test_agent_narration_about_login_is_still_preserved():
+    reply = _build_salvaged_reply("auth", "Not logged in to GitHub; I updated the files first.", "Unauthorized")
+    assert "I updated the files first" in reply
+    assert "No work was completed" not in reply

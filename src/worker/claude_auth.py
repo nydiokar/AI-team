@@ -121,6 +121,9 @@ class BackendAuthSession:
             if self._login is not None and self._login.process.poll() is not None:
                 self._dispose_locked(self._login)
             if self._login is not None:
+                if self._login.backend == backend:
+                    return {"login_id": self._login.login_id, "backend": backend,
+                            "status": "running", "input_supported": spec[2]}
                 raise BackendAuthError("login_in_progress")
             executable = shutil.which(backend)
             if not executable:

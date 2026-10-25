@@ -374,3 +374,27 @@ def test_gateway_caches_status_refreshes_and_records_verified_login(monkeypatch)
         # A cached observation never bypasses current node eligibility.
         monkeypatch.setattr("src.control.routes.monitoring._node_for_claude_auth", lambda _: {"live": False})
         assert client.get(f"{prefix}/status").status_code == 409
+
+
+@pytest.mark.parametrize("status,body,reason", [
+    (400, b'{"reason":"login_in_progress"}', "login_in_progress"),
+    (400, b'{"reason":"login_not_found"}', "login_not_found"),
+    (400, b'{"reason":"unexpected secret text"}', "worker_rejected_request"),
+    (400, b'garbage', "worker_rejected_request"),
+    (401, b'', "worker_auth_mismatch"),
+    (404, b'', "worker_auth_route_unavailable"),
+])
+def test_worker_error_reasons_are_bounded_allowlisted_and_logged(monkeypatch, caplog, status, body, reason) -> None:
+    import io
+    import urllib.error
+    async def guard() -> None: pass
+    router = _router(monkeypatch, guard)
+    def reject(*_, **__):
+        raise urllib.error.HTTPError("http://worker/", status, "Error", {}, io.BytesIO(body))
+    monkeypatch.setattr("src.control.routes.monitoring.urllib.request.urlopen", reject)
+    endpoint = _endpoint(router, "/api/nodes/{node_id}/backend-auth/{backend}/start").endpoint
+    with pytest.raises(HTTPException) as exc:
+        endpoint("kanebra", "claude")
+    assert exc.value.detail == reason
+    assert "node=kanebra backend=claude action=start" in caplog.text
+    assert "unexpected secret text" not in caplog.text

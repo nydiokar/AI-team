@@ -172,6 +172,8 @@ def classify_error_text(
     """
     if subtype == "error_max_turns":
         return "max_turns"
+    if api_error_status == 401:
+        return "auth"
     if api_error_status == 429:
         return "usage_limit"
     if api_error_status is not None and api_error_status >= 500:
@@ -181,6 +183,8 @@ def classify_error_text(
     if api_error_status is not None:
         return "upstream_error"
     low = (text or "").lower()
+    if "not logged in" in low:
+        return "auth"
     # Precedence is intentional: context_overflow is checked first because it has a
     # SPECIFIC recovery (compact / new session), so on the rare string that carries
     # both markers the actionable "/compact" banner wins. (The orchestrator's own
@@ -223,6 +227,11 @@ def _reset_hint(error_text: str) -> str:
     return m.group(1).strip() if m else ""
 
 
+def _is_login_refusal(text: str) -> bool:
+    """Recognize only the CLI's synthetic refusal, never agent narration."""
+    return bool(re.fullmatch(r"not logged in\s*·\s*please run /login", text.strip(), re.IGNORECASE))
+
+
 def _build_salvaged_reply(error_class: str, salvaged: str, error_text: str = "") -> str:
     """Compose the user-facing reply for an error turn: a short honest banner
     followed by the agent's salvaged work. Never returns the raw error string alone
@@ -230,6 +239,17 @@ def _build_salvaged_reply(error_class: str, salvaged: str, error_text: str = "")
     backend_error deliver the FULL response — only a context overflow is capped).
     """
     salvaged = (salvaged or "").strip()
+    if error_class == "auth":
+        signed_out = _is_login_refusal(salvaged) or (not salvaged and "not logged in" in error_text.casefold())
+        banner = (
+            "Claude is signed out on this session's node. No work was completed. "
+            if signed_out else "Claude authentication failed on this session's node. "
+        )
+        banner += (
+            "Open Home → Claude accounts, sign in on the same node, then send your message again. "
+            "In the web chat, enter /login to open the account panel."
+        )
+        return banner if signed_out or not salvaged else f"{banner}\n\n---\n\n{salvaged}"
     if error_class == "context_overflow":
         banner = (
             "⚠️ Context window full — the agent did the work but ran out of room to "
@@ -2173,15 +2193,19 @@ class ClaudeSDKClientDriver(ClaudeDriver):
                 # window). Fail honestly so retry/compact policy engages, but
                 # DELIVER the salvaged progress + an actionable banner instead of
                 # discarding 4 minutes of work or dumping a bare error string.
+                # Claude can put its synthetic login refusal in assistant text
+                # while the terminal error only says error_during_execution.
+                signed_out = _is_login_refusal(outcome.salvaged_output)
+                error_class = "auth" if signed_out else outcome.error_class
                 reply = _build_salvaged_reply(
-                    outcome.error_class, outcome.salvaged_output, outcome.error_text
+                    error_class, outcome.salvaged_output, outcome.error_text
                 )
                 return ExecutionResult(
                     success=False,
                     output=reply,
                     backend_session_id=outcome.backend_session_id,
-                    errors=[outcome.error_text or "backend returned an error result"],
-                    error_class=outcome.error_class or "backend_error",
+                    errors=["Claude not logged in" if signed_out else outcome.error_text or "backend returned an error result"],
+                    error_class=error_class or "backend_error",
                     execution_time=elapsed,
                     raw_stdout=outcome.raw_ndjson,
                     raw_stderr="",
