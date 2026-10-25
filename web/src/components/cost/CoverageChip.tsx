@@ -12,7 +12,7 @@ export function CoverageChip({
   coveragePct: number;
   unpricedTokens: number;
 }) {
-  const partial = coveragePct < 99.9;
+  const partial = unpricedTokens > 0 || coveragePct < 100;
   return (
     <span
       className={cn(
@@ -25,7 +25,7 @@ export function CoverageChip({
           : "all tokens priced"
       }
     >
-      {partial ? `${coveragePct}% priced` : "fully priced"}
+      {partial ? `${coveragePct >= 100 ? ">99.9" : coveragePct}% priced` : "fully priced"}
     </span>
   );
 }

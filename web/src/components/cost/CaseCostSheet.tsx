@@ -5,12 +5,16 @@
  * session. Data is the live /api/cases/{id}/usage read model.
  */
 import { Link } from "react-router-dom";
+import { useRef } from "react";
 import { X, Briefcase, UsersRound } from "lucide-react";
 import { useCaseUsage } from "../../hooks/useCost";
 import { caseTitle } from "../../transport/workAdapter";
 import { CoverageChip } from "./CoverageChip";
-import { formatTokens, formatUsd } from "../../lib/costPresentation";
+import { formatTokens } from "../../lib/costPresentation";
+import { formatCostUsd as formatUsd } from "../../lib/costAnalytics";
 import { cn } from "../../lib/cn";
+import * as Dialog from "@radix-ui/react-dialog";
+import { CostQueryNotice } from "./CostPanel";
 
 export function CaseCostSheet({
   flowRunId,
@@ -19,35 +23,32 @@ export function CaseCostSheet({
   flowRunId: string;
   onClose: () => void;
 }) {
-  const { data, isLoading, error } = useCaseUsage(flowRunId);
+  const returnFocus = useRef(document.activeElement instanceof HTMLElement ? document.activeElement : null);
+  const { data, isLoading, error, refetch } = useCaseUsage(flowRunId);
   const mgr = data?.mgrVsWorkers;
   const totalUsd = (mgr?.manager.usd.known ?? 0) + (mgr?.workers.usd.known ?? 0);
   const mgrPct = totalUsd > 0 ? ((mgr?.manager.usd.known ?? 0) / totalUsd) * 100 : 0;
 
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-end justify-center bg-black/50"
-      onClick={onClose}
-    >
-      <div
-        className="card-elev w-full max-w-[480px] rounded-t-2xl p-5 pb-8 max-h-[85vh] overflow-y-auto"
-        onClick={(e) => e.stopPropagation()}
-      >
+    <Dialog.Root open onOpenChange={(open) => { if (!open) onClose(); }}>
+      <Dialog.Portal>
+      <Dialog.Overlay className="fixed inset-0 z-50 bg-black/65 backdrop-blur-sm" />
+      <Dialog.Content onCloseAutoFocus={(event) => { event.preventDefault(); returnFocus.current?.focus(); }} className="card-elev fixed inset-x-0 bottom-0 z-50 mx-auto max-h-[85dvh] w-full max-w-[560px] overflow-y-auto rounded-t-2xl p-5 pb-8 outline-none sm:bottom-auto sm:top-1/2 sm:-translate-y-1/2 sm:rounded-2xl">
         <div className="mb-4 flex items-start justify-between gap-2">
           <div className="min-w-0">
             <div className="flex items-center gap-2">
               <Briefcase className="size-4 shrink-0 text-ink-muted" />
-              <h2 className="truncate text-base font-semibold text-ink">
+              <Dialog.Title className="truncate text-base font-semibold text-ink">
                 {data ? caseTitle(data.case.objectiveLock, data.flowRunId) : "Case cost"}
-              </h2>
+              </Dialog.Title>
             </div>
-            <p className="mt-0.5 truncate font-mono text-[11px] text-ink-muted">
-              {flowRunId}
-            </p>
+            <Dialog.Description className="mt-1 text-xs text-ink-muted">Case lifetime usage · independent of the selected Cost filters.</Dialog.Description>
+            <p className="mt-2 truncate font-mono text-[10px] text-ink-muted">{flowRunId}</p>
           </div>
           <button
+            type="button"
             onClick={onClose}
-            className="flex size-8 shrink-0 items-center justify-center rounded-full text-ink-soft hover:bg-surface-2"
+            className="flex size-11 shrink-0 items-center justify-center rounded-full text-ink-soft hover:bg-surface-2"
             aria-label="Close"
           >
             <X className="size-5" />
@@ -61,9 +62,7 @@ export function CaseCostSheet({
           </div>
         )}
 
-        {!isLoading && error != null && (
-          <p className="py-6 text-center text-[13px] text-bad">Couldn't load case cost.</p>
-        )}
+        <CostQueryNotice loading={false} error={error} hasData={Boolean(data)} onRetry={() => void refetch()} />
 
         {mgr && (
           <>
@@ -79,11 +78,12 @@ export function CaseCostSheet({
                   </span>
                 )}
               </div>
-              <div className="mt-2 flex gap-1 overflow-hidden rounded-full bg-surface-2">
+              <div className="mt-2 flex overflow-hidden rounded-full bg-surface-2" role="img" aria-label="Known USD split: manager and workers, amounts listed below">
                 <div
                   className="h-2.5 rounded-full bg-accent/80 transition-all"
                   style={{ width: `${mgrPct}%` }}
                 />
+                <div className="h-2.5 bg-[#a99cf6]" style={{ width: `${totalUsd > 0 ? 100 - mgrPct : 0}%` }} />
               </div>
               <div className="mt-3 grid grid-cols-2 gap-2 text-[13px]">
                 <div>
@@ -94,6 +94,7 @@ export function CaseCostSheet({
                   <div className="text-[11px] tabular-nums text-ink-muted">
                     {formatTokens(mgr.manager.tokens.total)} tokens
                   </div>
+                  <CoverageChip coveragePct={mgr.manager.usd.coveragePct} unpricedTokens={mgr.manager.usd.unpricedTokens} />
                 </div>
                 <div>
                   <div className="text-[11px] text-ink-muted">
@@ -105,6 +106,7 @@ export function CaseCostSheet({
                   <div className="text-[11px] tabular-nums text-ink-muted">
                     {formatTokens(mgr.workers.tokens.total)} tokens
                   </div>
+                  <CoverageChip coveragePct={mgr.workers.usd.coveragePct} unpricedTokens={mgr.workers.usd.unpricedTokens} />
                 </div>
               </div>
             </div>
@@ -136,7 +138,8 @@ export function CaseCostSheet({
             </div>
           </>
         )}
-      </div>
-    </div>
+      </Dialog.Content>
+      </Dialog.Portal>
+    </Dialog.Root>
   );
 }

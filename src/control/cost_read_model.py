@@ -95,7 +95,7 @@ def _sum_aggregates(items: List[Dict[str, Any]]) -> Dict[str, Any]:
             tokens[k] += int(it["tokens"].get(k) or 0)
         usd_known += float(it["usd"].get("known") or 0.0)
         unpriced_tokens += int(it["usd"].get("unpriced_tokens") or 0)
-    total_tokens = sum(tokens.values())
+    total_tokens = tokens["total"]
     priced_tokens = max(total_tokens - unpriced_tokens, 0)
     return {
         "tokens": tokens,

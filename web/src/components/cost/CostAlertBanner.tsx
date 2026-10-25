@@ -20,7 +20,7 @@ export function CostAlertBanner({ alerts }: { alerts: CostAlerts | undefined }) 
   if (!alerts.enabled) {
     return (
       <div className="rounded-xl bg-surface-2/60 px-4 py-2.5 text-[11px] text-ink-muted">
-        Budgets not armed — set a COST_ALERT_* env knob to enable USD burn alerts.
+        Gateway budgets · No cost alerts configured.
       </div>
     );
   }
@@ -28,7 +28,7 @@ export function CostAlertBanner({ alerts }: { alerts: CostAlerts | undefined }) 
   if (alerts.alerts.length === 0) {
     return (
       <div className="rounded-xl bg-ok/10 px-4 py-2.5 text-[11px] text-ok">
-        Within configured budgets.
+        Gateway budgets · No configured thresholds exceeded.
       </div>
     );
   }
@@ -37,7 +37,7 @@ export function CostAlertBanner({ alerts }: { alerts: CostAlerts | undefined }) 
     <div className="space-y-2">
       {alerts.alerts.map((a) => (
         <div
-          key={a.rule}
+          key={`${a.rule}-${a.scope}`}
           className="rounded-xl bg-warm-dim/70 px-4 py-2.5 ring-1 ring-warn/30"
         >
           <div className="flex items-center gap-2 text-[12px] font-medium text-warn">
