@@ -4,6 +4,7 @@ import asyncio
 import json
 import socket
 import time
+import urllib.request
 
 import pytest
 from fastapi import HTTPException
@@ -39,6 +40,38 @@ def _endpoint(router, path: str) -> APIRoute:
     if route is None:
         raise AssertionError(f"Route not registered: {path}")
     return route
+
+
+def test_backend_code_reaches_selected_node(monkeypatch: pytest.MonkeyPatch) -> None:
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    async def auth_guard() -> None:
+        pass
+
+    received: list[tuple[str, object]] = []
+
+    class Response:
+        def __enter__(self) -> Response: return self
+        def __exit__(self, *_: object) -> None: pass
+        def read(self, _: int) -> bytes: return b'{"ok":true}'
+
+    def send(request: urllib.request.Request, timeout: float) -> Response:
+        assert request.data is not None
+        received.append((request.full_url, json.loads(request.data)))
+        assert request.get_header("Authorization") == "Bearer mesh-secret"
+        assert timeout == 3
+        return Response()
+
+    monkeypatch.setattr("src.control.routes.monitoring.urllib.request.urlopen", send)
+    app = FastAPI()
+    app.include_router(_router(monkeypatch, auth_guard))
+    payload: dict[str, str] = {"login_id": "a" * 32, "input": "code#state\n"}
+    with TestClient(app) as client:
+        response = client.post("/api/nodes/kanebra/backend-auth/claude/input", json=payload)
+    assert response.status_code == 200
+    assert response.json() == {"ok": True}
+    assert received == [("http://100.88.11.88:9001/backend-auth/claude/input", payload)]
 
 
 @pytest.mark.parametrize("node", [
