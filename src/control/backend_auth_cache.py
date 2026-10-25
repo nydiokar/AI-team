@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import threading
 import time
+from _thread import LockType
 from collections import OrderedDict
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
@@ -19,7 +20,7 @@ class AccountStatus(BaseModel):
 
 
 class BackendAuthCache:
-    """Eight lock stripes coalesce concurrent checks without unbounded locks.
+    """Bounded per-key locks coalesce checks without blocking unrelated nodes.
 
     This is an observation cache, not an auth authority or login audit ledger.
     Node incarnation/address is part of the key; restart loses all observations.
@@ -27,21 +28,41 @@ class BackendAuthCache:
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
-        self._stripes = [threading.Lock() for _ in range(8)]
+        self._key_locks: dict[str, tuple[LockType, int]] = {}
         self._entries: OrderedDict[str, tuple[float, AccountStatus]] = OrderedDict()
 
     @contextmanager
-    def _stripe(self, key: str) -> Iterator[None]:
-        stripe = self._stripes[hash(key) % len(self._stripes)]
-        if not stripe.acquire(timeout=5):
-            raise TimeoutError("backend_auth_check_busy")
+    def _key_lock(self, key: str) -> Iterator[None]:
+        with self._lock:
+            if key not in self._key_locks:
+                if len(self._key_locks) >= 256:
+                    raise TimeoutError("backend_auth_check_busy")
+                self._key_locks[key] = (threading.Lock(), 0)
+            lock, users = self._key_locks[key]
+            self._key_locks[key] = (lock, users + 1)
+        acquired: bool = lock.acquire(timeout=5)
         try:
+            if not acquired:
+                raise TimeoutError("backend_auth_check_busy")
             yield
         finally:
-            stripe.release()
+            if acquired:
+                lock.release()
+            with self._lock:
+                _, users = self._key_locks[key]
+                if users == 1:
+                    del self._key_locks[key]
+                else:
+                    self._key_locks[key] = (lock, users - 1)
 
     def read(self, key: str, load: Callable[[], dict[str, object]], *, refresh: bool = False) -> dict[str, object]:
-        with self._stripe(key):
+        # A usable observation need not wait for a forced refresh of this key.
+        if not refresh:
+            with self._lock:
+                entry = self._entries.get(key)
+            if entry is not None and entry[0] > time.monotonic():
+                return entry[1].model_dump()
+        with self._key_lock(key):
             with self._lock:
                 entry = self._entries.get(key)
             if entry is not None and entry[0] > time.monotonic() and not refresh:
@@ -57,11 +78,11 @@ class BackendAuthCache:
             return status.model_dump()
 
     def invalidate(self, key: str) -> None:
-        with self._stripe(key), self._lock:
+        with self._key_lock(key), self._lock:
             self._entries.pop(key, None)
 
     def verified(self, key: str, authenticated: bool | None) -> dict[str, object]:
-        with self._stripe(key):
+        with self._key_lock(key):
             now: str = datetime.now(UTC).isoformat()
             with self._lock:
                 previous = self._entries.get(key)
