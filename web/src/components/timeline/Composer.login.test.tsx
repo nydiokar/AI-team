@@ -10,16 +10,15 @@ vi.mock("../../hooks/useSessionActions", () => ({
   useStopSession: () => ({}), useUploadFile: () => ({}),
 }));
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
-it("opens account login without sending /login to the agent", () => {
+it("submits session instructions without opening account management", () => {
   useDraftStore.getState().setDraft("login-session", "/login");
-  const onLogin = vi.fn();
   const container = document.createElement("div");
   const root = createRoot(container);
   try {
-    act(() => root.render(<Composer sessionId="login-session" running={false} onLogin={onLogin} />));
+    act(() => root.render(<Composer sessionId="login-session" running={false} />));
     act(() => container.querySelector<HTMLButtonElement>('button[aria-label="Send"]')!.click());
-    expect(onLogin).toHaveBeenCalledOnce();
-    expect(mocks.submit).not.toHaveBeenCalled();
+    expect(mocks.submit).toHaveBeenCalledOnce();
+    expect(mocks.submit.mock.calls[0][0]).toMatchObject({ sessionId: "login-session", description: "/login" });
     expect(useDraftStore.getState().bySession["login-session"]).toBeUndefined();
   } finally { act(() => root.unmount()); }
 });

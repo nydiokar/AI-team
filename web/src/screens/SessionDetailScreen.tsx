@@ -41,7 +41,6 @@ import { useForkStore } from "../stores/forkStore";
 import { useManagerBootStore } from "../stores/managerBootStore";
 import { SessionTurns } from "../components/timeline/SessionTurns";
 import { ContextFillGauge } from "../components/timeline/ContextFillGauge";
-import { SessionAccountPanel } from "../components/sessions/SessionAccountPanel";
 import { Composer } from "../components/timeline/Composer";
 import { JobRow } from "../components/system/JobsPanel";
 import { ModelPickerSheet } from "../components/sessions/ModelPickerSheet";
@@ -594,7 +593,6 @@ export function SessionDetailScreen() {
   const token = useAuthStore((s) => s.token);
   const { data, isLoading: sessionsLoading } = useSessions();
   const session = data?.find((s) => s.id === id);
-  const [accountOpen, setAccountOpen] = useState(false);
   const { data: cacheHeartbeats } = useCacheHeartbeats(id);
   const activeHeartbeat = (cacheHeartbeats ?? []).find((h) =>
     h.status === "active" || h.status === "observe_only",
@@ -1402,13 +1400,7 @@ export function SessionDetailScreen() {
                 {retiredReason}
               </div>
             ) : (
-              <>
-                {(session?.backend === "claude" || session?.backend === "codex") && <SessionAccountPanel
-                  key={id} backend={session.backend} nodeId={session.workspace.targetId}
-                  open={accountOpen} onOpen={() => setAccountOpen(true)} onClose={() => setAccountOpen(false)}
-                />}
-                <Composer sessionId={id} running={running} onLogin={session?.backend === "claude" || session?.backend === "codex" ? () => setAccountOpen(true) : undefined} />
-              </>
+              <Composer sessionId={id} running={running} />
             )}
           </>
         ) : id ? (

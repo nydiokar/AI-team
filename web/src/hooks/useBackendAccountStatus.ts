@@ -51,11 +51,11 @@ export function useBackendAccountStatus(token: string, nodeId: string, backend: 
       // A gateway cache hit must not buy another five minutes of freshness.
       return Number.isFinite(observed) ? Math.max(0, ttl - Math.max(0, query.state.dataUpdatedAt - observed)) : ttl;
     },
-    refetchInterval: (query) => {
-      const ttl = query.state.data?.state === "unavailable" || query.state.error ? 30_000 : 300_000;
-      const observed = Date.parse(query.state.data?.checked_at ?? "");
-      return Number.isFinite(observed) && !query.state.error ? Math.max(1000, ttl - Math.max(0, Date.now() - observed)) : ttl;
-    },
+    // Account checks belong to opening the Home account sheet or an explicit
+    // refresh, not background activity while the user works in a session.
+    refetchInterval: false,
+    refetchOnWindowFocus: false,
+    refetchOnReconnect: false,
     gcTime: 600_000,
     retry: false,
   });
