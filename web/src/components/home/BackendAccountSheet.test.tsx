@@ -2,7 +2,7 @@
 import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { QueryClient, QueryClientProvider, notifyManager } from "@tanstack/react-query";
+import { QueryClient, QueryClientProvider, focusManager, onlineManager, notifyManager } from "@tanstack/react-query";
 import type { Target } from "../../domain/models";
 const mocks = vi.hoisted(() => ({ status: vi.fn(), auth: vi.fn(), copy: vi.fn() }));
 vi.mock("../../lib/clipboard", () => ({ copyTextToClipboard: mocks.copy }));
@@ -42,6 +42,19 @@ it("checks every eligible node independently and isolates status failures", asyn
   expect(document.body.textContent).toContain("Signed in");
   expect(document.body.textContent).toContain("Account status unavailable");
   expect(document.body.textContent).not.toContain("offline");
+});
+it.each(["signed_in", "unavailable"])("does not recheck %s accounts on a timer, focus, or reconnect", async (state) => {
+  mocks.status.mockResolvedValue({ state, checked_at: new Date().toISOString() });
+  render(); await flush();
+  expect(mocks.status).toHaveBeenCalledTimes(1);
+  await act(async () => { await vi.advanceTimersByTimeAsync(301_000); });
+  await act(async () => {
+    focusManager.setFocused(false); focusManager.setFocused(true);
+    onlineManager.setOnline(false); onlineManager.setOnline(true);
+  });
+  expect(mocks.status).toHaveBeenCalledTimes(1);
+  await click("Refresh status"); await flush();
+  expect(mocks.status).toHaveBeenCalledTimes(2);
 });
 it("stops polling after completion and does not cancel a successful login on unmount", async () => {
   mocks.auth.mockImplementation((_t, _id, _b, action) => Promise.resolve(action === "poll" ? { login_id: "a".repeat(32), status: "exited", authenticated: true, output: "done", offset: 4 } : { login_id: "a".repeat(32), status: "running" }));
