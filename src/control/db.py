@@ -49,6 +49,8 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any, Dict, Generator, List, Optional, Tuple
 
+from pydantic import JsonValue
+
 # A82 Stage 2 — managed turn-queue typed outcomes. Import at module load (no
 # cycle: turn_queue.py imports only pydantic/stdlib). The Pydantic result MODELS
 # are imported lazily inside the strict helpers to keep them out of the hot
@@ -2734,6 +2736,7 @@ class MeshDB:
         *,
         success: bool,
         error: str = "",
+        strict: bool = False,
     ) -> None:
         """[A82 Stage 4d] Persist an ALREADY-TERMINAL protocol-0 audit turn
         (e.g. a watched-job notification record into an enrolled session) in ONE
@@ -2742,24 +2745,30 @@ class MeshDB:
         record it replaces (an audit write, not an execution)."""
         now = _now()
         try:
-            with self._write() as conn:
+            with (self._managed_write("record_job_audit") if strict else self._write()) as conn:
+                if strict:
+                    existing = conn.execute("SELECT session_id, action FROM mesh_tasks WHERE id=?", (task_id,)).fetchone()
+                    if existing is not None and (existing["session_id"] != session_id or existing["action"] != action):
+                        raise ValueError("job audit identity collision")
                 conn.execute(
                     """
                     INSERT OR IGNORE INTO mesh_tasks (
                         id, session_id, machine_id, backend, action, payload,
                         prompt, status, result, error, created_at, updated_at,
-                        completed_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        completed_at, reply_text
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         task_id, session_id, machine_id, backend, action,
                         json.dumps(payload), prompt,
                         "completed" if success else "failed",
                         json.dumps(result), None if success else error,
-                        now, now, now,
+                        now, now, now, str(result.get("output") or "") if strict else None,
                     ),
                 )
         except Exception as e:
+            if strict:
+                raise
             logger.warning("event=db_record_audit_turn_failed task_id=%s err=%s", task_id, e)
 
     def claim_task(self, task_id: str, node_id: str) -> bool:
@@ -9351,7 +9360,7 @@ class MeshDB:
             """,
             params,
         ).fetchall()
-        return [dict(r) for r in rows]
+        return [{k: v for k, v in dict(r).items() if k != "completion_enrolled"} for r in rows]
 
     def list_jobs_for_sessions(
         self, session_ids: List[str], limit: int = 200
@@ -9382,7 +9391,7 @@ class MeshDB:
             """,
             [*session_ids, limit],
         ).fetchall()
-        return [dict(r) for r in rows]
+        return [{k: v for k, v in dict(r).items() if k != "completion_enrolled"} for r in rows]
 
     def get_session_token_totals(
         self, session_ids: List[str]
@@ -9750,6 +9759,148 @@ class MeshDB:
             (since,),
         ).fetchall()
         return [dict(r) for r in rows]
+
+    def job_completion_page(self, after_id: str = "", limit: int = 25) -> dict[str, JsonValue]:
+        """Compact eligible terminals, keyset-paged independently of wall clocks.
+
+        Repeated sweeps discover transitions behind a previous cursor. The index
+        covers the eligibility predicate; large command/log/history blobs are not
+        materialized. Existing pre-J2 terminal jobs are deliberately not enrolled.
+        """
+        from .job_completion import JOB_COMPLETION_BATCH, compact_job
+
+        limit = max(1, min(int(limit), JOB_COMPLETION_BATCH))
+        rows = self._conn().execute(
+            "SELECT id, session_id, substr(node_id,1,128) AS node_id, "
+            "substr(label,1,512) AS label, status, exit_code, "
+            "substr(COALESCE(tail,''),-1500) AS tail, notify, notify_agent "
+            "FROM jobs WHERE completion_enrolled=1 AND status IN ('done','failed','lost') "
+            "AND (notify=1 OR notify_agent=1) AND id > ? ORDER BY id LIMIT ?",
+            (after_id, limit),
+        ).fetchall()
+        return {"jobs": [compact_job(dict(r)).model_dump(mode="json") for r in rows],
+                "next_cursor": str(rows[-1]["id"]) if len(rows) == limit else None}
+
+    def stage_job_completion(self, job: dict[str, JsonValue], source: str = "local") -> None:
+        """Immutable delivery intent, separate from either effect's acknowledgement."""
+        self.stage_job_completions([job], source)
+
+    def stage_job_completions(self, jobs: list[dict[str, JsonValue]], source: str = "local") -> None:
+        from .job_completion import JOB_COMPLETION_BATCH, compact_job
+
+        if source not in ("local", "remote") or len(jobs) > JOB_COMPLETION_BATCH:
+            raise ValueError("invalid job completion batch")
+        snapshots = [compact_job(job) for job in jobs]
+        if not snapshots:
+            return
+        with self._managed_write("stage_job_completion") as conn:
+            conn.executemany(
+                "INSERT OR IGNORE INTO job_completion_effects "
+                "(job_id, source, payload, notification_state, action_state, updated_at) "
+                "VALUES (?, ?, ?, ?, 'pending', ?)",
+                [(j.id, source, j.model_dump_json(), "pending" if j.notify else "done", _now())
+                 for j in snapshots if j.notify or j.notify_agent],
+            )
+
+    def stage_local_job_completions(self, limit: int = 25) -> int:
+        """One bounded discovery SELECT plus batched inserts; no timestamp cursor."""
+        from .job_completion import JOB_COMPLETION_BATCH
+
+        rows = self._conn().execute(
+            "SELECT id, session_id, substr(node_id,1,128) AS node_id, "
+            "substr(label,1,512) AS label, status, exit_code, "
+            "substr(COALESCE(tail,''),-1500) AS tail, notify, notify_agent "
+            "FROM jobs j WHERE completion_enrolled=1 AND status IN ('done','failed','lost') "
+            "AND (notify=1 OR notify_agent=1) AND NOT EXISTS "
+            "(SELECT 1 FROM job_completion_effects e WHERE e.job_id=j.id) "
+            "ORDER BY id LIMIT ?", (max(1, min(int(limit), JOB_COMPLETION_BATCH)),),
+        ).fetchall()
+        if not rows:
+            return 0
+        self.stage_job_completions([dict(r) for r in rows])
+        return len(rows)
+
+    def pending_job_completions(self, *, include_remote: bool = False, limit: int = 25) -> list[str]:
+        from .job_completion import JOB_COMPLETION_BATCH
+
+        rows = self._conn().execute(
+            "SELECT job_id FROM job_completion_effects "
+            "WHERE (notification_state='pending' OR action_state='pending') "
+            "AND (lease_until IS NULL OR lease_until <= ?) "
+            "AND (source='local' OR ?) ORDER BY updated_at, job_id LIMIT ?",
+            (time.time(), int(include_remote), max(1, min(int(limit), JOB_COMPLETION_BATCH))),
+        ).fetchall()
+        return [str(r[0]) for r in rows]
+
+    def get_job_completion(self, job_id: str) -> dict[str, JsonValue] | None:
+        row = self._conn().execute(
+            "SELECT * FROM job_completion_effects WHERE job_id=?", (job_id,),
+        ).fetchone()
+        return dict(row) if row else None
+
+    def claim_job_completion(self, job_id: str) -> dict[str, JsonValue] | None:
+        from .job_completion import JOB_EFFECT_LEASE_SEC
+
+        token = uuid.uuid4().hex
+        with self._managed_write("claim_job_completion") as conn:
+            conn.execute(
+                "UPDATE job_completion_effects SET lease_token=?, lease_until=? "
+                "WHERE job_id=? AND (notification_state='pending' OR action_state='pending') "
+                "AND (lease_until IS NULL OR lease_until <= ?)",
+                (token, time.time() + JOB_EFFECT_LEASE_SEC, job_id, time.time()),
+            )
+            if conn.execute("SELECT changes()").fetchone()[0] != 1:
+                return None
+            return dict(conn.execute("SELECT * FROM job_completion_effects WHERE job_id=?", (job_id,)).fetchone())
+
+    def begin_job_effect(self, job_id: str, token: str, effect: str) -> bool:
+        from .job_completion import JOB_EFFECT_ATTEMPTS
+
+        if effect not in ("notification", "action"):
+            raise ValueError("invalid job effect")
+        with self._managed_write("begin_job_effect") as conn:
+            # A crash on the last attempt leaves pending+attempts=max. Finalize
+            # that unknown outcome durably, rather than silently retry forever.
+            conn.execute(
+                f"UPDATE job_completion_effects SET {effect}_state='dead', "
+                f"{effect}_error='attempts_exhausted_or_outcome_unknown', updated_at=? "
+                f"WHERE job_id=? AND lease_token=? AND {effect}_state='pending' "
+                f"AND lease_until > ? AND {effect}_attempts >= ?",
+                (_now(), job_id, token, time.time(), JOB_EFFECT_ATTEMPTS),
+            )
+            conn.execute(
+                f"UPDATE job_completion_effects SET {effect}_attempts={effect}_attempts+1 "
+                f"WHERE job_id=? AND lease_token=? AND lease_until > ? "
+                f"AND {effect}_state='pending' AND {effect}_attempts < ?",
+                (job_id, token, time.time(), JOB_EFFECT_ATTEMPTS),
+            )
+            return conn.execute("SELECT changes()").fetchone()[0] == 1
+
+    def finish_job_effect(self, job_id: str, token: str, effect: str, state: str, error: str = "") -> bool:
+        if effect not in ("notification", "action") or state not in ("pending", "done", "dead"):
+            raise ValueError("invalid job effect transition")
+        with self._managed_write("finish_job_effect") as conn:
+            conn.execute(
+                f"UPDATE job_completion_effects SET {effect}_state=?, {effect}_error=?, updated_at=? "
+                "WHERE job_id=? AND lease_token=? AND lease_until > ?",
+                (state, error[:500] or None, _now(), job_id, token, time.time()),
+            )
+            return conn.execute("SELECT changes()").fetchone()[0] == 1
+
+    def refund_job_effect(self, job_id: str, token: str, effect: str) -> None:
+        if effect not in ("notification", "action"):
+            raise ValueError("invalid job effect")
+        with self._managed_write("refund_job_effect") as conn:
+            conn.execute(
+                f"UPDATE job_completion_effects SET {effect}_attempts=MAX(0,{effect}_attempts-1) "
+                "WHERE job_id=? AND lease_token=? AND lease_until > ?",
+                (job_id, token, time.time()),
+            )
+
+    def release_job_completion(self, job_id: str, token: str) -> None:
+        with self._managed_write("release_job_completion") as conn:
+            conn.execute("UPDATE job_completion_effects SET lease_until=NULL, lease_token=NULL "
+                         "WHERE job_id=? AND lease_token=?", (job_id, token))
 
     def get_running_jobs_for_node(self, node_id: str) -> List[Dict[str, Any]]:
         rows = self._conn().execute(
@@ -11223,6 +11374,30 @@ def _get_migrations() -> List[tuple]:
                # (rows already dead at this migration — carried-over A84 rows — are
                # not alertable). The partial index keeps the per-tick scan empty
                # in the steady state.
+        (47, """
+            ALTER TABLE jobs ADD COLUMN completion_enrolled INTEGER NOT NULL DEFAULT 1;
+            UPDATE jobs SET completion_enrolled=0 WHERE status IN ('done','failed','lost');
+            CREATE INDEX idx_jobs_completions ON jobs(id)
+                WHERE completion_enrolled=1 AND status IN ('done','failed','lost')
+                  AND (notify=1 OR notify_agent=1);
+            CREATE TABLE job_completion_effects (
+                job_id TEXT PRIMARY KEY,
+                source TEXT NOT NULL CHECK(source IN ('local','remote')),
+                payload TEXT NOT NULL CHECK(length(CAST(payload AS BLOB)) <= 16384),
+                notification_state TEXT NOT NULL CHECK(notification_state IN ('pending','done','dead')),
+                action_state TEXT NOT NULL CHECK(action_state IN ('pending','done','dead')),
+                notification_attempts INTEGER NOT NULL DEFAULT 0,
+                action_attempts INTEGER NOT NULL DEFAULT 0,
+                notification_error TEXT,
+                action_error TEXT,
+                lease_token TEXT,
+                lease_until REAL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE INDEX idx_job_completion_pending ON job_completion_effects(updated_at)
+                WHERE notification_state='pending' OR action_state='pending';
+        """),  # J2: terminal eligibility survives delayed commits; independent
+               # durable side-effect receipts, no replay of historical terminals.
     ]
 
 

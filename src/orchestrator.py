@@ -71,7 +71,7 @@ import re
 import socket
 import threading
 from pathlib import Path
-from typing import Callable, Dict, List, Any, Optional, Set, Tuple
+from typing import TYPE_CHECKING, Callable, Dict, List, Any, Optional, Set, Tuple
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from src.core.timeutil import now_iso, parse_iso
@@ -111,6 +111,9 @@ from src.core.failure_markers import (
 )
 
 logger = logging.getLogger(__name__)
+
+if TYPE_CHECKING:
+    from src.control.db import MeshDB
 
 
 #: [quota-resume] The error classes that mean "the provider refused the turn
@@ -816,10 +819,7 @@ class TaskOrchestrator(ITaskOrchestrator):
         # never leaks into task.metadata / the remote payload / persisted artifacts.
         self._compact_injected_ids: set[str] = set()
         # Job completion polling (T3)
-        self._last_job_poll = now_iso()
-        self._last_remote_job_poll = now_iso()
-        self._remote_job_poll_started_epoch = time.time()
-        self._processed_terminal_jobs: set[str] = set()
+        self._remote_job_completion_cursor = ""
         self._watched_jobs_cache_lock = threading.Lock()
         self._watched_jobs_remote_cache: Dict[
             tuple[Optional[str], Optional[str], int],
@@ -4788,8 +4788,8 @@ class TaskOrchestrator(ITaskOrchestrator):
     # Flag: MESH_ENABLED (poller only runs when mesh is on).
     #
     # Background coroutine that polls for watched jobs reaching terminal state
-    # and fans out Telegram notifications.  Deduplicates via
-    # _processed_terminal_jobs so each job notifies exactly once per run.
+    # and fans out notifications. SQLite receipts fence concurrent consumers;
+    # uncertain external sends may repeat, managed admissions retain one identity.
     #
     # FUTURE EXTRACTION → JobCompletionPoller (very low priority, ~11 methods).
     #   Self-contained enough but too small to justify now.  Revisit if T3 grows
@@ -4800,45 +4800,66 @@ class TaskOrchestrator(ITaskOrchestrator):
         """Poll for terminal watched jobs and push Telegram notifications.
 
         Runs as a background task during the gateway's lifetime. Checks every
-        30s for jobs that reached terminal state since the last poll.
+        30s for eligible terminals and unfinished durable side effects.
         """
         while self.running:
             try:
-                # The task server owns terminal job state; the gateway owns
-                # routing those terminal jobs to session-visible notifications.
-                terminal = await asyncio.to_thread(self._local_terminal_jobs_since, self._last_job_poll)
-                if terminal:
-                    self._last_job_poll = now_iso()
-
-                for job in terminal:
-                    await self._process_terminal_job(job)
-
-                if config.mesh.jobs_read_mode == "federated":
-                    remote_terminal = await asyncio.to_thread(
-                        self._remote_terminal_jobs_since, self._last_remote_job_poll,
-                    )
-                    if remote_terminal:
-                        self._last_remote_job_poll = now_iso()
-
-                    for job in remote_terminal:
-                        await self._process_terminal_job(job)
+                await self._poll_job_completions_once()
+                self._job_completion_poll_failed = False
             except Exception as e:
-                logger.debug("event=job_poller_error err=%s", e)
+                if not getattr(self, "_job_completion_poll_failed", False):
+                    logger.warning("event=job_completion_poll_unavailable error_class=%s", type(e).__name__)
+                self._job_completion_poll_failed = True
 
             try:
                 await asyncio.wait_for(asyncio.sleep(30), timeout=30)
             except asyncio.TimeoutError:
                 pass
 
-    def _local_terminal_jobs_since(self, since: str) -> list[dict[str, object]]:
-        """Resolve the DB/connection inside the fetching thread, never on the loop.
+    async def _poll_job_completions_once(self) -> int:
+        """Durable discovery and independent effects; no wall-clock watermark.
 
-        Poll cursor and notification retry semantics are unchanged (read-path J2).
-        A missing local DB must not suppress the explicitly configured remote poll.
+        Federation scans at most four compact pages/pass and resumes its cursor
+        next pass; EOF resets it so late terminal transitions are revisited.
         """
         from src.control.db import get_db
-        db = get_db()
-        return db.get_terminal_jobs_since(since) if db is not None else []
+        from src.control.job_completion import JOB_COMPLETION_PASS_BUDGET_SEC
+        db = await asyncio.to_thread(get_db)
+        if db is None:
+            raise RuntimeError("job completion receipt database unavailable")
+        await asyncio.to_thread(db.stage_local_job_completions)
+        remote = config.mesh.jobs_read_mode == "federated"
+        if remote:
+            try:
+                for _ in range(4):
+                    cursor = getattr(self, "_remote_job_completion_cursor", "")
+                    page = await asyncio.to_thread(self._remote_job_completion_page, cursor)
+                    await asyncio.to_thread(db.stage_job_completions, page["jobs"], "remote")
+                    self._remote_job_completion_cursor = page["next_cursor"] or ""
+                    if not page["next_cursor"]:
+                        break
+                self._job_remote_protocol_failed = False
+            except Exception as e:
+                if not getattr(self, "_job_remote_protocol_failed", False):
+                    logger.warning("event=job_completion_remote_unavailable error_class=%s", type(e).__name__)
+                self._job_remote_protocol_failed = True
+        ids = await asyncio.to_thread(db.pending_job_completions, include_remote=remote)
+        started, attempted = time.monotonic(), 0
+        for job_id in ids:
+            if attempted and time.monotonic() - started >= JOB_COMPLETION_PASS_BUDGET_SEC:
+                break  # do not let a batch of slow sends monopolize every pass
+            try:
+                await self._deliver_job_completion(db, job_id)
+            except Exception as e:
+                logger.warning("event=job_completion_retry job_id=%s err=%s", job_id, e)
+            attempted += 1
+        return attempted
+
+    def _remote_job_completion_page(self, after_id: str) -> dict[str, object]:
+        client = self._remote_jobs_client()
+        if client is None:
+            raise RuntimeError("federated job completion client unavailable")
+        return client.list_job_completions(after_id)
 
     def _remote_jobs_client(self):
         """Return a task-server client for CONTROLLER_URL, if this gateway has one."""
@@ -5010,26 +5031,6 @@ class TaskOrchestrator(ITaskOrchestrator):
                 break
         return out
 
-    def _remote_terminal_jobs_since(self, since: str) -> List[Dict[str, Any]]:
-        client = self._remote_jobs_client()
-        if client is None:
-            return []
-        started_after = float(getattr(self, "_remote_job_poll_started_epoch", 0.0) or 0.0)
-        terminal: List[Dict[str, Any]] = []
-        for job in client.list_jobs(limit=50):
-            job_id = str(job.get("id") or "")
-            if not job_id or job_id in self._processed_terminal_jobs:
-                continue
-            if str(job.get("status") or "") not in {"done", "failed", "lost"}:
-                continue
-            started_epoch = job.get("started_epoch")
-            if isinstance(started_epoch, (int, float)) and started_epoch < started_after:
-                continue
-            if started_epoch is None and str(job.get("updated_at") or "") <= since:
-                continue
-            terminal.append(job)
-        return terminal
-
     def _job_notification_payload(self, job: Dict[str, Any]) -> Dict[str, Any]:
         job_id = str(job.get("id") or "")
         label = str(job.get("label") or job_id or "unknown")
@@ -5056,177 +5057,31 @@ class TaskOrchestrator(ITaskOrchestrator):
             "reply": "\n".join(lines),
         }
 
-    def _record_job_session_turn(
-        self, job: Dict[str, Any], session: Any, payload: Dict[str, Any],
-        *, managed: bool = False,
-    ) -> None:
-        """Record a watched-job completion as a synthetic session turn.
-
-        [A82 Stage 4d] ``managed`` (ENROLLED session): ONE already-terminal
-        audit row (never a claimable ``pending`` row) and NO whole-row session
-        save — a stale snapshot must not rewrite an operator-stop ``cancelled``
-        status (4b MINOR 4); the ledger is the transcript's truth."""
-        job_id = str(payload["job_id"])
-        reply = str(payload["reply"])
-        prompt = str(payload["prompt"])
-        success = bool(payload["success"])
-        now = now_iso()
-
-        if managed:
-            self._record_managed_job_audit(job, session, payload)
-            return
-        try:
-            from src.control.db import get_db
-            db = get_db()
-            if db is not None:
-                db.enqueue_task(
-                    task_id=job_id,
-                    session_id=session.session_id,
-                    machine_id=getattr(session, "machine_id", None),
-                    backend=getattr(session, "backend", None) or "unknown",
-                    action="watched_job",
-                    payload={
-                        "task": {"id": job_id, "title": prompt, "prompt": prompt},
-                        "job": {
-                            "id": job_id,
-                            "label": payload["label"],
-                            "status": payload["status"],
-                        },
-                    },
-                )
-                result_dict = {
-                    "success": success,
-                    "output": reply,
-                    "errors": [] if success else [reply],
-                    "files_modified": [],
-                    "execution_time": 0.0,
-                    "timestamp": now,
-                    "return_code": job.get("exit_code"),
-                }
-                if success:
-                    db.complete_task(job_id, result_dict, None)
-                else:
-                    db.fail_task(job_id, reply, result=result_dict)
-                try:
-                    with db._write() as conn:
-                        conn.execute(
-                            """
-                            UPDATE mesh_tasks
-                            SET created_at = ?, completed_at = ?, updated_at = ?
-                            WHERE id = ? AND action = 'watched_job'
-                            """,
-                            (now, now, now, job_id),
-                        )
-                except Exception as e:
-                    logger.debug("event=job_session_turn_time_update_failed job_id=%s err=%s", job_id, e)
-                db.enrich_task(
-                    job_id,
-                    prompt=prompt,
-                    reply_text=reply,
-                    parsed_output={"type": "watched_job", "job": job},
-                    files_modified=[],
-                    return_code=job.get("exit_code"),
-                )
-                db.append_event(
-                    session_id=session.session_id,
-                    task_id=job_id,
-                    success=success,
-                    execution_time=0.0,
-                    error="" if success else reply,
-                )
-        except Exception as e:
-            logger.warning("event=job_session_turn_db_failed job_id=%s err=%s", job_id, e)
-
-        try:
-            history = list(getattr(session, "task_history", None) or [])
-            exists = any(
-                item.get("task_id") == job_id
-                for item in history
-                if isinstance(item, dict)
-            )
-            if not exists:
-                history.append({
-                    "task_id": job_id,
-                    "timestamp": now,
-                    "success": success,
-                    "execution_time": 0.0,
-                    "user_message": prompt,
-                    "result_summary": reply,
-                    "files_modified": [],
-                })
-                session.task_history = history[-20:]
-            session.last_task_id = job_id
-            session.last_result_summary = reply[-400:] if len(reply) > 400 else reply
-            session.last_summary = session.last_result_summary
-            session.last_files_modified = []
-            self.session_store.save(session)
-        except Exception as e:
-            logger.warning("event=job_session_turn_save_failed job_id=%s err=%s", job_id, e)
-
     def _record_managed_job_audit(
         self, job: Dict[str, Any], session: Any, payload: Dict[str, Any],
     ) -> None:
-        job_id = str(payload["job_id"])
-        reply = str(payload["reply"])
-        prompt = str(payload["prompt"])
-        success = bool(payload["success"])
-        try:
-            from src.control.db import get_db
-            db = get_db()
-            if db is None:
-                return
-            db.record_audit_turn(
-                job_id,
-                session.session_id,
-                getattr(session, "machine_id", None),
-                getattr(session, "backend", None) or "unknown",
-                "watched_job",
-                {
-                    "task": {"id": job_id, "title": prompt, "prompt": prompt},
-                    "job": {"id": job_id, "label": payload["label"], "status": payload["status"]},
-                },
-                prompt,
-                {
-                    "success": success, "output": reply,
-                    "errors": [] if success else [reply], "files_modified": [],
-                    "execution_time": 0.0, "timestamp": now_iso(),
-                    "return_code": job.get("exit_code"),
-                },
-                success=success,
-                error=reply,
-            )
-            db.enrich_task(
-                job_id,
-                prompt=prompt,
-                reply_text=reply,
-                parsed_output={"type": "watched_job", "job": job},
-                files_modified=[],
-                return_code=job.get("exit_code"),
-            )
-            db.append_event(
-                session_id=session.session_id,
-                task_id=job_id,
-                success=success,
-                execution_time=0.0,
-                error="" if success else reply,
-            )
-        except Exception as e:
-            logger.warning("event=job_session_turn_db_failed job_id=%s err=%s", job_id, e)
-
-    def _managed_turn_row_exists(self, turn_id: str) -> bool:
-        """True when the managed turn row is present, or when that cannot be
-        read (a turn that may exist must not be contradicted by a "refused"
-        audit record)."""
+        """Idempotent, already-terminal audit; failures remain retryable receipts."""
         from src.control.db import get_db
 
-        try:
-            return get_db().get_task(turn_id) is not None
-        except Exception as e:  # noqa: BLE001
-            logger.warning("event=job_turn_probe_failed turn=%s err=%s", turn_id, e)
-            return True
+        db = get_db()
+        if db is None:
+            raise RuntimeError("job audit database unavailable")
+        job_id, reply, prompt = str(payload["job_id"]), str(payload["reply"]), str(payload["prompt"])
+        success = bool(payload["success"])
+        db.record_audit_turn(
+            job_id, session.session_id, getattr(session, "machine_id", None),
+            getattr(session, "backend", None) or "unknown", "watched_job",
+            {"task": {"id": job_id, "title": prompt, "prompt": prompt},
+             "job": {"id": job_id, "label": payload["label"], "status": payload["status"]}},
+            prompt,
+            {"success": success, "output": reply,
+             "errors": [] if success else [reply], "files_modified": [],
+             "execution_time": 0.0, "timestamp": now_iso(), "return_code": job.get("exit_code")},
+            success=success, error=reply, strict=True,
+        )
 
     async def _admit_managed_watched_job(
-        self, job: Dict[str, Any], session: Any, payload: Dict[str, Any], description: str,
+        self, session: Any, payload: Dict[str, Any], description: str,
     ) -> None:
         """[A82 Stage 4d] Producer 4 for an ENROLLED session: the job completion
         becomes ONE managed turn. Durable trigger identity = the job id
@@ -5236,10 +5091,9 @@ class TaskOrchestrator(ITaskOrchestrator):
         it ran. Case attachment is the existing watched-job rule (the shared
         convergent lineage procedure: attach to the session's open Case, never
         relabel a Manager). ``system`` source: it honours and never releases an
-        operator-stop hold. A refused admission falls back to the audit record
-        (legacy parity), never to legacy execution."""
+        operator-stop hold. Uncommitted failures propagate to the durable retry
+        receipt; permanent/exhausted failures are audited by its consumer."""
         from src.control.db import producer_turn_id
-        from src.control.turn_queue import TurnQueueError
 
         job_id = str(payload["job_id"])
         trigger = f"watched:{job_id}"
@@ -5263,100 +5117,148 @@ class TaskOrchestrator(ITaskOrchestrator):
                 dispatched_by=f"watched_job:{job_id}",
                 turn_queue_enrolled=True,
             )
-        except Exception as e:  # noqa: BLE001 — typed refusal OR an untyped backing
-            # error (e.g. a locked carrier-registry read): never escape into the
-            # poller's batch (later jobs, legacy ones included, would be dropped).
-            level = logging.WARNING if isinstance(e, (TurnQueueError, HarnessAdmissionBlocked)) else logging.ERROR
-            logger.log(level, "event=job_notify_agent_refused job_id=%s err=%s", job_id, e)
-            # [A82 Stage 4d] An error AFTER the commit (event/telemetry) leaves a
-            # committed turn that will run: the "refused" audit would contradict
-            # it. Fall back only when the deterministic turn row is ABSENT.
-            if not self._managed_turn_row_exists(turn_id):
-                self._record_managed_job_audit(job, session, payload)
+        except Exception:
+            # A post-commit event can fail after admission succeeded. Probe
+            # its permanent identity; unreadable/absent evidence must retry.
+            from src.control.db import get_db
+            db = await asyncio.to_thread(get_db)
+            if db is not None and await asyncio.to_thread(db.get_task, turn_id) is not None:
+                return
+            raise
 
     async def _process_terminal_job(self, job: Dict[str, Any]) -> None:
-        job_id_key = str(job.get("id") or "")
-        processed = getattr(self, "_processed_terminal_jobs", None)
-        if processed is None:
-            processed = set()
-            self._processed_terminal_jobs = processed
-        if job_id_key in processed:
-            return
-        processed.add(job_id_key)
+        """Persist first observation, then attempt its independent effects.
 
-        if not job.get("notify") and not job.get("notify_agent"):
-            return
-
-        payload = self._job_notification_payload(job)
-        job_id = str(payload["job_id"])
-        session_id = str(job.get("session_id") or "")
-        session = self.session_store.get(session_id) if session_id else None
-        if session is None:
-            logger.info("event=job_notify_skipped job_id=%s reason=no_session", job_id)
-            return
-
-        # [A82 Stage 4d] ENROLLED session ⇒ managed producer. No marker read
-        # while no session is enrolled; unreadable ⇒ fail closed (None): no
-        # session turn/record at all, never a legacy fallback.
+        The durable receipt replaces the process-local processed set. External
+        notices may repeat after an uncertain send; admission retains its existing
+        permanent producer identity. No receipt DB means no untracked effects.
+        """
         from src.control.db import get_db
-        from src.control.turn_admission import session_enrollment
+        db = await asyncio.to_thread(get_db)
+        if db is None:
+            raise RuntimeError("job completion receipt database unavailable")
+        await asyncio.to_thread(db.stage_job_completion, job)
         try:
-            managed: Optional[bool] = await session_enrollment(get_db(), session_id)
+            await self._deliver_job_completion(db, str(job.get("id") or ""))
         except Exception as e:
-            logger.warning("event=job_notify_enrollment_unreadable job_id=%s err=%s", job_id, e)
-            managed = None
+            logger.warning("event=job_completion_retry job_id=%s err=%s", job.get("id"), e)
 
-        # With notify_agent the continuation turn below carries the same payload —
-        # a synthetic turn too would show the job result twice in the session.
-        if not job.get("notify_agent") and managed is not None:
-            self._record_job_session_turn(job, session, payload, managed=managed)
+    async def _deliver_job_completion(self, db: "MeshDB", job_id: str) -> None:
+        from src.control.job_completion import (
+            JOB_ACTION_TIMEOUT_SEC,
+            JOB_EFFECT_ATTEMPTS,
+            JOB_NOTICE_TIMEOUT_SEC,
+            JobCompletion,
+        )
+        from src.control.turn_admission import session_enrollment
+        from src.control.turn_queue import TurnQueueError
 
-        if job.get("notify"):
-            result = TaskResult(
-                task_id=job_id,
-                success=bool(payload["success"]),
-                output=str(payload["reply"]),
-                errors=[] if payload["success"] else [str(payload["reply"])],
-                files_modified=[],
-                execution_time=0.0,
-                timestamp=now_iso(),
-                return_code=job.get("exit_code") or 0,
-            )
-            try:
-                await self.notifier.notify_task_outcome(
-                    job_id,
-                    result,
-                    session=session,
-                    chat_id=getattr(session, "telegram_chat_id", None),
-                )
-            except Exception as e:
-                logger.warning("event=job_notify_failed job_id=%s err=%s", job_id, e)
-
-        if job.get("notify_agent") and managed is None:
+        receipt = await asyncio.to_thread(db.claim_job_completion, job_id)
+        if receipt is None:
             return
-        if job.get("notify_agent"):
-            description = (
-                f"The watched job `{payload['label']}` finished with status "
-                f"`{payload['status']}`.\n\n{payload['reply']}"
-            )
-            if managed:
-                await self._admit_managed_watched_job(job, session, payload, description)
-                return
+        token = str(receipt["lease_token"])
+        job = JobCompletion.model_validate_json(receipt["payload"]).model_dump(mode="json")
+        session_id = str(job.get("session_id") or "")
+        # Every SQLite connection is obtained in its executing thread. Session
+        # reads may also parse a JSON fallback, so keep them off the loop.
+        session = await asyncio.to_thread(self.session_store.get, session_id) if session_id else None
+        payload = self._job_notification_payload(job)
+        for effect in ("notification", "action"):
+            if effect == "action" and receipt["action_state"] == "pending":
+                from src.control.db import producer_turn_id
+                audit_or_turn = (producer_turn_id(f"watched:{job_id}", session_id, 1, prefix="jturn")
+                                 if job.get("notify_agent") else job_id)
+                existing = await asyncio.to_thread(db.get_task, audit_or_turn)
+                if existing is not None:
+                    # The last allowed attempt may have committed before a
+                    # crash. Reconcile its durable identity before exhausting
+                    # the budget, never call that accepted work a refusal.
+                    valid = (existing.get("session_id") == session_id and
+                             (existing.get("queue_protocol") == 1 and
+                              existing.get("idempotency_key") == f"watched:{job_id}"
+                              if job.get("notify_agent") else
+                              existing.get("action") == "watched_job" and
+                              existing.get("status") in ("completed", "failed")))
+                    await asyncio.to_thread(
+                        db.finish_job_effect, job_id, token, effect,
+                        "done" if valid else "dead", "" if valid else "job effect identity collision",
+                    )
+                    if not valid:
+                        logger.warning("event=job_completion_failed job_id=%s effect=action reason=identity_collision", job_id)
+                    continue
+            if not await asyncio.to_thread(db.begin_job_effect, job_id, token, effect):
+                latest = await asyncio.to_thread(db.get_job_completion, job_id)
+                if latest[f"{effect}_state"] == "dead" and receipt[f"{effect}_state"] == "pending":
+                    logger.warning("event=job_completion_failed job_id=%s effect=%s reason=attempts_exhausted_or_unknown",
+                                   job_id, effect)
+                continue
+            state, error = "done", ""
             try:
-                await self.submit_instruction(
-                    description,
-                    session_id=session.session_id,
-                    cwd=getattr(session, "repo_path", None),
-                    source="watched_job",
-                    extra_metadata={"job_id": job_id, "source": "watched_job"},
-                    # [M2] This follow-up task is dispatched BY the watched-job
-                    # subsystem — record that provenance on its flow_runs row
-                    # (flag-guarded; no-op when HARNESS_FLOW_DRIVE is OFF).
-                    dispatched_by=f"watched_job:{job_id}",
-                )
+                if session is None:
+                    raise ValueError("job owner session unavailable")
+                if effect == "notification":
+                    result = TaskResult(
+                        task_id=job_id, success=bool(payload["success"]),
+                        output=str(payload["reply"]),
+                        errors=[] if payload["success"] else [str(payload["reply"])],
+                        files_modified=[], execution_time=0.0, timestamp=now_iso(),
+                        return_code=job.get("exit_code") or 0,
+                    )
+                    await asyncio.wait_for(self.notifier.notify_task_outcome(
+                        job_id, result, session=session,
+                        chat_id=getattr(session, "telegram_chat_id", None),
+                        reliable=True,
+                    ), timeout=JOB_NOTICE_TIMEOUT_SEC)
+                else:
+                    async def action() -> None:
+                        managed = await session_enrollment(db, session_id)
+                        if not managed and job.get("notify_agent"):
+                            # A82 retired un-enrolled session execution. Never
+                            # replay a non-idempotent legacy submission on retry.
+                            raise ValueError("unmanaged job continuation refused")
+                        if job.get("notify_agent"):
+                            description = (
+                                f"The watched job `{payload['label']}` finished with status "
+                                f"`{payload['status']}`.\n\n{payload['reply']}"
+                            )
+                            await self._admit_managed_watched_job(
+                                session, payload, description,
+                            )
+                        else:
+                            await asyncio.to_thread(
+                                self._record_managed_job_audit, job, session, payload,
+                            )
+                    await asyncio.wait_for(action(), timeout=JOB_ACTION_TIMEOUT_SEC)
             except Exception as e:
-                logger.warning("event=job_notify_agent_failed job_id=%s err=%s", job_id, e)
-                self._record_job_session_turn(job, session, payload)
+                # Storage errors preserve the attempt budget (including an
+                # enrollment/admission read); no external send was certified.
+                error = f"{type(e).__name__}: {e}"[:500]
+                latest = await asyncio.to_thread(db.get_job_completion, job_id)
+                attempts = int(latest[f"{effect}_attempts"])
+                permanent = isinstance(e, ValueError) or (
+                    isinstance(e, TurnQueueError) and e.status_code < 500 and e.status_code != 429
+                ) or isinstance(e, HarnessAdmissionBlocked)
+                state = "dead" if permanent or attempts >= JOB_EFFECT_ATTEMPTS else "pending"
+                if _transient_db_error(e):
+                    await asyncio.to_thread(db.refund_job_effect, job_id, token, effect)
+                    state = "pending"
+                if state == "dead":
+                    logger.warning("event=job_completion_failed job_id=%s effect=%s err=%s",
+                                   job_id, effect, error)
+                    if effect == "action" and session is not None:
+                        try:
+                            await asyncio.to_thread(
+                                self._record_managed_job_audit, job, session,
+                                {**payload, "reply": f"{payload['reply']}\n\nJob completion action failed: {error}"},
+                            )
+                        except ValueError as audit_error:
+                            error = f"{error}; {audit_error}"[:500]
+            # Failures here leave the lease: after expiry, success-before-ack is
+            # unknown for notices and idempotently replayed for continuations.
+            if not await asyncio.to_thread(db.finish_job_effect, job_id, token, effect, state, error):
+                return
+        await asyncio.to_thread(db.release_job_completion, job_id, token)
+
 
     @staticmethod
     def _format_file_change_lines(result: TaskResult, limit: int = 20) -> List[str]:

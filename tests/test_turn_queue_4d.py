@@ -39,7 +39,7 @@ class _Notifier:
     def __init__(self):
         self.calls = []
 
-    async def notify_task_outcome(self, task_id, result, *, session=None, chat_id=None, prefix=""):
+    async def notify_task_outcome(self, task_id, result, *, session=None, chat_id=None, prefix="", reliable=False):
         self.calls.append(task_id)
 
 
@@ -50,7 +50,6 @@ def _env(tmp_path, monkeypatch, *, enroll=True, status=SS.AWAITING_INPUT):
     db, o = _setup(tmp_path, monkeypatch, enroll=enroll)
     _wire(o)
     o.notifier = _Notifier()
-    o._processed_terminal_jobs = set()
     o.task_results = {}
     o.running = True
     o.legacy_submits = []
@@ -97,7 +96,6 @@ def _restart(o_like):
     o._emit_event = lambda name, task, data=None: o.events.append(name)
     o._emit_turn_telemetry = lambda name, task, data=None, **k: o.events.append(name)
     o.notifier = _Notifier()
-    o._processed_terminal_jobs = set()
     o.task_results = {}
     o.running = True
     return _wire(o)
@@ -129,7 +127,6 @@ def test_W01_job_notification_is_one_durable_managed_turn_replays_collapse(tmp_p
     assert _legacy_session_rows(db) == []  # no synthetic/legacy row into the enrolled session
     # a second poll in this process, a restarted gateway, and a failed-status
     # re-report all collapse to the same ONE turn
-    o._processed_terminal_jobs = set()
     _process(o, _job())
     _process(_restart(o), _job())
     _process(_restart(o), _job(status="lost"))
@@ -202,18 +199,22 @@ def test_W04_notify_only_record_is_audit_only_and_never_undoes_a_hold(tmp_path, 
     assert db.operator_stop_hold("sess-1") == "operator_stop"
     assert _kind(db, "watched_job") == []  # a notify-only job wakes nobody
     # replay: still one audit row, no error
-    o._processed_terminal_jobs = set()
     _process(o, _job(notify_agent=0))
     assert [r["id"] for r in _legacy_session_rows(db) if r["action"] == "watched_job"] == ["job_x"]
 
 
-def test_W05_refused_admission_falls_back_to_audit_without_legacy_execution(tmp_path, monkeypatch):
+def test_W05_transient_refusal_retries_then_audits_without_legacy_execution(tmp_path, monkeypatch):
     db, o = _env(tmp_path, monkeypatch)
     db._conn().execute("DELETE FROM nodes")  # no managed carrier ⇒ typed 503 refusal
     db._conn().commit()
     before = db.get_session("sess-1")["status"]
     _process(o, _job())
     assert _kind(db, "watched_job") == []
+    assert _legacy_session_rows(db) == []  # no premature audit while retryable
+    assert db.get_job_completion("job_x")["action_state"] == "pending"
+    for _ in range(4):
+        _process(o, _job())
+    assert db.get_job_completion("job_x")["action_state"] == "dead"
     rows = _legacy_session_rows(db)
     assert [(r["id"], r["status"]) for r in rows] == [("job_x", "completed")]
     assert db.get_session("sess-1")["status"] == before  # no whole-row save
@@ -547,9 +548,10 @@ def test_U01_unenrolled_producers_touch_no_managed_state(tmp_path, monkeypatch):
     # born managed, never updated on conflict) — a row write, not a read of
     # managed state (C07 excludes it the same way).
     assert not [q for q in stmts if any(f in q for f in forbidden) and "INSERT INTO sessions" not in q]
-    # legacy deliveries exactly as before
-    assert [k["source"] for k in submits] == ["watched_job", "cache_heartbeat"]
-    assert submits[0]["extra_metadata"] == {"job_id": "job_x", "source": "watched_job"}
+    # Watched continuations now obey the A82 retired-execution boundary; an
+    # unenrolled session is audited/refused, never sent to a legacy submitter.
+    assert [k["source"] for k in submits] == ["cache_heartbeat"]
+    assert db.get_job_completion("job_x")["action_state"] == "dead"
     assert delivered == 1
     assert _managed_rows(db) == []
     assert db.get_task("job_y")["status"] == "completed"  # legacy synthetic turn
@@ -558,7 +560,7 @@ def test_U01_unenrolled_producers_touch_no_managed_state(tmp_path, monkeypatch):
 # =========================================================================== #
 # Stage 4d rework (A87 review): P1-P3 inverted + kill tests R1-R4
 # =========================================================================== #
-def test_RW01_untyped_admission_error_falls_back_to_audit_and_never_escapes(tmp_path, monkeypatch):
+def test_RW01_untyped_admission_error_retries_then_audits_and_never_escapes(tmp_path, monkeypatch):
     """P1 inverted: an untyped backing error (a locked registry read) during
     managed job admission ⇒ audit fallback for THAT job; the poller batch goes on."""
     db, o = _env(tmp_path, monkeypatch)
@@ -568,6 +570,11 @@ def test_RW01_untyped_admission_error_falls_back_to_audit_and_never_escapes(tmp_
     o._managed_carrier_assignment = boom
     _process(o, _job())  # does not raise
     assert _kind(db, "watched_job") == []
+    assert db.get_task("job_x") is None
+    assert db.get_job_completion("job_x")["action_state"] == "pending"
+    for _ in range(4):
+        _process(o, _job())
+    assert db.get_job_completion("job_x")["action_state"] == "dead"
     assert db.get_task("job_x")["status"] == "completed"  # audit record
     assert o.notifier.calls == ["job_x"]
 
@@ -876,5 +883,9 @@ def test_F02b_unreadable_turn_probe_writes_no_audit(tmp_path, monkeypatch):
     monkeypatch.setattr(db, "get_task", probe)
     _process(o, _job())
     monkeypatch.setattr(db, "get_task", real_get)
+    assert _kind(db, "watched_job") == []  # unreadable preflight is retried, never guessed
+    assert db.get_task("job_x") is None
+    db._conn().execute("UPDATE job_completion_effects SET lease_until=0")
+    _process(o, _job())
     assert [r["status"] for r in _kind(db, "watched_job")] == ["queued"]
     assert db.get_task("job_x") is None

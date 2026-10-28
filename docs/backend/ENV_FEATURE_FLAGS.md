@@ -60,6 +60,21 @@ and run serially off the event loop, with thread-local DB connections. Cursor,
 retry and restart reliability are tracked separately as J2 in
 [`READ_PATH_BURNDOWN.md`](READ_PATH_BURNDOWN.md); no exactly-once claim is made.
 
+J2 (separate PR, not yet deployed) adds migration 47 and durable completion-effect
+receipts. Terminal discovery no longer uses timestamps. Existing running and future
+jobs are eligible; pre-migration terminals remain historical unless an operator
+explicitly authorizes backfill. Each job's notification and audit/continuation
+receipts retry independently, at most five attempts with a 120 s claim lease.
+Unknown external sends may duplicate; continuation replay retains the existing
+permanent `watched:<job_id>` managed-admission key. Web Push remains best effort.
+
+In federation mode, the authority must support authenticated `GET /jobs/completions`
+before upgrading the gateway: 25 compact rows/page, four pages/pass, rotating keyset
+cursor, no start-time/newest-50 filter. An old server fails explicitly. A local
+controller DB is mandatory for completion receipts; its absence pauses effects.
+The UI's legacy federation list/cache remains compatible. Details, service bounds,
+rollout order and operator recovery are in burndown J2. No worker restart is needed.
+
 ## A. Behaviour gates — default OFF, must be set to take effect
 
 | Flag | Managed? | Default | What it turns on | Code seam |

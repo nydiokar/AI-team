@@ -31,15 +31,17 @@ Current work:
 
 **Read-path programme (2026-10-28 operator dispatch):** J1 jobs authority/enrichment
 is merged and live as `e0e2877` (PR #261), production verified with rollback retained;
-next J2 completion reliability, J3 reason N+1, J4 session projections,
+J2 completion reliability is implemented/locally verified, awaiting PR review and
+merge/deploy authorization; next J3 reason N+1, J4 session projections,
 J5 compact affiliations. Detailed scope, evidence and durable burndown:
 [`READ_PATH_BURNDOWN.md`](../docs/backend/READ_PATH_BURNDOWN.md).
 The current dispatch authorizes J2 implementation only; its merge/deployment remain gated.
 Jobs boundary deferrals: four concurrent reads bound active materialization, not
 historical text bytes or SQL execution time. SQLite's 15 s busy timeout is a lock
 wait bound; no statement deadline is claimed. J1's measured memory and concrete
-oversized-history/timeout follow-up are recorded in burndown S3; completion cursor,
-retry/restart correctness is the next mandatory job J2, not closed by offloading.
+oversized-history/timeout follow-up are recorded in burndown S3. J2's durable
+completion receipts and notification/admission contracts are in its burndown entry;
+implementation verification is distinct from its still-gated production rollout.
 
 1. **System-One decision layer (TypeSafe Jev) → Governor programme.** Spec
    `docs/SYSTEM_ONE_DECISION_LAYER_SPEC.md` (accepted 2026-10-05). Next: **A94** (core + replay +
