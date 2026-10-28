@@ -220,6 +220,10 @@ def _rewind_to_42(path: str) -> None:
     """Make a migrated DB look exactly like schema 42 again (pre-cutover)."""
     conn = sqlite3.connect(path)
     conn.execute("DELETE FROM schema_version WHERE version >= 43")
+    # J2 migration 47 did not exist at schema 42; rewind its physical schema too.
+    conn.execute("DROP INDEX IF EXISTS idx_jobs_completions")
+    conn.execute("DROP TABLE IF EXISTS job_completion_effects")
+    conn.execute("ALTER TABLE jobs DROP COLUMN completion_enrolled")
     conn.execute("DROP INDEX IF EXISTS idx_mesh_tasks_legacy_exec_live")
     conn.execute("DROP INDEX IF EXISTS idx_mesh_tasks_effects_failed")
     # A84 carry (o): migration 44 artifacts did not exist at schema 42 — strip

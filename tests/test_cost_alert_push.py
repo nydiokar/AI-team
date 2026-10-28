@@ -225,6 +225,7 @@ def test_inflight_check_is_not_doubled(monkeypatch, pushes):
     concurrent check — it is folded into ONE trailing check after it ends."""
     _knob(monkeypatch)
     gate = threading.Event()
+    trailing_finished = threading.Event()
     n: list = []
     running: list = [0, 0]                       # [current, max]
 
@@ -234,6 +235,8 @@ def test_inflight_check_is_not_doubled(monkeypatch, pushes):
         n.append(1)
         gate.wait(2)
         running[0] -= 1
+        if len(n) == 2:
+            trailing_finished.set()
         return {"alerts": []}
 
     monkeypatch.setattr(cost_alerts, "check_cost_alerts", _blocking)
@@ -245,6 +248,9 @@ def test_inflight_check_is_not_doubled(monkeypatch, pushes):
             await asyncio.sleep(0.01)
         assert len(n) == 1                       # nothing started mid-check
         gate.set()
+        # A scheduled timer is not an asyncio Task: _drain alone can return
+        # before the trailing check starts on a busy loop.
+        assert await asyncio.to_thread(trailing_finished.wait, 5)
         await _drain()
 
     asyncio.run(_go())

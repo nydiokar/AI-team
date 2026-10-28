@@ -188,6 +188,18 @@ update; current checks are attached to its head. Merge and deployment remain gat
 No local full/e2e suite, external notification, paid backend, worker restart or J2
 production deployment is part of this verification.
 
+CI follow-up: runs 40729618645 and 40730413127 exposed three historical-schema
+fixtures that rewound the version ledger without removing migration-47 objects.
+The schema-42/44 fixtures now remove those objects before testing migration replay;
+production migration semantics are unchanged. The first run also exposed a
+cost-alert test that drained Tasks but did not wait for its trailing timer. The
+same failure was reproduced on current main with a 2 ms timer delay; the test now
+waits for the second check's completion event and retains its concurrency assertion.
+That test passes with the same timer delay. The three affected files pass together:
+`pytest tests/test_agent_inbox.py tests/test_turn_queue_stage8a.py tests/test_cost_alert_push.py --tb=short`
+— **70 passed, 2 existing warnings in 16.46 s**. Production cost-alert logic is
+unchanged. Final PR-head CI is required separately from these targeted checks.
+
 Isolated-copy measurements: SQLite backup of the pre-J1 snapshot (source opened
 `mode=ro`) into `/tmp`; only that copy migrated/changed. Migration 46→47 + MeshDB
 open took 0.0081 s, integrity check `ok`; all four running/recent × all/unowned
