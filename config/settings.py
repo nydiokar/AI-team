@@ -5,7 +5,7 @@ import os
 import sys
 from pathlib import Path
 from dataclasses import dataclass
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Literal, Optional
 
 # Environment variables owned by this process config. When AI_TEAM_ENV_FILE is
 # explicit, that file is authoritative for these keys: commented/deleted keys
@@ -38,6 +38,7 @@ _MANAGED_ENV_KEYS = {
     "GATEWAY_TELEGRAM_CHAT_ID",
     "GATEWAY_UPLOAD_MAX_MB",
     "GUARDED_WRITE",
+    "JOBS_READ_MODE",
     "MAX_CONCURRENT_TASKS",
     "MAX_QUEUE_SIZE",
     "MESH_CLAIM_LEASE_SEC",
@@ -255,6 +256,7 @@ class MeshConfig:
     # sessions are assigned to it; never inferred from the hostname.
     local_carrier_node_id: str = ""         # MESH_LOCAL_CARRIER_NODE_ID
     worker_token: str = ""                  # WORKER_TOKEN — shared mesh auth secret
+    jobs_read_mode: Literal["controller", "federated"] = "controller"  # JOBS_READ_MODE
     node_heartbeat_timeout_sec: int = 90    # MESH_HEARTBEAT_TIMEOUT_SEC
     oneoff_queue_timeout_sec: int = 36000   # MESH_ONEOFF_QUEUE_TIMEOUT_SEC (10 hours)
     # AGENT_18 — pinned-worker offline fallback (Option A, bounded hold-and-requeue).
@@ -815,6 +817,15 @@ class Config:
                 self.mesh.worker_token = v
         except Exception:
             pass
+        jobs_read_mode: str = os.getenv("JOBS_READ_MODE", "controller").strip()
+        if jobs_read_mode not in ("controller", "federated"):
+            raise ValueError("JOBS_READ_MODE must be controller or federated")
+        if jobs_read_mode == "federated":
+            if not os.getenv("CONTROLLER_URL", "").strip() or not self.mesh.worker_token.strip():
+                raise ValueError("JOBS_READ_MODE=federated requires CONTROLLER_URL and WORKER_TOKEN")
+            self.mesh.jobs_read_mode = "federated"
+        else:
+            self.mesh.jobs_read_mode = "controller"
         try:
             v = os.getenv("MESH_EMBEDDED_SERVER")
             if v is not None:

@@ -479,6 +479,7 @@ def test_pid_alive_with_nonexistent_pid():
 
 
 def test_orchestrator_lists_local_and_remote_jobs(monkeypatch):
+    monkeypatch.setattr(config.mesh, "jobs_read_mode", "federated")
     import src.control.db as db_mod
     from src.orchestrator import TaskOrchestrator
 
@@ -515,6 +516,7 @@ def test_orchestrator_lists_local_and_remote_jobs(monkeypatch):
 
 
 def test_orchestrator_filters_local_and_remote_jobs_by_session(monkeypatch):
+    monkeypatch.setattr(config.mesh, "jobs_read_mode", "federated")
     import src.control.db as db_mod
     from src.orchestrator import TaskOrchestrator
 
@@ -557,6 +559,7 @@ def test_orchestrator_filters_local_and_remote_jobs_by_session(monkeypatch):
 
 
 def test_orchestrator_filters_local_and_remote_jobs_by_unowned(monkeypatch):
+    monkeypatch.setattr(config.mesh, "jobs_read_mode", "federated")
     import src.control.db as db_mod
     from src.orchestrator import TaskOrchestrator
 
@@ -598,6 +601,7 @@ def test_orchestrator_filters_local_and_remote_jobs_by_unowned(monkeypatch):
 
 
 def test_orchestrator_reconciles_remote_orphan_flag_against_gateway_sessions(monkeypatch):
+    monkeypatch.setattr(config.mesh, "jobs_read_mode", "federated")
     import src.control.db as db_mod
     from src.orchestrator import TaskOrchestrator
 
