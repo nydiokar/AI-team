@@ -5164,6 +5164,8 @@ class TaskOrchestrator(ITaskOrchestrator):
         session = await asyncio.to_thread(self.session_store.get, session_id) if session_id else None
         payload = self._job_notification_payload(job)
         for effect in ("notification", "action"):
+            if receipt[f"{effect}_state"] != "pending":
+                continue
             if effect == "action" and receipt["action_state"] == "pending":
                 from src.control.db import producer_turn_id
                 audit_or_turn = (producer_turn_id(f"watched:{job_id}", session_id, 1, prefix="jturn")

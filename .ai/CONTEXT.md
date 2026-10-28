@@ -31,7 +31,7 @@ Current work:
 
 **Read-path programme (2026-10-28 operator dispatch):** J1 jobs authority/enrichment
 is merged and live as `e0e2877` (PR #261), production verified with rollback retained;
-J2 completion reliability is implemented/locally verified, awaiting PR review and
+J2 completion reliability is implemented/locally verified in PR #262, awaiting review and
 merge/deploy authorization; next J3 reason N+1, J4 session projections,
 J5 compact affiliations. Detailed scope, evidence and durable burndown:
 [`READ_PATH_BURNDOWN.md`](../docs/backend/READ_PATH_BURNDOWN.md).

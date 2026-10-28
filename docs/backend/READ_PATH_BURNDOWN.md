@@ -72,7 +72,9 @@ Implementation, merge and production verification are recorded separately.
   disposition with evidence if outside the supported recovery contract. Do not
   equate in-memory deduplication with durable delivery. If a risk is disproven,
   record the reproducer and reason instead of implementing a speculative fix.
-- PR/commit: recorded in J2 verification below when published. Tests: focused and
+- PR: [#262](https://github.com/nydiokar/AI-team/pull/262), implementation `adfc2f4`
+  (base `27081a0`), main's documentation-only `618cd4c` merged as `77e2260`.
+  Tests: focused and
   seam evidence below. Merge/production: not authorized / not merged / not deployed.
 
 #### J2 correction contract (2026-10-28, before implementation)
@@ -175,11 +177,14 @@ Final targeted commands:
 /home/cifran/dev/AI-team/.venv/bin/pytest tests/test_a104_single_pending_source.py tests/test_flow_schema_extension.py --tb=short
 ```
 
-Results: **268 passed, 8 existing dependency warnings in 38.03 s**; **21 passed in
+Results: **268 passed, 8 existing dependency warnings in 34.51 s**; **21 passed in
 18.53 s**. The latter checks the single inbox authority and migration convergence.
+The final seam run includes the public completion-page OpenAPI schema assertion
+and the guard that avoids re-entering acknowledged effects.
 Ruff passes on the new model/test modules; comparison by diagnostic code/message
 against main found no introduced diagnostics in modified legacy modules.
-`git diff --check` passes. PR/commit evidence is appended after publication.
+`git diff --check` passes. PR #262 is published, CI pending at this documentation
+update; current checks are attached to its head. Merge and deployment remain gated.
 No local full/e2e suite, external notification, paid backend, worker restart or J2
 production deployment is part of this verification.
 
@@ -530,7 +535,7 @@ Implementation CI passed:
 on `1d23442`, 3m24s. Subsequent commits only update programme evidence; current
 head check status is available on PR #261. Production closure is recorded above.
 
-Current dispatch: J2 implementation is verified locally, awaiting its separate PR
+Current dispatch: J2 implementation is verified locally in PR #262, awaiting
 review/CI and explicit merge/deploy authorization. J1 production closure is complete.
 Next independently executable implementation after authorized J2 integration: J3
 session-reason N+1 and running-job truncation, with its five/seven SELECT budgets

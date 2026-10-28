@@ -12,6 +12,7 @@ from config import config
 from src.control import db as db_module
 from src.control import turn_admission as ta
 from src.control.db import MeshDB, producer_turn_id
+from src.orchestrator import TaskOrchestrator
 from tests.test_turn_queue_4d import _env, _job, _kind, _restart
 from tests.test_turn_queue_producer1 import _flags, _no_cli_spawn  # noqa: F401
 
@@ -233,7 +234,7 @@ async def test_actual_notification_layers_propagate_only_opt_in_errors(tmp_path,
         await tg.notify_completion("watched", "reply", chat_id=42, reliable=True)
 
 
-def _restart_with_notifier(orch):
+def _restart_with_notifier(orch: TaskOrchestrator) -> TaskOrchestrator:
     restarted = _restart(orch)
     restarted.notifier = orch.notifier
     return restarted

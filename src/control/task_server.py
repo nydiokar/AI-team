@@ -35,6 +35,7 @@ _STAGING_ROOT = Path(__file__).resolve().parent.parent.parent / "state" / "uploa
 
 from src.control.app_metrics import RequestTimingMiddleware
 from src.control.db import cache_heartbeat_interval_sec, get_db
+from src.control.job_completion import JobCompletionPage
 from src.control.mesh_health import get_mesh_health
 from src.control.node_registry import NodeInfo, NodeCapabilities, get_registry
 from src.control.telemetry_store import TelemetryStore
@@ -2239,7 +2240,11 @@ def list_jobs(
     )
 
 
-@app.get("/jobs/completions", dependencies=[Depends(_require_auth)])
+@app.get("/jobs/completions", dependencies=[Depends(_require_auth)], responses={
+    200: {"model": JobCompletionPage, "description": "Bounded eligible terminal snapshot page."},
+    429: {"description": "Concurrent completion reads exhausted."},
+    503: {"description": "Completion authority unavailable."},
+})
 def job_completions(
     after_id: str = Query("", max_length=128, pattern="^[A-Za-z0-9_-]*$"),
     limit: int = Query(25, ge=1, le=25),

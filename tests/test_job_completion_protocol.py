@@ -6,6 +6,7 @@ import json
 import sqlite3
 import threading
 import urllib.error
+from collections.abc import Iterator
 from unittest.mock import AsyncMock
 
 import pytest
@@ -22,7 +23,7 @@ from tests.test_turn_queue_producer1 import _flags, _no_cli_spawn  # noqa: F401
 
 
 @pytest.fixture
-def api(tmp_path, monkeypatch):
+def api(tmp_path, monkeypatch) -> Iterator[tuple[MeshDB, TestClient]]:
     db = MeshDB(str(tmp_path / "remote.db"))
     monkeypatch.setattr(task_server, "get_db", lambda: db)
     monkeypatch.setattr(task_server, "_worker_token", lambda: "completion-test")
@@ -33,6 +34,10 @@ def api(tmp_path, monkeypatch):
 def test_completion_api_bounds_auth_failure_and_serialization_gate(api, monkeypatch) -> None:
     db, client = api
     auth = {"Authorization": "Bearer completion-test"}
+    schema = client.get("/openapi.json").json()
+    assert schema["paths"]["/jobs/completions"]["get"]["responses"]["200"]["content"]["application/json"]["schema"] == {
+        "$ref": "#/components/schemas/JobCompletionPage",
+    }
     assert client.get("/jobs/completions").status_code in (401, 403)
     assert client.get("/jobs/completions", headers={"Authorization": "Bearer wrong"}).status_code == 401
     for query in ("limit=0", "limit=26", "after_id=x%20y", "after_id=" + "x" * 129):
@@ -87,7 +92,7 @@ async def test_federation_more_than_50_old_starts_and_late_transition_behind_cur
         conn.execute("UPDATE jobs SET started_epoch=1, updated_at='2000-01-01'")
     calls: list[str] = []
 
-    def urlopen(request, timeout):
+    def urlopen(request, timeout) -> io.BytesIO:
         calls.append(request.full_url)
         response = api_client.get(request.full_url.replace("http://remote", ""), headers={"Authorization": "Bearer completion-test"})
         assert response.status_code == 200
@@ -118,7 +123,7 @@ def test_client_rejects_malformed_oversized_and_nonadvancing_pages(monkeypatch, 
 
 
 def test_old_remote_protocol_fails_explicitly(monkeypatch) -> None:
-    def old(*args, **kwargs):
+    def old(*args, **kwargs) -> None:
         raise urllib.error.HTTPError("http://remote/jobs/completions", 404, "old server", {}, None)
 
     monkeypatch.setattr("urllib.request.urlopen", old)
@@ -134,7 +139,7 @@ async def test_remote_outage_does_not_suppress_already_durable_effects(tmp_path,
     monkeypatch.setattr(config.mesh, "jobs_read_mode", "federated")
     db.stage_job_completion(_job(notify_agent=0), "remote")
 
-    def unavailable(cursor):
+    def unavailable(cursor) -> None:
         raise urllib.error.HTTPError("http://remote/jobs/completions", 404, "old server", {}, None)
 
     orch._remote_job_completion_page = unavailable
