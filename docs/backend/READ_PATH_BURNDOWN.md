@@ -42,7 +42,7 @@ Implementation, merge and production verification are recorded separately.
   repeatable local latency; distinguish fixture evidence from production evidence.
 - Implementation/verification: local checks passed; full evidence below.
 - PR: [#261](https://github.com/nydiokar/AI-team/pull/261); implementation commit
-  `1d23442` (base `4f792cd`). CI result is recorded below when available.
+  `1d23442` (base `4f792cd`). Implementation CI passed (run `40691307468`).
 - Merge: NOT AUTHORIZED / not merged. Production: NOT AUTHORIZED / not verified.
 
 ### J2 — Completion reliability
@@ -219,7 +219,10 @@ SQL work. Jobs indexing remains optional S4, not silently included in J1.
   rather than 100 full responses. Controller traced incremental Python peak was
   658,049 bytes for the largest normal shape (~2.63 MB for four). On the copy,
   setting each historical tail to 64 KiB yielded a 3,342,873-byte response and
-  20,125,459-byte traced peak (~80.5 MB for four). This is an active-memory estimate,
+  20,125,459-byte traced peak (~80.5 MB for four). A separate stress on the same
+  copy marked jobs running, filling BOTH arrays (50 + 50 entries): 6,685,956-byte
+  JSON and 40,265,456-byte traced peak (~161.1 MB for four). This covers the
+  overlapping-arrays case absent from the sampled live data. These are active-memory estimates,
   not measured concurrent RSS; tracemalloc excludes SQLite/native/page-cache memory.
   MeshDB config allows an 8 MiB page cache per thread-local connection; existing
   threadpool connections can remain warm after a request. No absolute byte bound
@@ -278,7 +281,10 @@ merge, deployment or worker restart has been performed or authorized.
 
 J1 implementation is VERIFIED locally and published in PR #261. Merge is pending
 explicit operator authorization; production deployment/verification is separately
-pending authorization. CI: pending. This is not a merged/live completion claim.
+pending authorization. Implementation CI passed:
+[run 40691307468](https://github.com/nydiokar/AI-team/actions/runs/40691307468)
+on `1d23442`, 3m24s. Subsequent commits only update programme evidence; current
+head check status is available on PR #261. This is not a merged/live completion claim.
 
 Next independently executable dispatch: J2 completion reliability, based on the
 approved/merged J1 selected-source seam. First commit deterministic reproductions
