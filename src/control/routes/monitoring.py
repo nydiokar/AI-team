@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import ipaddress
 import json
+import sqlite3
 import threading
 import urllib.error
 import urllib.request
@@ -27,6 +28,9 @@ from src.control.control_api import (
 )
 from src.core import observability
 from src.core.build_info import build_info
+
+
+_HOME_READ_SLOTS = threading.BoundedSemaphore(4)
 
 
 class _BoundedAuthRoute(APIRoute):
@@ -449,9 +453,25 @@ def build_router(orchestrator: Any, *, require_auth: Callable[..., Any]) -> APIR
         return JSONResponse({"sections": sections})
 
     @router.get("/api/nodes", dependencies=[Depends(require_auth)], responses={200: {"model": NodesOut, "description": "Live mesh execution nodes."}})
-    def api_nodes() -> JSONResponse:
-        nodes = core._live_nodes()
-        return JSONResponse({"nodes": nodes})
+    def api_nodes(activity: bool = False) -> JSONResponse:
+        if not activity:
+            return JSONResponse({"nodes": core._live_nodes()})
+        if not _HOME_READ_SLOTS.acquire(blocking=False):
+            raise HTTPException(status_code=429, detail="node_activity_busy")
+        try:
+            from src.control.home_status import node_activity
+            nodes = core._live_nodes()
+            db = core._db()
+            if db is None:
+                raise HTTPException(status_code=503, detail="db_unavailable")
+            summaries = node_activity(db, [n["node_id"] for n in nodes])
+            return JSONResponse({"nodes": [
+                {**node, "activity": summaries[node["node_id"]].model_dump()} for node in nodes
+            ]})
+        except sqlite3.Error:
+            raise HTTPException(status_code=503, detail="node_activity_unavailable")
+        finally:
+            _HOME_READ_SLOTS.release()
 
     @router.get("/api/nodes/{node_id}/backend-auth/{backend}/status", dependencies=[Depends(require_auth)], responses={200: {"model": ClaudeAuthOut}})
     def backend_auth_status(node_id: str, backend: str, refresh: bool = False) -> dict[str, object]:

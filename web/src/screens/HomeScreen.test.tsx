@@ -74,6 +74,7 @@ const node = (id: string, health: string) => ({
   slotsUsed: 1,
   slotsTotal: 8,
   activeTasks: [],
+  activity: { counts: { running: 1, queued: 0, waiting: 2, failed: 0, idle: 0 }, sessions: [] },
 });
 
 const quotaWith = (fiveH: number | null, sevenD: number | null) => ({
@@ -110,12 +111,12 @@ it("opens the selected provider account sheet from accessible Home buttons witho
   expect(container.querySelector('[role="dialog"]')?.textContent).toBe("codex accounts");
 });
 
-it("renders accounts/usage meters and an honest n/a when unknown", () => {
+it("renders accounts/usage meters and an honest dash when unknown", () => {
   hooks.quota = { data: quotaWith(31, null) };
   render();
   expect(container.textContent).toContain("Claude Code");
   expect(container.textContent).toContain("31%");
-  expect(container.textContent).toContain("n/a"); // 7d unknown — never a fake 0%
+  expect(container.textContent).toContain("—"); // 7d unknown — never a fake 0%
 });
 
 it("flags a near-limit window", () => {
@@ -150,26 +151,44 @@ it("uses one text account control per backend and shows both windows without ter
   expect(container.querySelectorAll('button[aria-label="Manage claude accounts"]')).toHaveLength(1);
   const section = container.querySelector('[aria-label="Accounts and usage"]')!;
   expect(section.querySelectorAll('[role="meter"]')).toHaveLength(2);
-  expect(section.querySelector("img")).toBeNull();
+  expect(section.querySelectorAll("img")).toHaveLength(3);
   expect(section.textContent).not.toMatch(/[█░$]/);
   expect(section.textContent).toContain("5 hours");
   expect(section.textContent).toContain("7 days");
 });
-it("shows useful node workload information without account buttons", () => {
-  hooks.targets = { data: [{ ...node("kanebra", "online"), activeTasks: [{ taskId: "task-123", backend: "claude", phase: "executing", action: "resume_session" }] }], isLoading: false, isError: false };
+it("shows node session states from the complete server summary, without the generic attention pill", () => {
+  hooks.targets = { data: [{ ...node("kanebra", "online"), activity: {
+    counts: { running: 2, queued: 1, waiting: 3, failed: 1, idle: 4 },
+    sessions: [{ id: "failed-session", backend: "codex", state: "failed", summary: "Fix release", repoPath: "/repo" }],
+  } }], isLoading: false, isError: false };
   render();
   const section = container.querySelector('[aria-label="Active nodes"]')!;
-  expect(section.textContent).toContain("Working");
-  expect(section.textContent).toContain("1 task running");
-  expect(section.textContent).toContain("task-123");
-  expect(section.textContent).toContain("7 of 8 slots available");
-  expect(section.querySelector("button")).toBeNull();
+  expect(section.textContent).toContain("11open sessions");
+  expect(section.textContent).toContain("1 session to check");
+  expect(section.querySelector('a[href="/sessions/failed-session"]')?.textContent).toContain("Fix release");
+  expect(container.textContent).not.toContain("need attention");
+  expect(section.querySelector('[aria-label="Node online"]')).not.toBeNull();
+  expect(section.querySelector('button[aria-label="Change kanebra picture"]')).not.toBeNull();
+  act(() => section.querySelector<HTMLButtonElement>('button[aria-label="2 running sessions on kanebra"]')!.click());
+  expect(section.textContent).toContain("No running sessions.");
+  expect(section.querySelector('a[href="/sessions/failed-session"]')).toBeNull();
 });
-it("does not call an occupied or unreported node idle", () => {
-  hooks.targets = { data: [{ ...node("occupied", "online"), slotsUsed: 8 }, { ...node("unreported", "online"), slotsUsed: null }], isLoading: false, isError: false };
+
+it("shows unavailable activity explicitly and reveals offline cards on demand", () => {
+  hooks.targets = { data: [{ ...node("unreported", "online"), activity: null }, node("horse", "offline")], isLoading: false, isError: false };
   render();
   const section = container.querySelector('[aria-label="Active nodes"]')!;
-  expect(section.textContent).toContain("At capacity");
-  expect(section.textContent).toContain("Waiting for workload report");
-  expect(section.textContent).not.toContain("Idle");
+  expect(section.textContent).toContain("Session activity unavailable");
+  expect(section.textContent).not.toContain("Waiting for workload report");
+  expect(section.textContent).not.toContain("horse");
+  act(() => section.querySelector<HTMLButtonElement>('button[aria-expanded]')!.click());
+  expect(section.querySelector('[aria-label="Node offline"]')).not.toBeNull();
+});
+
+it("opens accessible picture settings with storage instructions", () => {
+  hooks.targets = { data: [node("kanebra", "online")], isLoading: false, isError: false };
+  render();
+  act(() => container.querySelector<HTMLButtonElement>('button[aria-label="Change kanebra picture"]')!.click());
+  expect(document.querySelector('[role="dialog"]')?.textContent).toContain("Saved on this browser only");
+  expect(document.querySelector('input[type="file"]')?.getAttribute("accept")).toContain("image/png");
 });

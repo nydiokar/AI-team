@@ -147,6 +147,16 @@
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
           }
         },
         "security": [
@@ -156,6 +166,18 @@
         ],
         "tags": [
           "Monitoring"
+        ],
+        "parameters": [
+          {
+            "name": "activity",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false,
+              "title": "Activity"
+            }
+          }
         ]
       }
     },
@@ -9894,6 +9916,14 @@
             "additionalProperties": true,
             "type": "object",
             "title": "Prewarm"
+          },
+          "observed_usage": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Observed Usage"
           }
         },
         "type": "object",

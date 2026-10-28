@@ -78,6 +78,24 @@ Only jobs that are genuinely open. Everything merged/done is in git and the disp
 
 ## Recent shift notes
 
+**2026-10-28 — Home node activity + Codex usage.** Node cards read complete open-session
+counts and three previews/state from `/api/nodes?activity=true`; managed states use ledger
+truth, no 200-session UI truncation. Avatar picker is browser-local (128px JPEG; 2 MB
+input). Native Codex account limits now flow into session telemetry and Home's quota read
+(15-minute freshness/reset expiry); worker deployment/restart is operator-gated. Current
+GPT-6 model standard API equivalents are priced with explicit Sol/Terra cached-input rates.
+Boundary check: node/quota reads each allow four concurrent executions (429 otherwise),
+run off the event loop, cap session previews and Codex telemetry reads (2000 × 16 KiB),
+validate query/input and native counters, and return 503 for unavailable SQLite reads.
+At 100 calls only four reads per surface execute; Codex read buffers are bounded to about
+128 MiB aggregate before Python overhead. Client deadline 15s; SQLite existing busy timeout
+bounds lock waits. **Deferred:** no server statement-execution deadline on these read-only
+queries; actual live-DB combined read measured 8.62ms/42.7 KiB peak on 2026-10-28. Revisit
+SQLite progress-handler cancellation if node/session scale materially increases. No migration,
+new provider polling, credential reads, or worker restart is part of gateway deployment.
+See `docs/frontend/SCREENS_AND_COMPONENTS.md` for picture controls and usage semantics.
+
+
 **2026-10-26 — Cost dashboard shipped (PR #256, live `29d3157`).** Responsive daily spend/token history, model/project allocation, token composition, CSV export and accessible case-lifetime drilldowns; reviewed concept: `docs/COST_ANALYTICS_DESIGN.md`. Fixed aggregate coverage double-counting and rounded “fully priced” labels. Verified 82 targeted frontend tests, 25 backend cost tests, 9 offline browser scenarios, green CI, independent adversarial review and the production UI/API reconciliation. Schema remains 46; workers were not restarted. Existing API row limits are disclosed in the UI.
 
 **2026-10-26 — Claude login recovery (PR #255 merged; gateway/UI live `6de65ad`, schema unchanged at 46).** Account panels detach without canceling the worker login; the tab remembers only the login ID (ten-minute bound), replays bounded worker output on reopen, and retries transient polling failures. Same-provider worker starts reattach instead of rejecting. Gateway errors preserve only allowlisted worker reasons and log node/backend/action without codes, URLs or credentials. Session chat shares Home's account status and `/login` opens the exact carrier's account panel without an agent turn; the CLI's exact synthetic signed-out refusal is an `auth` failure, never salvaged progress. Boundary review: existing eight-request gateway/worker bounds, one login/node, two status processes, 64 KiB output, 4 KiB input, 8 KiB bodies, read/RPC timeouts and ten-minute process-group cleanup remain; no new endpoint or DB store. Live mobile browser verified Kanebra signed-out state and `/login` opening its session carrier panel without any POST/agent turn. Focused Python/UI tests and a mocked mobile disconnect→reopen→reload→code→verified-sign-in flow pass. Worker restart is authorized by the operator on 2026-10-26; wait for active Kanebra turns, including the caller hosted by this worker, before promotion. Account status checks use bounded per-key locks instead of hash stripes so an unreachable node cannot delay a healthy node; cached observations do not wait for a forced refresh. Locks are released after their final waiter; both cache and lock map cap at 256, with the existing eight-request route limit unchanged. The deployment skill now requires workload/ancestry evidence and reuses existing authorization (`scripts/worker_context.py`). Auth failures close the rejected SDK client so retry after login starts a fresh CLI with the native conversation retained. The supervised idle handoff will record its outcome in `~/ai-team-data/deployments/kanebra-login-restart-20261026.json`; do not call it live before that result is verified. Browser authorization/code completion remains operator-owned.

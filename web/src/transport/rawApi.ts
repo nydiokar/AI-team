@@ -172,6 +172,11 @@ export interface RawLiveState {
   v?: number;
 }
 
+export interface RawNodeActivity {
+  counts: Record<"running" | "queued" | "waiting" | "failed" | "idle", number>;
+  sessions: { session_id: string; backend: string; state: "running" | "queued" | "waiting" | "failed" | "idle"; summary: string; repo_path: string }[];
+}
+
 export interface RawNode {
   node_id: string;
   tailscale_ip: string;
@@ -190,6 +195,7 @@ export interface RawNode {
   // ── live_state: worker heartbeat snapshot (already present in API response) ──
   live_state?: RawLiveState | null;
   live_state_updated_at?: string | null;
+  activity?: RawNodeActivity | null;
 }
 
 // GET /api/tasks → { tasks: RawTask[] }
@@ -532,7 +538,18 @@ export interface RawQuotaWindowState {
   }>;
 }
 
+export interface RawObservedUsage {
+  provider: string;
+  node_id: string;
+  observed_at: string;
+  used_percent: number;
+  window_duration_seconds: number;
+  reset_at: string;
+  plan_type: string | null;
+}
+
 export interface RawQuotaWindowsResponse {
+  observed_usage?: RawObservedUsage[];
   enabled: boolean;
   mode: "observe_only" | string;
   adapters: RawQuotaAdapterStatus[];

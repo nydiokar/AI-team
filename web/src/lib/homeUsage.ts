@@ -68,7 +68,7 @@ function clampPercent(p: number | null | undefined): number | null {
 export function summarizeProviderUsage(
   resp: RawQuotaWindowsResponse | undefined | null,
 ): ProviderUsage[] {
-  if (!resp || !resp.enabled) return [];
+  if (!resp) return [];
 
   const bucketById = new Map<string, RawQuotaBucket>();
   for (const b of resp.buckets ?? []) bucketById.set(b.bucket_id, b);
@@ -137,6 +137,13 @@ export function summarizeProviderUsage(
         snap.reset_at,
       );
     }
+  }
+
+  // Native Codex observations are node-scoped, not fabricated account identities.
+  // The gateway expires these after 15 minutes; re-check expiry in cached UI data.
+  for (const usage of resp.observed_usage ?? []) {
+    if (Date.now() - Date.parse(usage.observed_at) > 900_000 || Date.parse(usage.reset_at) <= Date.now()) continue;
+    push(usage.provider, "", usage.window_duration_seconds, usage.used_percent, null, usage.reset_at);
   }
 
   return [...byProvider.entries()]

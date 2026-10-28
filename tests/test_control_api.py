@@ -294,6 +294,7 @@ async def test_quota_windows_endpoint_returns_disabled_shape_when_coordinator_no
 
     assert r.status_code == 200
     assert r.json() == {
+        "observed_usage": [],
         "enabled": False,
         "mode": "observe_only",
         "adapters": [],
@@ -986,3 +987,46 @@ def test_case_resume_requires_auth(monkeypatch):
     c = _resume_client(monkeypatch, _ResumeOrchestrator())
     assert c.post("/api/cases/c1/resume", json={}).status_code in (401, 403)
     assert c.get("/api/cases/c1/resume-state").status_code in (401, 403)
+
+
+def test_home_node_summary_and_busy_guard(client, monkeypatch, tmp_path):
+    from src.control.db import MeshDB
+    from src.control.routes import monitoring
+    db = MeshDB(str(tmp_path / 'home.db'))
+    monkeypatch.setattr(control_api, '_db', lambda: db)
+    monkeypatch.setattr(control_api, '_live_nodes', lambda: [{'node_id': 'node', 'live': True}])
+    response = client.get('/api/nodes?activity=true', headers=_auth())
+    assert response.status_code == 200
+    assert response.json()['nodes'][0]['activity']['counts']['running'] == 0
+    for _ in range(4):
+        monitoring._HOME_READ_SLOTS.acquire()
+    try:
+        assert client.get('/api/nodes?activity=true', headers=_auth()).status_code == 429
+    finally:
+        for _ in range(4):
+            monitoring._HOME_READ_SLOTS.release()
+
+
+def test_quota_read_rejects_excess_concurrency(client):
+    from src.control.routes.cost import _QUOTA_READ_SLOTS
+    for _ in range(4):
+        _QUOTA_READ_SLOTS.acquire()
+    try:
+        assert client.get('/api/quota-windows', headers=_auth()).status_code == 429
+    finally:
+        for _ in range(4):
+            _QUOTA_READ_SLOTS.release()
+
+
+def test_home_reads_report_database_failure_per_request(client, monkeypatch, tmp_path):
+    import sqlite3
+    from src.control.db import MeshDB
+    from src.control import home_status
+    monkeypatch.setattr(control_api, '_db', lambda: MeshDB(str(tmp_path / 'failure.db')))
+    monkeypatch.setattr(control_api, '_live_nodes', lambda: [{'node_id': 'node'}])
+    def unavailable(*args, **kwargs):
+        raise sqlite3.OperationalError('unavailable')
+    monkeypatch.setattr(home_status, 'node_activity', unavailable)
+    monkeypatch.setattr(home_status, 'codex_usage', unavailable)
+    assert client.get('/api/nodes?activity=true', headers=_auth()).status_code == 503
+    assert client.get('/api/quota-windows', headers=_auth()).status_code == 503

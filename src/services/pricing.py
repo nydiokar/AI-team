@@ -56,6 +56,14 @@ _PRICE_TABLE: Dict[str, PriceRates] = {
     # Claude Fable 5 (Mythos class) — platform.claude.com pricing, 2026-08-03.
     "fable": _family(10.0, 50.0),
     # OpenAI GPT-5.x via the Codex CLI — OpenAI API pricing page, 2026-08-03.
+    # Standard API equivalents, verified 2026-10-28:
+    # https://developers.openai.com/api/docs/pricing
+    # Sol/Terra cached input is 5% of base, not the older 10% default.
+    "gpt-6-astra": _family(10.0, 50.0),
+    "gpt-6-sol": _family(2.0, 10.0),
+    "gpt-6.1-sol": PriceRates(input=2.0, output=10.0, cache_write=2.5, cache_read=0.1),
+    "gpt-6.1-terra": PriceRates(input=1.0, output=5.0, cache_write=1.25, cache_read=0.05),
+    "gpt-6-luna": _family(0.1, 0.5),
     "gpt-5.6-sol": _family(5.0, 30.0),
     "gpt-5.6-terra": _family(2.0, 12.0),    # 2026-07-30 cut from $2.50/$15
     "gpt-5.6-luna": _family(0.2, 1.2),      # 2026-07-30 cut from $1/$6

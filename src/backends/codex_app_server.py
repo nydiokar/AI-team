@@ -29,7 +29,7 @@ MAX_LATE = 256
 REQUEST_METHODS = frozenset({
     "initialize", "thread/start", "thread/resume", "thread/unsubscribe",
     "thread/archive", "thread/compact/start", "turn/start", "turn/interrupt",
-    "model/list", "thread/read",
+    "model/list", "thread/read", "account/rateLimits/read",
 })
 CONSUMED_NOTIFICATIONS = frozenset({
     "turn/started", "turn/completed", "thread/tokenUsage/updated",
@@ -141,6 +141,7 @@ class CodexAppServerClient:
         self.sequence: int = 0
         self.writes: queue.Queue[bytes | None] = queue.Queue(MAX_PENDING)
         self.readers: list[threading.Thread] = []
+        self.rate_limits: dict[str, JsonValue] = {}
         self.stderr: bytearray = bytearray()
         self.windows_job: int | None = None
 
@@ -168,6 +169,13 @@ class CodexAppServerClient:
             self.request("initialize", {"clientInfo": {"name": "ai-team", "version": "1"},
                                         "capabilities": {"experimentalApi": False}})
             self.writes.put_nowait(b'{"method":"initialized","params":{}}\n')
+            # Account metadata only: no inference and no token spend. Optional
+            # for API-key/older runtimes; never prevent sessions from starting.
+            try:
+                result = self.request("account/rateLimits/read", {}, timeout=5.0)
+                self._set_rate_limits(result.get("rateLimits"))
+            except CodexProtocolError:
+                pass
         except Exception:
             self.close()
             raise
@@ -329,6 +337,11 @@ class CodexAppServerClient:
                 except queue.Full:
                     pass
 
+    def _set_rate_limits(self, value: JsonValue) -> None:
+        from src.core.telemetry_adapters.codex import native_rate_limits
+        # Retain only the allowlisted counters, never credits/account payloads.
+        self.rate_limits = native_rate_limits(value)
+
     def _read(self) -> None:
         assert self.process is not None and self.process.stdout is not None
         event: object = None
@@ -363,6 +376,14 @@ class CodexAppServerClient:
                         self.pending[request_id].put_nowait(event)
                         continue
                     method = event.get("method")
+                    if method == "account/rateLimits/updated":
+                        params = event.get("params")
+                        if isinstance(params, dict):
+                            limits = params.get("rateLimits")
+                            # Model-scoped buckets cannot replace overall Codex limits.
+                            if isinstance(limits, dict) and limits.get("limitId") in (None, "codex"):
+                                self._set_rate_limits(limits)
+                        continue
                     if method not in CONSUMED_NOTIFICATIONS:
                         continue
                     params = event.get("params", {})

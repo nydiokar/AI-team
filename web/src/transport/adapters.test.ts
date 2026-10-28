@@ -50,6 +50,15 @@ describe("nodeAdapter — trust derived live, not stale status (gap-doc §2)", (
     expect(targets.find((t) => t.id === "main-pc")!.backends).toEqual(["claude", "codex"]);
   });
 
+  it("adapts Home activity previews into domain fields", () => {
+    const target = toTargets([{ ...rawNodes[0], activity: {
+      counts: { running: 1, queued: 0, waiting: 0, failed: 0, idle: 0 },
+      sessions: [{ session_id: "s-home", backend: "codex", state: "running", summary: "Working", repo_path: "/repo" }],
+    } }])[0];
+    expect(target.activity?.sessions[0]).toEqual({ id: "s-home", backend: "codex", state: "running", summary: "Working", repoPath: "/repo" });
+    expect(target.activity?.counts.running).toBe(1);
+  });
+
   it("deriveHealth boundary cases", () => {
     expect(deriveHealth({ live: true } as never)).toBe("online");
     expect(deriveHealth({ live: false, heartbeat_age_sec: null } as never)).toBe("unknown");

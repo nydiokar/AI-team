@@ -28,7 +28,12 @@ for line in sys.stdin:
     if method=="initialize":
         emit({"id":request["id"],"result":{"codexHome":"/tmp","platformFamily":"unix","platformOs":"linux","userAgent":"codex/test"}})
         continue
+    if method=="account/rateLimits/read":
+        emit({"id":request["id"],"result":{"rateLimits":{"limitId":"codex","planType":"plus","primary":{"usedPercent":31,"windowDurationMins":300,"resetsAt":2000000000}}}})
+        continue
     mode=request["params"].get("threadId", "")
+    if mode=="rate-limits":
+        emit({"method":"account/rateLimits/updated","params":{"rateLimits":{"limitId":"codex","primary":{"usedPercent":45,"windowDurationMins":300,"resetsAt":2000000000}}}})
     if mode=="die": sys.exit(1)
     if mode=="hang": time.sleep(10); continue
     if mode=="slow": time.sleep(0.5)
@@ -182,3 +187,13 @@ def test_hung_request_goes_late_then_unresponsive_and_its_route_can_be_forgotten
     assert client.forget_late(request_id) is True
     assert client.late == {} and client.outstanding(request_id)
     assert not client.failure and client.process.poll() is None
+
+
+def test_account_limits_are_sanitized_and_updated_without_thread_id(server):
+    client = server()
+    client.start()
+    assert client.rate_limits['primary']['used_percent'] == 31
+    assert client.rate_limits['plan_type'] == 'plus'
+    client.request('turn/interrupt', {'threadId': 'rate-limits', 'turnId': 'turn'})
+    assert client.rate_limits['primary']['used_percent'] == 45
+    assert not client.failure
