@@ -66,3 +66,20 @@ def test_priced_families_present():
     assert {"opus", "sonnet", "haiku", "fable"}.issubset(families)
     assert "gpt-5.6-terra" in families and "gpt-5.5" in families
     assert "gpt-5.3-codex" in families
+
+
+def test_current_sol_cached_input_uses_published_five_percent_rate():
+    est = estimate_cost('gpt-6.1-sol', _one_million_each())
+    assert est.known
+    assert est.usd_input == 2
+    assert est.usd_output == 10
+    assert est.usd_cache_read == 0.1
+    assert est.usd_cache_write == 2.5
+    assert est.usd_total == 14.6
+
+
+def test_current_terra_astra_luna_and_previous_sol_have_standard_rates():
+    for model, expected in [('gpt-6.1-terra', 7.3), ('gpt-6-astra', 73.5),
+                            ('gpt-6-luna', 0.735), ('gpt-6-sol', 14.7)]:
+        est = estimate_cost(model, _one_million_each())
+        assert est.known and est.usd_total == expected

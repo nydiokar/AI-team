@@ -51,11 +51,11 @@ export function useCacheHeartbeats(sessionId?: string) {
   });
 }
 
-export function useTargets() {
+export function useTargets(activity = false) {
   const token = useAuthStore((s) => s.token);
   return useQuery({
-    queryKey: ["nodes"],
-    queryFn: async () => toTargets(await api.nodes(token)),
+    queryKey: activity ? ["nodes", "activity"] : ["nodes"],
+    queryFn: async () => toTargets(await api.nodes(token, activity)),
     enabled: Boolean(token),
     refetchInterval: SLOW_POLL_MS,
     retry: (count, err) =>

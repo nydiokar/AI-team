@@ -56,6 +56,13 @@ export function toTarget(raw: RawNode): Target {
     slotsUsed: ls?.slots_used ?? null,
     slotsTotal: ls?.slots_total ?? null,
     activeTasks: parseLiveStateTasks(raw),
+    activity: raw.activity ? {
+      counts: raw.activity.counts,
+      sessions: raw.activity.sessions.map((s) => ({
+        id: s.session_id, backend: s.backend, state: s.state,
+        summary: s.summary, repoPath: s.repo_path,
+      })),
+    } : null,
   };
 }
 

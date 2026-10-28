@@ -6,6 +6,8 @@ monkeypatch ``control_api`` keep reaching these handlers.
 """
 from __future__ import annotations
 
+import sqlite3
+import threading
 from typing import TYPE_CHECKING, Any, Callable, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -196,6 +198,9 @@ class SystemAlertsOut(BaseModel):
     alerts: list[dict]
 
 
+_QUOTA_READ_SLOTS = threading.BoundedSemaphore(4)
+
+
 class QuotaWindowsOut(BaseModel):
     enabled: bool
     mode: str
@@ -204,6 +209,7 @@ class QuotaWindowsOut(BaseModel):
     latest_snapshots: list[dict]
     window_states: list[dict]
     prewarm: dict
+    observed_usage: list[dict] = Field(default_factory=list)
 
 
 def build_router(orchestrator: Any, *, require_auth: Callable[..., Any]) -> APIRouter:
@@ -379,11 +385,25 @@ def build_router(orchestrator: Any, *, require_auth: Callable[..., Any]) -> APIR
         "/api/quota-windows",
         responses={200: {"model": QuotaWindowsOut, "description": "Quota window coordinator + prewarmer status"}},
     )
-    async def api_quota_windows() -> JSONResponse:
+    def api_quota_windows() -> JSONResponse:
+        if not _QUOTA_READ_SLOTS.acquire(blocking=False):
+            raise HTTPException(status_code=429, detail="quota_read_busy")
+        try:
+            return read_quota_windows()
+        except sqlite3.Error:
+            raise HTTPException(status_code=503, detail="quota_store_unavailable")
+        finally:
+            _QUOTA_READ_SLOTS.release()
+
+    def read_quota_windows() -> JSONResponse:
+        from src.control.home_status import codex_usage
+        db = core._db()
+        observed = [w.model_dump() for w in codex_usage(db)] if db is not None else []
         coordinator = getattr(orchestrator, "quota_coordinator", None)
         if coordinator is None:
             return JSONResponse({
                 "enabled": False,
+                "observed_usage": observed,
                 "mode": "observe_only",
                 "adapters": [],
                 "buckets": [],
@@ -392,6 +412,7 @@ def build_router(orchestrator: Any, *, require_auth: Callable[..., Any]) -> APIR
             })
         try:
             status = coordinator.read_status()
+            status["observed_usage"] = observed
             # The prewarmer's own view (is a window running, when does it end,
             # what did the last activation do) rides on the same read — one
             # place to answer "what is the window rhythm right now?".

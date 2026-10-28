@@ -203,3 +203,16 @@ def test_token_count_maps_request_context_and_session_cumulative_usage():
     assert metrics["session_cumulative_input_tokens"] == 1200
     assert metrics["turn_exit_context_tokens"] == 140
     assert metrics["context_window_tokens"] == 1000
+
+
+def test_native_account_limits_normalize_and_reject_malformed_or_scoped_values():
+    from src.core.telemetry_adapters.codex import native_rate_limits
+    value = {'limitId': 'codex', 'planType': 'plus', 'credits': {'balance': 'SECRET'},
+             'primary': {'usedPercent': 31, 'windowDurationMins': 300, 'resetsAt': 2000000000}}
+    result = native_rate_limits(value)
+    assert result == {'plan_type': 'plus', 'primary': {'used_percent': 31.0, 'window_minutes': 300, 'resets_at': 2000000000}}
+    assert native_rate_limits({**value, 'limitId': 'model_specific'}) == {}
+    assert native_rate_limits({**value, 'primary': {'usedPercent': -1}}) == {}
+    events = _adapter().consume_token_count({'info': {'total_token_usage': {'input_tokens': 100}}, 'rate_limits': result})
+    assert events[-1].attributes['rate_limit_primary_used_percent'] == 31
+    assert 'SECRET' not in str(events)

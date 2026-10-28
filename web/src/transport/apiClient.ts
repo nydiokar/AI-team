@@ -379,8 +379,8 @@ export const api = {
     return data.heartbeats ?? [];
   },
 
-  async nodes(token: string): Promise<RawNode[]> {
-    const data = await get<{ nodes: RawNode[] }>(`/api/nodes`, token);
+  async nodes(token: string, activity = false): Promise<RawNode[]> {
+    const data = await get<{ nodes: RawNode[] }>(`/api/nodes${activity ? "?activity=true" : ""}`, token, activity ? AbortSignal.timeout(15000) : undefined);
     return data.nodes ?? [];
   },
 
@@ -824,7 +824,7 @@ export const api = {
 
   /** GET /api/quota-windows — observe-only provider quota windows. */
   async quotaWindows(token: string): Promise<RawQuotaWindowsResponse> {
-    return get<RawQuotaWindowsResponse>(`/api/quota-windows`, token);
+    return get<RawQuotaWindowsResponse>(`/api/quota-windows`, token, AbortSignal.timeout(15000));
   },
 
   // ── Work / Case read model (A27) — read-only ─────────────────────────────

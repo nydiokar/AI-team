@@ -137,3 +137,13 @@ it("keeps overall weekly usage separate from scoped limits and summarizes accoun
   }));
   expect(out[0].windows.map((w) => w.usedPercent)).toEqual([60, 20]);
 });
+
+
+it("uses fresh native Codex plan observations independently of the Claude coordinator", () => {
+  const observation = { provider: "codex", node_id: "node", observed_at: new Date().toISOString(), used_percent: 12, window_duration_seconds: 18000, reset_at: new Date(Date.now() + 3600000).toISOString(), plan_type: "plus" };
+  const data = resp({ enabled: false, observed_usage: [observation, { ...observation, node_id: "other", used_percent: 8 }] });
+  expect(summarizeProviderUsage(data)[0]?.windows[0]?.usedPercent).toBe(12);
+  expect(summarizeProviderUsage(data)[0]?.accountHint).toBeNull();
+  expect(summarizeProviderUsage(resp({ observed_usage: [{ ...observation, observed_at: new Date(Date.now() - 960000).toISOString() }] }))).toEqual([]);
+  expect(summarizeProviderUsage(resp({ observed_usage: [{ ...observation, reset_at: new Date(Date.now() - 1).toISOString() }] }))).toEqual([]);
+});

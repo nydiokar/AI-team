@@ -126,3 +126,29 @@ what the domain layer already pins down.
 - [`DATA_FLOW.md`](DATA_FLOW.md) — which hooks feed which screens, and why
   chat/activity/timeline are three distinct sources.
 - [`DEV_AND_BUILD.md`](DEV_AND_BUILD.md) — running this locally, testing, PWA.
+
+### Home — node activity and backend usage
+
+`HomeScreen` puts `NodeActivityCards` above backend plan usage. Counts come from
+`GET /api/nodes?activity=true`: all open sessions assigned to that node, using
+managed turn-ledger truth (running/queued/recovery) rather than stale busy flags.
+Counts are complete; the response includes only three recent previews per state.
+Tap a state count to view those sessions; tap a preview to open its conversation.
+Offline cards are available through the offline count and show a red status dot.
+
+To change a node's picture, tap its avatar on Home and choose a PNG, JPG, or WebP
+under 2 MB. The center is cropped to 128×128 and saved in this browser's local
+storage. Each node has a deterministic default identity. **Pictures are local to
+this browser/profile**, survive reloads, and do not sync to other devices. Open
+the same picker and choose **Use default identity** to reset. An agent can help
+prepare an image; the operator can select it through this control.
+
+Backend meters show plan usage, not session context fill or dollar spend. Claude
+uses its existing quota coordinator. Codex uses sanitized native account limits
+forwarded alongside session telemetry, choosing the highest fresh observation
+across nodes (never summing nodes or inferring account identity). Observations
+expire after 15 minutes or at reset; a dash means unavailable, not zero. The
+Codex app-server worker code must be deployed/restarted before it can forward
+these observations. OpenCode routes to providers and has no single plan quota.
+Dollar amounts remain approximate standard API equivalents; subscription plan
+usage is reported by the provider and is not calculated from token prices.

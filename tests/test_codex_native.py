@@ -396,3 +396,33 @@ def test_reactivated_session_cancels_a_deferred_close(native):
 def test_archive_is_a_known_rpc_method():
     from src.backends.codex_app_server import REQUEST_METHODS
     assert "thread/archive" in REQUEST_METHODS
+
+
+def test_native_context_updates_forward_account_limits_to_durable_telemetry(native):
+    backend, runtime, cwd = native
+    runtime.rate_limits = {'plan_type': 'plus', 'primary': {'used_percent': 23, 'window_minutes': 300, 'resets_at': 2000000000}}
+    original_complete = runtime.complete
+    def complete(thread_id, status=None):
+        counters = {'inputTokens': 200, 'outputTokens': 10, 'cachedInputTokens': 100,
+                    'reasoningOutputTokens': 0, 'totalTokens': 210}
+        runtime.emit(thread_id, 'thread/tokenUsage/updated', tokenUsage={
+            'last': counters, 'total': counters, 'modelContextWindow': 100000})
+        original_complete(thread_id, status)
+    runtime.complete = complete
+    class Sink:
+        def __init__(self):
+            self.events = []
+        def emit_many(self, events):
+            self.events.extend(events)
+        def emit(self, event):
+            self.events.append(event)
+    sink = Sink()
+    context = TelemetryContext(turn_id='t-limits', invocation_id='i-limits',
+                               node_id='node', session_id='session', backend='codex')
+    result = backend._run(cwd, 'hello', None, 'session', call=_call('session'),
+                          telemetry_context=context, telemetry_sink=sink)
+    assert result.success
+    event = next(e for e in sink.events if e.event_name == 'model.session_usage')
+    assert event.attributes['context_window_tokens'] == 100000
+    assert event.attributes['rate_limit_primary_used_percent'] == 23
+    assert event.attributes['rate_limit_primary_window_minutes'] == 300

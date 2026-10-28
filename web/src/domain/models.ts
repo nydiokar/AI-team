@@ -32,6 +32,13 @@ export interface ActiveTaskDetail {
   startedAt: string | null;
 }
 
+export type NodeActivityState = "running" | "queued" | "waiting" | "failed" | "idle";
+
+export interface NodeActivity {
+  counts: Record<NodeActivityState, number>;
+  sessions: { id: string; backend: string; state: NodeActivityState; summary: string; repoPath: string }[];
+}
+
 export interface Target {
   /** node_id (PK in `nodes`). */
   id: string;
@@ -50,6 +57,7 @@ export interface Target {
   slotsTotal: number | null;
   /** Active tasks from the latest live_state heartbeat (empty when idle). */
   activeTasks: ActiveTaskDetail[];
+  activity?: NodeActivity | null;
 }
 
 // ── Workspace ─ 🟡 PARTIAL (gap-doc §2) ────────────────────────────────────

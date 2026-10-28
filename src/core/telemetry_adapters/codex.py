@@ -11,6 +11,8 @@ import json
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
+from pydantic import BaseModel, Field, JsonValue, ValidationError
+
 from src.core.telemetry import TelemetryContext, TelemetryEvent, build_event
 
 ADAPTER_VERSION = "codex-jsonl-0.140-v1"
@@ -20,6 +22,37 @@ _TOOL_TYPES: Dict[str, tuple[str, str]] = {
     "file_change": ("file_change", "file_write"),
     "web_search": ("web_search", "search"),
 }
+
+
+class _NativeLimitWindow(BaseModel):
+    usedPercent: float = Field(ge=0, le=100, allow_inf_nan=False, strict=True)
+    windowDurationMins: int = Field(gt=0, le=525600, strict=True)
+    resetsAt: int = Field(gt=0, strict=True)
+
+
+class _NativeLimits(BaseModel):
+    limitId: str | None = None
+    planType: str | None = Field(default=None, max_length=40)
+    primary: _NativeLimitWindow | None = None
+    secondary: _NativeLimitWindow | None = None
+
+
+def native_rate_limits(value: object) -> dict[str, JsonValue]:
+    """Normalize native app-server limits to the existing rollout schema."""
+    try:
+        limits: _NativeLimits = _NativeLimits.model_validate(value)
+    except ValidationError:
+        return {}
+    if limits.limitId not in (None, 'codex'):
+        return {}
+    result: dict[str, JsonValue] = {'plan_type': limits.planType}
+    for name in ('primary', 'secondary'):
+        window: _NativeLimitWindow | None = getattr(limits, name)
+        if window is not None:
+            result[name] = {'used_percent': window.usedPercent,
+                            'window_minutes': window.windowDurationMins,
+                            'resets_at': window.resetsAt}
+    return result
 
 
 class CodexTelemetryAdapter:

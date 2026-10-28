@@ -1020,7 +1020,7 @@ class CodexBackend(CodingBackend):
                         for name, count in last.items():
                             usage[name] = usage.get(name, 0) + count
                         if adapter:
-                            emit(adapter.consume_token_count({"info": {
+                            emit(adapter.consume_token_count({"rate_limits": getattr(client, "rate_limits", {}), "info": {
                                 "last_token_usage": last,
                                 "total_token_usage": {v: native_usage["total"][k] for k, v in mapping.items()},
                                 "model_context_window": native_usage.get("modelContextWindow")}}))
