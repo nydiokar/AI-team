@@ -30,7 +30,8 @@ instead and leave a one-liner here.
 Current work:
 
 **Read-path programme (2026-10-28 operator dispatch):** J1 jobs authority/enrichment
-is active; next J2 completion reliability, J3 reason N+1, J4 session projections,
+is implemented/locally verified in PR #261 (`1d23442`), awaiting merge authorization;
+next J2 completion reliability, J3 reason N+1, J4 session projections,
 J5 compact affiliations. Detailed scope, evidence and durable burndown:
 [`READ_PATH_BURNDOWN.md`](../docs/backend/READ_PATH_BURNDOWN.md).
 This execution implements J1 only; merge and deployment require operator authorization.

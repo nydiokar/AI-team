@@ -40,8 +40,9 @@ Implementation, merge and production verification are recorded separately.
   connections are obtained in the fetching thread. Excess HTTP requests fail before
   DB work and permits release on success/error. Measure plans, bytes, memory and
   repeatable local latency; distinguish fixture evidence from production evidence.
-- Implementation/verification: local checks passed; full evidence below. PR/commit:
-  recorded in the PR closure entry below once published.
+- Implementation/verification: local checks passed; full evidence below.
+- PR: [#261](https://github.com/nydiokar/AI-team/pull/261); implementation commit
+  `1d23442` (base `4f792cd`). CI result is recorded below when available.
 - Merge: NOT AUTHORIZED / not merged. Production: NOT AUTHORIZED / not verified.
 
 ### J2 — Completion reliability
@@ -272,3 +273,16 @@ autoformat/refactor. No web changes, so web tests/build are not part of J1.
 
 Production baseline health was `4f792cd`; no post-change live API check, rebuild,
 merge, deployment or worker restart has been performed or authorized.
+
+### PR closure and next dispatch
+
+J1 implementation is VERIFIED locally and published in PR #261. Merge is pending
+explicit operator authorization; production deployment/verification is separately
+pending authorization. CI: pending. This is not a merged/live completion claim.
+
+Next independently executable dispatch: J2 completion reliability, based on the
+approved/merged J1 selected-source seam. First commit deterministic reproductions
+for late commits and notification/admission failures. Specify retries, duplicate
+effects and startup/restart recovery before choosing a persistence change. Verify
+restart boundaries, failed backing resources, repeated polls and permanent failure;
+record disproven allegations with evidence. J3–J5 remain mandatory TODO in order.
