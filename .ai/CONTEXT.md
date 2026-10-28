@@ -29,6 +29,17 @@ instead and leave a one-liner here.
 
 Current work:
 
+**Read-path programme (2026-10-28 operator dispatch):** J1 jobs authority/enrichment
+is active; next J2 completion reliability, J3 reason N+1, J4 session projections,
+J5 compact affiliations. Detailed scope, evidence and durable burndown:
+[`READ_PATH_BURNDOWN.md`](../docs/backend/READ_PATH_BURNDOWN.md).
+This execution implements J1 only; merge and deployment require operator authorization.
+Jobs boundary deferrals: four concurrent reads bound active materialization, not
+historical text bytes or SQL execution time. SQLite's 15 s busy timeout is a lock
+wait bound; no statement deadline is claimed. J1's measured memory and concrete
+oversized-history/timeout follow-up are recorded in burndown S3; completion cursor,
+retry/restart correctness is the next mandatory job J2, not closed by offloading.
+
 1. **System-One decision layer (TypeSafe Jev) → Governor programme.** Spec
    `docs/SYSTEM_ONE_DECISION_LAYER_SPEC.md` (accepted 2026-10-05). Next: **A94** (core + replay +
    wake scorecard; Level 3; needs a read-only controller DB copy and `TYPESAFE_API_KEY` from the

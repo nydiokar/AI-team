@@ -32,6 +32,34 @@ their `"1"`/`"0"` rows and lax inputs unchanged. Numeric/str flags: `scripts/ops
 
 ---
 
+## Jobs read authority (startup setting)
+
+`JOBS_READ_MODE=controller` (default, managed) reads watched jobs exclusively from
+the controller MeshDB. Compose explicitly selects this mode because gateway and
+task-server share the state volume. `CONTROLLER_URL` alone never enables remote
+jobs reads. Healthy-empty returns empty running/recent arrays; unavailable DB
+returns HTTP 503 `jobs_unavailable`. Ownership means a matching SQLite session,
+including closed sessions. JSON-only sessions remain orphaned in jobs while the
+existing session fallback remains available. Empty/whitespace IDs use the existing
+SQL predicate (non-NULL without an exact matching session is orphaned).
+
+For an older local Web UI gateway that intentionally merges jobs from a separate
+task controller, explicitly set `JOBS_READ_MODE=federated`, `CONTROLLER_URL` and
+`WORKER_TOKEN` before restarting that gateway. Invalid mode/missing credentials
+fail configuration loading. Compatibility mode retains the legacy local-first
+union, remote cache, gateway/JSON ownership reconciliation and partial/stale reads
+on remote failure. Its per-job reconciliation and remote 50-row completion window
+are not covered by the controller performance guarantee. Missing union facade
+returns 503 rather than silently selecting local-only results. The worker/task-server
+`/jobs` API is unchanged. This setting is not writable through `/api/flags`.
+
+`GET /api/jobs` admits at most four reads through database materialization and
+JSON serialization; excess requests get 429 `jobs_busy`. Limit stays 1–50 per
+array; recent still includes running jobs. Completion fetches use the same mode
+and run serially off the event loop, with thread-local DB connections. Cursor,
+retry and restart reliability are tracked separately as J2 in
+[`READ_PATH_BURNDOWN.md`](READ_PATH_BURNDOWN.md); no exactly-once claim is made.
+
 ## A. Behaviour gates — default OFF, must be set to take effect
 
 | Flag | Managed? | Default | What it turns on | Code seam |

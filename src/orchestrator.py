@@ -4804,27 +4804,24 @@ class TaskOrchestrator(ITaskOrchestrator):
         """
         while self.running:
             try:
-                from src.control.db import get_db
-                db = get_db()
-                if db is None:
-                    await asyncio.sleep(30)
-                    continue
-
                 # The task server owns terminal job state; the gateway owns
                 # routing those terminal jobs to session-visible notifications.
-                terminal = db.get_terminal_jobs_since(self._last_job_poll)
+                terminal = await asyncio.to_thread(self._local_terminal_jobs_since, self._last_job_poll)
                 if terminal:
                     self._last_job_poll = now_iso()
 
                 for job in terminal:
                     await self._process_terminal_job(job)
 
-                remote_terminal = self._remote_terminal_jobs_since(self._last_remote_job_poll)
-                if remote_terminal:
-                    self._last_remote_job_poll = now_iso()
+                if config.mesh.jobs_read_mode == "federated":
+                    remote_terminal = await asyncio.to_thread(
+                        self._remote_terminal_jobs_since, self._last_remote_job_poll,
+                    )
+                    if remote_terminal:
+                        self._last_remote_job_poll = now_iso()
 
-                for job in remote_terminal:
-                    await self._process_terminal_job(job)
+                    for job in remote_terminal:
+                        await self._process_terminal_job(job)
             except Exception as e:
                 logger.debug("event=job_poller_error err=%s", e)
 
@@ -4832,6 +4829,16 @@ class TaskOrchestrator(ITaskOrchestrator):
                 await asyncio.wait_for(asyncio.sleep(30), timeout=30)
             except asyncio.TimeoutError:
                 pass
+
+    def _local_terminal_jobs_since(self, since: str) -> list[dict[str, object]]:
+        """Resolve the DB/connection inside the fetching thread, never on the loop.
+
+        Poll cursor and notification retry semantics are unchanged (read-path J2).
+        A missing local DB must not suppress the explicitly configured remote poll.
+        """
+        from src.control.db import get_db
+        db = get_db()
+        return db.get_terminal_jobs_since(since) if db is not None else []
 
     def _remote_jobs_client(self):
         """Return a task-server client for CONTROLLER_URL, if this gateway has one."""
@@ -4852,7 +4859,7 @@ class TaskOrchestrator(ITaskOrchestrator):
         session_id: Optional[str] = None,
         ownership: Optional[str] = None,
     ) -> Dict[str, List[Dict[str, Any]]]:
-        """Return watched jobs visible to this gateway.
+        """Read controller authority, or the explicitly selected legacy union.
 
         The local Web UI can run on a machine whose MCP/worker points at a
         remote task server via CONTROLLER_URL. In that topology, local SQLite is
@@ -4861,30 +4868,25 @@ class TaskOrchestrator(ITaskOrchestrator):
         When session_id is supplied, return only jobs owned by that session so
         Session/Project surfaces do not have to filter a global operator list.
         """
+        from src.control.db import get_db
+        from src.control.jobs_read_model import list_controller_jobs
+
+        if config.mesh.jobs_read_mode == "controller":
+            return list_controller_jobs(
+                get_db(), limit=limit, session_id=session_id, ownership=ownership,
+            )
+
         running: List[Dict[str, Any]] = []
         recent: List[Dict[str, Any]] = []
         local_ownership = ownership
         remote_ownership = None if ownership == "unowned" else ownership
         remote_limit = max(limit, 50) if ownership == "unowned" else limit
         try:
-            from src.control.db import get_db
-            db = get_db()
-            if db is not None:
-                running.extend(
-                    db.list_jobs(
-                        status="running",
-                        session_id=session_id,
-                        ownership=local_ownership,
-                        limit=limit,
-                    )
-                )
-                recent.extend(
-                    db.list_jobs(
-                        session_id=session_id,
-                        ownership=local_ownership,
-                        limit=limit,
-                    )
-                )
+            local = list_controller_jobs(
+                get_db(), limit=limit, session_id=session_id, ownership=local_ownership,
+            )
+            running.extend(local["running"])
+            recent.extend(local["recent"])
         except Exception as e:
             logger.debug("event=local_jobs_list_failed err=%s", e)
 

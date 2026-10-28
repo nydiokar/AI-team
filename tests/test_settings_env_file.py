@@ -22,7 +22,9 @@ assert config.telegram.notification_chat_id == 456
 """
 
 
-def _run_settings_import(script: str, env_file: Path) -> subprocess.CompletedProcess[str]:
+def _run_settings_import(
+    script: str, env_file: Path, *, extra_env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
     env: dict[str, str] = os.environ.copy()
     env.update(
         {
@@ -32,6 +34,7 @@ def _run_settings_import(script: str, env_file: Path) -> subprocess.CompletedPro
             "GATEWAY_TELEGRAM_CHAT_ID": "999",
         }
     )
+    env.update(extra_env or {})
     return subprocess.run(
         [sys.executable, "-c", script],
         cwd=Path(__file__).resolve().parents[1],
@@ -55,6 +58,18 @@ def test_explicit_env_file_clears_commented_managed_env_keys(tmp_path: Path) -> 
 
     result: subprocess.CompletedProcess[str] = _run_settings_import(SCRIPT, env_file)
 
+    assert result.returncode == 0, result.stderr
+
+
+def test_explicit_env_file_clears_stale_jobs_mode(tmp_path: Path) -> None:
+    env_file: Path = tmp_path / "gateway.env"
+    env_file.write_text("MESH_ENABLED=false\n", encoding="utf-8")
+    result = _run_settings_import(
+        "from config import config; assert config.mesh.jobs_read_mode == 'controller'; "
+        "import os; assert os.getenv('JOBS_READ_MODE') is None",
+        env_file,
+        extra_env={"JOBS_READ_MODE": "federated"},
+    )
     assert result.returncode == 0, result.stderr
 
 

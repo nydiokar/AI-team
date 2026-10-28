@@ -20,8 +20,10 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from fastapi.routing import APIRoute
 from pydantic import BaseModel, ConfigDict, Field
 
+from config import config
 from src.control import control_api as core
 from src.control.backend_auth_cache import BackendAuthCache
+from src.control.jobs_read_model import JobsUnavailableError, list_controller_jobs
 from src.control.control_api import (
     _ID_STR_MAX,
     logger,
@@ -31,6 +33,7 @@ from src.core.build_info import build_info
 
 
 _HOME_READ_SLOTS = threading.BoundedSemaphore(4)
+_JOBS_READ_SLOTS = threading.BoundedSemaphore(4)
 
 
 class _BoundedAuthRoute(APIRoute):
@@ -724,7 +727,11 @@ def build_router(orchestrator: Any, *, require_auth: Callable[..., Any]) -> APIR
             result[be] = serialize(be)
         return JSONResponse({"node_id": node_id, "models": result})
 
-    @router.get("/api/jobs", dependencies=[Depends(require_auth)], responses={200: {"model": JobsOut, "description": "Watched jobs: running + recent."}})
+    @router.get("/api/jobs", dependencies=[Depends(require_auth)], responses={
+        200: {"model": JobsOut, "description": "Watched jobs: running + recent (all statuses)."},
+        429: {"description": "Concurrent jobs-read limit reached (jobs_busy)."},
+        503: {"description": "Selected jobs authority unavailable (jobs_unavailable)."},
+    })
     def api_jobs(
         limit: int = Query(20, ge=1, le=50),
         session_id: Optional[str] = Query(default=None, max_length=_ID_STR_MAX),
@@ -733,31 +740,29 @@ def build_router(orchestrator: Any, *, require_auth: Callable[..., Any]) -> APIR
         ownership_filter = None if ownership in (None, "all") else ownership
         if session_id and ownership_filter == "unowned":
             raise HTTPException(status_code=400, detail="session_id_conflicts_with_unowned")
-        list_watched_jobs = getattr(orchestrator, "list_watched_jobs", None)
-        if callable(list_watched_jobs):
-            return JSONResponse(
-                list_watched_jobs(
-                    limit=limit,
-                    session_id=session_id,
-                    ownership=ownership_filter,
+        if not _JOBS_READ_SLOTS.acquire(blocking=False):
+            raise HTTPException(status_code=429, detail="jobs_busy")
+        try:
+            list_watched_jobs = getattr(orchestrator, "list_watched_jobs", None)
+            if callable(list_watched_jobs):
+                return JSONResponse(
+                    list_watched_jobs(
+                        limit=limit,
+                        session_id=session_id,
+                        ownership=ownership_filter,
+                    )
                 )
-            )
-
-        db = core._db()
-        if db is None:
-            return JSONResponse({"running": [], "recent": []})
-        running = db.list_jobs(
-            status="running",
-            session_id=session_id,
-            ownership=ownership_filter,
-            limit=limit,
-        )
-        recent = db.list_jobs(
-            session_id=session_id,
-            ownership=ownership_filter,
-            limit=limit,
-        )
-        return JSONResponse({"running": running, "recent": recent})
+            if config.mesh.jobs_read_mode == "federated":
+                # A compatibility read needs its union/reconciliation facade.
+                # Never silently substitute controller-only results for it.
+                raise JobsUnavailableError("jobs_unavailable")
+            return JSONResponse(list_controller_jobs(
+                core._db(), limit=limit, session_id=session_id, ownership=ownership_filter,
+            ))
+        except (JobsUnavailableError, sqlite3.Error):
+            raise HTTPException(status_code=503, detail="jobs_unavailable") from None
+        finally:
+            _JOBS_READ_SLOTS.release()
 
     @router.get("/api/mesh/health", dependencies=[Depends(require_auth)], responses={200: {"model": MeshHealthOut, "description": "Mesh health trend + reconcile backlog."}})
     def api_mesh_health(limit: int = Query(24, ge=1, le=200)) -> JSONResponse:

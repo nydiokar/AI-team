@@ -96,6 +96,8 @@ services:
       MESH_ENABLED: "true"
       MESH_EMBEDDED_SERVER: "false"
       CONTROL_API_ENABLED: "true"
+      # Both controller services mount the same MeshDB; never federate via HTTP.
+      JOBS_READ_MODE: "controller"
       CONTROL_API_BIND_HOST: "0.0.0.0"
 
       # Dedicated Docker controller delegates work to workers.
