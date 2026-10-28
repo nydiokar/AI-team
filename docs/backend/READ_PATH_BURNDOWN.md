@@ -13,7 +13,7 @@ Implementation, merge and production verification are recorded separately.
 
 ### J1 — Jobs authority and enrichment
 
-- Priority: P1, execute first. Status: VERIFIED (implementation/local checks only).
+- Priority: P1, execute first. Status: VERIFIED (implementation, merge and production).
 - Classification: confirmed defects; compatibility change explicitly accepted.
 - Evidence: `TaskOrchestrator.list_watched_jobs` always merges local and remote
   reads; `_normalize_job_ownership` repeats session lookups for both arrays.
@@ -43,7 +43,9 @@ Implementation, merge and production verification are recorded separately.
 - Implementation/verification: local checks passed; full evidence below.
 - PR: [#261](https://github.com/nydiokar/AI-team/pull/261); implementation commit
   `1d23442` (base `4f792cd`). Implementation CI passed (run `40691307468`).
-- Merge: NOT AUTHORIZED / not merged. Production: NOT AUTHORIZED / not verified.
+- Merge: authorized by the operator on 2026-10-28; PR #261 merged as `e0e2877`.
+- Production: VERIFIED `e0e2877`, image `bb712a2a5647`, tag `prod-e0e2877`;
+  deployment evidence and rollback below. No workers restarted.
 
 ### J2 — Completion reliability
 
@@ -274,17 +276,72 @@ control API, watched jobs and managed producer targets exercise the actual seams
 diagnostic code/message against `4f792cd` found no introduced diagnostics. No broad
 autoformat/refactor. No web changes, so web tests/build are not part of J1.
 
-Production baseline health was `4f792cd`; no post-change live API check, rebuild,
-merge, deployment or worker restart has been performed or authorized.
+Production baseline before the authorized deployment was `4f792cd`.
+
+### Authorized J1 deployment and production verification — 2026-10-28
+
+- PR #261 reviewed against unchanged main `4f792cd`; final head `6f05218` CI passed
+  ([run 40691972065](https://github.com/nydiokar/AI-team/actions/runs/40691972065)).
+  The same 184 acceptance tests passed again in 26.09 s (two existing warnings).
+- Merge SHA and deployment SHA: `e0e2877`. Main checkout used for build:
+  `.worktrees/login-ux`, clean tracked files, `.env` already symlinked to the host
+  env. Unrelated untracked ctags temporary files were preserved and excluded from
+  the Docker allowlist. Deployment preflight: GO, schema 46 → 46, no migrations.
+- Online SQLite backup:
+  `/home/cifran/ai-team-data/backups/mesh-pre-e0e2877-20261028T1332Z.db`, mode 0600,
+  `PRAGMA integrity_check = ok`. Rollback image `ai-team:pre-e0e2877` retains old
+  image ID `85b1900cf3d9` / revision `4f792cd`; no rollback or data restore used.
+- Built shared image `bb712a2a5647`, recreated only `gateway` + `task-server`.
+  Both healthy, both report `build.git_sha=e0e2877`; gateway coverage true,
+  task-server schema 46, two nodes online, no stale/pending/claimed tasks at probe,
+  no gateway/task-server tracebacks. First immediate startup curl reset before
+  readiness; subsequent repeated checks healthy. Production image tagged
+  `ai-team:prod-e0e2877`; pushed annotated git deploy tag
+  `deploy/20261028T1332Z-e0e2877` (preflight timestamp).
+- Native worker unchanged: `ai-team-worker-kanebra`, PID 2576526, restart count 4,
+  online before and after. No worker or unrelated service restart command used.
+- Read deployed config inside gateway: `jobs_read_mode=controller`. Compose selects
+  it explicitly; mode is not inferred from CONTROLLER_URL, empty rows or failures.
+- Real Chromium UI loaded `/system`, authenticated through the normal localStorage
+  credential flow (loopback correctly shows TokenGate without a supplied token).
+  Populated jobs: 200, zero running / 20 recent; first actual job row rendered.
+  Empty-state check forwards only that browser's jobs URL to the REAL API with a
+  nonexistent session filter; response 200 with both arrays empty, UI rendered
+  `No watched jobs.`. No mocked response body, DB write, paid turn or DB-failure
+  simulation. Screenshots/report retained under `/tmp/ai-team-j1-ui-*.png` and
+  `/tmp/ai-team-j1-live-ui.json` (not repository artifacts).
+- Browser-authenticated real API probes: 10 samples each, all 200. Second run:
+  all jobs limit 20: 16.6–65.0 ms; unowned limit 50: 10.7–21.0 ms; nonexistent
+  session: 6.3–18.3 ms. Cold first run had a 240.5 ms maximum; these are sample
+  ranges, not p95s or latency guarantees. Zero browser page errors.
+- Tooling limitation: browser assertions and JSON/screenshots completed, then the
+  host Node process aborted during teardown (exit 134), reproducible with installed
+  Node 24 and Node 22. No browser child processes remained. This does not establish
+  a clean browser-runner exit; it is recorded rather than presented as a green
+  browser command. UI assertions/API responses themselves passed on both runs.
+- During populated/empty UI reads, 30 API probes and a background poll interval,
+  a 40 s capture in the live gateway network namespace recorded ZERO TCP SYNs to
+  task-server port 9002, zero dropped packets. Task-server access log recorded zero
+  `GET /jobs` calls. Together with deployed mode/code and offline zero-HTTP tests,
+  this verifies removal of redundant remote jobs reads for the observed window;
+  it does not claim every gateway operation is forbidden from contacting that port.
+- Structured 503 and contention/malformed-input behavior remain covered by isolated
+  acceptance tests; production DB availability was not destructively manipulated.
+  No running jobs existed at probe, so new completion reliability is not claimed.
+  J2 and all S1–S4 limitations remain open; historical text/SQL deadlines unchanged.
+
+Rollback procedure if needed: tag `ai-team:pre-e0e2877` back to `ai-team:local`,
+then `docker compose up -d --no-build gateway task-server` from this main checkout.
+No schema changed. Restoring the DB backup would discard later writes and still
+requires a separate operator decision; it is not part of automatic code rollback.
 
 ### PR closure and next dispatch
 
-J1 implementation is VERIFIED locally and published in PR #261. Merge is pending
-explicit operator authorization; production deployment/verification is separately
-pending authorization. Implementation CI passed:
+J1 is VERIFIED, merged and deployed after explicit operator authorization.
+Implementation CI passed:
 [run 40691307468](https://github.com/nydiokar/AI-team/actions/runs/40691307468)
 on `1d23442`, 3m24s. Subsequent commits only update programme evidence; current
-head check status is available on PR #261. This is not a merged/live completion claim.
+head check status is available on PR #261. Production closure is recorded above.
 
 Next independently executable dispatch: J2 completion reliability, based on the
 approved/merged J1 selected-source seam. First commit deterministic reproductions
