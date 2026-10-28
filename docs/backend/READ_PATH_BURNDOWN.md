@@ -49,7 +49,7 @@ Implementation, merge and production verification are recorded separately.
 
 ### J2 — Completion reliability
 
-- Priority: P1. Status: VERIFIED (implementation/local checks; PR review pending).
+- Priority: P1. Status: VERIFIED (implementation, targeted checks and CI; PR review pending).
   Depends on J1 (closed live). Merge and deployment remain NOT AUTHORIZED.
 - Classification: both correctness defects deterministically reproduced, correction
   implemented. Discovery/retry/restart guarantees are bounded as specified below.
@@ -74,8 +74,10 @@ Implementation, merge and production verification are recorded separately.
   record the reproducer and reason instead of implementing a speculative fix.
 - PR: [#262](https://github.com/nydiokar/AI-team/pull/262), implementation `adfc2f4`
   (base `27081a0`), main's documentation-only `618cd4c` merged as `77e2260`.
-  Tests: focused and
-  seam evidence below. Merge/production: not authorized / not merged / not deployed.
+  Final implementation/test head `f9c213d` passed CI
+  ([run 40731253503](https://github.com/nydiokar/AI-team/actions/runs/40731253503)).
+  Tests: focused and seam evidence below. Merge/production: not authorized /
+  not merged / not deployed.
 
 #### J2 correction contract (2026-10-28, before implementation)
 
@@ -183,8 +185,9 @@ The final seam run includes the public completion-page OpenAPI schema assertion
 and the guard that avoids re-entering acknowledged effects.
 Ruff passes on the new model/test modules; comparison by diagnostic code/message
 against main found no introduced diagnostics in modified legacy modules.
-`git diff --check` passes. PR #262 is published, CI pending at this documentation
-update; current checks are attached to its head. Merge and deployment remain gated.
+`git diff --check` passes. PR #262 is published; implementation head `f9c213d`
+passed CI run 40731253503. Subsequent evidence-only head checks are attached to the
+PR. Merge and deployment remain gated.
 No local full/e2e suite, external notification, paid backend, worker restart or J2
 production deployment is part of this verification.
 
@@ -547,8 +550,8 @@ Implementation CI passed:
 on `1d23442`, 3m24s. Subsequent commits only update programme evidence; current
 head check status is available on PR #261. Production closure is recorded above.
 
-Current dispatch: J2 implementation is verified locally in PR #262, awaiting
-review/CI and explicit merge/deploy authorization. J1 production closure is complete.
+Current dispatch: J2 implementation is verified locally and in CI in PR #262,
+awaiting review and explicit merge/deploy authorization. J1 production closure is complete.
 Next independently executable implementation after authorized J2 integration: J3
 session-reason N+1 and running-job truncation, with its five/seven SELECT budgets
 and full reason/queue-overlay equivalence above. J3–J5 remain mandatory TODO in order;
