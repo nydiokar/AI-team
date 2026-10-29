@@ -2480,6 +2480,27 @@ class MeshDB:
         ).fetchall()
         return [dict(r) for r in rows]
 
+    def list_session_summaries(
+        self, limit: int = 200, *, keep_pinned: Optional[bool] = None,
+    ) -> List[Dict[str, Any]]:
+        """View/reason columns only; full lifecycle reads stay in list_sessions.
+
+        cache_unhealthy_count preserves the legacy parser's invalid-row rejection;
+        no task history, user-message or artifact blobs are materialized.
+        """
+        where = "" if keep_pinned is None else "WHERE COALESCE(keep_pinned, 0) = ?"
+        params: list[int] = [] if keep_pinned is None else [int(keep_pinned)]
+        params.append(limit)
+        rows = self._conn().execute(
+            "SELECT session_id, backend, repo_path, status, created_at, updated_at, "
+            "machine_id, backend_session_id, model, effort, last_task_id, last_summary, "
+            "last_result_summary, last_files_modified, origin, previous_backend_session_ids, "
+            "current_case_id, case_role, continued_from, keep_pinned, keep_note, "
+            f"cache_unhealthy_count FROM sessions {where} ORDER BY updated_at DESC LIMIT ?",
+            params,
+        ).fetchall()
+        return [dict(row) for row in rows]
+
     _EMPTY_CLOSED_SESSION_PREDICATE = """
         s.status = 'closed'
         AND COALESCE(s.backend_session_id, '') = ''
@@ -11458,6 +11479,12 @@ def _get_migrations() -> List[tuple]:
                 WHERE notification_state='pending' OR action_state='pending';
         """),  # J2: terminal eligibility survives delayed commits; independent
                # durable side-effect receipts, no replay of historical terminals.
+        (48, """
+            CREATE INDEX IF NOT EXISTS idx_sessions_updated_at
+                ON sessions(updated_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_sessions_pinned_updated_at
+                ON sessions(COALESCE(keep_pinned,0), updated_at DESC);
+        """),  # J4: measured list/pinned shapes avoid a temporary ordering sort.
     ]
 
 

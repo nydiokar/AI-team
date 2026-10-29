@@ -8,6 +8,7 @@ Mounted by ``control_api.build_control_api``; route map: docs/backend/ARCHITECTU
 from __future__ import annotations
 
 import asyncio
+import threading
 from typing import Any, Callable, Dict, Optional
 
 from fastapi import (
@@ -41,6 +42,9 @@ from src.control.control_api import (
     ModelBody,
     logger,
 )
+
+
+_SESSIONS_READ_SLOTS = threading.BoundedSemaphore(4)
 
 
 # --- OpenAPI response models (documentation only) ----------------------------
@@ -205,23 +209,28 @@ def build_router(
     @router.get(
         "/api/sessions",
         responses={200: {"model": SessionListOut,
-                         "description": "Known sessions, most-recent first."}},
+                         "description": "Known sessions, most-recent first."},
+                   429: {"description": "Concurrent sessions-read limit reached (sessions_busy)."}},
     )
     def api_sessions(
         limit: int = Query(200, ge=1, le=1000),
         keep_pinned: Optional[bool] = Query(default=None),
     ) -> JSONResponse:
+        if not _SESSIONS_READ_SLOTS.acquire(blocking=False):
+            raise HTTPException(status_code=429, detail="sessions_busy")
         try:
-            # [A83] Pass the existing DB handle so the batched secondary-reason
-            # derivation runs on the read path (no N+1, no timer — #145/#147).
-            views = orchestrator.session_service.list_views(
-                limit=limit, keep_pinned=keep_pinned, db=core._db()
-            )
-            sessions = [v.to_dict() for v in views]
-        except Exception as e:
-            logger.warning("control_api_sessions_failed err=%s", e)
-            sessions = []
-        return JSONResponse({"sessions": sessions})
+            try:
+                # [A83] Reason evidence remains on the batched read path.
+                views = orchestrator.session_service.list_views(
+                    limit=limit, keep_pinned=keep_pinned, db=core._db()
+                )
+                sessions = [v.to_dict() for v in views]
+            except Exception as e:
+                logger.warning("control_api_sessions_failed err=%s", e)
+                sessions = []
+            return JSONResponse({"sessions": sessions})
+        finally:
+            _SESSIONS_READ_SLOTS.release()
 
     @router.get(
         "/api/cache-heartbeats",

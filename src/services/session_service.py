@@ -373,7 +373,7 @@ class SessionService:
         no per-Case status/pause reads). ``db`` omitted ⇒ reasons stay None
         and the views are byte-identical to before (Telegram et al. unchanged).
         """
-        sessions = self.store.list_all(limit=limit, keep_pinned=keep_pinned)
+        sessions = self.store.list_summaries(limit=limit, keep_pinned=keep_pinned)
         if db is None:
             return [SessionView.from_session(s) for s in sessions]
         from src.core.session_reason import derive_session_reasons
