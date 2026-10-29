@@ -369,8 +369,8 @@ class SessionService:
 
         [A83] When ``db`` is supplied, attach the derived, non-authoritative
         *secondary reason* to each view in ONE batched pass
-        (``derive_session_reasons`` — a single ``list_jobs_for_sessions`` plus
-        bounded per-manager reads; no N+1). ``db`` omitted ⇒ reasons stay None
+        (``derive_session_reasons`` — five data SELECTs per 500-ID chunk;
+        no per-Case status/pause reads). ``db`` omitted ⇒ reasons stay None
         and the views are byte-identical to before (Telegram et al. unchanged).
         """
         sessions = self.store.list_all(limit=limit, keep_pinned=keep_pinned)

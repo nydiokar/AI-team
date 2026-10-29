@@ -20,8 +20,8 @@ Hard invariants (do not weaken):
   once stalled the event loop by scanning every open Case's full event log on a
   TIMER. This derivation MUST stay on the read path — per listed session, on
   request. NEVER move it into a background loop / timer / scheduler, and never
-  add a new full-log scan. Reads are batched across the page and watermark-gated
-  via ``db.max_flow_event_ids`` so unchanged Cases are a cheap index read.
+  add a new full-log scan. Reads are batched across the page in deduplicated 500-ID chunks;
+  only the latest relevant pause facts are read, never complete event logs.
 """
 from __future__ import annotations
 
@@ -84,8 +84,8 @@ _NODE_OFFLINE_STATES = (
 class _ReasonBatch:
     """Pre-loaded, page-wide evidence for a bounded, N+1-free derivation.
 
-    Built ONCE per read (``build_reason_batch``) with a single
-    ``list_jobs_for_sessions`` call and per-manager pause/wait reads only. Each
+    Built ONCE per read (``build_reason_batch``) from bounded owner, inbox,
+    live-task and Case evidence queries. Each
     per-session ``derive_session_reason`` then reads only from this in-memory
     snapshot — it issues NO further DB calls."""
     # session_id -> True if a `jobs` row for it is currently `running`.
@@ -109,108 +109,65 @@ class _ReasonBatch:
 
 
 def build_reason_batch(db: Any, sessions: List[Session]) -> _ReasonBatch:
-    """Load page-wide evidence for the reason derivation in bounded, batched reads.
+    """Load read-only evidence in deduplicated chunks of at most 500 IDs.
 
-    Bounded-read contract (spec §5 — safety-critical):
-    - ONE ``list_jobs_for_sessions(ids)`` for the whole page (already N+1-safe).
-    - role/case straight off the already-loaded session rows (no per-row read).
-    - pause reads done ONLY for open Cases on the page; `waiting_workers` from the agent inbox (A104)
-      — Cases watermark-gated via ``db.max_flow_event_ids`` so a Case with no
-      events is skipped without a per-Case scan.
-    - NO cross-session materialization, NO N+1, and NEVER on a timer / loop.
-
-    #145 / #147: the Wake-Dispatcher stalled the loop by doing exactly the
-    unbounded, timer-driven variant of this. Keep it on the read path.
+    Each full chunk needs five data SELECTs: running-job owners, two inbox
+    projections, own-task liveness and Case status/latest independent pause
+    facts. No per-Case queries or full event-log folds; never run on a timer.
     """
-    session_ids = [s.session_id for s in sessions if s.session_id]
-
-    # (1) Batched job read for the WHOLE page — the only per-page job query.
-    running_job_sessions: set = set()
+    session_ids: list[str] = list(dict.fromkeys(s.session_id for s in sessions if s.session_id))
+    running_job_sessions: set[str] = set()
     if session_ids:
         try:
-            for job in db.list_jobs_for_sessions(session_ids):
-                if str(job.get("status") or "") == "running":
-                    sid = job.get("session_id")
-                    if sid:
-                        running_job_sessions.add(str(sid))
+            running_job_sessions = set(db.running_job_sessions(session_ids))
         except Exception:
             pass
 
-    # Candidate cases from the loaded rows (no read): any waiting session with a
-    # current_case_id.
-    case_ids: set = set()
-    waiting_ids: List[str] = []
+    # Candidate Cases and waiting owners come straight from loaded session rows.
+    case_ids: set[str] = set()
+    waiting_ids: list[str] = []
     for s in sessions:
         if s.status not in _WAIT_STATES:
             continue
-        waiting_ids.append(s.session_id)
+        if s.session_id:
+            waiting_ids.append(s.session_id)
         cid = str(getattr(s, "current_case_id", "") or "")
         if cid:
             case_ids.add(cid)
+    waiting_ids = list(dict.fromkeys(waiting_ids))
 
-    # (1b) [A104 I3] What is waiting for each session comes from the agent inbox
-    # (the batched projection of ``pending_for``) — two grouped, index-served
-    # reads for the whole page, never a Case event-log fold, never a role read.
-    waiting_sessions: set = set()
-    if waiting_ids:
+    # A104: the inbox remains the only source for another agent's pending work.
+    # Keep the same grouped inbox/liveness predicates, with bounded IN lists.
+    waiting_sessions: set[str] = set()
+    live_task_sessions: set[str] = set()
+    for start in range(0, len(waiting_ids), 500):
+        chunk: list[str] = waiting_ids[start:start + 500]
         try:
-            waiting_sessions = {sid for sid, w in db.inbox_waiting_for(waiting_ids).items() if w}
+            waiting_sessions.update(sid for sid, waiting in db.inbox_waiting_for(chunk).items() if waiting)
         except Exception:
-            waiting_sessions = set()
-
-    # (1c) Own-work liveness: one batched read over the SAME waiting sessions —
-    # which of them still own a non-terminal task. A hit here on a session whose
-    # primary state is IDLE/AWAITING_INPUT is the mismatch the operator saw.
-    live_task_sessions: set = set()
-    if waiting_ids:
+            pass
         try:
-            live_task_sessions = set(db.live_task_sessions(waiting_ids))
+            live_task_sessions.update(db.live_task_sessions(chunk))
         except Exception:
-            live_task_sessions = set()
+            pass
 
-    open_cases: set = set()
-    case_quota_paused: set = set()
-    case_retry_paused: set = set()
+    open_cases: set[str] = set()
+    case_quota_paused: set[str] = set()
+    case_retry_paused: set[str] = set()
     case_waiting_workers: Dict[str, bool] = {}  # kept for the batch shape; unused
-
     if case_ids:
-        # (2) Watermark: one batched MAX(id) per Case (index-served, O(1)/Case).
-        # A Case absent here has NO events at all — it cannot have a pause or a
-        # wait-group, so we skip every per-Case read for it. This is the cheap
-        # gate the spec's future short-TTL cache would key on.
         try:
-            watermarks = db.max_flow_event_ids(list(case_ids))
+            evidence = db.case_reason_evidence(list(case_ids))
         except Exception:
-            watermarks = {}
-
-        for cid in case_ids:
-            # Openness: read the single flow_runs row (NULL/'blocked' ⇒ open).
-            try:
-                run = db.get_flow_run(cid)
-            except Exception:
-                run = None
-            if run is None:
-                continue  # no Case row ⇒ not an open Case; leaves plain `idle`.
-            status = str(run.get("status") or "").strip().lower()
-            if status in _CLOSED_CASE_STATUSES:
+            evidence = {}
+        for cid, case in evidence.items():
+            if str(case.status or "").strip().lower() in _CLOSED_CASE_STATUSES:
                 continue
             open_cases.add(cid)
-
-            has_events = cid in watermarks
-            # Pause reads apply to any waiting session on an open Case (manager
-            # or worker); gated by the watermark — no events ⇒ no pause.
-            if has_events:
-                try:
-                    if db.case_quota_pause(cid) is not None:
-                        case_quota_paused.add(cid)
-                except Exception:
-                    pass
-                try:
-                    if db.transient_pause(cid) is not None:
-                        case_retry_paused.add(cid)
-                except Exception:
-                    pass
-
+            if case.quota_paused:
+                case_quota_paused.add(cid)
+            if case.retry_paused:
+                case_retry_paused.add(cid)
 
     return _ReasonBatch(
         running_job_sessions=frozenset(running_job_sessions),
@@ -283,8 +240,8 @@ def derive_session_reason(session: Session, batch: _ReasonBatch) -> Optional[Ses
 def derive_session_reasons(db: Any, sessions: List[Session]) -> Dict[str, Optional[SessionReason]]:
     """Batched, N+1-free reason map for a page of sessions: {session_id: reason}.
 
-    One ``build_reason_batch`` (single ``list_jobs_for_sessions`` + per-manager
-    bounded reads) followed by pure per-session derivation. ``db`` is None ⇒ all
+    One ``build_reason_batch`` (five data SELECTs per 500-ID chunk) followed
+    by pure per-session derivation. ``db`` is None ⇒ all
     reasons None (degrade quietly; the reason is presentational)."""
     if db is None or not sessions:
         return {s.session_id: None for s in sessions}

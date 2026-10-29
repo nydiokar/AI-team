@@ -49,7 +49,7 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any, Dict, Generator, List, Optional, Tuple
 
-from pydantic import JsonValue
+from pydantic import BaseModel, ConfigDict, JsonValue
 
 # A82 Stage 2 — managed turn-queue typed outcomes. Import at module load (no
 # cycle: turn_queue.py imports only pydantic/stdlib). The Pydantic result MODELS
@@ -77,6 +77,15 @@ logger = logging.getLogger(__name__)
 
 _mesh_health_sample_lock = threading.Lock()
 _mesh_health_last_sample: Dict[str, float] = {}
+
+
+class CaseReasonEvidence(BaseModel):
+    """Compact, read-only evidence for the session reason projection."""
+    model_config = ConfigDict(frozen=True)
+
+    status: str | None
+    quota_paused: bool
+    retry_paused: bool
 
 # ---------------------------------------------------------------------------
 # Schema version — DERIVED from the migration list (see _get_migrations()).
@@ -8657,6 +8666,43 @@ class MeshDB:
             return None
         return str(links[-1].get("entity_id") or "") or None
 
+    def case_reason_evidence(self, flow_run_ids: list[str]) -> dict[str, CaseReasonEvidence]:
+        """Status and independent latest pause facts, one SELECT per 500 IDs.
+
+        Correlated bounded reads use the existing (flow_run_id, id) index, just
+        like the single-Case pause helpers. No payload/history is materialized;
+        a missing Case stays absent and NULL status keeps its open semantics.
+        """
+        ids: list[str] = sorted({cid for cid in flow_run_ids if cid})
+        out: dict[str, CaseReasonEvidence] = {}
+        for start in range(0, len(ids), 500):
+            chunk: list[str] = ids[start:start + 500]
+            marks: str = ",".join("?" for _ in chunk)
+            rows = self._conn().execute(
+                f"""
+                SELECT f.flow_run_id, f.status,
+                       (SELECT e.event_type FROM flow_events e
+                        WHERE e.flow_run_id=f.flow_run_id AND e.event_type IN
+                            ('flow.quota_paused', 'flow.quota_resumed',
+                             'flow.quota_pause_declined', 'case.manager_respawned')
+                        ORDER BY e.id DESC LIMIT 1) AS quota_event,
+                       (SELECT e.event_type FROM flow_events e
+                        WHERE e.flow_run_id=f.flow_run_id AND e.event_type IN
+                            ('flow.transient_paused', 'flow.transient_resumed',
+                             'flow.transient_pause_exhausted', 'case.manager_respawned')
+                        ORDER BY e.id DESC LIMIT 1) AS retry_event
+                FROM flow_runs f WHERE f.flow_run_id IN ({marks})
+                """,
+                chunk,
+            ).fetchall()
+            for row in rows:
+                out[str(row["flow_run_id"])] = CaseReasonEvidence(
+                    status=row["status"],
+                    quota_paused=row["quota_event"] == "flow.quota_paused",
+                    retry_paused=row["retry_event"] == "flow.transient_paused",
+                )
+        return out
+
     def case_quota_pause(self, flow_run_id: str) -> Optional[Dict[str, Any]]:
         """[quota-resume] The Case's OPEN quota pause, or None.
 
@@ -9361,6 +9407,20 @@ class MeshDB:
             params,
         ).fetchall()
         return [{k: v for k, v in dict(r).items() if k != "completion_enrolled"} for r in rows]
+
+    def running_job_sessions(self, session_ids: list[str]) -> set[str]:
+        """Requested owners with a running job; historical terminals never cap it."""
+        ids: list[str] = sorted({sid for sid in session_ids if sid})
+        out: set[str] = set()
+        for start in range(0, len(ids), 500):
+            chunk: list[str] = ids[start:start + 500]
+            marks: str = ",".join("?" for _ in chunk)
+            rows = self._conn().execute(
+                f"SELECT DISTINCT session_id FROM jobs "
+                f"WHERE status='running' AND session_id IN ({marks})", chunk,
+            ).fetchall()
+            out.update(str(row["session_id"]) for row in rows)
+        return out
 
     def list_jobs_for_sessions(
         self, session_ids: List[str], limit: int = 200

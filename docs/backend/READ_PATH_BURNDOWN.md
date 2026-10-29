@@ -49,7 +49,7 @@ Implementation, merge and production verification are recorded separately.
 
 ### J2 — Completion reliability
 
-- Priority: P1. Status: VERIFIED (implementation, targeted checks and CI; PR review pending).
+- Priority: P1. Status: VERIFIED (implementation, targeted checks, review, CI and merge).
   Depends on J1 (closed live). Operator authorized review, corrections and merge on 2026-10-29.
 - Classification: both correctness defects deterministically reproduced, correction
   implemented. Discovery/retry/restart guarantees are bounded as specified below.
@@ -76,8 +76,8 @@ Implementation, merge and production verification are recorded separately.
   (base `27081a0`), main's documentation-only `618cd4c` merged as `77e2260`.
   Final implementation/test head `f9c213d` passed CI
   ([run 40731253503](https://github.com/nydiokar/AI-team/actions/runs/40731253503)).
-  Tests: focused and seam evidence below. Merge/production: review in progress /
-  not merged / not deployed.
+  Review correction `d0526eb` passed CI run `40858265943`. PR #262 merged as
+  `d52a83b` on 2026-10-29. Production: not yet verified; no rollout claim.
 
 #### J2 correction contract (2026-10-28, before implementation)
 
@@ -282,7 +282,9 @@ These are operator procedures, not production mutations performed in this dispat
 
 ### J3 — Session-reason N+1 and running-job truncation
 
-- Priority: P1, MUST-FIX after J2. Status: TODO. Depends on J2 closure and fresh main.
+- Priority: P1, MUST-FIX after J2. Status: VERIFIED (implementation/targeted checks),
+  pending review/integration; base main `d52a83b`.
+  J2 review/correction/merge is complete; production rollout remains separate.
 - Classification: confirmed defects. `build_reason_batch` does per-case
   `get_flow_run`, `case_quota_pause`, `transient_pause`; its N+1 test permits 30
   per-case calls for ten cases. `list_jobs_for_sessions` limits all statuses to 200
@@ -300,7 +302,56 @@ These are operator procedures, not production mutations performed in this dispat
   primary session state, independent pause/resume/decline/exhaustion/respawn events,
   quota-over-retry precedence and event-ID ordering despite reversed timestamps.
   An old running job survives >200 newer completed jobs. No full event-log folds.
-- PR/commit/tests: none. Merge/production: not implemented / not verified.
+- Implementation: `feat/session-reason-batch`, based on merged J2 `d52a83b`.
+  Tests/evidence below. Review, PR/merge and production verification remain separate.
+
+#### J3 implementation evidence — 2026-10-29
+
+Tests-first real-SQLite reproductions on merged J2 measured **8 / 65 / 605 / 1508**
+reason data SELECTs for **1 / 20 / 200 / 501** distinct waiting Cases. A separate
+regression created one old running job plus 201 newer terminal jobs: the old reader
+returned only terminals and incorrectly derived `open_case_idle`.
+
+`MeshDB.running_job_sessions` now returns distinct requested running owners without
+historical-row limits. `case_reason_evidence` returns a frozen typed projection of
+Case status and two independent newest relevant event types; both readers deduplicate
+and chunk at 500 IDs. The reason builder keeps inbox and live-task predicates, chunks
+their IN lists, and replaces only per-Case status/pause reads. Existing single-Case
+pause helpers and their payload enrichment are unchanged. No migration, timer, new
+inbox, admission or scheduler policy is introduced.
+
+Real SQLite tracing now proves **5 / 5 / 5 / 10** reason SELECTs and **7 / 7 / 7 / 13**
+complete list SELECTs (base list + cached enrolled queue overlay) at those sizes.
+The existing test that permitted 30 per-Case calls now requires zero. Tests cover
+shared/missing Cases, eventless and closed/cancelled/blocked/NULL/normalized statuses,
+all primary session states and manager/worker roles, independent pause/resume/decline/
+exhaustion/respawn sequences, quota precedence, and event-ID order with reversed
+wall-clock timestamps. The old running job now remains `waiting_job`. EXPLAIN uses
+the existing flow-events index for both bounded event probes and the jobs-session
+index for running owners, with no temporary Case sort or payload/objective reads.
+Repeated input IDs issue one query, empty ID lists issue none.
+
+```bash
+/home/cifran/dev/AI-team/.venv/bin/pytest tests/test_session_reason.py tests/test_session_reason_view.py tests/test_session_reason_batch.py tests/test_session_service.py tests/test_session_service_lifecycle.py tests/test_db_write_resilience.py tests/test_turn_queue_stage6.py tests/test_a104_single_pending_source.py tests/test_control_api.py tests/test_case_quota_resume.py tests/test_case_transient_resume.py --tb=short -n 4
+```
+
+**308 passed, 8 existing dependency warnings in 47.69 s.** The direct five-file
+reason/view/service run passed 140 tests in 9.63 s before the final indexed-plan
+test was added (that test passed separately). New tests pass Ruff; modified legacy
+files add no diagnostic code/message versus base main. `git diff --check` passes.
+No paid backend, full/e2e suite, external notification or production write was run.
+Independent lead review reran the reason/batch/view files: **115 passed in 9.05 s**.
+The queue/API/pause/inbox seams were tested locally; production is not verified.
+
+Boundary review: this adds no entry point. The existing authenticated sessions GET
+validates limit 1–1000 and consumes no body; evidence materialization is bounded by
+requested IDs and 500-ID chunks, without history/payload reads. Existing shared sync
+handler admission is unchanged; full Session/history materialization and aggregate
+memory at 100 calls remain unknown until J4, so route-specific admission sizing is
+explicitly deferred to J4/S3 before higher-volume/untrusted use (also in CONTEXT).
+SQLite lock timeout is not a statement deadline; S3 remains open. Backing-read
+failures retain presentational degradation; no API availability-policy change or
+new startup probe is claimed. No architecture/DB authority or worker changes.
 
 ### J4 — Session-list projection and indexing
 
@@ -550,12 +601,11 @@ Implementation CI passed:
 on `1d23442`, 3m24s. Subsequent commits only update programme evidence; current
 head check status is available on PR #261. Production closure is recorded above.
 
-Current dispatch: J2 implementation is verified locally and in CI in PR #262,
-awaiting review and explicit merge/deploy authorization. J1 production closure is complete.
-Next independently executable implementation after authorized J2 integration: J3
-session-reason N+1 and running-job truncation, with its five/seven SELECT budgets
-and full reason/queue-overlay equivalence above. J3–J5 remain mandatory TODO in order;
-none was started during J2. S1–S4 remain explicitly deferred, not closed.
+Current dispatch: the operator authorized PR #262 review/correction/merge and the
+next jobs on 2026-10-29. J2 is merged as `d52a83b`; production is not yet verified.
+J3 session-reason N+1/running-job truncation is implemented/verified on that fresh main,
+with its five/seven SELECT budgets and reason/queue-overlay equivalence above.
+J4/J5 follow in order. S1–S4 remain explicitly deferred, not closed.
 
 ### J2 lead review — 2026-10-29
 
