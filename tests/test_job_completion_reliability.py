@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import sqlite3
 import threading
 from unittest.mock import AsyncMock
@@ -342,6 +343,10 @@ async def test_permanent_closed_session_refusal_is_honest_and_not_retried(tmp_pa
     receipt = db.get_job_completion("job_x")
     assert receipt["action_state"] == "dead" and receipt["action_attempts"] == 1
     assert "action failed" in db.get_task("job_x")["reply_text"]
+    audit = db.get_task("job_x")
+    assert audit["status"] == "failed"
+    result = json.loads(audit["result"])
+    assert result["success"] is False and result["errors"]
     assert _kind(db, "watched_job") == []
 
 

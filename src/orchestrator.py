@@ -5251,7 +5251,8 @@ class TaskOrchestrator(ITaskOrchestrator):
                         try:
                             await asyncio.to_thread(
                                 self._record_managed_job_audit, job, session,
-                                {**payload, "reply": f"{payload['reply']}\n\nJob completion action failed: {error}"},
+                                {**payload, "success": False,
+                                 "reply": f"{payload['reply']}\n\nJob completion action failed: {error}"},
                             )
                         except ValueError as audit_error:
                             error = f"{error}; {audit_error}"[:500]

@@ -50,7 +50,7 @@ Implementation, merge and production verification are recorded separately.
 ### J2 — Completion reliability
 
 - Priority: P1. Status: VERIFIED (implementation, targeted checks and CI; PR review pending).
-  Depends on J1 (closed live). Merge and deployment remain NOT AUTHORIZED.
+  Depends on J1 (closed live). Operator authorized review, corrections and merge on 2026-10-29.
 - Classification: both correctness defects deterministically reproduced, correction
   implemented. Discovery/retry/restart guarantees are bounded as specified below.
 - Baseline evidence (before J2): `_job_completion_poller` advanced `_last_job_poll` after SELECT;
@@ -76,7 +76,7 @@ Implementation, merge and production verification are recorded separately.
   (base `27081a0`), main's documentation-only `618cd4c` merged as `77e2260`.
   Final implementation/test head `f9c213d` passed CI
   ([run 40731253503](https://github.com/nydiokar/AI-team/actions/runs/40731253503)).
-  Tests: focused and seam evidence below. Merge/production: not authorized /
+  Tests: focused and seam evidence below. Merge/production: review in progress /
   not merged / not deployed.
 
 #### J2 correction contract (2026-10-28, before implementation)
@@ -556,3 +556,19 @@ Next independently executable implementation after authorized J2 integration: J3
 session-reason N+1 and running-job truncation, with its five/seven SELECT budgets
 and full reason/queue-overlay equivalence above. J3–J5 remain mandatory TODO in order;
 none was started during J2. S1–S4 remain explicitly deferred, not closed.
+
+### J2 lead review — 2026-10-29
+
+Reviewed PR #262 against the original J2 acceptance criteria and traced discovery,
+notification propagation, durable receipts, managed admission and restart recovery.
+The pre-correction focused seam run passed **289 tests, 8 existing warnings in
+60.52 s** (the recorded 11-file command plus the single-inbox and schema tests).
+
+Review found a refused/exhausted continuation audit inherited the successful job
+exit: its reply described action failure but task status was `completed` and
+`result.success=true`. A new assertion reproduced this on PR head. Set success
+false only for failed-action audits; ordinary job-outcome audits keep job status.
+Two existing refusal tests were corrected to require failed audit status.
+Notification/admission identity, retries and migration are unchanged.
+
+Correction verification: `pytest tests/test_job_completion_reliability.py tests/test_turn_queue_4d.py --tb=short` — **59 passed, 2 existing warnings in 8.22 s**.

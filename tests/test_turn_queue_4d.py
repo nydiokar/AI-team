@@ -216,7 +216,7 @@ def test_W05_transient_refusal_retries_then_audits_without_legacy_execution(tmp_
         _process(o, _job())
     assert db.get_job_completion("job_x")["action_state"] == "dead"
     rows = _legacy_session_rows(db)
-    assert [(r["id"], r["status"]) for r in rows] == [("job_x", "completed")]
+    assert [(r["id"], r["status"]) for r in rows] == [("job_x", "failed")]
     assert db.get_session("sess-1")["status"] == before  # no whole-row save
 
 
@@ -575,7 +575,7 @@ def test_RW01_untyped_admission_error_retries_then_audits_and_never_escapes(tmp_
     for _ in range(4):
         _process(o, _job())
     assert db.get_job_completion("job_x")["action_state"] == "dead"
-    assert db.get_task("job_x")["status"] == "completed"  # audit record
+    assert db.get_task("job_x")["status"] == "failed"  # refused-action audit
     assert o.notifier.calls == ["job_x"]
 
 
