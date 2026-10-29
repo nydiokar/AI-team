@@ -33,19 +33,20 @@ Current work:
 J1 is merged and live as `e0e2877` (PR #261), with production verification and rollback.
 J2 is reviewed/corrected and merged as `d52a83b` (PR #262); production rollout is
 not yet verified. The operator authorized review, fixes, merge and the next jobs
-on 2026-10-29. J3 reason batching/running-job evidence is locally verified, pending
-review/integration; J4
-session projections and J5 compact affiliations follow in order. Detailed scope
+on 2026-10-29. J3 reason batching/running-job evidence is reviewed and merged as
+`af4e008` (PR #263). J4 session projections/indexing are locally verified, pending
+review/integration; J5 compact affiliations follows next. Detailed scope
 and evidence: [`READ_PATH_BURNDOWN.md`](../docs/backend/READ_PATH_BURNDOWN.md).
 
 Read-boundary deferrals: J1 jobs reads allow four concurrent materializations, but
 historical text and SQL execution remain unbounded (S3; SQLite's 15 s busy timeout
-only bounds lock waits). J3 adds bounded 500-ID evidence queries, without changing
-`/api/sessions` admission/error policy. That route still has only the shared sync
-handler thread-pool bound and materializes full Sessions/history; aggregate memory
-at 100 calls is unknown. J4 must replace full-row list materialization; size a
-route-specific concurrency limit with the projection's measured memory alongside
-S3 before higher-volume/untrusted use. No hard server statement deadline is claimed.
+only bounds lock waits). J3 adds bounded 500-ID reason evidence queries. J4 replaces
+full-row session-list materialization and admits four concurrent reads through
+serialization (429 otherwise); its isolated-copy 1000-row traced peak is 7.76 MB
+(~31.0 MB for four, excluding SQLite/native memory). Historical scalar text still
+has no absolute byte bound; S3 retains the oversized-history contract and hard SQL
+deadline follow-up before higher-volume/untrusted use. Existing session-list
+JSON fallback and read-error/empty response behavior remain unchanged.
 J2's durable receipts and notification/admission/restart contracts are recorded in
 the burndown; merge is distinct from production verification.
 

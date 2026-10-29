@@ -282,8 +282,9 @@ These are operator procedures, not production mutations performed in this dispat
 
 ### J3 — Session-reason N+1 and running-job truncation
 
-- Priority: P1, MUST-FIX after J2. Status: VERIFIED (implementation/targeted checks),
-  pending review/integration; base main `d52a83b`.
+- Priority: P1, MUST-FIX after J2. Status: VERIFIED (implementation/review/merge).
+  PR [#263](https://github.com/nydiokar/AI-team/pull/263), merge `af4e008`;
+  CI run `40859652586` passed. Production verification remains separate.
   J2 review/correction/merge is complete; production rollout remains separate.
 - Classification: confirmed defects. `build_reason_batch` does per-case
   `get_flow_run`, `case_quota_pause`, `transient_pause`; its N+1 test permits 30
@@ -303,7 +304,8 @@ These are operator procedures, not production mutations performed in this dispat
   quota-over-retry precedence and event-ID ordering despite reversed timestamps.
   An old running job survives >200 newer completed jobs. No full event-log folds.
 - Implementation: `feat/session-reason-batch`, based on merged J2 `d52a83b`.
-  Tests/evidence below. Review, PR/merge and production verification remain separate.
+  Tests/evidence below. Reviewed and merged via PR #263 as `af4e008`;
+  production verification remains separate.
 
 #### J3 implementation evidence — 2026-10-29
 
@@ -355,7 +357,8 @@ new startup probe is claimed. No architecture/DB authority or worker changes.
 
 ### J4 — Session-list projection and indexing
 
-- Priority: P2, REQUIRED after J3. Status: TODO. Depends on J3 and revalidation.
+- Priority: P2, REQUIRED after J3. Status: VERIFIED (implementation/targeted checks),
+  pending review/integration; base main `af4e008`.
 - Classification: confirmed overfetch; index benefit is a measured hypothesis,
   not an established production latency promise.
 - Evidence: `MeshDB.list_sessions` selects full rows ordered by `updated_at`;
@@ -373,7 +376,67 @@ new startup probe is claimed. No architecture/DB authority or worker changes.
   matches existing empty/error/malformed-row behavior. Pinned sessions older than
   the newest 200 remain retrievable (UI pinned limit 1000). Fresh/existing migrations
   pass; all three query shapes avoid an unnecessary sort with measured query plans.
-- PR/commit/tests: none. Merge/production: not implemented / not verified.
+- Implementation: `feat/session-list-projection`; evidence below. PR/merge and
+  production verification remain separate.
+
+#### J4 implementation evidence — 2026-10-29
+
+Tests-first checks failed on J3 main: the list path constructed full mutable
+Sessions, and unfiltered/pinned/unpinned shapes all needed temporary ordering sorts
+(**4 failed, 6 deselected in 1.88 s**). `MeshDB.list_session_summaries` now selects
+explicit view/reason columns only; `SessionStore.list_summaries` constructs a frozen
+Pydantic projection. Full `get`/`save`/`list_all` and JSON history remain intact.
+Both adapters share the exact old normalization and the same pure SessionView
+conversion. `model_construct` intentionally preserves the legacy dataclass parser's
+non-coercing tolerance; status/cache-count rejection, origin/list defaults,
+healthy-empty, per-row skip and DB-error/JSON fallback behavior are unchanged.
+The cache-count scalar remains selected only to preserve invalid-row rejection.
+
+Migration 48 adds `sessions(updated_at DESC)` and
+`sessions(COALESCE(keep_pinned,0), updated_at DESC)` indexes after EXPLAIN on an
+isolated online backup (2112 sessions). Before indexes all three shapes scanned
+and used a temporary ordering B-tree; compact SQL now uses the appropriate index
+without a sort. Ordering remains `updated_at DESC`; synthetic equal timestamps
+preserve prior rowid/insertion ties, with no new tie-breaker. A legacy nullable
+fixture retains COALESCE semantics; a pinned session older than 219 newer sessions
+remains retrievable. Fresh migration, explicit 47→48 and reopen preserve all rows.
+
+Focused command:
+
+```bash
+/home/cifran/dev/AI-team/.venv/bin/pytest tests/test_session_list_projection.py tests/test_view_models.py tests/test_session_origin.py tests/test_session_service.py tests/test_session_service_lifecycle.py tests/test_session_reason.py tests/test_session_reason_view.py tests/test_session_reason_batch.py tests/test_control_api.py tests/test_control_api_write.py tests/test_model_picker.py tests/test_flow_schema_extension.py tests/test_agent_inbox.py tests/test_turn_queue_stage8a.py --tb=short -n 4
+```
+
+**362 passed, 8 existing warnings in 39.34 s.** The independent review rerun of
+projection/view/reason-batch files passed **129 tests in 12.69 s**; the final worker
+rerun passed **129 tests in 10.19 s**. Full view
+mapping (all primary statuses, configured model, malformed/default origins, last
+result/previous native ID, reasons and enrolled queue overlay) matches the full
+reader. The 100-call API test holds four serializers, proves 96 requests receive
+429 before materialization, and verifies permit release on success, read failure
+and serialization failure. New modules pass Ruff; modified legacy modules add no
+diagnostic code/message relative to J3 main; `git diff --check` passes.
+No paid CLI, full/e2e suite or production mutation was run.
+
+Isolated-copy, checkout-config measurements compare BOTH readers with the same indexes, no reasons
+or queue overlay, 200 rows and 30 warmed read+view+JSON samples: complete output
+equality (217666 JSON bytes); source-row JSON 3669784→309421 bytes; traced Python
+peak 10697541→1451630 bytes. Full reader min/median/max 32.506/33.414/80.546 ms;
+compact 18.951/21.930/25.285 ms. These are fixture/copy observations, not production
+latency or RSS guarantees. A separate compact 1000-row run WITH reasons/overlay
+produced 1149855 JSON bytes and a 7759002-byte traced peak (~31.0 MB for four).
+
+Service boundary: existing authenticated GET limit 1–1000 and pinned validation
+precede reads; no body consumed. A local four-slot nonblocking semaphore is held
+through materialization AND JSONResponse serialization; excess returns structured
+429 `sessions_busy`. At N=100 only four materializations execute, 96 reject. No
+new endpoint or generic gate framework; thread execution/inbox/scheduler patterns
+remain unchanged. Backing DB failure retains the existing JSON fallback; exhausted
+read errors retain the old empty response contract. SQLite's 15 s busy timeout is
+only a lock bound, with no hard statement/server execution deadline (S3). Historical
+scalar text/JSON-fallback files remain unbounded in bytes; absolute byte handling
+and cancellation need S3's separate compatibility contract before high-volume or
+untrusted use. No claim of a hard RSS/output bound or successful production rollout.
 
 ### J5 — Compact affiliations
 
@@ -603,9 +666,10 @@ head check status is available on PR #261. Production closure is recorded above.
 
 Current dispatch: the operator authorized PR #262 review/correction/merge and the
 next jobs on 2026-10-29. J2 is merged as `d52a83b`; production is not yet verified.
-J3 session-reason N+1/running-job truncation is implemented/verified on that fresh main,
-with its five/seven SELECT budgets and reason/queue-overlay equivalence above.
-J4/J5 follow in order. S1–S4 remain explicitly deferred, not closed.
+J3 session-reason N+1/running-job truncation is reviewed and merged as `af4e008`
+(PR #263), with its five/seven SELECT budgets and reason/queue-overlay equivalence.
+J4 projection/index48/concurrency checks are locally verified, awaiting review/merge;
+J5 compact affiliations is next after J4 integration. S1–S4 stay deferred, not closed.
 
 ### J2 lead review — 2026-10-29
 

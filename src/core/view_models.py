@@ -12,6 +12,7 @@ from dataclasses import dataclass, asdict
 from typing import Any, Dict, List, Optional
 
 from src.core.interfaces import Session, SessionStatus
+from src.core.session_projection import SessionListProjection
 from src.core.session_reason import SessionReason
 
 
@@ -70,7 +71,7 @@ class SessionView:
     turn_queue: Optional[SessionTurnQueueState] = None
 
     @classmethod
-    def from_session(cls, s: Session) -> "SessionView":
+    def from_session(cls, s: Session | SessionListProjection) -> "SessionView":
         origin = s.origin
         try:
             # The default the DRIVER will actually run (config default → catalog

@@ -25,10 +25,12 @@ Hard invariants (do not weaken):
 """
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, asdict
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 from src.core.interfaces import Session, SessionStatus
+from src.core.session_projection import SessionListProjection
 
 # Case statuses that mean the Case is CLOSED. Mirrors MeshDB._CLOSED_STATUSES
 # (db.py) — NULL / 'blocked' count as OPEN. Kept as a literal (not imported) so
@@ -108,7 +110,7 @@ class _ReasonBatch:
     live_task_sessions: frozenset = frozenset()
 
 
-def build_reason_batch(db: Any, sessions: List[Session]) -> _ReasonBatch:
+def build_reason_batch(db: Any, sessions: Sequence[Session | SessionListProjection]) -> _ReasonBatch:
     """Load read-only evidence in deduplicated chunks of at most 500 IDs.
 
     Each full chunk needs five data SELECTs: running-job owners, two inbox
@@ -180,7 +182,7 @@ def build_reason_batch(db: Any, sessions: List[Session]) -> _ReasonBatch:
     )
 
 
-def derive_session_reason(session: Session, batch: _ReasonBatch) -> Optional[SessionReason]:
+def derive_session_reason(session: Session | SessionListProjection, batch: _ReasonBatch) -> Optional[SessionReason]:
     """Derive the secondary reason for ONE session from a pre-loaded ``batch``.
 
     Issues NO DB calls — all evidence is read from ``batch`` (built once per
@@ -237,7 +239,7 @@ def derive_session_reason(session: Session, batch: _ReasonBatch) -> Optional[Ses
     return SessionReason(kind="idle", confidence="high")
 
 
-def derive_session_reasons(db: Any, sessions: List[Session]) -> Dict[str, Optional[SessionReason]]:
+def derive_session_reasons(db: Any, sessions: Sequence[Session | SessionListProjection]) -> Dict[str, Optional[SessionReason]]:
     """Batched, N+1-free reason map for a page of sessions: {session_id: reason}.
 
     One ``build_reason_batch`` (five data SELECTs per 500-ID chunk) followed

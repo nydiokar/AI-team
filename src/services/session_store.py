@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from src.core.interfaces import Session, SessionStatus, SessionOrigin
+from src.core.session_projection import SessionListProjection, session_values
 from src.core.timeutil import now_iso
 
 logger = logging.getLogger(__name__)
@@ -190,6 +191,41 @@ class SessionStore:
                 pass
         return sessions
 
+    def list_summaries(self, limit: int = 200, *, keep_pinned: Optional[bool] = None) -> List[SessionListProjection]:
+        """Compact DB reads, with the full reader's same empty/error/JSON rules."""
+        # Read from DB first when available (DB is canonical state source).
+        try:
+            from src.control.db import get_db
+            db = get_db()
+            if db is not None:
+                rows = db.list_session_summaries(limit=limit, keep_pinned=keep_pinned)
+                sessions: list[SessionListProjection] = []
+                for row in rows:
+                    try:
+                        sessions.append(SessionListProjection.from_row(row))
+                    except Exception as e:
+                        sid = row.get("session_id", "unknown")
+                        logger.warning(
+                            "session_db_row_parse_failed id=%s err=%s — skipping",
+                            sid, e,
+                        )
+                return sessions
+        except Exception:
+            pass
+        # Fall back to JSON directory scan when DB is unavailable.
+        sessions = []
+        for p in sorted(_SESSIONS_DIR.glob("*.json"), key=lambda x: x.stat().st_mtime, reverse=True):
+            if len(sessions) >= limit:
+                break
+            try:
+                session = SessionListProjection.from_row(json.loads(p.read_text(encoding="utf-8")))
+                if keep_pinned is not None and bool(session.keep_pinned) != keep_pinned:
+                    continue
+                sessions.append(session)
+            except Exception:
+                pass
+        return sessions
+
     def delete(self, session_id: str) -> None:
         path = _SESSIONS_DIR / f"{session_id}.json"
         if path.exists():
@@ -320,61 +356,4 @@ class SessionStore:
 
     @staticmethod
     def _from_dict(d: dict) -> Session:
-        def _parse_list(value):
-            """Parse a field that may be a JSON string (DB) or already a list (JSON file)."""
-            if isinstance(value, str):
-                try:
-                    return json.loads(value)
-                except Exception:
-                    return []
-            return value or []
-
-        def _parse_origin(value):
-            """Read origin from a nested dict (JSON file) or JSON string (DB row);
-            absent/unparseable → default SessionOrigin (telegram/user)."""
-            if isinstance(value, str):
-                try:
-                    value = json.loads(value)
-                except Exception:
-                    value = None
-            if isinstance(value, dict):
-                return SessionOrigin(
-                    channel=value.get("channel", "telegram"),
-                    kind=value.get("kind", "user"),
-                )
-            return SessionOrigin()
-
-        return Session(
-            session_id=d["session_id"],
-            backend=d["backend"],
-            repo_path=d["repo_path"],
-            status=SessionStatus(d["status"]),
-            created_at=d["created_at"],
-            updated_at=d["updated_at"],
-            machine_id=d.get("machine_id", ""),
-            backend_session_id=d.get("backend_session_id", ""),
-            model=d.get("model") or None,
-            effort=d.get("effort") or None,
-            last_task_id=d.get("last_task_id", ""),
-            last_artifact_path=d.get("last_artifact_path", ""),
-            last_summary=d.get("last_summary", ""),
-            last_user_message=d.get("last_user_message", ""),
-            last_result_summary=d.get("last_result_summary", ""),
-            last_files_modified=_parse_list(d.get("last_files_modified", [])),
-            telegram_chat_id=d.get("telegram_chat_id"),
-            telegram_thread_id=d.get("telegram_thread_id"),
-            owner_user_id=d.get("owner_user_id"),
-            task_history=_parse_list(d.get("task_history", [])),
-            origin=_parse_origin(d.get("origin")),
-            driver_type=d.get("driver_type", "") or "",
-            driver_status=d.get("driver_status", "") or "",
-            cache_health=d.get("cache_health", "unknown") or "unknown",
-            cache_unhealthy_count=int(d.get("cache_unhealthy_count", 0) or 0),
-            previous_backend_session_ids=_parse_list(d.get("previous_backend_session_ids", [])),
-            current_case_id=d.get("current_case_id") or None,
-            case_role=d.get("case_role") or None,
-            role_boot=d.get("role_boot") or None,
-            continued_from=d.get("continued_from") or None,
-            keep_pinned=bool(d.get("keep_pinned", False)),
-            keep_note=d.get("keep_note") or "",
-        )
+        return Session(**session_values(d))
