@@ -9,7 +9,7 @@ over HTTP instead, via this client.
 Design notes:
   - stdlib urllib only (mirrors src/worker/agent.py `_HTTP`) — no new deps.
   - Bearer auth with WORKER_TOKEN, same as every task-server endpoint.
-  - Methods return None / [] on failure rather than raising, because the gateway
+  - Legacy methods return None / [] on failure rather than raising, because the gateway
     must tolerate the server being unreachable: that condition is precisely what
     triggers fallback mode (Phase 4). Callers distinguish "server said no" from
     "server unreachable" via is_healthy() / the None sentinel.
@@ -26,6 +26,8 @@ import urllib.parse
 import urllib.request
 from typing import Any, Dict, List, Optional
 
+from pydantic import JsonValue
+
 from src.control.mesh_health import MeshHealth, get_mesh_health
 
 logger = logging.getLogger(__name__)
@@ -35,7 +37,8 @@ class TaskServerClient:
     """Synchronous HTTP client for the mesh task server.
 
     Failures are swallowed and surfaced as None/[]; the gateway treats an
-    unreachable server as "mesh unhealthy", not as a crash.
+    unreachable server as "mesh unhealthy", not as a crash. The J2 completion
+    protocol is explicitly fail-closed: failure must not look like an empty page.
     """
 
     def __init__(
@@ -210,6 +213,31 @@ class TaskServerClient:
         elif ownership:
             params["ownership"] = ownership
         return self._get("/jobs", params) or []
+
+    def list_job_completions(self, after_id: str = "") -> dict[str, JsonValue]:
+        """J2 completion protocol: bounded and fail-closed, unlike legacy lists.
+
+        A 404/timeout/malformed body MUST NOT become an empty successful sweep.
+        New controller protocol is required before a federated gateway upgrades.
+        """
+        from .job_completion import JOB_COMPLETION_BATCH, JobCompletionPage
+
+        query = urllib.parse.urlencode({"after_id": after_id, "limit": JOB_COMPLETION_BATCH})
+        req = urllib.request.Request(f"{self._base}/jobs/completions?{query}", headers=self._headers())
+        with urllib.request.urlopen(req, timeout=self._timeout) as response:
+            body = response.read(1048577)
+        if len(body) > 1048576:
+            raise ValueError("job completion response exceeds 1 MiB")
+        page = JobCompletionPage.model_validate_json(body)
+        ids = [j.id for j in page.jobs]
+        if ids != sorted(set(ids)):
+            raise ValueError("job completion page is not strictly ordered")
+        if page.jobs and any(j.id <= after_id for j in page.jobs):
+            raise ValueError("job completion cursor did not advance")
+        expected_cursor = page.jobs[-1].id if len(page.jobs) == JOB_COMPLETION_BATCH else None
+        if page.next_cursor != expected_cursor:
+            raise ValueError("invalid job completion cursor")
+        return page.model_dump(mode="json")
 
     # ------------------------------------------------------------------
     # Tasks

@@ -16,6 +16,7 @@ import json
 import logging
 import re
 import shutil
+import sqlite3
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -25,8 +26,8 @@ from pathlib import Path
 import threading
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-from fastapi import BackgroundTasks, Depends, FastAPI, File, HTTPException, Request, Security, UploadFile
-from fastapi.responses import FileResponse
+from fastapi import BackgroundTasks, Depends, FastAPI, File, HTTPException, Query, Request, Security, UploadFile
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
@@ -34,6 +35,7 @@ _STAGING_ROOT = Path(__file__).resolve().parent.parent.parent / "state" / "uploa
 
 from src.control.app_metrics import RequestTimingMiddleware
 from src.control.db import cache_heartbeat_interval_sec, get_db
+from src.control.job_completion import JobCompletionPage
 from src.control.mesh_health import get_mesh_health
 from src.control.node_registry import NodeInfo, NodeCapabilities, get_registry
 from src.control.telemetry_store import TelemetryStore
@@ -44,6 +46,7 @@ logger = logging.getLogger(__name__)
 
 _SLOW_REQUEST_SECONDS = 1.0
 _MESH_HEALTH_SAMPLE_SECONDS = 30.0
+_JOB_COMPLETION_READ_SLOTS = threading.BoundedSemaphore(4)
 
 # --- Deferred telemetry projection ------------------------------------------
 # Raw telemetry events insert synchronously (fast, indexed). The CPU-bound turn
@@ -2237,6 +2240,29 @@ def list_jobs(
     )
 
 
+@app.get("/jobs/completions", dependencies=[Depends(_require_auth)], responses={
+    200: {"model": JobCompletionPage, "description": "Bounded eligible terminal snapshot page."},
+    429: {"description": "Concurrent completion reads exhausted."},
+    503: {"description": "Completion authority unavailable."},
+})
+def job_completions(
+    after_id: str = Query("", max_length=128, pattern="^[A-Za-z0-9_-]*$"),
+    limit: int = Query(25, ge=1, le=25),
+) -> JSONResponse:
+    """Compact, clock-independent completion sweep for explicit federation."""
+    if not _JOB_COMPLETION_READ_SLOTS.acquire(blocking=False):
+        raise HTTPException(status_code=429, detail="job_completion_busy")
+    try:
+        db = get_db()
+        if db is None:
+            raise HTTPException(status_code=503, detail="job_completion_unavailable")
+        return JSONResponse(db.job_completion_page(after_id, limit))
+    except (sqlite3.Error, ValueError):
+        raise HTTPException(status_code=503, detail="job_completion_unavailable") from None
+    finally:
+        _JOB_COMPLETION_READ_SLOTS.release()
+
+
 @app.get("/jobs/{job_id}", dependencies=[Depends(_require_auth)])
 def get_job(job_id: str) -> Dict[str, Any]:
     db = get_db()
@@ -2245,4 +2271,4 @@ def get_job(job_id: str) -> Dict[str, Any]:
     job = db.get_job(job_id)
     if not job:
         raise HTTPException(status_code=404, detail=f"Job {job_id!r} not found")
-    return job
+    return {k: v for k, v in job.items() if k != "completion_enrolled"}

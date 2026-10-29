@@ -49,10 +49,11 @@ Implementation, merge and production verification are recorded separately.
 
 ### J2 — Completion reliability
 
-- Priority: P1, NEXT MUST-FIX. Status: TODO. Depends on J1's selected-source seam.
-- Classification: code-established correctness risks; deterministic reproductions
-  required before selecting a fix.
-- Evidence: `_job_completion_poller` advances `_last_job_poll` after SELECT;
+- Priority: P1. Status: VERIFIED (implementation, targeted checks and CI; PR review pending).
+  Depends on J1 (closed live). Operator authorized review, corrections and merge on 2026-10-29.
+- Classification: both correctness defects deterministically reproduced, correction
+  implemented. Discovery/retry/restart guarantees are bounded as specified below.
+- Baseline evidence (before J2): `_job_completion_poller` advanced `_last_job_poll` after SELECT;
   `complete_job`/`fail_job` compute timestamps before `_write` obtains its lock.
   Capturing the boundary before SELECT alone therefore still misses delayed commits.
   `_process_terminal_job` adds to `_processed_terminal_jobs` before notification,
@@ -71,7 +72,213 @@ Implementation, merge and production verification are recorded separately.
   disposition with evidence if outside the supported recovery contract. Do not
   equate in-memory deduplication with durable delivery. If a risk is disproven,
   record the reproducer and reason instead of implementing a speculative fix.
-- PR/commit/tests: none. Merge/production: not implemented / not verified.
+- PR: [#262](https://github.com/nydiokar/AI-team/pull/262), implementation `adfc2f4`
+  (base `27081a0`), main's documentation-only `618cd4c` merged as `77e2260`.
+  Final implementation/test head `f9c213d` passed CI
+  ([run 40731253503](https://github.com/nydiokar/AI-team/actions/runs/40731253503)).
+  Tests: focused and seam evidence below. Merge/production: review in progress /
+  not merged / not deployed.
+
+#### J2 correction contract (2026-10-28, before implementation)
+
+Source tracing also found two swallowed Telegram error layers: NotificationService
+and TelegramInterface. Push was explicitly best-effort/fire-and-forget already.
+A moved in-memory mark cannot observe real Telegram failure or recover a restart.
+
+Smallest coherent correction: use the existing controller SQLite store for a
+specialized job-effect receipt table, plus the existing managed turn admission
+identity (`watched:<job_id>`). A receipt is NOT another agent inbox: it owns only
+job side-effect delivery and never answers what an agent is waiting for. Reusing
+mesh task rows as discovery receipts would fabricate duplicate conversation turns
+for notify-agent jobs; existing managed effects consume already-terminal agent
+turns and do not own watched process discovery/admission. No new broker/service.
+
+- Discovery uses eligible terminal rows absent from receipts, independent of any
+  timestamp/start time. Migration 47 enrolls existing running jobs and future jobs;
+  already-terminal pre-migration jobs stay historical (no notification storm).
+  Recovery of those old outcomes requires an explicit operator backfill decision.
+- One immutable bounded snapshot per globally identified job, first observation
+  wins (same job-ID dedupe contract as the old local/remote union). Durable notice
+  and action receipts are independent: successful notice is not repeated merely
+  because admission retries. Notify-only action is an idempotent terminal audit;
+  notify-agent action is the existing permanently idempotent managed admission.
+  The retired best-effort/session-save helper and old watermark/processed-set
+  branches have no remaining callers and are removed from the live path.
+- Five attempts/effect, serial bounded batches (25), 120 s token-fenced lease;
+  20 s notice and 30 s action wait bounds. Expired leases recover after a restart;
+  stale holders cannot acknowledge a newer claim. SQL failure preserves pending
+  intent; unknown sends may be repeated. Exhaustion/permanent refusal is recorded
+  dead with a bounded error and an essential log, never reported as successful.
+- Notifications: opt-in strict Telegram error propagation for watched jobs only.
+  Other callers retain best effort. A successful receipt means the notification
+  call completed, not human receipt. Web Push remains its existing best-effort
+  channel; it is not promoted to durable per-subscription delivery. Retries after
+  a timeout, partial Telegram send or send-before-ack crash can duplicate notices.
+- Continuations: no unmanaged execution fallback. Supported sessions are born
+  managed; un-enrolled/closed/gone sessions end in explicit refusal/audit. Transient
+  carrier/storage/capacity failures retry. Commit-before-ack replays the same turn;
+  admission is distinct from execution/completion of that turn. Operator holds and
+  existing Case/lineage rules remain authoritative.
+- Federation gets a bounded authenticated completion-page read (compact projection,
+  25 rows, bounded cursor/body), not the old newest-50/start-time window. A bounded
+  rotating keyset scan resets at EOF; a terminal transition behind its cursor is
+  found on a later sweep. Receipts survive restarts; scan cursors need not. An old
+  server without the new protocol fails explicitly, never silently falls back to
+  lossy listing. A local controller DB is required for receipts even in federation;
+  absent DB pauses effects. Deploy authority/controller before compatible gateways.
+- No exactly-once external notification claim. One durable continuation identity
+  is guaranteed by existing admission constraints; an exhausted/withdrawn/refused
+  action is not described as delivered execution. J3–J5 and S1–S4 stay untouched.
+
+#### J2 implementation and verification record
+
+Reproductions were run before implementation: delayed writer timestamps at :10,
+blocks before write acquisition, another completion is read at :11, poll advances
+past :12, delayed writer commits, timestamp reader loses it. The same test then
+requires durable polling to find BOTH jobs. A raising notifier is called once by
+the old processed-set path despite two deliveries; the regression requires two
+attempts and a successful durable notice receipt. Both tests failed on the old
+implementation (recorded in `/tmp/ai-team-j2-red.txt`), not merely hypothetical races.
+
+The new tests use real file-backed SQLite and the real admission/scheduler seams,
+with fake transports/carriers and the paid-backend spawn guard. Cases include:
+
+- Delayed commits and old start/update timestamps; completion before gateway start.
+- Known send failures; real NotificationService → TelegramInterface error propagation;
+  non-job callers retain best effort; actual sends are replaced by async spies.
+- Notification failure with successful admission and the converse; retries never
+  repeat an acknowledged independent effect. Five failures become durable dead
+  state without starving later jobs. Backing-store contention refunds known attempts.
+- Send-before-ack loss may duplicate notice; admission-before-ack loss, a real DB
+  reopen and a fresh gateway instance still yield one turn. Cancellation leaves
+  a lease; expiry recovers. Last-attempt committed action is reconciled before
+  budget exhaustion. Stale lease acknowledgements are rejected.
+- Ten simultaneous competing deliveries cannot send/admit twice while a lease is
+  held. A 20 s soft pass budget leaves unattempted work durable for later passes
+  (one current effect can overrun it up to its own timeout; not a hard SQL deadline).
+- Full poll → durable managed admission → real scheduler → fake carrier claim →
+  real completion → fresh gateway poll preserves one identity. This proves the
+  controller seam, not a paid backend turn or external human receipt.
+- Closed/un-enrolled continuation refusal, operator-stop holds, Case affiliation,
+  Case interrupt/session close withdrawal, notify-only transcript/audit semantics.
+  Failed actions leave an explicit failure explanation in the audit reply.
+- 131 remote completions, starts before gateway startup, a terminal transition
+  behind a saved cursor, protocol 404/oversize/truncation/invalid status/cursor,
+  and previously persisted effects draining even during remote discovery outage.
+- Invalid legacy owner IDs are never truncated into another recipient: they
+  become unroutable/dead snapshots, retain original evidence in jobs, and cannot
+  poison a valid completion on the same page.
+- Real migration 46→47 skips historical terminals, retains running/future jobs;
+  fresh DBs converge. J1 read budgets, response semantics and zero-HTTP guarantees
+  remain covered. Internal eligibility metadata is excluded from public job reads.
+
+Final targeted commands:
+
+```bash
+/home/cifran/dev/AI-team/.venv/bin/pytest tests/test_job_completion_reliability.py tests/test_job_completion_protocol.py tests/test_turn_queue_4d.py tests/test_watched_jobs.py tests/test_jobs_read_authority.py tests/test_task_server_client.py tests/test_push_notifications.py tests/test_output_truncation.py tests/test_telegram_session_flow.py tests/test_turn_queue_a84_effects.py tests/test_control_api_write.py --tb=short -n 4
+/home/cifran/dev/AI-team/.venv/bin/pytest tests/test_a104_single_pending_source.py tests/test_flow_schema_extension.py --tb=short
+```
+
+Results: **268 passed, 8 existing dependency warnings in 34.51 s**; **21 passed in
+18.53 s**. The latter checks the single inbox authority and migration convergence.
+The final seam run includes the public completion-page OpenAPI schema assertion
+and the guard that avoids re-entering acknowledged effects.
+Ruff passes on the new model/test modules; comparison by diagnostic code/message
+against main found no introduced diagnostics in modified legacy modules.
+`git diff --check` passes. PR #262 is published; implementation head `f9c213d`
+passed CI run 40731253503. Subsequent evidence-only head checks are attached to the
+PR. Merge and deployment remain gated.
+No local full/e2e suite, external notification, paid backend, worker restart or J2
+production deployment is part of this verification.
+
+CI follow-up: runs 40729618645 and 40730413127 exposed three historical-schema
+fixtures that rewound the version ledger without removing migration-47 objects.
+The schema-42/44 fixtures now remove those objects before testing migration replay;
+production migration semantics are unchanged. The first run also exposed a
+cost-alert test that drained Tasks but did not wait for its trailing timer. The
+same failure was reproduced on current main with a 2 ms timer delay; the test now
+waits for the second check's completion event and retains its concurrency assertion.
+That test passes with the same timer delay. The three affected files pass together:
+`pytest tests/test_agent_inbox.py tests/test_turn_queue_stage8a.py tests/test_cost_alert_push.py --tb=short`
+— **70 passed, 2 existing warnings in 16.46 s**. Production cost-alert logic is
+unchanged. Final PR-head CI is required separately from these targeted checks.
+
+Isolated-copy measurements: SQLite backup of the pre-J1 snapshot (source opened
+`mode=ro`) into `/tmp`; only that copy migrated/changed. Migration 46→47 + MeshDB
+open took 0.0081 s, integrity check `ok`; all four running/recent × all/unowned
+public shapes equalled the pre-migration rows, historical completion page empty.
+Twenty-five synthetic jobs with maximum Unicode label/tail and a 64 KiB command
+produced a 211,064-byte page, 913,948-byte traced Python peak (~3.66 MB for four),
+maximum persisted snapshot 8,440 bytes. Thirty warmed read+serialization samples:
+1.899 / 1.931 median / 2.190 ms max. These are isolated observations, not production
+latencies or total RSS. Discovery uses ONE data SELECT + one executemany transaction;
+EXPLAIN uses `idx_jobs_completions` and the receipt PK for NOT EXISTS, no temporary
+sort. Complete response equality and indexed work matter in addition to query count.
+
+#### J2 service-boundary and operational contract
+
+- `GET /jobs/completions` keeps the existing worker-token authentication. A literal
+  route precedes `/jobs/{job_id}`. Cursor is ASCII ID syntax, max 128; limit 1–25,
+  no request body consumed. Invalid inputs are 422, invalid/missing auth 401/403,
+  unavailable/query-failing DB 503, four busy readers 429. No failure detail leaks.
+  Semaphore includes compact projection and JSON serialization; tests hold it in
+  serialization and verify rejection/release. The legacy jobs endpoint is unchanged.
+- One compact snapshot is capped at 16 KiB in SQLite; 25 entries/page, four pages
+  scanned serially/pass, at most 25 pending effect IDs loaded. Client rejects bodies
+  over 1 MiB and malformed/nonadvancing pages. At N=100 incoming calls, four active
+  page materializations and 96 small rejections replace 100 responses; synthetic
+  active Python estimate ~3.66 MB, excluding native SQLite/connection caches.
+  Existing S3 SQL-deadline/native-RSS limitations remain explicit, not closed.
+- DB mutations use existing five-second managed-write acquisition deadlines.
+  Reads retain SQLite's 15 s lock timeout, not a hard execution deadline. Remote
+  sockets retain two-second per-operation timeout, not a slow-drip total deadline.
+  Awaited notice/action have 20/30 s bounds; cancellation does not undo SQLite
+  work already running in a thread or a Telegram message accepted externally.
+- One serial consumer/pass, token-fenced 120 s leases, process-independent receipts.
+  After a crashed holder, retry waits until lease expiry (up to 120 s plus poll
+  scheduling). A statement/IO stall beyond the lease can leave external outcomes
+  uncertain; stale acknowledgement cannot mark a new lease done. Managed admission
+  idempotency still fences duplicate continuation intent. No exactly-once send claim.
+- Public jobs APIs retain process status semantics. Receipt dead/error state is
+  visible through the durable table and essential structured warning logs; this
+  PR does not add a dashboard delivery-status badge or per-subscription push receipts.
+  Configured Telegram errors propagate only for watched jobs. Push stays best effort;
+  no configured Telegram target means call completion, not a claim of human delivery.
+- Receipt identity keeps J1's global job-ID contract: registration allocates UUID
+  job IDs; local/remote duplicate IDs are one first-observed job. This is not a
+  new cross-controller namespace or multi-tenant federation guarantee. Receipt rows
+  are retained to preserve replay history; no unsafe TTL/prune is introduced.
+
+#### J2 rollout and explicit operator recovery (NOT AUTHORIZED yet)
+
+After approval: back up controller DB, preserve the J1 image, deploy controller
+gateway + task-server together (migration 47 is additive). Do not restart workers.
+For an older federated installation, upgrade its authoritative task-server protocol
+before its gateway and ensure local MeshDB receipts are enabled/available. Terminals
+observed by an old gateway in between upgrades can produce duplicate external notices
+on cutover; existing managed turn identities still collapse admission replay.
+
+Pre-migration terminal jobs deliberately stay historical: the old process-local set
+cannot prove which notices were sent. Automatic replay could send old notices or
+start previously unadmitted work. Historical recovery is an explicit operator
+backfill decision, not a silently closed defect or a promise of historical delivery.
+Inspect a SPECIFIC job and its deterministic turn before authorizing recovery:
+
+```sql
+SELECT j.id, j.session_id, j.status, j.completion_enrolled,
+       e.notification_state, e.notification_attempts, e.notification_error,
+       e.action_state, e.action_attempts, e.action_error, e.lease_until
+FROM jobs j LEFT JOIN job_completion_effects e ON e.job_id=j.id WHERE j.id=:job_id;
+```
+
+Only after that authorization, enroll that specific historical terminal with
+`UPDATE jobs SET completion_enrolled=1 WHERE id=:job_id AND status IN ('done','failed','lost');`.
+For an exhausted receipt, reset ONLY the selected effect's state to `pending`,
+attempts to zero and error to NULL, clearing its lease token/deadline only if no
+live lease exists. Do not reset the other successful effect or change its snapshot.
+Notice recovery can duplicate a send whose prior outcome is unknown; action
+recovery reconciles an already-admitted deterministic turn before attempting again.
+These are operator procedures, not production mutations performed in this dispatch.
 
 ### J3 — Session-reason N+1 and running-job truncation
 
@@ -343,9 +550,25 @@ Implementation CI passed:
 on `1d23442`, 3m24s. Subsequent commits only update programme evidence; current
 head check status is available on PR #261. Production closure is recorded above.
 
-Next independently executable dispatch: J2 completion reliability, based on the
-approved/merged J1 selected-source seam. First commit deterministic reproductions
-for late commits and notification/admission failures. Specify retries, duplicate
-effects and startup/restart recovery before choosing a persistence change. Verify
-restart boundaries, failed backing resources, repeated polls and permanent failure;
-record disproven allegations with evidence. J3–J5 remain mandatory TODO in order.
+Current dispatch: J2 implementation is verified locally and in CI in PR #262,
+awaiting review and explicit merge/deploy authorization. J1 production closure is complete.
+Next independently executable implementation after authorized J2 integration: J3
+session-reason N+1 and running-job truncation, with its five/seven SELECT budgets
+and full reason/queue-overlay equivalence above. J3–J5 remain mandatory TODO in order;
+none was started during J2. S1–S4 remain explicitly deferred, not closed.
+
+### J2 lead review — 2026-10-29
+
+Reviewed PR #262 against the original J2 acceptance criteria and traced discovery,
+notification propagation, durable receipts, managed admission and restart recovery.
+The pre-correction focused seam run passed **289 tests, 8 existing warnings in
+60.52 s** (the recorded 11-file command plus the single-inbox and schema tests).
+
+Review found a refused/exhausted continuation audit inherited the successful job
+exit: its reply described action failure but task status was `completed` and
+`result.success=true`. A new assertion reproduced this on PR head. Set success
+false only for failed-action audits; ordinary job-outcome audits keep job status.
+Two existing refusal tests were corrected to require failed audit status.
+Notification/admission identity, retries and migration are unchanged.
+
+Correction verification: `pytest tests/test_job_completion_reliability.py tests/test_turn_queue_4d.py --tb=short` — **59 passed, 2 existing warnings in 8.22 s**.

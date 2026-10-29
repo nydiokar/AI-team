@@ -47,6 +47,7 @@ def test_controller_two_selects_no_http_or_session_loads(controller, monkeypatch
     assert len(result["running"]) == len(result["recent"]) == count
     assert result["running"] == result["recent"]
     assert all(j["orphaned"] == 1 for j in result["running"])
+    assert all("completion_enrolled" not in j for j in result["recent"])
     controller.session_store.get.assert_not_called()
     controller._cached_remote_watched_jobs.assert_not_called()
 
@@ -220,67 +221,50 @@ async def test_completion_fetch_is_off_loop_and_uses_selected_source(controller,
     import src.control.db as db_mod
 
     monkeypatch.setattr(config.mesh, "jobs_read_mode", mode)
-    entered = threading.Event()
-    release = threading.Event()
+    entered, release = threading.Event(), threading.Event()
     loop_thread = threading.get_ident()
     threads: list[int] = []
     calls: list[str] = []
 
-    def fetch(since) -> list[dict[str, str]]:
-        assert since == "local-boundary"
+    def fetch() -> int:
         threads.append(threading.get_ident())
         calls.append("local")
         entered.set()
         assert release.wait(10)
-        controller.running = False
-        return [{"id": "local-job"}]
+        return 0
 
     def get_database() -> SimpleNamespace:
         threads.append(threading.get_ident())
-        return SimpleNamespace(get_terminal_jobs_since=fetch)
+        return SimpleNamespace(stage_local_job_completions=fetch,
+                               stage_job_completions=lambda *args: None,
+                               pending_job_completions=lambda **kwargs: [])
 
-    def remote(since) -> list[dict[str, str]]:
-        assert since == "remote-boundary"
+    def remote(cursor: str) -> dict:
         threads.append(threading.get_ident())
         calls.append("remote")
-        return [{"id": "remote-job"}]
+        return {"jobs": [], "next_cursor": None}
 
     monkeypatch.setattr(db_mod, "get_db", get_database)
-    controller._remote_terminal_jobs_since = remote
-    controller._last_job_poll = "local-boundary"
-    controller._last_remote_job_poll = "remote-boundary"
-    controller.running = True
-    delivered: list[str] = []
-    delivered_event = asyncio.Event()
-
-    async def process(job) -> None:
-        delivered.append(job["id"])
-        if len(delivered) == (2 if mode == "federated" else 1):
-            delivered_event.set()
-
-    controller._process_terminal_job = process
-    poll = asyncio.create_task(controller._job_completion_poller())
+    controller._remote_job_completion_page = remote
+    poll = asyncio.create_task(controller._poll_job_completions_once())
     try:
-        # Yielding here must remain possible while the synchronous fetch waits.
         async def heartbeat() -> None:
             while not entered.is_set():
                 await asyncio.sleep(0.001)
             await asyncio.sleep(0)
 
         await asyncio.wait_for(heartbeat(), timeout=2)
-        assert not poll.done()
-        assert calls == ["local"]
-        assert threads and all(t != loop_thread for t in threads)
+        assert not poll.done() and calls == ["local"]
         release.set()
-        await asyncio.wait_for(delivered_event.wait(), timeout=2)
-        assert delivered == (["local-job", "remote-job"] if mode == "federated" else ["local-job"])
+        await asyncio.wait_for(poll, timeout=2)
         assert calls == (["local", "remote"] if mode == "federated" else ["local"])
-        assert all(t != loop_thread for t in threads)
+        assert threads and all(t != loop_thread for t in threads)
     finally:
         release.set()
-        poll.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await poll
+        if not poll.done():
+            poll.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await poll
 
 
 @pytest.mark.asyncio
@@ -289,42 +273,27 @@ async def test_completion_reader_obtains_a_thread_local_sqlite_connection(contro
     loop_connection = db._conn()
     db.register_job(job_id="terminal", node_id="n", label="job")
     db.complete_job("terminal", exit_code=0)
-    original = db.get_terminal_jobs_since
+    original = db.stage_local_job_completions
     connections: list[sqlite3.Connection] = []
 
-    def fetch(since: str) -> list[dict[str, object]]:
+    def fetch() -> int:
         connections.append(db._conn())
-        return original(since)
+        return original()
 
-    monkeypatch.setattr(db, "get_terminal_jobs_since", fetch)
-    jobs = await asyncio.to_thread(controller._local_terminal_jobs_since, "")
-    assert [j["id"] for j in jobs] == ["terminal"]
+    monkeypatch.setattr(db, "stage_local_job_completions", fetch)
+    monkeypatch.setattr(db, "pending_job_completions", lambda **kwargs: [])
+    await controller._poll_job_completions_once()
+    assert db.get_job_completion("terminal") is not None
     assert len(connections) == 1 and connections[0] is not loop_connection
 
 
 @pytest.mark.asyncio
-async def test_federated_completion_poll_survives_absent_local_db(controller, monkeypatch) -> None:
+async def test_federated_completion_requires_durable_local_receipts(controller, monkeypatch) -> None:
     import src.control.db as db_mod
 
     monkeypatch.setattr(config.mesh, "jobs_read_mode", "federated")
     monkeypatch.setattr(db_mod, "get_db", lambda: None)
-    controller.running = True
-    controller._last_job_poll = "local"
-    controller._last_remote_job_poll = "remote"
-    controller._remote_terminal_jobs_since = Mock(return_value=[{"id": "remote-job"}])
-    finished = asyncio.Event()
-
-    async def process(job) -> None:
-        assert job == {"id": "remote-job"}
-        finished.set()
-
-    controller._process_terminal_job = process
-    poll = asyncio.create_task(controller._job_completion_poller())
-    try:
-        await asyncio.wait_for(finished.wait(), timeout=2)
-        controller._remote_terminal_jobs_since.assert_called_once_with("remote")
-    finally:
-        controller.running = False
-        poll.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await poll
+    controller._remote_job_completion_page = Mock()
+    with pytest.raises(RuntimeError, match="receipt database unavailable"):
+        await controller._poll_job_completions_once()
+    controller._remote_job_completion_page.assert_not_called()

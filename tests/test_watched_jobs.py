@@ -389,18 +389,14 @@ async def test_gateway_terminal_job_notifies_session_and_agent(tmp_path, monkeyp
 
     store = SessionStore()
     session = store.create("codex", str(tmp_path), telegram_chat_id=100, owner_user_id=1)
-    # [A82 Stage 8a] born managed: the legacy watched-job delivery is the
-    # unenrolled session's branch (managed delivery: test_turn_queue_4d).
-    from src.control.db import get_db
-    from tests.stage8a_legacy import unenrolled
-
-    unenrolled(get_db(), session.session_id)
+    # Sessions are born managed. Real durable-admission replay is covered in
+    # test_turn_queue_4d; this test isolates notification/transcript formatting.
 
     class _Notifier:
         def __init__(self):
             self.calls = []
 
-        async def notify_task_outcome(self, task_id, result, *, session=None, chat_id=None, prefix=""):
+        async def notify_task_outcome(self, task_id, result, *, session=None, chat_id=None, prefix="", reliable=False):
             self.calls.append({
                 "task_id": task_id,
                 "output": result.output,
@@ -440,16 +436,17 @@ async def test_gateway_terminal_job_notifies_session_and_agent(tmp_path, monkeyp
     }]
     assert submitted[0]["session_id"] == session.session_id
     assert submitted[0]["source"] == "watched_job"
-    assert submitted[0]["extra_metadata"] == {"job_id": "job_test123", "source": "watched_job"}
+    assert submitted[0]["extra_metadata"]["job_id"] == "job_test123"
+    assert submitted[0]["extra_metadata"]["source"] == "watched_job"
+    assert submitted[0]["turn_queue_enrolled"] is True
     assert "all tests passed" in submitted[0]["description"]
 
     # The continuation turn carries the payload — no duplicate synthetic turn.
     assert store.get(session.session_id).last_task_id != "job_test123"
 
     # Notify-only (no continuation) still records the synthetic job turn.
-    orch._processed_terminal_jobs = set()
     await orch._process_terminal_job({
-        "id": "job_test123",
+        "id": "job_notify_only",
         "session_id": session.session_id,
         "node_id": "worker-a",
         "label": "npm test",
@@ -463,14 +460,13 @@ async def test_gateway_terminal_job_notifies_session_and_agent(tmp_path, monkeyp
 
     turns = transcript.get_transcript(tmp_path / "results", sessions_dir, session.session_id)
     assert turns is not None
-    assert turns[-1]["task_id"] == "job_test123"
+    assert turns[-1]["task_id"] == "job_notify_only"
     assert turns[-1]["instruction"] == "Watched job finished: npm test"
     assert "all tests passed" in turns[-1]["result"]
 
     from src.control.db import get_db
-    row = get_db().get_task("job_test123")
-    saved = store.get(session.session_id)
-    assert row["completed_at"] == saved.task_history[-1]["timestamp"]
+    row = get_db().get_task("job_notify_only")
+    assert row["completed_at"] and row["reply_text"]
 
 
 def test_pid_alive_with_nonexistent_pid():
@@ -664,40 +660,13 @@ def test_orchestrator_returns_cached_remote_jobs_when_fetch_in_progress():
         orch._watched_jobs_cache_lock.release()
 
 
-def test_orchestrator_filters_remote_terminal_jobs_once():
+def test_remote_completion_protocol_requires_an_explicit_client() -> None:
     from src.orchestrator import TaskOrchestrator
 
-    class _FakeClient:
-        def list_jobs(self, node_id=None, status=None, session_id=None, limit=20):
-            return [
-                {
-                    "id": "job_new",
-                    "status": "done",
-                    "updated_at": "2026-06-30T09:00:00",
-                    "started_epoch": 200.0,
-                },
-                {
-                    "id": "job_old",
-                    "status": "done",
-                    "updated_at": "2026-06-30T09:00:00",
-                    "started_epoch": 100.0,
-                },
-                {
-                    "id": "job_running",
-                    "status": "running",
-                    "updated_at": "2026-06-30T12:00:00",
-                    "started_epoch": 300.0,
-                },
-            ]
-
     orch = TaskOrchestrator.__new__(TaskOrchestrator)
-    orch._processed_terminal_jobs = {"job_seen"}
-    orch._remote_job_poll_started_epoch = 150.0
-    orch._remote_jobs_client = lambda: _FakeClient()
-
-    jobs = orch._remote_terminal_jobs_since("2026-06-30T12:00:00")
-
-    assert [job["id"] for job in jobs] == ["job_new"]
+    orch._remote_jobs_client = lambda: None
+    with pytest.raises(RuntimeError, match="client unavailable"):
+        orch._remote_job_completion_page("")
 
 
 def test_process_identity_for_current_process():

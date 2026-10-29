@@ -3121,13 +3121,18 @@ class TelegramInterface:
         self.session_store.bind(update.effective_chat.id, session.session_id)
         await query.edit_message_text(self._format_session_switched_message(session))
 
-    async def notify_completion(self, task_id: str, summary: str, success: bool = True, chat_id: Optional[int] = None):
+    async def notify_completion(
+        self, task_id: str, summary: str, success: bool = True,
+        chat_id: Optional[int] = None, *, reliable: bool = False,
+    ) -> None:
         """Notify of task completion.
 
         If chat_id is given (session tasks), send only to that chat.
         Otherwise broadcast to allowed_users or notification_chat_id.
         """
         if not self.app or not self.is_running:
+            if reliable:
+                raise RuntimeError("Telegram notification transport not running")
             return
 
         try:
@@ -3146,6 +3151,8 @@ class TelegramInterface:
                 try:
                     await self._send_long_message(chat_id=chat_id, text=message)
                 except Exception as e:
+                    if reliable:
+                        raise
                     logger.warning(f"Failed to notify chat {chat_id}: {e}")
             elif self.allowed_users:
                 for uid in self.allowed_users:
@@ -3165,6 +3172,8 @@ class TelegramInterface:
                     logger.warning(f"Failed to notify fallback chat: {e}")
 
         except Exception as e:
+            if reliable:
+                raise
             logger.error(f"Failed to send completion notification for task {task_id}: {e}")
     
     async def notify_error(self, error_message: str):

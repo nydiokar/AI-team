@@ -12,7 +12,7 @@ one more handler call in the relevant ``notify_*`` method — **zero** changes
 to the orchestrator or any other domain code.
 
 Design rules (same as the rest of the codebase):
-- never raise into the caller
+- best-effort by default; watched-job receipts opt into Telegram error propagation
 - best-effort delivery per channel
 - all formatting lives here or in ``result_text``, not in the orchestrator
 """
@@ -69,11 +69,14 @@ class NotificationService:
         session: Optional[Any] = None,
         chat_id: Optional[int] = None,
         prefix: str = "",
+        reliable: bool = False,
     ) -> None:
         """Deliver a task completion or failure notification.
 
         Builds the user-facing text from ``result``, emits a structured
-        event, then sends via Telegram if a chat target is available.
+        event, then sends via Telegram if a chat target is available. Watched-job
+        receipts opt into raising Telegram failures; other callers retain best
+        effort. Push remains best-effort and may repeat on a notice retry.
         """
         from src.core.observability import emit_event
 
@@ -103,8 +106,11 @@ class NotificationService:
             try:
                 await tg.notify_completion(
                     task_id, text, success=success, chat_id=chat_id,
+                    **({"reliable": True} if reliable else {}),
                 )
             except Exception as e:
+                if reliable:
+                    raise
                 logger.warning("notify_task_outcome failed task=%s err=%s", task_id, e)
 
     # ------------------------------------------------------------------
