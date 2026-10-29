@@ -7,8 +7,8 @@ READ-PATH ONLY, and never mutates the SessionStatus enum. These tests prove:
 - BUSY/terminal -> empty with ZERO DB reads,
 - node-offline detail = node id,
 - a racy/stale ledger write between reads,
-- NO N+1: a page of N sessions issues ONE list_jobs_for_sessions, ONE batched
-  inbox read (A104 ``inbox_waiting_for``) and bounded per-open-Case pause reads,
+- NO N+1: a page of N sessions issues bounded 500-ID running-owner, inbox,
+  live-task and Case-evidence queries, with ZERO per-Case pause/status reads,
   never a Case event-log fold (asserted by a call-count spy, not vibes),
 - A104: ``waiting_workers`` comes from the agent inbox and is ROLE-FREE (any
   session with outstanding requests or undelivered messages),
@@ -21,6 +21,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
+from src.control.db import CaseReasonEvidence
 from src.core.interfaces import SessionStatus
 from src.core.session_reason import (
     SessionReason,
@@ -77,13 +78,18 @@ class _FakeDB:
         self.calls[name] = self.calls.get(name, 0) + 1
 
     # --- the read surface the derivation uses --- #
-    def list_jobs_for_sessions(self, session_ids: List[str], limit: int = 200):
-        self._bump("list_jobs_for_sessions")
-        return [
-            {"session_id": sid, "status": "running"}
-            for sid in session_ids
-            if sid in self._running
-        ]
+    def running_job_sessions(self, session_ids: list[str]) -> set[str]:
+        self._bump("running_job_sessions")
+        return self._running.intersection(session_ids)
+
+    def case_reason_evidence(self, flow_run_ids: list[str]) -> dict[str, CaseReasonEvidence]:
+        self._bump("case_reason_evidence")
+        return {
+            cid: CaseReasonEvidence(status=self._case_status[cid],
+                                    quota_paused=cid in self._quota and bool(self._case_events.get(cid)),
+                                    retry_paused=cid in self._retry and bool(self._case_events.get(cid)))
+            for cid in set(flow_run_ids) if cid in self._case_status
+        }
 
     def max_flow_event_ids(self, flow_run_ids: List[str]) -> Dict[str, int]:
         self._bump("max_flow_event_ids")
@@ -145,7 +151,7 @@ def test_busy_and_terminal_short_circuit_to_empty_with_zero_db_reads():
         db = _FakeDB(running_job_session_ids=["s1"], case_status={"c1": ""})
         s = _FakeSession("s1", st, case_role="manager", current_case_id="c1")
         # derive_session_reason reads ONLY from a batch (no db); build_reason_batch
-        # still runs the single page-level job read, so assert the PER-SESSION
+        # still runs the single page-level running-owner read, so assert the PER-SESSION
         # derivation itself does zero case reads and returns None.
         batch = build_reason_batch(db, [s])
         before = dict(db.calls)
@@ -345,24 +351,23 @@ def test_no_n_plus_1_for_a_page_of_sessions():
     derive_session_reasons(db, sessions)
 
     # ONE batched job read for the whole page — the N+1 hazard, pinned to 1.
-    assert db.calls.get("list_jobs_for_sessions", 0) == 1
-    # ONE batched watermark read for the whole page.
-    assert db.calls.get("max_flow_event_ids", 0) == 1
+    assert db.calls.get("running_job_sessions", 0) == 1
+    # ONE combined Case evidence read, no watermark/per-Case reads.
+    assert db.calls.get("case_reason_evidence", 0) == 1
+    assert db.calls.get("max_flow_event_ids", 0) == 0
     # ONE batched inbox read for the whole page (A104) — never per session.
     assert db.calls.get("inbox_waiting_for", 0) == 1
-    # Per-open-case reads are bounded to the 10 open cases (managers+workers),
-    # never touching the 5 BUSY sessions' cases.
-    assert db.calls.get("get_flow_run", 0) == 10
+    # No individual Case reads, regardless of the number of distinct Cases.
+    assert db.calls.get("get_flow_run", 0) == 0
     # NO Case event-log fold at all (the legacy per-manager wait-group scan).
     assert db.calls.get("list_flow_events", 0) == 0
-    # Pause reads run for every open case (manager or worker): 10 each.
-    assert db.calls.get("case_quota_pause", 0) == 10
-    assert db.calls.get("transient_pause", 0) == 10
+    # Both pause kinds are projected together, without per-Case helper calls.
+    assert db.calls.get("case_quota_pause", 0) == 0
+    assert db.calls.get("transient_pause", 0) == 0
 
 
-def test_watermark_gate_skips_per_case_reads_for_eventless_cases():
-    # A case with NO events (absent from max_flow_event_ids) must skip the pause
-    # and wait-group reads entirely — it can only be open_case_idle or idle.
+def test_eventless_cases_need_no_per_case_reads():
+    # A case with NO events has no pause; it can only be open_case_idle or idle.
     db = _FakeDB(case_status={"c1": ""}, case_events={"c1": []})  # open, but zero events
     s = _FakeSession("s1", SessionStatus.AWAITING_INPUT, "manager", "c1")
     r = _reason_of(db, s)

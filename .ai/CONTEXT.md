@@ -29,19 +29,25 @@ instead and leave a one-liner here.
 
 Current work:
 
-**Read-path programme (2026-10-28 operator dispatch):** J1 jobs authority/enrichment
-is merged and live as `e0e2877` (PR #261), production verified with rollback retained;
-J2 completion reliability is implemented/locally verified in PR #262, awaiting review and
-merge/deploy authorization; next J3 reason N+1, J4 session projections,
-J5 compact affiliations. Detailed scope, evidence and durable burndown:
-[`READ_PATH_BURNDOWN.md`](../docs/backend/READ_PATH_BURNDOWN.md).
-The current dispatch authorizes J2 implementation only; its merge/deployment remain gated.
-Jobs boundary deferrals: four concurrent reads bound active materialization, not
-historical text bytes or SQL execution time. SQLite's 15 s busy timeout is a lock
-wait bound; no statement deadline is claimed. J1's measured memory and concrete
-oversized-history/timeout follow-up are recorded in burndown S3. J2's durable
-completion receipts and notification/admission contracts are in its burndown entry;
-implementation verification is distinct from its still-gated production rollout.
+**Read-path programme (2026-10-28 operator dispatch; continued 2026-10-29):**
+J1 is merged and live as `e0e2877` (PR #261), with production verification and rollback.
+J2 is reviewed/corrected and merged as `d52a83b` (PR #262); production rollout is
+not yet verified. The operator authorized review, fixes, merge and the next jobs
+on 2026-10-29. J3 reason batching/running-job evidence is locally verified, pending
+review/integration; J4
+session projections and J5 compact affiliations follow in order. Detailed scope
+and evidence: [`READ_PATH_BURNDOWN.md`](../docs/backend/READ_PATH_BURNDOWN.md).
+
+Read-boundary deferrals: J1 jobs reads allow four concurrent materializations, but
+historical text and SQL execution remain unbounded (S3; SQLite's 15 s busy timeout
+only bounds lock waits). J3 adds bounded 500-ID evidence queries, without changing
+`/api/sessions` admission/error policy. That route still has only the shared sync
+handler thread-pool bound and materializes full Sessions/history; aggregate memory
+at 100 calls is unknown. J4 must replace full-row list materialization; size a
+route-specific concurrency limit with the projection's measured memory alongside
+S3 before higher-volume/untrusted use. No hard server statement deadline is claimed.
+J2's durable receipts and notification/admission/restart contracts are recorded in
+the burndown; merge is distinct from production verification.
 
 1. **System-One decision layer (TypeSafe Jev) → Governor programme.** Spec
    `docs/SYSTEM_ONE_DECISION_LAYER_SPEC.md` (accepted 2026-10-05). Next: **A94** (core + replay +
