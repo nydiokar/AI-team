@@ -42,7 +42,7 @@ import { useManagerBootStore } from "../stores/managerBootStore";
 import { SessionTurns } from "../components/timeline/SessionTurns";
 import { ContextFillGauge } from "../components/timeline/ContextFillGauge";
 import { Composer } from "../components/timeline/Composer";
-import { JobRow } from "../components/system/JobsPanel";
+import { JobRow, JobsReadNotice } from "../components/system/JobsPanel";
 import { ModelPickerSheet } from "../components/sessions/ModelPickerSheet";
 import { EffortPickerSheet } from "../components/sessions/EffortPickerSheet";
 import { GitPanelSheet } from "../components/sessions/GitPanelSheet";
@@ -324,8 +324,8 @@ function SessionStateSequence({
   );
 }
 
-function SessionJobsSection({ sessionId }: { sessionId: string }) {
-  const { data, isLoading } = useJobs(20, sessionId);
+export function SessionJobsSection({ sessionId }: { sessionId: string }) {
+  const { data, isLoading, error, refetch } = useJobs(20, sessionId);
   const running: RawJob[] = data?.running ?? [];
   const recent: RawJob[] = (data?.recent ?? []).filter(
     (j) => j.status === "done" || j.status === "failed" || j.status === "lost",
@@ -339,12 +339,13 @@ function SessionJobsSection({ sessionId }: { sessionId: string }) {
         Jobs
       </p>
       <div className="card-elev overflow-hidden rounded-xl divide-y divide-hairline">
+        {error != null && <JobsReadNotice hasData={data != null} onRetry={() => { void refetch(); }} />}
         {isLoading ? (
           <div className="flex items-center gap-2 px-4 py-3 text-[12px] text-ink-muted">
             <Loader2 className="size-3.5 animate-spin" />
             Loading jobs...
           </div>
-        ) : total === 0 ? (
+        ) : total === 0 && error == null ? (
           <p className="px-4 py-3 text-[12px] text-ink-muted">No watched jobs for this session.</p>
         ) : (
           <>

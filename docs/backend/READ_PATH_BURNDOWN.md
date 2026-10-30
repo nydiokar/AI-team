@@ -784,3 +784,20 @@ Two existing refusal tests were corrected to require failed audit status.
 Notification/admission identity, retries and migration are unchanged.
 
 Correction verification: `pytest tests/test_job_completion_reliability.py tests/test_turn_queue_4d.py --tb=short` — **59 passed, 2 existing warnings in 8.22 s**.
+
+### J1 audit correction — jobs availability reaches the UI (2026-10-30)
+
+Phase-2 source tracing found a demonstrated P2 cross-layer gap outside J1's API
+checks: both System `JobsPanel` and Detail `SessionJobsSection` ignored query
+errors. An initial 503 rendered “No watched jobs”; cached rows had no failed-
+refresh notice, and a collapsed empty System section could disappear entirely.
+Two tests reproduced the false absence before the correction (both failed).
+
+Minimal correction: shared jobs-only unavailable/stale notice with retry; only a
+successful empty read renders absence. Cached rows remain explicitly stale.
+System summary carries availability so an unavailable collapsed section keeps a
+reachable header and warning instead of disappearing. No API, query authority,
+read cadence, DB schema, queue or worker changes. Review includes initial errors,
+cached-positive/empty failures, retry/recovery and the collapsed summary signal.
+Tests exercise both actual components. PR/merge/live evidence follows in the
+engineering audit; this finding is not buried under the original J1 done label.

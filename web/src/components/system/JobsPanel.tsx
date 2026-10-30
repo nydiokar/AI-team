@@ -23,7 +23,17 @@ import {
   type JobOwnershipFilter,
 } from "../../lib/jobOwnership";
 
-type JobsSummary = { total: number; running: number };
+type JobsSummary = { total: number; running: number; unavailable: boolean };
+
+/** Errors never establish an empty jobs list; cached rows remain explicitly stale. */
+export function JobsReadNotice({ hasData, onRetry }: { hasData: boolean; onRetry: () => void }) {
+  return (
+    <p role="status" className="px-4 py-3 text-[12px] text-warn">
+      {hasData ? "Refresh failed. Showing last available jobs." : "Watched jobs unavailable."}{" "}
+      <button type="button" className="underline" onClick={onRetry}>Retry</button>
+    </p>
+  );
+}
 
 const STATUS_VISUAL: Record<
   string,
@@ -132,7 +142,7 @@ export function JobsPanel({
   onSummary?: (s: JobsSummary) => void;
   owned?: JobOwnershipFilter;
 }) {
-  const { data, isLoading } = useJobs(
+  const { data, isLoading, error, refetch } = useJobs(
     20,
     undefined,
     owned === "unowned" ? "unowned" : undefined,
@@ -147,11 +157,12 @@ export function JobsPanel({
   );
   const total = running.length + recent.length;
   const runningCount = running.length;
+  const unavailable = error != null;
 
   // Report upward via effect (never setState in a parent during child render).
   useEffect(() => {
-    onSummary?.({ total, running: runningCount });
-  }, [total, runningCount, onSummary]);
+    onSummary?.({ total, running: runningCount, unavailable });
+  }, [total, runningCount, unavailable, onSummary]);
 
   if (!expanded) return null;
 
@@ -161,7 +172,8 @@ export function JobsPanel({
         {isLoading && (
           <p className="px-4 py-4 text-center text-sm text-ink-muted">Loading jobs…</p>
         )}
-        {!isLoading && total === 0 && (
+        {unavailable && <JobsReadNotice hasData={data != null} onRetry={() => { void refetch(); }} />}
+        {!isLoading && !unavailable && total === 0 && (
           <p className="px-4 py-5 text-center text-sm text-ink-muted">No watched jobs.</p>
         )}
         {running.map((j) => (
