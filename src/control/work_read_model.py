@@ -15,6 +15,8 @@ Honesty-first (WORK_CONTROL_SUBSTRATE_MILESTONE.md authority rules):
     module reads them for DISPLAY only — nothing here drives execution.
 """
 
+import re
+from collections.abc import Iterable
 from typing import Any, Dict, List, Optional
 
 
@@ -189,6 +191,72 @@ def build_case_timeline(
 # Authoritative session roles a link may carry (flow_links.role vocab for a
 # session entity). Anything else collapses to the generic "session".
 _SESSION_ROLES = ("manager", "worker", "reviewer", "evidence")
+
+
+# ECMAScript \s differs from Python's (e.g. FEFF, NEL, control separators).
+_JS_WHITESPACE = r"\u0009-\u000d\u0020\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff"
+
+
+def _js_trim(value: str) -> str:
+    return value.strip("\t\n\v\f\r \u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff")
+
+
+def _strip_markup(value: str) -> str:
+    # The JS regex retries quadratically on a long unmatched '<' suffix. Such a
+    # suffix cannot contain a match: exclude it before applying the same regex.
+    end = value.rfind(">") + 1
+    return re.sub(r"<[^>]+>", " ", value[:end]) + value[end:]
+
+
+def _js_slice(value: str, units: int) -> str:
+    return value.encode("utf-16-le", "surrogatepass")[:units * 2].decode("utf-16-le", "surrogatepass")
+
+
+def case_title(objective: str | None, flow_run_id: str) -> str:
+    """Match workAdapter.caseTitle, including lone-surrogate UTF-16 slices.
+
+    JSON transport MUST escape surrogates (ensure_ascii=True); UTF-8 cannot encode
+    a lone surrogate produced when JavaScript slice cuts through an emoji.
+    """
+    tail = re.sub(r"^[a-z_]+[-_]?", "", flow_run_id, flags=re.IGNORECASE | re.ASCII)
+    tail_units = len(tail.encode("utf-16-le", "surrogatepass")) // 2
+    fallback = "case " + (_js_slice(tail, 8) if tail_units >= 6 else _js_slice(flow_run_id, 12))
+    raw = _js_trim(objective or "")
+    if not raw:
+        return fallback
+    chosen = ""
+    for tag in ("real_objective", "interpreted_task", "task_name"):
+        opening = re.search(f"<{tag}>", raw, re.IGNORECASE | re.ASCII)
+        closing = re.search(f"</{tag}>", raw[opening.end():], re.IGNORECASE | re.ASCII) if opening else None
+        if opening and closing:
+            inner = _strip_markup(raw[opening.end():opening.end() + closing.start()])
+            chosen = _js_trim(re.sub(f"[{_JS_WHITESPACE}]+", " ", inner))
+            if chosen:
+                break
+    if not chosen:
+        lines = _strip_markup(raw).split("\n")
+        chosen = next((_js_trim(line) for line in lines if _js_trim(line)), fallback)
+    return _js_slice(chosen, 117) + "…" if len(chosen.encode("utf-16-le", "surrogatepass")) > 240 else chosen
+
+
+def build_compact_session_affiliations(links: list[dict], cases: Iterable[dict]) -> dict:
+    # Consume one objective at a time; retain only bounded titles and status.
+    by_case: dict = {}
+    for row in cases:
+        fid = row["flow_run_id"]
+        by_case[fid] = (case_title(row.get("objective_lock"), fid), row.get("status"))
+    affiliations: list[dict] = []
+    for row in links:
+        fid = row["flow_run_id"]
+        if fid not in by_case:
+            by_case[fid] = (case_title(None, fid or ""), None)
+        title, status = by_case[fid]
+        affiliations.append({
+            "session_id": row["session_id"], "flow_run_id": fid,
+            "role": _session_role(row.get("role")),
+            "case_status": status, "case_title": title,
+        })
+    return {"affiliations": affiliations, "total": len(affiliations)}
 
 
 def _session_role(role: Optional[str]) -> str:

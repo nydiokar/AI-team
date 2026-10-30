@@ -1,3 +1,4 @@
+import titleFixtures from "./caseTitles.golden.json";
 import { describe, it, expect } from "vitest";
 import {
   caseTitle,
@@ -346,4 +347,19 @@ describe("toCaseRoster", () => {
     expect(roster.sessions[0].present).toBe(false);
     expect(roster.tokenTotals.total).toBe(0);
   });
+});
+
+
+describe("shared Python/JavaScript title goldens", () => {
+  for (const fixture of titleFixtures) {
+    it(fixture.name, () => {
+      const expected = String.fromCharCode(...fixture.expected_utf16);
+      expect(caseTitle(fixture.objective, fixture.flow_run_id)).toBe(expected);
+      const transport = JSON.parse(JSON.stringify({ affiliations: [{
+        session_id: "s", flow_run_id: fixture.flow_run_id, role: "worker",
+        case_status: "closed", case_title: expected,
+      }], total: 1 }));
+      expect(toSessionAffiliationIndex(transport).get("s")?.caseTitle).toBe(expected);
+    });
+  }
 });

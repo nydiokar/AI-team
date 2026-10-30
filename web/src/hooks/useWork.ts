@@ -121,17 +121,19 @@ export function useWorkRoster(flowRunId: string | undefined) {
  * A session absent from the index has NO entry (the Sessions surface shows it as
  * standalone — never inferred). Multi-case links are deduplicated server-side to
  * the session's MOST RECENT case (the endpoint is newest-link-first); we never
- * fabricate a "primary" the substrate did not assert. With the substrate flag OFF
- * the response is empty (zero cost).
+ * fabricate a "primary" the substrate did not assert. Unknown/loading and failed
+ * refreshes expose no current membership. Only a successful index can establish
+ * absence; this query is not persisted.
  */
 export function useSessionAffiliations(): {
   index: Map<string, SessionAffiliation>;
   isLoading: boolean;
   error: unknown;
+  isKnown: boolean;
 } {
   const token = useAuthStore((s) => s.token);
   const query = useQuery({
-    queryKey: ["work-affiliations"],
+    queryKey: ["work-affiliations", "compact-v1"],
     queryFn: async () => toSessionAffiliationIndex(await api.workAffiliations(token)),
     enabled: Boolean(token),
     refetchInterval: DETAIL_POLL_MS,
@@ -140,9 +142,10 @@ export function useSessionAffiliations(): {
   });
 
   return {
-    index: query.data ?? EMPTY_AFFILIATIONS,
+    index: query.error == null && token ? query.data ?? EMPTY_AFFILIATIONS : EMPTY_AFFILIATIONS,
     isLoading: query.isLoading,
     error: query.error,
+    isKnown: Boolean(token) && query.data != null && query.error == null,
   };
 }
 

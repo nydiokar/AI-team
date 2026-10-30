@@ -440,12 +440,14 @@ untrusted use. No claim of a hard RSS/output bound or successful production roll
 
 ### J5 — Compact affiliations
 
-- Priority: P2, REQUIRED after J4. Status: TODO. Depends on J4 and contract revalidation.
+- Priority: P2, REQUIRED after J4. Status: VERIFIED (implementation, targeted checks
+  and independent adversarial review); PR/merge pending. J4 merged as `3eab87e`.
 - Classification: confirmed redundant objective payload; compact transport required.
 - Evidence: `list_session_case_links` joins full objectives before builder dedup;
   `build_session_affiliations` emits objective per session. Sessions, Session Detail
-  and Cost share `useSessionAffiliations`. That hook exposes no error state and
-  defaults to an empty map: error/unknown can appear standalone. This is pre-existing.
+  and Cost share `useSessionAffiliations`. The baseline hook exposes an error but
+  defaults to an empty map; Detail ignores that error and asserts Standalone before
+  success. Sessions omits the chip; Cost already discloses errors but not loading.
 - Scope: explicit compact option, legacy default preserved; emit IDs, normalized
   role, case status and equivalent bounded title, no raw objective. Compute once
   per case. Preserve newest-link semantics (including closed/missing cases and
@@ -460,7 +462,103 @@ untrusted use. No claim of a hard RSS/output bound or successful production roll
   affiliations are NOT persisted (`main.tsx` only persists session queries).
   Measure peak intermediate memory/concurrency and query plan. Historical target
   <750 KB for the same 1,082-entry dataset is unverified, not a unit-test timing gate.
-- PR/commit/tests: none. Merge/production: not implemented / not verified.
+- PR/merge: pending. Production remains `e0e2877` at the 2026-10-30 baseline;
+  no J5 live claim before deployment and direct checks.
+
+#### J5 implementation, adversarial review and boundary evidence — 2026-10-30
+
+`format=compact` explicitly selects titles; absent/`legacy` preserves the exact old
+fields and behavior. OpenAPI documents both shapes; separate TS compact/legacy types,
+client selection and adapter agree. Case detail still returns the full objective.
+Two data SELECTs under one savepoint select newest link IDs and stream relevant
+case rows. Missing case rows survive as links with NULL status/fallback title;
+newer closed links win. No global cap or per-case SQL; obsolete case objectives
+are not loaded. Only one objective row at a time is retained while computing
+one bounded title/status per case. Link rows, titles, output and JSON still scale
+with the whole index. Existing indexes are reused; no migration.
+
+The shared hook uses `["work-affiliations", "compact-v1"]`; existing event/mutation
+prefix invalidation still works. Only successful data establishes absence. Loading,
+disabled/no-token and failed initial/refetch reads are unknown; failed cached data
+is hidden until recovery. Sessions and Cost disclose loading/unavailable; Detail's
+shared link renders loading/unavailable rather than Standalone. During a healthy
+background fetch the last successful snapshot remains available. These are observed
+snapshots, not a real-time membership guarantee; no affiliations are persisted.
+
+Verification:
+
+```bash
+.venv/bin/pytest tests/test_session_affiliations.py tests/test_work_read_model.py tests/test_control_api.py --tb=short
+env -u NODE_CHANNEL_FD -u NODE_CHANNEL_SERIALIZATION_MODE pnpm --dir web exec vitest related --run src/transport/workAdapter.ts src/transport/apiClient.ts src/hooks/useWork.ts src/screens/SessionsScreen.tsx src/screens/SessionDetailScreen.tsx src/screens/CostScreen.tsx src/components/work/SessionAffiliationLabel.tsx
+env -u NODE_CHANNEL_FD -u NODE_CHANNEL_SERIALIZATION_MODE pnpm --dir web typecheck
+env -u NODE_CHANNEL_FD -u NODE_CHANNEL_SERIALIZATION_MODE pnpm --dir web build
+```
+
+**109 Python tests passed** (2 existing warnings, 42.89 s); **120 frontend tests
+passed** (12 files, 13.02 s); typecheck and production build exited 0. Inherited
+Node IPC environment (`NODE_CHANNEL_FD=3`) caused the previous exit 134; clearing
+those variables resolves it without changing dependencies. Common Python/TS
+fixtures cover tag priority/empty tags, markup, JS-specific whitespace, fallback
+IDs, Unicode and truncation through a surrogate pair. Expected UTF-16 units avoid
+Vite's rejection of lone-surrogate JSON fixture literals; real API JSON transport
+is tested separately. Tests also compare 232 complete memberships against legacy,
+concurrent WAL writes between reads, consumer-failure transaction release, full
+case objective retention, schema, bad format, DB acquisition/query/serialization
+failure, real QueryClient cached-positive/empty failure→recovery and prefix invalidation.
+Ruff diagnostic code/message comparison with base adds no diagnostics; diff check passes.
+
+Independent review found a material P2: directly porting the browser markup regex
+made unclosed `<` input quadratic on the server (16 KiB: 413 ms). The correction
+excludes unmatched suffixes and searches each tag's first opener/closer once.
+Review rechecked **88,573 exhaustive markup strings** and **2,000 adversarial
+Python/actual-TypeScript title pairs** without mismatch; 16/128 KiB malformed
+markup measured 1.53/4.16 ms. Independent reruns: 43 affiliation tests and 51
+frontend tests passed. No remaining material finding in the reviewed path;
+these probes do not establish a hard execution bound.
+
+Read-only live-source SQLite backup, then all initialization/stress on isolated
+`/tmp` copies; same JSON encoding for both readers. Results:
+
+| Dataset | Entries | Legacy → compact JSON bytes | Legacy → compact traced total peak | Compact intermediate build peak |
+|---|---:|---:|---:|---:|
+| Production backup | 1,082 | 5,137,379 → 260,777 | 21,216,995 → 2,064,138 | 863,997 |
+| 80 cases, shared 64 KiB objectives | 1,082 | 71,066,565 → 116,579 | 214,407,860 → 1,617,805 | 678,093 |
+| Same + 262,144 emoji/objective | 1,082 | compact 116,579 | compact 7,295,190 | 7,295,190 |
+
+After link materialization, traced live bytes were 424,656 / 389,465 / 388,632.
+Warm compact read+build+serialization min/median/max: production copy
+28.62/31.34/36.11 ms (30 samples); 64 KiB fixture 10.94/12.39/13.66 ms (30);
+large-Unicode 158.40/159.17/181.17 ms (3). No production latency/RSS claim.
+EXPLAIN: both SELECTs use covering `idx_flow_links_entity`, rowid link lookups and
+case PK; newest links materialize twice and final link order uses a temporary
+B-tree. No objective JOIN fanout or N+1. The historical <750 KB target is met on
+the copied 1,082-entry membership (260,777 bytes), not an absolute output limit.
+
+Service boundary (compact option):
+- **Concurrency:** authenticated sync handler, four nonblocking process-local
+  permits held through title projection AND JSON encoding; 96 excess calls at
+  N=100 return 429 before DB work. Tests hold four serializers and verify release
+  on success, DB acquisition/read failure and serialization failure.
+- **Memory:** four active materializations estimate ~8.26 MB traced Python for
+  this production copy or ~29.18 MB in the Unicode fixture, plus rejection bodies.
+  These are four-times-single-call estimates, not concurrent/native RSS bounds.
+  SQLite caches (configured 8 MiB/thread connection), temporary B-trees, allocator
+  retention and arbitrarily large historical fields are excluded. S1/S3 remain
+  required before materially larger/untrusted use; no arbitrary membership cap.
+- **Request size/malformed input:** GET consumes no body; the only selector is
+  exact `legacy|compact` (422 otherwise), auth precedes reads. Corrupt backing
+  values/query/encoding errors fail the complete compact read with sanitized 503,
+  rather than inventing an empty successful index. No startup DB probe added.
+- **Timeouts:** new browser compact read has a 15 s AbortSignal deadline. Server
+  SQLite retains 15 s lock wait, no statement/whole-response deadline. Browser
+  abort does not cancel a running synchronous query. Hard cancellation and
+  oversized-history contracts remain S3; objective size/CPU is not absolutely bounded.
+- **Backing store/compatibility:** absent or failing DB returns structured 503
+  `affiliations_unavailable`. Legacy default deliberately retains its old empty-on-
+  absent-DB behavior and ungated materialization; legacy admission/size/deadline
+  hardening needs a separate compatibility decision under S3. No DB writes,
+  new ownership path, worker restart, paid backend or local full/e2e suite.
+
 
 ## Separately evaluated improvements and compatibility decisions
 

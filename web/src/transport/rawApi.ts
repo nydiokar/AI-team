@@ -827,6 +827,16 @@ export interface RawSessionAffiliationsResponse {
   total: number;
 }
 
+/** Explicit format=compact response. Full objectives remain on case detail. */
+export interface RawCompactSessionAffiliation extends Omit<RawSessionAffiliation, "objective_lock"> {
+  case_title: string;
+}
+
+export interface RawCompactSessionAffiliationsResponse {
+  affiliations: RawCompactSessionAffiliation[];
+  total: number;
+}
+
 // POST /api/cases/orphans/sweep → bounded operator cleanup for open Cases whose
 // Manager session is gone/inactive. `dry_run=true` reports candidates only;
 // `dry_run=false` marks them blocked through the backend interrupt path.

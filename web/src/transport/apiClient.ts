@@ -34,7 +34,7 @@ import type {
   RawCaseTimelineResponse,
   RawCaseGraphResponse,
   RawCaseRosterResponse,
-  RawSessionAffiliationsResponse,
+  RawCompactSessionAffiliationsResponse,
   RawCaseOrphanSweepResponse,
   RawCaseResumeResponse,
   RawCaseResumeState,
@@ -882,10 +882,11 @@ export const api = {
    * by the Sessions surface to label a session's case role. A session absent from
    * the response is standalone (never inferred).
    */
-  async workAffiliations(token: string): Promise<RawSessionAffiliationsResponse> {
-    return get<RawSessionAffiliationsResponse>(
-      "/api/work/affiliations/sessions",
+  async workAffiliations(token: string): Promise<RawCompactSessionAffiliationsResponse> {
+    return get<RawCompactSessionAffiliationsResponse>(
+      "/api/work/affiliations/sessions?format=compact",
       token,
+      AbortSignal.timeout(15000),
     );
   },
 

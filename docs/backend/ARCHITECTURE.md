@@ -287,7 +287,7 @@ Flag OFF returns a structured refusal (409 or 404 as noted), never a bare error.
 | GET | `/api/flows`, `/api/flows/{id}` | — | read-only `flow_runs` records (the low-level per-turn ledger) |
 | GET | `/api/work`, `/api/work/{id}` | — | Case summaries (attention buckets) / Case detail + ledger + parent/children |
 | GET | `/api/work/{id}/timeline` · `/graph` · `/roster` | — | Case audit trail (`flow_events`), lineage graph, live sessions + jobs |
-| GET | `/api/work/affiliations/sessions` | — | which session belongs to which Case |
+| GET | `/api/work/affiliations/sessions` | `format=legacy` (default) or `compact` | complete newest session→Case links; legacy carries objective, compact carries bounded `case_title`, normalized role/status/IDs only; compact 429 busy / 503 unavailable |
 
 The Manager's stable identity (role prompt, allowed decisions, tool profile
 `manager_v1`) is [`docs/harness/roles/manager.md`](../harness/roles/manager.md), loaded via

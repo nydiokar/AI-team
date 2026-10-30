@@ -47,6 +47,12 @@ serialization (429 otherwise); its isolated-copy 1000-row traced peak is 7.76 MB
 has no absolute byte bound; S3 retains the oversized-history contract and hard SQL
 deadline follow-up before higher-volume/untrusted use. Existing session-list
 JSON fallback and read-error/empty response behavior remain unchanged.
+J5 compact affiliations admits four reads through JSON serialization, streams one
+objective at a time and retains bounded titles; whole-index growth, historical field
+sizes/native SQLite RSS and hard SQL cancellation remain S1/S3. The legacy default
+retains ungated/empty-on-absent-DB compatibility; hardening requires a separate
+compatibility decision. Browser compact reads time out at 15 s without stopping
+server threads. See burndown for isolated measurements and explicit limits.
 J2's durable receipts and notification/admission/restart contracts are recorded in
 the burndown; merge is distinct from production verification.
 
