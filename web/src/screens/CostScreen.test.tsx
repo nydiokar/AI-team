@@ -36,7 +36,7 @@ beforeEach(() => {
   hooks.top.mockReturnValue(result({ rows: [], totals: bucket() }));
   hooks.projects.mockReturnValue(result({ projects: [{ repoPath: "/repo/AI-team", tokens: bucket().tokens }, { repoPath: "<no repo path>", tokens: bucket().tokens }] }));
   hooks.alerts.mockReturnValue(result(undefined));
-  hooks.affiliations.mockReturnValue({ index: new Map(), isLoading: false, error: null });
+  hooks.affiliations.mockReturnValue({ index: new Map(), isLoading: false, isKnown: true, error: null });
   container = document.createElement("div");
   document.body.appendChild(container);
   root = createRoot(container);
@@ -121,9 +121,23 @@ it("omits unfilterable sentinels from project options and preserves a selection 
 
 it("keeps session navigation and case lifetime drilldown separately actionable", () => {
   hooks.top.mockReturnValue(result({ rows: [{ ...bucket(), sessionId: "session-1", repoPath: "/repo/AI-team", backend: "claude", role: "worker", models: [] }] }));
-  hooks.affiliations.mockReturnValue({ index: new Map([["session-1", { flowRunId: "case-1", caseTitle: "Ship it" }]]), error: null });
+  hooks.affiliations.mockReturnValue({ index: new Map([["session-1", { flowRunId: "case-1", caseTitle: "Ship it" }]]), isKnown: true, error: null });
   render();
   expect(container.querySelector('a[href="/sessions/session-1"]')).not.toBeNull();
   act(() => container.querySelector<HTMLButtonElement>('[aria-label="View case lifetime cost: Ship it"]')!.click());
   expect(container.querySelector('[role="dialog"]')?.textContent).toContain("Case lifetime");
+});
+
+
+it("discloses loading and failed case links without hiding session navigation", () => {
+  hooks.top.mockReturnValue(result({ rows: [{ ...bucket(), sessionId: "session-1", repoPath: null, backend: "claude", role: "worker", models: [] }] }));
+  hooks.affiliations.mockReturnValue({ index: new Map(), isKnown: false, isLoading: true, error: null });
+  render();
+  expect(container.textContent).toContain("Loading case links");
+  expect(container.textContent).not.toContain("Standalone");
+  hooks.affiliations.mockReturnValue({ index: new Map(), isKnown: false, isLoading: false, error: new Error("offline") });
+  render();
+  expect(container.textContent).toContain("Case links are unavailable");
+  expect(container.querySelector('a[href="/sessions/session-1"]')).not.toBeNull();
+  expect(container.querySelector('[aria-label^="View case lifetime"]')).toBeNull();
 });

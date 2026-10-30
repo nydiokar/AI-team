@@ -7009,6 +7009,38 @@ class MeshDB:
         rows = self._conn().execute(sql, params).fetchall()
         return [dict(r) for r in rows]
 
+    @contextmanager
+    def compact_session_case_data(self) -> Generator[tuple[list[dict], Generator[dict, None, None]], None, None]:
+        """Newest links and streamed cases from ONE read snapshot, including orphans.
+
+        Only titles need survive each case row. Do not fetchall objectives: a large
+        shared objective must neither repeat per session nor accumulate per case.
+        The caller consumes the case iterator before leaving this read scope.
+        """
+        conn = self._conn()
+        newest = (
+            "WITH newest AS (SELECT MAX(id) AS id FROM flow_links "
+            "WHERE entity_type = 'session' AND entity_id IS NOT NULL AND entity_id != '' "
+            "GROUP BY entity_id) "
+        )
+        conn.execute("SAVEPOINT compact_affiliations")
+        cursor = None
+        try:
+            links = [dict(row) for row in conn.execute(
+                newest + "SELECT fl.flow_run_id, fl.entity_id AS session_id, fl.role "
+                "FROM flow_links fl JOIN newest n ON n.id = fl.id ORDER BY fl.id DESC"
+            )]
+            cursor = conn.execute(
+                newest + "SELECT fr.flow_run_id, fr.objective_lock, fr.status "
+                "FROM flow_runs fr WHERE fr.flow_run_id IN "
+                "(SELECT fl.flow_run_id FROM flow_links fl JOIN newest n ON n.id = fl.id)"
+            )
+            yield links, (dict(row) for row in cursor)
+        finally:
+            if cursor is not None:
+                cursor.close()
+            conn.execute("RELEASE SAVEPOINT compact_affiliations")
+
     def find_open_case_for_session(self, session_id: str) -> Optional[str]:
         """[A36] The session's newest still-OPEN Case, or None.
 

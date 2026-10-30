@@ -12,14 +12,20 @@ covers every session link in the backlog, resolves multi-case links
 deterministically, and never fabricates an affiliation the substrate did not
 assert. These tests pin that behaviour end to end.
 """
+import json
+import sqlite3
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+from threading import Event, Lock
+
 import pytest
 from fastapi.testclient import TestClient
 
-from src.control import control_api, work_read_model as wrm
+from src.control import control_api
+from src.control import work_read_model as wrm
 from src.control.db import MeshDB
-from src.services.session_store import SessionStore
 from src.services.session_service import SessionService
-
+from src.services.session_store import SessionStore
 
 TOKEN = "test-control-token"
 
@@ -183,3 +189,172 @@ def test_affiliations_path_not_captured_as_flow_id(client, db):
     r = client.get("/api/work/affiliations/sessions", headers=_auth())
     assert r.status_code == 200
     assert "affiliations" in r.json()
+
+
+def test_compact_affiliations_preserve_newest_and_missing_case(client, db):
+    old = db.create_flow_run("old", "execution", objective_lock="old")
+    new = db.create_flow_run("new", "execution", objective_lock="<real_objective>New case</real_objective>")
+    db.update_flow_run(new, status="closed")
+    db.create_flow_link(old, "session", "shared", "worker")
+    db.create_flow_link(new, "session", "shared", "manager")
+    db.create_flow_link("ghost-12345678", "session", "orphan", "worker")
+    response = client.get("/api/work/affiliations/sessions?format=compact", headers=_auth())
+    assert response.status_code == 200
+    rows = {row["session_id"]: row for row in response.json()["affiliations"]}
+    assert rows["shared"]["flow_run_id"] == new
+    assert rows["shared"]["case_status"] == "closed"
+    assert rows["shared"]["case_title"] == "New case"
+    assert "objective_lock" not in rows["shared"]
+    assert rows["orphan"]["flow_run_id"] == "ghost-12345678"
+
+
+def test_compact_affiliations_unavailable_is_not_empty(client, monkeypatch):
+    monkeypatch.setattr(control_api, "_db", lambda: None)
+    response = client.get("/api/work/affiliations/sessions?format=compact", headers=_auth())
+    assert response.status_code == 503
+
+
+TITLE_FIXTURES = json.loads((Path(__file__).parents[1] / "web/src/transport/caseTitles.golden.json").read_text())
+
+
+@pytest.mark.parametrize("fixture", TITLE_FIXTURES, ids=lambda f: f["name"])
+def test_case_title_common_golden(fixture):
+    assert wrm.case_title(fixture["objective"], fixture["flow_run_id"]) == b"".join(unit.to_bytes(2, "little") for unit in fixture["expected_utf16"]).decode("utf-16-le", "surrogatepass")
+
+
+def test_compact_complete_mapping_and_streaming(db, client, monkeypatch):
+    for i in range(230):
+        fid = db.create_flow_run(f"t{i}", "execution", objective_lock=f"Title {i}")
+        db.create_flow_link(fid, "session", f"s{i}", " Worker ")
+    db.create_flow_link(fid, "session", "shared", "unknown")
+    old = db.create_flow_run("obsolete", "execution", objective_lock="MUST NOT READ")
+    db.create_flow_link(old, "session", "shared", "reviewer")
+    db.create_flow_link(fid, "session", "shared", "worker")
+    db.create_flow_link("ghost-12345678", "session", "orphan", "evidence")
+    legacy = wrm.build_session_affiliations(db.list_session_case_links())
+    calls = []
+    original = wrm.case_title
+    def title(objective, fid):
+        calls.append(objective)
+        return original(objective, fid)
+    monkeypatch.setattr(wrm, "case_title", title)
+    statements = []
+    db._conn().set_trace_callback(statements.append)
+    with db.compact_session_case_data() as (links, cases):
+        assert iter(cases) is cases  # Objectives are consumed one row at a time.
+        compact = wrm.build_compact_session_affiliations(links, cases)
+    db._conn().set_trace_callback(None)
+    expected = [{k: v for k, v in row.items() if k != "objective_lock"} |
+                {"case_title": original(row["objective_lock"], row["flow_run_id"])}
+                for row in legacy["affiliations"]]
+    assert compact == {"affiliations": expected, "total": 232}
+    assert len(calls) == 231  # once/case including missing case, no obsolete objective
+    assert "MUST NOT READ" not in calls
+    reads = [s for s in statements if s.startswith("WITH newest")]
+    assert len(reads) == 2
+    response = client.get("/api/work/affiliations/sessions?format=compact", headers=_auth())
+    assert response.json() == compact
+
+
+def test_compact_snapshot_and_release_on_failure(db):
+    fid = db.create_flow_run("snapshot", "execution", objective_lock="before")
+    db.create_flow_link(fid, "session", "s", "worker")
+    with db.compact_session_case_data() as (links, cases):
+        writer = sqlite3.connect(db._conn().execute("PRAGMA database_list").fetchone()[2])
+        writer.execute("UPDATE flow_runs SET objective_lock='after', status='closed' WHERE flow_run_id=?", (fid,))
+        writer.execute("INSERT INTO flow_links(flow_run_id,entity_type,entity_id,role,created_at) VALUES (?, 'session','new','worker','now')", (fid,))
+        writer.commit()
+        writer.close()
+        result = wrm.build_compact_session_affiliations(links, cases)
+    assert result["total"] == 1
+    assert result["affiliations"][0]["case_title"] == "before"
+    with pytest.raises(RuntimeError), db.compact_session_case_data():
+        raise RuntimeError("consumer failed")
+    assert not db._conn().in_transaction
+    with db.compact_session_case_data() as (links, cases):
+        result = wrm.build_compact_session_affiliations(links, cases)
+    assert result["total"] == 2
+    assert result["affiliations"][0]["case_title"] == "after"
+
+
+def test_compact_surrogate_json_and_legacy_detail(client, db):
+    objective = "a" * 116 + "😀" + "z" * 5
+    fid = db.create_flow_run("unicode", "execution", objective_lock=objective)
+    db.create_flow_link(fid, "session", "s", "worker")
+    response = client.get("/api/work/affiliations/sessions?format=compact", headers=_auth())
+    assert response.status_code == 200
+    assert response.json()["affiliations"][0]["case_title"] == "a" * 116 + "\ud83d…"
+    assert b"\\ud83d" in response.content
+    assert client.get("/api/work/affiliations/sessions", headers=_auth()).json()["affiliations"][0]["objective_lock"] == objective
+    assert client.get(f"/api/work/{fid}", headers=_auth()).json()["case"]["objective_lock"] == objective
+
+
+@pytest.mark.parametrize("value", ["bad", "compact " , "x" * 10000])
+def test_compact_invalid_format(client, value):
+    assert client.get("/api/work/affiliations/sessions", params={"format": value}, headers=_auth()).status_code == 422
+
+
+def test_compact_models(client):
+    schema = client.app.openapi()
+    variants = schema["paths"]["/api/work/affiliations/sessions"]["get"]["responses"]["200"]["content"]["application/json"]["schema"]["anyOf"]
+    assert len(variants) == 2
+    fields = schema["components"]["schemas"]["CompactSessionAffiliation"]["properties"]
+    assert "case_title" in fields and "objective_lock" not in fields
+
+
+def test_compact_gate_includes_serialization_and_releases(client, db, monkeypatch):
+    from src.control.routes import work
+    original = work.json.dumps
+    entered = Event()
+    release = Event()
+    lock = Lock()
+    count = 0
+    def blocked(value, *args, **kwargs):
+        nonlocal count
+        if isinstance(value, dict) and "affiliations" in value:
+            with lock:
+                count += 1
+                if count == 4:
+                    entered.set()
+            assert release.wait(10)
+        return original(value, *args, **kwargs)
+    monkeypatch.setattr(work.json, "dumps", blocked)
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        futures = [pool.submit(client.get, "/api/work/affiliations/sessions?format=compact", headers=_auth()) for _ in range(4)]
+        try:
+            assert entered.wait(10)
+            for _ in range(96):
+                assert client.get("/api/work/affiliations/sessions?format=compact", headers=_auth()).status_code == 429
+            assert count == 4
+        finally:
+            release.set()
+        assert [f.result().status_code for f in futures] == [200] * 4
+    def fail(*args, **kwargs):
+        raise ValueError("serialization failed")
+    # Patch the serializer at its call site via a wrapper to avoid also breaking
+    # Starlette's structured HTTP error rendering (same stdlib json module).
+    monkeypatch.setattr(work, "json", type("BrokenJSON", (), {"dumps": fail}))
+    monkeypatch.setattr(json, "dumps", original)
+    for _ in range(5):
+        assert client.get("/api/work/affiliations/sessions?format=compact", headers=_auth()).status_code == 503
+    monkeypatch.setattr(work, "json", json)
+    monkeypatch.setattr(db, "compact_session_case_data", fail)
+    for _ in range(5):
+        assert client.get("/api/work/affiliations/sessions?format=compact", headers=_auth()).status_code == 503
+
+
+@pytest.mark.parametrize("objective", ["<" * 65536, "<real_objective>" * 4096])
+def test_compact_malformed_large_markup(objective):
+    assert wrm.case_title(objective, "flow_12345678") == (
+        "<" * 117 + "…" if objective.startswith("<<") else "case 12345678"
+    )
+
+
+def test_compact_db_acquisition_error_releases_gate(client, monkeypatch):
+    def fail():
+        raise sqlite3.OperationalError("private path")
+    monkeypatch.setattr(control_api, "_db", fail)
+    for _ in range(5):
+        response = client.get("/api/work/affiliations/sessions?format=compact", headers=_auth())
+        assert response.status_code == 503
+        assert response.json() == {"detail": "affiliations_unavailable"}

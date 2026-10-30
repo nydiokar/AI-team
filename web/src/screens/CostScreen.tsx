@@ -106,7 +106,7 @@ export function CostScreen() {
           {(["usd", "tokens"] as const).map((by) => <button key={by} type="button" aria-pressed={sort === by} onClick={() => setSort(by)}>{by === "usd" ? "Spend" : "Tokens"}</button>)}
         </div>}>
         <CostQueryNotice loading={top.isLoading} error={top.error} hasData={Boolean(top.data)} onRetry={() => void top.refetch()} />
-        {affiliations.error != null && <p role="status" className="mt-3 text-xs text-warn">Case links are unavailable. Session links still work.</p>}
+        {!affiliations.isKnown && <p role="status" className="mt-3 text-xs text-warn">{affiliations.isLoading ? "Loading case links…" : "Case links are unavailable. Session links still work."}</p>}
         {top.data && <TopSpenders rows={top.data.rows} affiliations={affiliations.index} onPickCase={setDrillCase} />}
       </CostPanel>
 

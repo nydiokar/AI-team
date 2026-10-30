@@ -17,6 +17,7 @@ import type {
   RawGraphNode,
   RawCaseGraphResponse,
   RawSessionAffiliationsResponse,
+  RawCompactSessionAffiliationsResponse,
   RawCaseRosterResponse,
   RawRosterTokens,
   RawWorkBucket,
@@ -293,7 +294,7 @@ export function toCaseRoster(raw: RawCaseRosterResponse): CaseRoster {
 }
 
 export function toSessionAffiliationIndex(
-  raw: RawSessionAffiliationsResponse,
+  raw: RawSessionAffiliationsResponse | RawCompactSessionAffiliationsResponse,
 ): Map<string, SessionAffiliation> {
   const map = new Map<string, SessionAffiliation>();
   for (const a of raw.affiliations ?? []) {
@@ -304,7 +305,7 @@ export function toSessionAffiliationIndex(
       flowRunId: a.flow_run_id,
       role: normalizeSessionRole(a.role),
       // Same derivation as the Work list/detail — one source of truth for titles.
-      caseTitle: caseTitle(a.objective_lock, a.flow_run_id),
+      caseTitle: "case_title" in a ? a.case_title : caseTitle(a.objective_lock, a.flow_run_id),
       // Authoritative case status, copied verbatim — the label derives closed vs
       // active from it (never inferred).
       caseStatus: a.case_status ?? null,

@@ -599,7 +599,7 @@ export function SessionDetailScreen() {
   );
   // Authoritative case membership for this session (Work substrate). undefined ⇒
   // standalone; never inferred from task adjacency.
-  const { index: affiliations } = useSessionAffiliations();
+  const { index: affiliations, isKnown: affiliationKnown, isLoading: affiliationLoading } = useSessionAffiliations();
   const affiliation = id ? affiliations.get(id) : undefined;
   const {
     data: turns,
@@ -1033,7 +1033,7 @@ export function SessionDetailScreen() {
           {session && (
             <div className="flex items-center gap-2 border-b border-hairline bg-base/60 px-4 py-2 backdrop-blur-xl">
               <span className="text-[11px] text-ink-muted">Affiliation</span>
-              <SessionAffiliationLink affiliation={affiliation} />
+              <SessionAffiliationLink affiliation={affiliation} isKnown={affiliationKnown} isLoading={affiliationLoading} />
             </div>
           )}
           <button
@@ -1218,7 +1218,7 @@ export function SessionDetailScreen() {
               <>
                 <div className="flex items-center gap-2 border-b border-hairline bg-base/60 px-4 py-2 backdrop-blur-xl">
                   <span className="text-[11px] text-ink-muted">Affiliation</span>
-                  <SessionAffiliationLink affiliation={affiliation} />
+                  <SessionAffiliationLink affiliation={affiliation} isKnown={affiliationKnown} isLoading={affiliationLoading} />
                 </div>
                 {activeHeartbeat && (
                   <div className="flex items-center gap-2 border-b border-hairline bg-surface-1 px-4 py-2 text-[11px] text-ink-soft">

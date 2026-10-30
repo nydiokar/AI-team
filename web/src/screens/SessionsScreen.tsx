@@ -70,7 +70,7 @@ export function SessionsScreen() {
   const unpinnedQuery = useSessions(false);
   // Authoritative session→case affiliation labels (empty until the Work
   // substrate records links; never inferred). Absent ⇒ session shows standalone.
-  const { index: affiliations } = useSessionAffiliations();
+  const { index: affiliations, isKnown: affiliationKnown, isLoading: affiliationLoading } = useSessionAffiliations();
 
   const groups = useMemo(
     () =>
@@ -99,6 +99,7 @@ export function SessionsScreen() {
 
   return (
     <div className="pb-8">
+      {!affiliationKnown && <p role="status" className="px-4 py-2 text-xs text-ink-muted">{affiliationLoading ? "Loading case links…" : "Case links are unavailable."}</p>}
       <CompactTopBar
         title="Sessions"
         subtitle="Live · persistent context"

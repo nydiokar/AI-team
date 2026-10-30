@@ -1,0 +1,110 @@
+[
+  {
+    "name": "priority",
+    "objective": "<task_name>third</task_name><interpreted_task>second</interpreted_task><real_objective>first</real_objective>",
+    "flow_run_id": "flow_12345678",
+    "expected_utf16": [102, 105, 114, 115, 116]
+  },
+  {
+    "name": "empty-tag",
+    "objective": "<real_objective><b> </b></real_objective><interpreted_task>second</interpreted_task>",
+    "flow_run_id": "f",
+    "expected_utf16": [115, 101, 99, 111, 110, 100]
+  },
+  {
+    "name": "markup",
+    "objective": "<REAL_OBJECTIVE> A <b>bold</b>\n title\t here </REAL_OBJECTIVE>",
+    "flow_run_id": "f",
+    "expected_utf16": [65, 32, 98, 111, 108, 100, 32, 116, 105, 116, 108, 101, 32, 104, 101, 114, 101]
+  },
+  {
+    "name": "plain",
+    "objective": "\n <b>First</b>  line\nsecond",
+    "flow_run_id": "f",
+    "expected_utf16": [70, 105, 114, 115, 116, 32, 32, 32, 108, 105, 110, 101]
+  },
+  {
+    "name": "empty",
+    "objective": null,
+    "flow_run_id": "flow_a1b2c3d4",
+    "expected_utf16": [99, 97, 115, 101, 32, 49, 98, 50, 99, 51, 100, 52]
+  },
+  {
+    "name": "short-id",
+    "objective": " ",
+    "flow_run_id": "abc",
+    "expected_utf16": [99, 97, 115, 101, 32, 97, 98, 99]
+  },
+  {
+    "name": "unicode-id",
+    "objective": null,
+    "flow_run_id": "flow_\ud83d\ude00\ud83d\ude00\ud83d\ude00x",
+    "expected_utf16": [99, 97, 115, 101, 32, 55357, 56832, 55357, 56832, 55357, 56832, 120]
+  },
+  {
+    "name": "surrogate-id",
+    "objective": null,
+    "flow_run_id": "flow_1234567\ud83d\ude00",
+    "expected_utf16": [99, 97, 115, 101, 32, 49, 50, 51, 52, 53, 54, 55, 55357]
+  },
+  {
+    "name": "js-space",
+    "objective": "\ufeff\u00a0<task_name>\u1680A\u2028 B\ufeff</task_name>\u3000",
+    "flow_run_id": "f",
+    "expected_utf16": [65, 32, 66]
+  },
+  {
+    "name": "python-only-space",
+    "objective": "<task_name>A\u0085\u001cB</task_name>",
+    "flow_run_id": "f",
+    "expected_utf16": [65, 133, 28, 66]
+  },
+  {
+    "name": "unicode-tag",
+    "objective": "<ta\u017fk_name>wrong</ta\u017fk_name><task_name>right</task_name>",
+    "flow_run_id": "f",
+    "expected_utf16": [114, 105, 103, 104, 116]
+  },
+  {
+    "name": "combining",
+    "objective": "<real_objective>e\u0301 \u65e5\u672c \ud83d\ude00</real_objective>",
+    "flow_run_id": "f",
+    "expected_utf16": [101, 769, 32, 26085, 26412, 32, 55357, 56832]
+  },
+  {
+    "name": "120-units",
+    "objective": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+    "flow_run_id": "f",
+    "expected_utf16": [120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120]
+  },
+  {
+    "name": "121-units",
+    "objective": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+    "flow_run_id": "f",
+    "expected_utf16": [120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 8230]
+  },
+  {
+    "name": "surrogate-cut",
+    "objective": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\ud83d\ude00zzzzz",
+    "flow_run_id": "f",
+    "expected_utf16": [97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 55357, 8230]
+  },
+  {
+    "name": "paired-cut",
+    "objective": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\ud83d\ude00zzzzz",
+    "flow_run_id": "f",
+    "expected_utf16": [97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 55357, 56832, 8230]
+  },
+  {
+    "name": "repeated-tag",
+    "objective": "<task_name> </task_name><task_name>ignored</task_name>",
+    "flow_run_id": "f",
+    "expected_utf16": [105, 103, 110, 111, 114, 101, 100]
+  },
+  {
+    "name": "fallback-markup",
+    "objective": "<x></x>",
+    "flow_run_id": "flow_12345678",
+    "expected_utf16": [99, 97, 115, 101, 32, 49, 50, 51, 52, 53, 54, 55, 56]
+  }
+]

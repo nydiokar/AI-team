@@ -50,9 +50,14 @@ export function SessionAffiliationChip({
 /** Link form — for standalone contexts (e.g. SessionDetail header). */
 export function SessionAffiliationLink({
   affiliation,
+  isKnown = true,
+  isLoading = false,
 }: {
   affiliation: SessionAffiliation | undefined;
+  isKnown?: boolean;
+  isLoading?: boolean;
 }) {
+  if (!isKnown) return <ToneBadge tone="idle" label={isLoading ? "Loading case link…" : "Case link unavailable"} dot={false} />;
   if (!affiliation) {
     return <ToneBadge tone={roleTone("session")} label="Standalone" dot={false} />;
   }

@@ -6,14 +6,18 @@ monkeypatch ``control_api`` keep reaching these handlers.
 """
 from __future__ import annotations
 
-from typing import Any, Callable, Optional
+import json
+import threading
+from typing import Any, Callable, Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, ConfigDict, Field
 
 from src.control import control_api as core
 from src.control.routes._responses import TokenTotals
+
+_affiliations_gate = threading.BoundedSemaphore(4)
 
 
 # --- Response models (documentation only; handlers return JSONResponse) --------
@@ -87,6 +91,19 @@ class SessionAffiliation(BaseModel):
 
 class SessionAffiliationsOut(BaseModel):
     affiliations: list[SessionAffiliation]
+    total: int
+
+
+class CompactSessionAffiliation(BaseModel):
+    session_id: str
+    flow_run_id: str | None = None
+    role: Literal["manager", "worker", "reviewer", "evidence", "session"]
+    case_status: str | None = None
+    case_title: str = Field(description="caseTitle equivalent, at most 120 UTF-16 units; no raw objective")
+
+
+class CompactSessionAffiliationsOut(BaseModel):
+    affiliations: list[CompactSessionAffiliation]
     total: int
 
 
@@ -281,9 +298,9 @@ def build_router(orchestrator: Any, *, require_auth: Callable[..., Any]) -> APIR
 
     @router.get(
         "/api/work/affiliations/sessions",
-        responses={200: {"model": SessionAffiliationsOut, "description": "Session→case affiliation index over the whole substrate."}},
+        responses={200: {"model": SessionAffiliationsOut | CompactSessionAffiliationsOut, "description": "Whole-substrate index. Default legacy carries objective_lock; format=compact carries case_title only."}},
     )
-    def api_work_session_affiliations() -> JSONResponse:
+    def api_work_session_affiliations(format: Literal["legacy", "compact"] = Query("legacy")) -> Response:
         """Authoritative session→case affiliation index over the WHOLE substrate.
 
         One JOIN (flow_links entity_type='session' → flow_runs) — no per-case
@@ -292,6 +309,20 @@ def build_router(orchestrator: Any, *, require_auth: Callable[..., Any]) -> APIR
         BEFORE ``/api/work/{flow_run_id}`` so the literal path is never captured as
         a flow id. Empty ``affiliations`` when the substrate has no session links."""
         from src.control import work_read_model as _wrm
+        if format == "compact":
+            if not _affiliations_gate.acquire(blocking=False):
+                raise HTTPException(status_code=429, detail="affiliations_busy")
+            try:
+                db = core._db()
+                if db is None:
+                    raise RuntimeError("affiliations database unavailable")
+                with db.compact_session_case_data() as (links, cases):
+                    result = _wrm.build_compact_session_affiliations(links, cases)
+                return Response(json.dumps(result, ensure_ascii=True, separators=(",", ":")), media_type="application/json")
+            except Exception as exc:
+                raise HTTPException(status_code=503, detail="affiliations_unavailable") from exc
+            finally:
+                _affiliations_gate.release()
         db = core._db()
         rows = db.list_session_case_links() if db is not None else []
         return JSONResponse(_wrm.build_session_affiliations(rows))
