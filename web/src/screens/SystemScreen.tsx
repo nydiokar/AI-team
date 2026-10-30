@@ -311,7 +311,7 @@ export function SystemScreen() {
   const { canInstall, isIos, install } = useInstallPrompt();
   const [selectedTarget, setSelectedTarget] = useState<Target | null>(null);
   const [jobsExpanded, setJobsExpanded] = useState(true);
-  const [jobs, setJobs] = useState({ total: 0, running: 0 });
+  const [jobs, setJobs] = useState({ total: 0, running: 0, unavailable: false });
 
   const all = targets ?? [];
   const liveNodes = all.filter((t) => t.live);
@@ -365,14 +365,14 @@ export function SystemScreen() {
 
       {/* ── Jobs — sits below the live infra (mesh + nodes); one collapsible
           header, hidden entirely when there's nothing to watch. ── */}
-      {(jobs.total > 0 || jobsExpanded) && (
+      {(jobs.total > 0 || jobsExpanded || jobs.unavailable) && (
         <SectionHeader
           label="Jobs"
           count={jobs.total || undefined}
           onToggle={() => setJobsExpanded((v) => !v)}
           expanded={jobsExpanded}
           action={
-            jobs.running > 0 ? (
+            jobs.unavailable ? <span className="text-[10px] text-warn">Unavailable</span> : jobs.running > 0 ? (
               <span className="flex items-center gap-1 rounded-full bg-accent-dim/60 px-1.5 py-0.5 text-[10px] font-medium text-accent">
                 <span className="size-1 rounded-full bg-accent pulse-dot" />
                 {jobs.running} running
