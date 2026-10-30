@@ -13,9 +13,11 @@ Implementation, merge and production verification are recorded separately.
 
 ### J1 — Jobs authority and enrichment
 
-- Priority: P1, execute first. Status: VERIFIED (implementation, merge and production).
+- Priority: P1, execute first. Status: VERIFIED (implementation, merge and observed
+  production reads); audit correction for UI availability merged/deployed in PR #266.
+  Remaining production-grade limits and unverified cases are recorded in the audit below.
 - Classification: confirmed defects; compatibility change explicitly accepted.
-- Evidence: `TaskOrchestrator.list_watched_jobs` always merges local and remote
+- Baseline evidence (before J1): `TaskOrchestrator.list_watched_jobs` always merged local and remote
   reads; `_normalize_job_ownership` repeats session lookups for both arrays.
   `MeshDB.list_jobs` already computes SQLite ownership and filters before LIMIT.
   Commit `41e34f8` intentionally added remote gateway compatibility; it is not dead
@@ -49,8 +51,9 @@ Implementation, merge and production verification are recorded separately.
 
 ### J2 — Completion reliability
 
-- Priority: P1. Status: VERIFIED (implementation, targeted checks, review, CI and merge).
-  Depends on J1 (closed live). Operator authorized review, corrections and merge on 2026-10-29.
+- Priority: P1. Status: VERIFIED (implementation, targeted checks, review, CI, merge
+  and deployment). New terminal delivery/recovery is NOT production-verified.
+  Depends on J1; operator authorized review, corrections and merge on 2026-10-29.
 - Classification: both correctness defects deterministically reproduced, correction
   implemented. Discovery/retry/restart guarantees are bounded as specified below.
 - Baseline evidence (before J2): `_job_completion_poller` advanced `_last_job_poll` after SELECT;
@@ -77,7 +80,9 @@ Implementation, merge and production verification are recorded separately.
   Final implementation/test head `f9c213d` passed CI
   ([run 40731253503](https://github.com/nydiokar/AI-team/actions/runs/40731253503)).
   Review correction `d0526eb` passed CI run `40858265943`. PR #262 merged as
-  `d52a83b` on 2026-10-29. Production: not yet verified; no rollout claim.
+  `d52a83b` on 2026-10-29. Deployed on 2026-10-30 in `8bb4422`, retained
+  in final build `ee59596`; empty completion protocol read verified, external
+  notification/admission/recovery not observed in production (see audit).
 
 #### J2 correction contract (2026-10-28, before implementation)
 
@@ -187,7 +192,8 @@ Ruff passes on the new model/test modules; comparison by diagnostic code/message
 against main found no introduced diagnostics in modified legacy modules.
 `git diff --check` passes. PR #262 is published; implementation head `f9c213d`
 passed CI run 40731253503. Subsequent evidence-only head checks are attached to the
-PR. Merge and deployment remain gated.
+PR. Those pre-merge gates subsequently passed; final merge/deployment evidence
+is in the engineering audit below.
 No local full/e2e suite, external notification, paid backend, worker restart or J2
 production deployment is part of this verification.
 
@@ -249,10 +255,12 @@ sort. Complete response equality and indexed work matter in addition to query co
   new cross-controller namespace or multi-tenant federation guarantee. Receipt rows
   are retained to preserve replay history; no unsafe TTL/prune is introduced.
 
-#### J2 rollout and explicit operator recovery (NOT AUTHORIZED yet)
+#### J2 rollout and explicit operator recovery
 
-After approval: back up controller DB, preserve the J1 image, deploy controller
-gateway + task-server together (migration 47 is additive). Do not restart workers.
+Authorized gateway/task-server rollout completed on 2026-10-30 (migration 47
+additive; backup and exact builds in the audit). Workers were not restarted.
+The federation upgrade and historical recovery procedures below remain explicit
+operator decisions for dependent installations; no historical backfill was performed.
 For an older federated installation, upgrade its authoritative task-server protocol
 before its gateway and ensure local MeshDB receipts are enabled/available. Terminals
 observed by an old gateway in between upgrades can produce duplicate external notices
@@ -284,11 +292,13 @@ These are operator procedures, not production mutations performed in this dispat
 
 - Priority: P1, MUST-FIX after J2. Status: VERIFIED (implementation/review/merge).
   PR [#263](https://github.com/nydiokar/AI-team/pull/263), merge `af4e008`;
-  CI run `40859652586` passed. Production verification remains separate.
-  J2 review/correction/merge is complete; production rollout remains separate.
-- Classification: confirmed defects. `build_reason_batch` does per-case
-  `get_flow_run`, `case_quota_pause`, `transient_pause`; its N+1 test permits 30
-  per-case calls for ten cases. `list_jobs_for_sessions` limits all statuses to 200
+  CI run `40859652586` passed. Deployed in final build `ee59596`;
+  ordinary reason/queue payloads observed, stress/failure cases verified in isolation.
+  J2 review/correction/merge and gateway rollout are complete; external delivery
+  verification remains separate.
+- Baseline defects (before J3): `build_reason_batch` did per-case
+  `get_flow_run`, `case_quota_pause`, `transient_pause`; its N+1 test permitted 30
+  per-case calls for ten cases. `list_jobs_for_sessions` limited all statuses to 200
   before the reason layer selects running jobs.
 - Affected behavior: page cost grows per distinct waiting case; old running jobs
   can disappear from waiting reasons.
@@ -305,7 +315,7 @@ These are operator procedures, not production mutations performed in this dispat
   An old running job survives >200 newer completed jobs. No full event-log folds.
 - Implementation: `feat/session-reason-batch`, based on merged J2 `d52a83b`.
   Tests/evidence below. Reviewed and merged via PR #263 as `af4e008`;
-  production verification remains separate.
+  deployment/read observations and remaining acceptance limits are in the audit below.
 
 #### J3 implementation evidence — 2026-10-29
 
@@ -343,25 +353,27 @@ test was added (that test passed separately). New tests pass Ruff; modified lega
 files add no diagnostic code/message versus base main. `git diff --check` passes.
 No paid backend, full/e2e suite, external notification or production write was run.
 Independent lead review reran the reason/batch/view files: **115 passed in 9.05 s**.
-The queue/API/pause/inbox seams were tested locally; production is not verified.
+The queue/API/pause/inbox seams were tested locally; ordinary production reads
+are now observed, while pause/old-job/failure scenarios remain isolated evidence.
 
 Boundary review: this adds no entry point. The existing authenticated sessions GET
 validates limit 1–1000 and consumes no body; evidence materialization is bounded by
-requested IDs and 500-ID chunks, without history/payload reads. Existing shared sync
-handler admission is unchanged; full Session/history materialization and aggregate
-memory at 100 calls remain unknown until J4, so route-specific admission sizing is
-explicitly deferred to J4/S3 before higher-volume/untrusted use (also in CONTEXT).
+requested IDs and 500-ID chunks, without history/payload reads. At the J3 checkpoint, full Session/history materialization and aggregate memory
+were deferred to J4. J4 subsequently added projection/four-slot admission and
+measured Python memory; native memory, historical bytes and deadlines remain S3
+before higher-volume/untrusted use (also in CONTEXT).
 SQLite lock timeout is not a statement deadline; S3 remains open. Backing-read
 failures retain presentational degradation; no API availability-policy change or
 new startup probe is claimed. No architecture/DB authority or worker changes.
 
 ### J4 — Session-list projection and indexing
 
-- Priority: P2, REQUIRED after J3. Status: VERIFIED (implementation/targeted checks),
-  pending review/integration; base main `af4e008`.
+- Priority: P2, REQUIRED after J3. Status: VERIFIED (implementation, review, CI,
+  merge and ordinary production reads). PR [#264](https://github.com/nydiokar/AI-team/pull/264),
+  merge `3eab87e`, CI `40861342633`; final deployed build `ee59596`.
 - Classification: confirmed overfetch; index benefit is a measured hypothesis,
   not an established production latency promise.
-- Evidence: `MeshDB.list_sessions` selects full rows ordered by `updated_at`;
+- Baseline evidence (before J4): `MeshDB.list_sessions` selected full rows ordered by `updated_at`;
   `SessionStore.list_all` parses mutable Sessions including history/messages.
   `SessionService.list_views` only needs view/reason/overlay fields. Existing
   server limit is real: CONTEXT's old claim that it is client-only is stale.
@@ -376,8 +388,8 @@ new startup probe is claimed. No architecture/DB authority or worker changes.
   matches existing empty/error/malformed-row behavior. Pinned sessions older than
   the newest 200 remain retrievable (UI pinned limit 1000). Fresh/existing migrations
   pass; all three query shapes avoid an unnecessary sort with measured query plans.
-- Implementation: `feat/session-list-projection`; evidence below. PR/merge and
-  production verification remain separate.
+- Implementation: `feat/session-list-projection`; implementation/copy evidence below,
+  deployed list/pinned observations and explicit limitations in the audit.
 
 #### J4 implementation evidence — 2026-10-29
 
@@ -436,12 +448,13 @@ read errors retain the old empty response contract. SQLite's 15 s busy timeout i
 only a lock bound, with no hard statement/server execution deadline (S3). Historical
 scalar text/JSON-fallback files remain unbounded in bytes; absolute byte handling
 and cancellation need S3's separate compatibility contract before high-volume or
-untrusted use. No claim of a hard RSS/output bound or successful production rollout.
+untrusted use. No hard RSS/output bound; successful rollout is now recorded separately below.
 
 ### J5 — Compact affiliations
 
-- Priority: P2, REQUIRED after J4. Status: VERIFIED (implementation, targeted checks
-  and independent adversarial review); PR/merge pending. J4 merged as `3eab87e`.
+- Priority: P2, REQUIRED after J4. Status: VERIFIED (implementation, targeted checks,
+  independent adversarial review, CI, merge and all three ordinary UI consumers).
+  PR [#265](https://github.com/nydiokar/AI-team/pull/265), merge `8bb4422`; J4 merged as `3eab87e`.
 - Classification: confirmed redundant objective payload; compact transport required.
 - Evidence: `list_session_case_links` joins full objectives before builder dedup;
   `build_session_affiliations` emits objective per session. Sessions, Session Detail
@@ -461,9 +474,11 @@ untrusted use. No claim of a hard RSS/output bound or successful production roll
   standalone membership. Versioned format key retains event invalidation. Note:
   affiliations are NOT persisted (`main.tsx` only persists session queries).
   Measure peak intermediate memory/concurrency and query plan. Historical target
-  <750 KB for the same 1,082-entry dataset is unverified, not a unit-test timing gate.
-- PR/merge: pending. Production remains `e0e2877` at the 2026-10-30 baseline;
-  no J5 live claim before deployment and direct checks.
+  <750 KB for the same 1,082-entry dataset is measured below, not a unit-test timing gate.
+- PR #265 implementation `cffd8d9`, merge `8bb4422`; CI
+  [41094605454](https://github.com/nydiokar/AI-team/actions/runs/41094605454) passed.
+  Deployed first as `8bb4422`, then retained in `ee59596` with the J1 UI correction;
+  positive Sessions/Detail/Cost observations and remaining limits are in the audit.
 
 #### J5 implementation, adversarial review and boundary evidence — 2026-10-30
 
@@ -535,6 +550,7 @@ B-tree. No objective JOIN fanout or N+1. The historical <750 KB target is met on
 the copied 1,082-entry membership (260,777 bytes), not an absolute output limit.
 
 Service boundary (compact option):
+
 - **Concurrency:** authenticated sync handler, four nonblocking process-local
   permits held through title projection AND JSON encoding; 96 excess calls at
   N=100 return 429 before DB work. Tests hold four serializers and verify release
@@ -542,6 +558,8 @@ Service boundary (compact option):
 - **Memory:** four active materializations estimate ~8.26 MB traced Python for
   this production copy or ~29.18 MB in the Unicode fixture, plus rejection bodies.
   These are four-times-single-call estimates, not concurrent/native RSS bounds.
+  Permits end at encoded Response creation, not socket drain; slow readers can
+  retain additional completed bodies outside these active-materialization estimates.
   SQLite caches (configured 8 MiB/thread connection), temporary B-trees, allocator
   retention and arbitrarily large historical fields are excluded. S1/S3 remain
   required before materially larger/untrusted use; no arbitrary membership cap.
@@ -559,6 +577,147 @@ Service boundary (compact option):
   hardening needs a separate compatibility decision under S3. No DB writes,
   new ownership path, worker restart, paid backend or local full/e2e suite.
 
+
+## Engineering audit — 2026-10-30
+
+Audited **after J5 merged** against the original scope/acceptance above, current
+source at `8bb4422` and corrective merge `ee59596`, PR histories #261–#266 and
+focused tests. No P0/P1 defect was demonstrated. One P2 UI availability defect was
+reproduced, corrected, reviewed, merged and deployed separately (#266). VERIFIED
+below applies to the named evidence, **not blanket production-grade certification**.
+
+| Job | Implementation / merge | Deployment | Direct functional observation | Remaining work / limits |
+|---|---|---|---|---|
+| J1 | Met: controller/federated selection, shared two-read composition, SQL ownership/filter-before-LIMIT, API 503/admission/off-loop polling; [#261](https://github.com/nydiokar/AI-team/pull/261) `e0e2877`; UI correction [#266](https://github.com/nydiokar/AI-team/pull/266) `ee59596` | `ee59596` | all/unowned job arrays equal authoritative SQL; healthy-empty; System renders rows; both UI errors/retry tested as described below | S3 text/SQL/native-memory limits; federated partial/stale behavior deliberately retained; no fresh production running job in this audit |
+| J2 | Met within declared bounded contract: timestamp-free discovery, independent durable effects, fenced leases/retry, permanent admission identity, bounded federation pages; [#262](https://github.com/nydiokar/AI-team/pull/262) `d52a83b` | `ee59596`, migration 47 | authenticated completion page 200/empty; receipt table/index present; 94 historical terminals excluded, zero receipts | **NOT live-verified:** new terminal discovery→notice/admission/execution, failed send, crash/restart recovery. Controlled fake-carrier/transport tests prove those seams. Historical backfill remains operator-owned; notices may duplicate; Push is best effort |
+| J3 | Met: deduplicated 500-ID evidence, independent latest pause facts, all running owners, preserved reason precedence/queue/inbox; [#263](https://github.com/nydiokar/AI-team/pull/263) `af4e008` | `ee59596` | actual session reason/queue payloads; production-copy pre-J3 reason equivalence; frontend adapter/grouping checks | Old-running-job >200 and pause/event-order combinations are isolated fixtures, not current live examples. Existing silent evidence degradation remains a compatibility risk; no atomic snapshot across every reason/queue SELECT |
+| J4 | Met: projection/full-reader equivalence, history retained, JSON/null/tie behavior, migration/index plans and pinned retrieval; [#264](https://github.com/nydiokar/AI-team/pull/264) `3eab87e` | `ee59596`, migration 48 | 200 latest / 200 unpinned / 4 pinned; **3 pinned outside newest 200** still retrieved; 200 queue overlays; actual Sessions UI rendered | Deliberate old fallback/error-to-empty semantics remain; malformed-row/fallback/migration and 100-call tests are isolated. Scalar/fallback bytes, native RSS and execution deadlines remain S3 |
+| J5 | Met: explicit compact/default legacy, complete newest/orphan mapping, once/case equivalent titles, schema/client/cache/UI integration and reviewed boundary; [#265](https://github.com/nydiokar/AI-team/pull/265) `8bb4422` | `ee59596` | 1,082 mappings agree with legacy IDs/role/status; 260,777-byte compact response; full detail objective; Sessions title, Detail link and **30-day Cost case usage 200 + rendered breakdown** | S1 whole-index growth, S3 historical bytes/native/SQL deadline; default legacy path intentionally ungated. Snapshot races/Unicode/malformed/100-call/error paths proved in isolation, not by damaging live data |
+
+### Evidence and architecture assessment
+
+- **History/build:** GitHub recheck confirms #261 `e0e2877`, #262 `d52a83b`,
+  #263 `af4e008`, #264 `3eab87e`, #265 `8bb4422`, #266 `ee59596` merged;
+  each relevant PR-head CI passed. #266 implementation `a714ed5`, CI
+  [41096668574](https://github.com/nydiokar/AI-team/actions/runs/41096668574)
+  passed. Final gateway **and task-server** report `ee59596`; image
+  `49a707139f0c`, tag `ai-team:prod-ee59596`, schema 48, two nodes online,
+  coverage true, no startup traceback. Worker PID `2711734` and restart count 5
+  unchanged across both deployments. Node build mismatch is expected: worker
+  code was not part of this programme and workers were not restarted.
+- **Rollout:** initial preflight GO at `8bb4422`, live schema 46→48. Online backup
+  `/home/cifran/ai-team-data/backups/mesh-pre-8bb4422-20261030T1702Z.db`,
+  316,407,808 bytes, mode 0600, integrity `ok`; rollback image
+  `ai-team:pre-8bb4422` preserves J1. Corrective preflight GO at `ee59596`,
+  48→48; rollback `ai-team:pre-ee59596` preserves `8bb4422`. Both Compose
+  services rebuilt/recreated together. Compose ran from clean main with its host
+  env; build context was a `git archive` of the exact commit, excluding preserved
+  untracked analysis scripts that the normal Docker allowlist would include.
+  Pushed deploy tags `deploy/20261030T1702Z-8bb4422` and
+  `deploy/20261030T1717Z-ee59596`. No rollback/data restore used.
+- **J1 authority/UI:** `list_controller_jobs` is shared by the facade and API
+  fallback; controller mode performs no remote union/session reconciliation.
+  Live deployed config is explicitly `controller`; all/unowned arrays (20/50)
+  reconcile with read-only SQLite, and nonexistent-owner filter returns true
+  empty. Original zero-HTTP packet capture remains historical J1 evidence; it
+  was not repeated for the final build. Audit caught both UI consumers discarding
+  the API error: #266 adds jobs-only unavailable/stale notice + retry and a
+  parent availability summary. Cached rows stay visibly stale; only successful
+  empty establishes absence. This closes a demonstrated cross-layer defect.
+- **J2 integration:** receipts own watched-job effects, not agent waiting; A104's
+  inbox remains authoritative. Existing `watched:<job_id>` managed admission,
+  scheduler and audit paths are reused, without a second executor or inbox.
+  Migration excludes historical terminals intentionally to avoid notification/
+  continuation storms; the observed 59 done/32 failed/3 lost jobs are all excluded.
+  No pending completion existed to observe a new live effect. Receipt `done`
+  never means human receipt or completed agent execution. Five-attempt dead state,
+  unknown-send duplicates, lease expiry and operator recovery are explicit
+  contract decisions, not silently certified exactly-once delivery.
+- **J3/J4 integration:** `list_views` now uses `list_summaries`, then the existing
+  reason and queue overlays; full get/save/list_all remain lifecycle authority.
+  Shared parsing/conversion preserves configured model/origin/previous ID/result
+  semantics. J3 reads inbox waiting/own-task liveness and latest relevant ledger
+  event types; single-case enriched pause helpers remain unchanged. Query counts
+  are not constant SQL cost: event-type probes can scan irrelevant case history
+  using the existing `(flow_run_id,id)` index. The copy's largest case had 667
+  events; no additional index was justified by a measured regression. Per-case
+  work/deadlines at larger histories remain a risk to size under S3.
+- **J5 integration:** one versioned shared hook feeds all three consumers; no
+  per-case HTTP fanout, new ownership store or cached objective pathway. Legacy
+  default and case detail retain full objectives deliberately. The stronger
+  isolated race probe injected a committed writer **immediately before the second
+  SELECT** via SQLite tracing: current request retained old links/status/title,
+  next request saw the commit, and the read transaction released.
+
+### Verification coverage and production-grade follow-ups
+
+Post-merge audit command:
+
+```bash
+.venv/bin/pytest tests/test_jobs_read_authority.py tests/test_job_completion_reliability.py tests/test_job_completion_protocol.py tests/test_session_reason_batch.py tests/test_session_list_projection.py tests/test_session_affiliations.py --tb=short
+```
+
+**206 passed, 2 existing warnings in 57.39 s.** J1–J5 module selection covers
+SQL counts/authority, delayed commit, independent effects, competing leases,
+restart and last-attempt reconciliation, 131 remote completions/protocol bounds,
+all-state/pause ordering, old running-job truncation, projection/history/fallback/
+migration/index equality, admission serialization/error paths and affiliation
+compatibility/Unicode. Original broader seam commands above remain useful history;
+a green unit test is not claimed as a paid turn, external receipt or live failure.
+
+Additional frontend audit: `vitest run src/transport/sessionReason.test.ts
+src/transport/adapters.test.ts src/lib/sessionGroups.test.ts src/lib/turnQueue.test.ts`
+— **64 passed** (4 files, 719 ms). #266's actual System/Detail components plus
+ownership/invalidation/affiliation checks: **17 passed** (4 files, 2.86 s), with
+initial/cached-positive/cached-empty error→retry/recovery and collapsed summary.
+Typecheck and production build exited 0, including inside the Docker build.
+Independent J5 adversarial review and golden/probe details remain above.
+
+On an isolated migrated copy of the pre-deploy online backup, complete SessionView
+outputs (including reasons/queue) matched full readers for latest 200, pinned 1000
+(4 rows), unpinned 200 and latest 1000. Reasons matched the actual pre-J3 function
+from `d52a83b` for these same rows. Copy SELECTs were 6/3/6/8 (fewer waiting Cases
+than the maximum-budget fixtures); it contained no old-running-job or active-pause
+example, so equality here does not prove those specific fixes. Checkout model
+configuration was used; exhaustive configured-default cases remain fixture evidence.
+
+Final-build Chromium observations: real authenticated Sessions (closed section
+expanded), Detail and 30-day Cost rendered the compact affiliation path; Cost
+returned case usage 200 and rendered manager/worker breakdown. Default 7-day top
+spenders had no affiliated row; 30-day had ten. System rendered jobs. Zero page
+errors; browser/runner exited 0, children reaped. For #266 only the test browser's
+jobs response was intercepted as 503: both surfaces displayed unavailable without
+false absence, Retry recovered to the **real healthy API 200**, and collapsed
+System header stayed reachable. This is synthetic client behavior, **not a real
+production DB outage/recovery**. Real backing failures/concurrency/Unicode races
+were exercised only on isolated data. Local artifacts are under `/tmp/j5-*.png`,
+`/tmp/j5-live-results.json`, `/tmp/jobs-ui-probe.json`,
+`/tmp/read-path-live-api.json` and `/tmp/read-path-copy-audit.json`; durable findings
+are recorded here rather than depending on those temporary files.
+
+Remaining before broader production-grade certification:
+1. **P2, deliberate S3 deferral:** hard SQL/server deadline/cancellation,
+   oversized historical-field policy and native/concurrent/slow-reader RSS sizing.
+   Separate four-slot gates bound active materialization per surface, not all
+   endpoints together or encoded bodies queued behind slow clients. No absolute
+   request-memory/latency guarantee exists. Keep authenticated/operator workload
+   assumptions until these are sized; browser timeouts cannot stop server threads.
+2. **P2 reliability compatibility decision:** sessions retain silent per-evidence
+   degradation, JSON fallback and final error-to-empty contract; legacy affiliations
+   retain absent-DB empty and ungated reads. These are observed code behaviors,
+   not new J3–J5 defects or successful failure-handling certification. A separate
+   availability contract is needed to distinguish unknown from healthy-empty end
+   to end on those legacy paths. #266 fixes the already-distinguishable jobs path.
+3. **J2 live acceptance remains not verified:** observe a genuinely requested new
+   watched job through terminal receipt/notification/admission and subsequent
+   execution, plus controlled recovery in an authorized staging environment.
+   Do not manufacture a paid turn or replay the 94 historical terminals to mark
+   this green. Historical recovery and dependent federation inventory/rollout
+   remain operator decisions; external exactly-once delivery is not the contract.
+4. **S1/S2/S4 remain optional/deferred:** scoped complete affiliation retrieval
+   when whole-index growth warrants it; federation retirement only after inventory;
+   jobs indexes only after larger-cardinality measurements. Existing two authority
+   modes are deliberate compatibility, not an accidental duplicate current path.
 
 ## Separately evaluated improvements and compatibility decisions
 
@@ -674,8 +833,8 @@ DB acquisition and local/remote fetches run off-loop, preserve serial processing
 and test a real SQLite connection differs between loop and fetching thread.
 Existing compatibility tests retain union/dedupe, scoping, ownership reconciliation
 and stale-cache behavior. Real JSON-only files demonstrate the intentional ownership
-difference between modes. Completion watermark/processed-before-notify risks remain
-open in J2; no exactly-once, restart recovery or successful delivery claim.
+difference between modes. At J1 closure the watermark/processed-before-notify risks awaited J2; J2 later
+corrected those seams as documented above. No exactly-once external-send claim.
 
 ### Commands and verification results
 
@@ -747,7 +906,8 @@ Production baseline before the authorized deployment was `4f792cd`.
 - Structured 503 and contention/malformed-input behavior remain covered by isolated
   acceptance tests; production DB availability was not destructively manipulated.
   No running jobs existed at probe, so new completion reliability is not claimed.
-  J2 and all S1–S4 limitations remain open; historical text/SQL deadlines unchanged.
+  At that J1 checkpoint J2 was unimplemented; its current status is in the audit.
+  S1–S4 remain deferred; historical text/SQL deadlines are unchanged.
 
 Rollback procedure if needed: tag `ai-team:pre-e0e2877` back to `ai-team:local`,
 then `docker compose up -d --no-build gateway task-server` from this main checkout.
@@ -762,12 +922,11 @@ Implementation CI passed:
 on `1d23442`, 3m24s. Subsequent commits only update programme evidence; current
 head check status is available on PR #261. Production closure is recorded above.
 
-Current dispatch: the operator authorized PR #262 review/correction/merge and the
-next jobs on 2026-10-29. J2 is merged as `d52a83b`; production is not yet verified.
-J3 session-reason N+1/running-job truncation is reviewed and merged as `af4e008`
-(PR #263), with its five/seven SELECT budgets and reason/queue-overlay equivalence.
-J4 projection/index48/concurrency checks are locally verified, awaiting review/merge;
-J5 compact affiliations is next after J4 integration. S1–S4 stay deferred, not closed.
+Current programme state (2026-10-30): J1–J5 are merged and deployed in `ee59596`;
+J1 UI availability received separate audit correction PR #266. Ordinary read/UI
+functionality is observed; J2 new terminal delivery/recovery is not live-verified.
+The engineering audit below supersedes the old J4-pending/J5-next dispatch claims.
+S1–S4 remain deferred, not closed.
 
 ### J2 lead review — 2026-10-29
 
@@ -799,5 +958,6 @@ System summary carries availability so an unavailable collapsed section keeps a
 reachable header and warning instead of disappearing. No API, query authority,
 read cadence, DB schema, queue or worker changes. Review includes initial errors,
 cached-positive/empty failures, retry/recovery and the collapsed summary signal.
-Tests exercise both actual components. PR/merge/live evidence follows in the
-engineering audit; this finding is not buried under the original J1 done label.
+Tests exercise both actual components. PR #266 merged as `ee59596`, CI passed,
+and deployment plus browser-only failure/retry observations are recorded in the
+engineering audit above; the original false-absence finding is corrected.

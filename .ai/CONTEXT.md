@@ -29,14 +29,13 @@ instead and leave a one-liner here.
 
 Current work:
 
-**Read-path programme (2026-10-28 operator dispatch; continued 2026-10-29):**
-J1 is merged and live as `e0e2877` (PR #261), with production verification and rollback.
-J2 is reviewed/corrected and merged as `d52a83b` (PR #262); production rollout is
-not yet verified. The operator authorized review, fixes, merge and the next jobs
-on 2026-10-29. J3 reason batching/running-job evidence is reviewed and merged as
-`af4e008` (PR #263). J4 session projections/indexing are locally verified, pending
-review/integration; J5 compact affiliations follows next. Detailed scope
-and evidence: [`READ_PATH_BURNDOWN.md`](../docs/backend/READ_PATH_BURNDOWN.md).
+**Read-path programme (2026-10-30 audit):** J1–J5 are merged and deployed in
+`ee59596` (schema 48). Audit corrected a jobs UI false-empty-on-error gap via
+PR #266. Ordinary Jobs/Sessions/Detail/Cost reads are directly observed; J2 new
+completion notice/admission/recovery has no live example and remains unverified.
+The remaining work is S1/S3 sizing and deliberate availability/compatibility
+contracts. Scope, evidence and limits:
+[`READ_PATH_BURNDOWN.md`](../docs/backend/READ_PATH_BURNDOWN.md).
 
 Read-boundary deferrals: J1 jobs reads allow four concurrent materializations, but
 historical text and SQL execution remain unbounded (S3; SQLite's 15 s busy timeout
@@ -52,9 +51,14 @@ objective at a time and retains bounded titles; whole-index growth, historical f
 sizes/native SQLite RSS and hard SQL cancellation remain S1/S3. The legacy default
 retains ungated/empty-on-absent-DB compatibility; hardening requires a separate
 compatibility decision. Browser compact reads time out at 15 s without stopping
-server threads. See burndown for isolated measurements and explicit limits.
+server threads. Per-surface gates end at encoded Response creation, not socket
+drain, and do not bound all endpoints together or completed bodies behind slow
+readers. Session evidence/error-to-empty and legacy affiliation availability
+semantics need a separate contract under S3; latest-event probes still have
+history-dependent SQL work. See burndown for measurements and explicit limits.
 J2's durable receipts and notification/admission/restart contracts are recorded in
-the burndown; merge is distinct from production verification.
+the burndown; deployed empty reads do not certify new terminal delivery. Historical
+terminals remain excluded; backfill requires an explicit operator decision.
 
 1. **System-One decision layer (TypeSafe Jev) → Governor programme.** Spec
    `docs/SYSTEM_ONE_DECISION_LAYER_SPEC.md` (accepted 2026-10-05). Next: **A94** (core + replay +
