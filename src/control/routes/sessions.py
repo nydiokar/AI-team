@@ -235,8 +235,13 @@ def build_router(
             except Exception as e:
                 logger.warning("control_api_sessions_failed err=%s", e)
                 raise HTTPException(status_code=503, detail="sessions_unavailable") from None
-            if read.source == "json" or read.partial:
-                return JSONResponse({"sessions": sessions, "read_state": "fallback" if read.source == "json" else "partial"})
+            from config import config
+            from src.control import controller_state
+            fallback: bool = read.source == "json" and (
+                config.mesh.shadow_write or controller_state.active() is not None
+            )
+            if fallback or read.partial:
+                return JSONResponse({"sessions": sessions, "read_state": "partial" if read.partial else "fallback"})
             return JSONResponse({"sessions": sessions})
         finally:
             _SESSIONS_READ_SLOTS.release()

@@ -193,6 +193,27 @@ configured-but-unavailable local storage returns 503. Final expanded 14-module r
 module) **392 passed, 8 existing warnings in 44.44 s**. Corrected CI is recorded
 at closure.
 
+### File-only session compatibility correction
+
+PR [#269](https://github.com/nydiokar/AI-team/pull/269) merged as `f23569e` after
+final head `2b268d1` CI run `41207103945` passed (3m39s). Deployment preflight GO,
+schema 48→48; online backup integrity ok, mode 0600. Image build was held for one
+additional reproduced compatibility defect: healthy JSON reads were labelled
+fallback even when local DB storage was **explicitly disabled**, making the UI
+reject the established file-only gateway mode. Keep its healthy success shape;
+only unexpected DB/remote-source fallback or malformed-row partial reads are
+unavailable. A tests-first regression failed on merged `f23569e`. No recovery
+records, lifecycle readers, DB source choice or UI cache shape changes. Partial
+file-only reads still disclose `read_state=partial`; DB failure still discloses
+fallback, and the frontend still refuses to infer a current complete inventory.
+
+File-only correction verification: projection/control-API/session-service/lifecycle/
+snapshot modules **102 passed, 2 existing warnings in 20.74 s**. Tests cover file-
+only populated/empty success, malformed files partial, unexpected DB fallback and
+unavailable API errors. Self-review keeps remote-controller-client fallback unknown
+and makes partial status take precedence over source fallback. No introduced source
+lint diagnostics; test import ordering corrected. No gateway image promoted yet.
+
 ## Ordered mandatory jobs
 
 ### J1 — Jobs authority and enrichment

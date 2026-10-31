@@ -299,6 +299,7 @@ def test_summary_read_discloses_fallback_and_partial_rows(store_db, monkeypatch)
 
 def test_api_discloses_fallback_and_partial_inventory(store_db, monkeypatch) -> None:
     from fastapi.testclient import TestClient
+
     from src.control import control_api
     store, db = store_db
     store.save(_session("saved"), touch=False)
@@ -322,6 +323,7 @@ def test_api_discloses_fallback_and_partial_inventory(store_db, monkeypatch) -> 
 
 def test_api_queue_failure_is_unavailable_not_a_missing_overlay(store_db, monkeypatch) -> None:
     from fastapi.testclient import TestClient
+
     from src.control import control_api
     store, db = store_db
     store.save(_session("saved"), touch=False)
@@ -338,3 +340,28 @@ def test_api_queue_failure_is_unavailable_not_a_missing_overlay(store_db, monkey
         response = client.get("/api/sessions", headers={"Authorization": "Bearer test"})
         assert response.status_code == 503
         assert response.json() == {"detail": "sessions_unavailable"}
+
+
+def test_explicit_file_only_gateway_keeps_healthy_session_reads(store_db, monkeypatch) -> None:
+    from fastapi.testclient import TestClient
+
+    from src.control import control_api, controller_state
+    store, _db = store_db
+    store.save(_session("saved"), touch=False)
+    monkeypatch.setattr(config.mesh, "shadow_write", False)
+    monkeypatch.setattr(db_module, "get_db", lambda: None)
+    monkeypatch.setattr(controller_state, "active", lambda: None)
+    monkeypatch.setattr(control_api, "_db", lambda: None)
+    monkeypatch.setattr(control_api, "_dashboard_token", lambda: "test")
+    class Orchestrator:
+        session_service = SessionService(store)
+        quota_coordinator = None
+    with TestClient(control_api.build_control_api(Orchestrator())) as client:
+        result = client.get("/api/sessions", headers={"Authorization": "Bearer test"})
+        assert result.status_code == 200
+        assert result.json()["sessions"][0]["session_id"] == "saved"
+        assert "read_state" not in result.json()
+        assert client.get("/api/sessions?keep_pinned=true", headers={"Authorization": "Bearer test"}).json() == {"sessions": []}
+        # An unreadable recovery row is still partial, even in file-only mode.
+        (store_module._SESSIONS_DIR / "bad.json").write_text("{")
+        assert client.get("/api/sessions", headers={"Authorization": "Bearer test"}).json()["read_state"] == "partial"
