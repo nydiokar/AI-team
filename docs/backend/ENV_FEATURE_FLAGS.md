@@ -47,11 +47,23 @@ For an older local Web UI gateway that intentionally merges jobs from a separate
 task controller, explicitly set `JOBS_READ_MODE=federated`, `CONTROLLER_URL` and
 `WORKER_TOKEN` before restarting that gateway. Invalid mode/missing credentials
 fail configuration loading. Compatibility mode retains the legacy local-first
-union, remote cache, gateway/JSON ownership reconciliation and partial/stale reads
-on remote failure. Its per-job reconciliation and remote 50-row completion window
-are not covered by the controller performance guarantee. Missing union facade
-returns 503 rather than silently selecting local-only results. The worker/task-server
-`/jobs` API is unchanged. This setting is not writable through `/api/flags`.
+union, a two-second remote cache and gateway/JSON ownership reconciliation.
+Failed local reads, failed/malformed remote reads and expired-cache contention
+return 503 rather than claiming complete/empty coverage. The existing jobs UI
+marks cached rows stale on error and offers Retry. Explicitly disabling local
+shadow storage (or installing the existing remote controller-state client) still permits the remote-only UI topology; a configured
+local DB whose initialization failed returns 503 instead. Completion receipts still
+require local DB storage. Per-job compatibility reconciliation is outside the
+controller performance guarantee. Missing union facade returns 503.
+
+Upgrade the authoritative task-server before a federated gateway: the gateway now
+requests `GET /jobs?format=verified-v1`, whose envelope confirms the availability
+contract. Older servers' arrays are rejected explicitly. Default `/jobs` successful
+arrays remain unchanged; modern servers return 503 for failed/absent DB and 429
+when four reads through serialization are occupied. Limit is 1–1000, node/session
+IDs at most 128, status is running/done/failed/lost; gateway callers use at most 50.
+Legacy TaskServerClient callers retain best-effort defaults; only this UI path opts
+into strict reads. This setting is not writable through `/api/flags`.
 
 `GET /api/jobs` admits at most four reads through database materialization and
 JSON serialization; excess requests get 429 `jobs_busy`. Limit stays 1–50 per
@@ -60,7 +72,7 @@ and run serially off the event loop, with thread-local DB connections. Cursor,
 retry and restart reliability are tracked separately as J2 in
 [`READ_PATH_BURNDOWN.md`](READ_PATH_BURNDOWN.md); no exactly-once claim is made.
 
-J2 (separate PR, not yet deployed) adds migration 47 and durable completion-effect
+J2 (merged and deployed at schema 48) adds migration 47 and durable completion-effect
 receipts. Terminal discovery no longer uses timestamps. Existing running and future
 jobs are eligible; pre-migration terminals remain historical unless an operator
 explicitly authorizes backfill. Each job's notification and audit/continuation
@@ -72,7 +84,8 @@ In federation mode, the authority must support authenticated `GET /jobs/completi
 before upgrading the gateway: 25 compact rows/page, four pages/pass, rotating keyset
 cursor, no start-time/newest-50 filter. An old server fails explicitly. A local
 controller DB is mandatory for completion receipts; its absence pauses effects.
-The UI's legacy federation list/cache remains compatible. Details, service bounds,
+The UI's successful federation union remains compatible; strict availability needs
+the versioned jobs envelope above. Details, service bounds,
 rollout order and operator recovery are in burndown J2. No worker restart is needed.
 
 ## A. Behaviour gates — default OFF, must be set to take effect

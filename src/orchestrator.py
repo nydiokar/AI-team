@@ -4890,7 +4890,7 @@ class TaskOrchestrator(ITaskOrchestrator):
         Session/Project surfaces do not have to filter a global operator list.
         """
         from src.control.db import get_db
-        from src.control.jobs_read_model import list_controller_jobs
+        from src.control.jobs_read_model import JobsUnavailableError, list_controller_jobs
 
         if config.mesh.jobs_read_mode == "controller":
             return list_controller_jobs(
@@ -4903,13 +4903,21 @@ class TaskOrchestrator(ITaskOrchestrator):
         remote_ownership = None if ownership == "unowned" else ownership
         remote_limit = max(limit, 50) if ownership == "unowned" else limit
         try:
-            local = list_controller_jobs(
-                get_db(), limit=limit, session_id=session_id, ownership=local_ownership,
-            )
-            running.extend(local["running"])
-            recent.extend(local["recent"])
-        except Exception as e:
-            logger.debug("event=local_jobs_list_failed err=%s", e)
+            local_db = get_db()
+            if local_db is None:
+                from src.control import controller_state
+                if config.mesh.shadow_write and controller_state.active() is None:
+                    # get_db also returns None after failed initialization. Only
+                    # explicit remote-only configuration establishes no local source.
+                    raise JobsUnavailableError("jobs_unavailable")
+            if local_db is not None:
+                local = list_controller_jobs(
+                    local_db, limit=limit, session_id=session_id, ownership=local_ownership,
+                )
+                running.extend(local["running"])
+                recent.extend(local["recent"])
+        except Exception as exc:
+            raise JobsUnavailableError("jobs_unavailable") from exc
 
         remote = self._cached_remote_watched_jobs(
             limit=remote_limit,
@@ -4974,6 +4982,8 @@ class TaskOrchestrator(ITaskOrchestrator):
         session_id: Optional[str],
         ownership: Optional[str],
     ) -> Dict[str, List[Dict[str, Any]]]:
+        from src.control.jobs_read_model import JobsUnavailableError
+
         if not hasattr(self, "_watched_jobs_cache_lock"):
             self._watched_jobs_cache_lock = threading.Lock()
         if not hasattr(self, "_watched_jobs_remote_cache"):
@@ -4988,7 +4998,7 @@ class TaskOrchestrator(ITaskOrchestrator):
             return cached[1]
 
         if not self._watched_jobs_cache_lock.acquire(blocking=False):
-            return cached[1] if cached else {"running": [], "recent": []}
+            raise JobsUnavailableError("jobs_unavailable")
 
         try:
             cached = self._watched_jobs_remote_cache.get(cache_key)
@@ -4998,23 +5008,25 @@ class TaskOrchestrator(ITaskOrchestrator):
 
             client = self._remote_jobs_client()
             if client is None:
-                return {"running": [], "recent": []}
+                raise JobsUnavailableError("jobs_unavailable")
 
             result = {
                 "running": client.list_jobs(
                     status="running",
                     session_id=session_id,
                     ownership=ownership,
-                    limit=limit,
+                    limit=limit, reliable=True,
                 ),
                 "recent": client.list_jobs(
                     session_id=session_id,
                     ownership=ownership,
-                    limit=limit,
+                    limit=limit, reliable=True,
                 ),
             }
             self._watched_jobs_remote_cache[cache_key] = (now, result)
             return result
+        except Exception as exc:
+            raise JobsUnavailableError("jobs_unavailable") from exc
         finally:
             self._watched_jobs_cache_lock.release()
 

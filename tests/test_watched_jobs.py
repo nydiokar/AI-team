@@ -292,7 +292,7 @@ def test_job_endpoint_functions(tmp_path):
         assert job["exit_code"] == 0
 
         # GET /jobs lists it
-        assert any(j["id"] == jid for j in list_jobs(node_id="test-node"))
+        assert any(j["id"] == jid for j in json.loads(list_jobs(node_id="test-node").body))
         with pytest.raises(HTTPException):
             list_jobs(session_id="sess_api", ownership="unowned")
         with pytest.raises(HTTPException):
@@ -490,7 +490,7 @@ def test_orchestrator_lists_local_and_remote_jobs(monkeypatch):
             return [{"id": "local-done", "status": "done"}]
 
     class _FakeClient:
-        def list_jobs(self, node_id=None, status=None, session_id=None, ownership=None, limit=20):
+        def list_jobs(self, node_id=None, status=None, session_id=None, ownership=None, limit=20, *, reliable=False):
             if status == "running":
                 return [{"id": "remote-running", "status": "running"}]
             return [
@@ -535,7 +535,7 @@ def test_orchestrator_filters_local_and_remote_jobs_by_session(monkeypatch):
             return [{"id": "local-owned-done", "status": "done", "session_id": session_id}]
 
     class _FakeClient:
-        def list_jobs(self, node_id=None, status=None, session_id=None, ownership=None, limit=20):
+        def list_jobs(self, node_id=None, status=None, session_id=None, ownership=None, limit=20, *, reliable=False):
             calls.append(("remote", status, session_id, ownership, limit))
             if session_id != "sess_jobs":
                 return []
@@ -581,7 +581,7 @@ def test_orchestrator_filters_local_and_remote_jobs_by_unowned(monkeypatch):
             return [{"id": "local-unowned-done", "status": "done", "session_id": None}]
 
     class _FakeClient:
-        def list_jobs(self, node_id=None, status=None, session_id=None, ownership=None, limit=20):
+        def list_jobs(self, node_id=None, status=None, session_id=None, ownership=None, limit=20, *, reliable=False):
             calls.append(("remote", status, session_id, ownership, limit))
             if status == "running":
                 return [{"id": "remote-unowned-running", "status": "running", "session_id": None}]
@@ -625,7 +625,7 @@ def test_orchestrator_reconciles_remote_orphan_flag_against_gateway_sessions(mon
             return {"session_id": session_id} if session_id == "sess_live" else None
 
     class _FakeClient:
-        def list_jobs(self, node_id=None, status=None, session_id=None, ownership=None, limit=20):
+        def list_jobs(self, node_id=None, status=None, session_id=None, ownership=None, limit=20, *, reliable=False):
             calls.append(("remote", status, session_id, ownership, limit))
             if status == "running":
                 return [{
@@ -650,7 +650,7 @@ def test_orchestrator_reconciles_remote_orphan_flag_against_gateway_sessions(mon
     assert all(call[3] is None for call in calls if call[0] == "remote")
 
 
-def test_orchestrator_returns_cached_remote_jobs_when_fetch_in_progress():
+def test_orchestrator_rejects_expired_remote_cache_when_fetch_in_progress():
     from src.orchestrator import TaskOrchestrator
 
     orch = TaskOrchestrator.__new__(TaskOrchestrator)
@@ -663,12 +663,10 @@ def test_orchestrator_returns_cached_remote_jobs_when_fetch_in_progress():
     }
     orch._watched_jobs_remote_cache_ttl_sec = 2.0
     assert orch._watched_jobs_cache_lock.acquire(blocking=False)
+    from src.control.jobs_read_model import JobsUnavailableError
     try:
-        assert orch._cached_remote_watched_jobs(
-            limit=20,
-            session_id=None,
-            ownership=None,
-        ) == {"running": [{"id": "stale-running"}], "recent": [{"id": "stale-done"}]}
+        with pytest.raises(JobsUnavailableError):
+            orch._cached_remote_watched_jobs(limit=20, session_id=None, ownership=None)
     finally:
         orch._watched_jobs_cache_lock.release()
 

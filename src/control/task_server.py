@@ -24,12 +24,12 @@ from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
 import threading
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Annotated, Any, Dict, Iterable, List, Literal, Optional, Tuple
 
 from fastapi import BackgroundTasks, Depends, FastAPI, File, HTTPException, Query, Request, Security, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, ValidationError
 
 _STAGING_ROOT = Path(__file__).resolve().parent.parent.parent / "state" / "uploads"
 
@@ -47,6 +47,7 @@ logger = logging.getLogger(__name__)
 _SLOW_REQUEST_SECONDS = 1.0
 _MESH_HEALTH_SAMPLE_SECONDS = 30.0
 _JOB_COMPLETION_READ_SLOTS = threading.BoundedSemaphore(4)
+_JOBS_LIST_READ_SLOTS = threading.BoundedSemaphore(4)
 
 # --- Deferred telemetry projection ------------------------------------------
 # Raw telemetry events insert synchronously (fast, indexed). The CPU-bound turn
@@ -2215,29 +2216,47 @@ def report_proactive_turn(session_id: str, payload: ProactiveTurnPayload) -> Dic
     return {"status": "accepted", "session_id": session_id, "task_id": task_id}
 
 
-@app.get("/jobs", dependencies=[Depends(_require_auth)])
+class JobsReadOut(BaseModel):
+    """Versioned availability contract, while default /jobs remains an array."""
+    jobs: list[dict[str, JsonValue]] = Field(max_length=1000)
+    format: Literal["verified-v1"] = "verified-v1"
+
+
+@app.get("/jobs", dependencies=[Depends(_require_auth)], responses={
+    200: {"model": list[dict[str, JsonValue]] | JobsReadOut, "description": "Legacy array by default; format=verified-v1 explicitly confirms the availability contract. Limit 1–1000; gateway callers use at most 50."},
+    429: {"description": "Concurrent jobs reads exhausted (jobs_busy)."},
+    503: {"description": "Jobs authority unavailable (jobs_unavailable)."},
+})
 def list_jobs(
-    node_id: Optional[str] = None,
-    status: Optional[str] = None,
-    session_id: Optional[str] = None,
+    node_id: Annotated[str | None, Query(max_length=128)] = None,
+    status: Annotated[str | None, Query(pattern="^(running|done|failed|lost)$")] = None,
+    session_id: Annotated[str | None, Query(max_length=128)] = None,
     ownership: Optional[str] = None,
-    limit: int = 20,
-) -> List[Dict[str, Any]]:
+    limit: Annotated[int, Query(ge=1, le=1000)] = 20,
+    format: Literal["legacy", "verified-v1"] = "legacy",
+) -> JSONResponse:
+    """Legacy success array; unavailable is never a successful empty authority."""
     if ownership not in (None, "all", "unowned"):
         raise HTTPException(status_code=400, detail="invalid_ownership")
     ownership_filter = None if ownership in (None, "all") else ownership
     if session_id and ownership_filter == "unowned":
         raise HTTPException(status_code=400, detail="session_id_conflicts_with_unowned")
-    db = get_db()
-    if db is None:
-        return []
-    return db.list_jobs(
-        node_id=node_id,
-        status=status,
-        session_id=session_id,
-        ownership=ownership_filter,
-        limit=limit,
-    )
+    if not _JOBS_LIST_READ_SLOTS.acquire(blocking=False):
+        raise HTTPException(status_code=429, detail="jobs_busy")
+    try:
+        db = get_db()
+        if db is None:
+            raise RuntimeError("jobs authority unavailable")
+        with db.read_snapshot():
+            rows = db.list_jobs(
+                node_id=node_id, status=status, session_id=session_id,
+                ownership=ownership_filter, limit=limit,
+            )
+            return JSONResponse({"jobs": rows, "format": "verified-v1"} if format == "verified-v1" else rows)
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="jobs_unavailable") from exc
+    finally:
+        _JOBS_LIST_READ_SLOTS.release()
 
 
 @app.get("/jobs/completions", dependencies=[Depends(_require_auth)], responses={
