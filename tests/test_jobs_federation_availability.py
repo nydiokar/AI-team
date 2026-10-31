@@ -191,3 +191,19 @@ def test_federated_facade_client_server_round_trip_and_remote_recovery(federatio
             assert {row["id"] for row in orch.list_watched_jobs()["recent"]} == {"local-job", "remote-job"}
         finally:
             remote.close()
+
+
+@pytest.mark.parametrize("intentional", [False, True])
+def test_absent_local_database_requires_explicit_remote_only_configuration(federation, monkeypatch, intentional) -> None:
+    from src.control import controller_state
+    from src.control import db as db_module
+    orch, client = federation
+    monkeypatch.setattr(db_module, "get_db", lambda: None)
+    monkeypatch.setattr(controller_state, "active", lambda: None)
+    monkeypatch.setattr(config.mesh, "shadow_write", not intentional)
+    monkeypatch.setattr(client, "_get", lambda *args: {"format": "verified-v1", "jobs": []})
+    if intentional:
+        assert orch.list_watched_jobs() == {"running": [], "recent": []}
+    else:
+        with pytest.raises(JobsUnavailableError):
+            orch.list_watched_jobs()

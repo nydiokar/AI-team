@@ -50,8 +50,9 @@ fail configuration loading. Compatibility mode retains the legacy local-first
 union, a two-second remote cache and gateway/JSON ownership reconciliation.
 Failed local reads, failed/malformed remote reads and expired-cache contention
 return 503 rather than claiming complete/empty coverage. The existing jobs UI
-marks cached rows stale on error and offers Retry. A deliberately absent local DB
-still permits the established remote-only UI topology; completion receipts still
+marks cached rows stale on error and offers Retry. Explicitly disabling local
+shadow storage (or installing the existing remote controller-state client) still permits the remote-only UI topology; a configured
+local DB whose initialization failed returns 503 instead. Completion receipts still
 require local DB storage. Per-job compatibility reconciliation is outside the
 controller performance guarantee. Missing union facade returns 503.
 

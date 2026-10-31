@@ -31,8 +31,9 @@ or partial lists carry `read_state` and remain available to recovery consumers.
 The UI rejects them as current inventory, preserves React Query's failed state,
 and offers Retry; generic exceptions now return sanitized 503 instead of empty 200.
 Queue overlay failure also yields 503 on this API path. Failed reason evidence
-marks affected waiting sessions `unavailable` (medium confidence), including failed
-chunks without hiding successful chunks. Primary state and lifecycle readers stay
+marks affected waiting sessions `unavailable` (medium confidence), including chunk-local inbox/live-task failures without hiding successful sibling
+chunks. Whole-reader failures conservatively mark that reader's affected inputs
+unknown. Primary state and lifecycle readers stay
 unchanged. Compact and default legacy affiliation success schemas stay unchanged;
 both now reject unavailable DB (503) and excess reads (429), through serialization.
 
@@ -137,8 +138,8 @@ was hidden by a remote result; expired-cache contention served stale as current;
 strict transport shape/error distinction was absent. Correction preserves the
 explicit mode, successful union/dedupe and gateway-relative ownership, but returns
 `jobs_unavailable` on failed coverage. Healthy empty and fresh two-second cache
-remain success; the remote-only UI topology with deliberately absent local DB
-remains supported (J2 effects still need receipts). No successful effect is replayed.
+remain success; the remote-only UI topology with explicitly disabled local shadow storage or an
+installed controller-state client remains supported (J2 effects still need receipts). No successful effect is replayed.
 
 Adversarial review found a client-only strict check could still trust an old
 server's false-empty response. One existing `/jobs` handler now offers explicit
@@ -183,7 +184,14 @@ TestClient lifespans left a self-node and changed a later DB-fallback test's sou
 The baseline self-awareness module passed 15 tests alone; the new federation→
 self-awareness sequence reproduced one failure. Isolate/restore the registry in
 both new test modules; no production node-read change is needed. The sequential
-regression and corrected CI are recorded at closure.
+regression **42 passed, 2 existing warnings in 4.23 s** after fixture isolation.
+A final source review also verified `get_db()` masks initialization failure as
+None: one new regression reproduced accepting that as deliberate remote-only
+configuration. The facade now permits missing local DB only when shadow storage
+is explicitly disabled or the existing controller-state client is installed;
+configured-but-unavailable local storage returns 503. Final expanded 14-module regression (including the order-sensitive self-awareness
+module) **392 passed, 8 existing warnings in 44.44 s**. Corrected CI is recorded
+at closure.
 
 ## Ordered mandatory jobs
 

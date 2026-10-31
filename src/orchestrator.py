@@ -4904,6 +4904,12 @@ class TaskOrchestrator(ITaskOrchestrator):
         remote_limit = max(limit, 50) if ownership == "unowned" else limit
         try:
             local_db = get_db()
+            if local_db is None:
+                from src.control import controller_state
+                if config.mesh.shadow_write and controller_state.active() is None:
+                    # get_db also returns None after failed initialization. Only
+                    # explicit remote-only configuration establishes no local source.
+                    raise JobsUnavailableError("jobs_unavailable")
             if local_db is not None:
                 local = list_controller_jobs(
                     local_db, limit=limit, session_id=session_id, ownership=local_ownership,
