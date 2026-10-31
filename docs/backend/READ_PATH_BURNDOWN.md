@@ -15,15 +15,16 @@ Operator authorized implementation, CI/self-merge and gateway/task-server deploy
 no worker restart, historical replay or unnecessary paid workload. Mandatory work
 is failure honesty and demonstrated recovery, not arbitrary pagination/index/cap changes.
 
-| Gate | Acceptance / evidence owner | Execution state |
+| Gate | Closure evidence | State on 2026-10-31 |
 |---|---|---|
-| 1 requirements | Original J1–J5 acceptance below + this record; exact deployed revision recorded at close | Baseline `bfd01d4`, live health `ee59596`; PRs #261–266 confirmed merged |
-| 2 availability | Real SQLite failure tests → HTTP/client/cache → Sessions; reason failures cannot prove idle; recovery files retained | Implemented on `feat/read-availability-close`; six new regressions failed before correction |
-| 3 completion recovery | Existing reliability/protocol tests plus isolated process death/restart around durable effects; natural production observation separate | Pending process acceptance / production observation |
-| 4 resource envelope | Re-measure representative copy + mixed requests/RSS before promoting optional caps; execution cancellation tested if introduced | Existing measurements below are historical, not absolute guarantees |
-| 5 affiliation growth | Complete newest/orphan/title semantics and all consumers; scoped API only if measurements justify promotion | Whole-index compact preserved; legacy now shares four admission slots |
-| 6 consistency/compatibility | Concurrent-writer tests; no second inbox/executor; retain explicit federation and historical cutover | Pending closure verification |
-| 7 ship/certify | Targeted tests, adversarial review, CI, self-merge, gateway/task-server deploy, authenticated functional observation | Pending; no full production certificate claimed |
+| 1 requirements | Original acceptance below, correction regressions, measurements and exact deployed identity | Complete for declared operator workload; limits explicit below |
+| 2 availability | Failed evidence → unavailable reason; DB failure → error/fallback metadata; partial rows → unknown inventory; intentional file-only success preserved | Implemented, merged, deployed; isolated failures and real-browser retry verified |
+| 3 completion recovery | Four real interpreter death/reopen cases through receipts, notice transport layers, scheduler and deterministic turn execution | Process acceptance passed; **natural production completion chain still pending** |
+| 4 resource envelope | Native RSS/PSS and enlarged-copy measurements, 100-call admission, scoped cooperative VM cancellation and cleanup | Verified within measured workload; no absolute historical-byte/native IO/socket bound |
+| 5 affiliation growth | Complete 1,082 live mappings, 10,820 isolated mappings; all three consumers; legacy/compact share admission | Complete J5 contract; S1 scoped retrieval remains optional, not justified by measurements |
+| 6 consistency/compatibility | Jobs and session page/evidence snapshots; strict federation version confirmation, union/error/recovery tests; file-only compatibility | Complete code/tests; current live mode controller; no dependent federated installation modified |
+| 7 ship/certify | PRs #267–270, passing final-head CI, deployment and functional observations below | Engineering closure deployed `20d6167`; no blanket certification of J2's unobserved production chain |
+
 
 Availability correction: `read_summaries` preserves JSON recovery and malformed-row
 skip behavior, returning typed provenance. Healthy list JSON is unchanged; fallback
@@ -87,6 +88,8 @@ fsynced local transport sink: one notice normally, two after send-before-ack
 uncertainty. Only test leases are advanced instead of waiting 120 seconds. Backend
 spawn guards remain installed; subprocess.run owns/reaps every interpreter.
 This proves process persistence, not a real Telegram receipt or production turn.
+The registered test carrier is driven through claim/start/complete with backend
+spawn guards; no full gateway/worker daemon or provider execution is claimed.
 
 Fresh online backup measurements (2026-10-31, all mutations isolated): 2,120
 sessions, 94 jobs, 5,676 links, **zero completion receipts**. Five samples including
@@ -213,6 +216,82 @@ only populated/empty success, malformed files partial, unexpected DB fallback an
 unavailable API errors. Self-review keeps remote-controller-client fallback unknown
 and makes partial status take precedence over source fallback. No introduced source
 lint diagnostics; test import ordering corrected. No gateway image promoted yet.
+
+### Final shipping, deployment and certification record — 2026-10-31
+
+| Job | Implementation / merge | Deployed / observed outcome | Remaining certification limit |
+|---|---|---|---|
+| J1 | Original #261 + UI #266; availability #267, snapshots #268, strict federation #269 | `20d6167`; all/unowned/healthy-empty API reads, SQL ID reconciliation, System jobs rendered; both protocol formats agree | Federated production installation not exercised; default unrelated legacy client remains best effort; native/network/bytes limits below |
+| J2 | Original #262; fresh-process acceptance #268 | `20d6167`, schema 48; completion page healthy empty, 94 historical jobs remain unenrolled, **0 receipts / 0 eligible terminals** | New genuine production terminal → notice → admission → completed execution still **NOT observed**; no paid turn or historical replay manufactured |
+| J3 | Original #263; failed-evidence honesty #267, shared HTTP snapshot #268 | `20d6167`; ordinary reason/queue payloads; precedence, pause ordering, old-running-job and failed evidence regressions pass | Stress/failure/race cases isolated; primary SessionStatus remains authoritative; no promise of live failure injection |
+| J4 | Original #264; provenance/error #267, snapshot #268, file-only preservation #270 | `20d6167`; 200 unpinned + 4 pinned; 3 pins outside newest 200 retrieved; Sessions rendered; browser-only failed/fallback reads do not prove absence and Retry recovers real 200 | File-only/fallback/malformed cases isolated; historical fallback-file/scalar bytes and native IO remain unbounded |
+| J5 | Original #265; both-format admission/error #267, scoped SQL budget #268 | `20d6167`; 1,082 compact/legacy mappings agree, compact 260,777 bytes; full objective retained; Sessions title, Detail link, 30-day Cost usage 200 + manager/worker breakdown | Whole-index growth remains S1 optional; pathological bytes/native IO/slow readers outside certified envelope |
+
+PR/CI closure: [#267](https://github.com/nydiokar/AI-team/pull/267) `61ba4fb`
+(run `41204034001`, passed); [#268](https://github.com/nydiokar/AI-team/pull/268)
+`ce765d0` (final head `d753c71`, run `41205174257`, passed);
+[#269](https://github.com/nydiokar/AI-team/pull/269) `f23569e` (final head
+`2b268d1`, run `41207103945`, passed after fixing the reproduced test-isolation
+leak); [#270](https://github.com/nydiokar/AI-team/pull/270) `20d6167` (head
+`29dde8a`, run `41207727353`, passed). All self-merged after final-head CI. Merge-build CI also passed, including
+`20d6167` run `41208017067` (and prior merge runs `41207396730`, `41205457951`).
+
+Local verification: final expanded J1–J5 regression **392 passed / 8 existing
+warnings / 44.44 s**; subsequent file-only correction **102 passed / 2 existing
+warnings / 20.74 s**, plus populated/empty/partial regression **1 passed**.
+Related frontend **143 passed** plus real client/query/cache integration **1
+passed**; typecheck and production build passed. Docker ran the final frontend
+build/typecheck successfully. No full or paid local e2e suite; no paid backend.
+Source lint diagnostic comparisons and new-module checks passed. Self-review found
+and corrected real mixed snapshots, false absence, old-protocol acceptance, masked
+DB initialization, test registry pollution and intentional file-only rejection.
+No independent review agent was used in this closure pass.
+
+Deployment: preflight GO on clean `main == origin/main`, schema **48→48**, no
+migration. Built from a `git archive` of exact committed `20d6167` with Compose
+host configuration retained; original untracked analysis scripts were excluded
+without moving/deleting them. Online SQLite backup
+`/home/cifran/ai-team-data/backups/mesh-pre-20d6167-20261031T1359Z.db`,
+318,418,944 bytes, mode 0600, integrity **ok**. Image `8d98833ec638`,
+`ai-team:prod-20d6167`; rollback `ai-team:pre-20d6167` preserves image
+`49a707139f0c` / `ee59596`. Recreated **only gateway + task-server**; both healthy,
+both health builds `20d6167`, coverage true, two nodes online, no startup traceback
+or migration. Initial immediate startup curl returned empty while health was
+starting; subsequent health/API/UI probes passed. Native worker PID **2711734**,
+restart count **5**, unchanged before/after. Worker build mismatch is expected.
+Pushed annotated deploy tag `deploy/20261031T1359Z-20d6167`; no rollback/data restore.
+
+Live authenticated checks: jobs all/unowned and true-empty filter; session lists
+have no degraded marker; legacy and versioned task-server jobs (50 rows) agree; their IDs reconcile
+with SQL. Compact and legacy affiliations agree on IDs/role/status; case detail
+retains full objective. Real Chromium Sessions, Detail, Cost and System rendered;
+7-day Cost had no affiliated top row, 30-day had ten and opened case usage 200.
+Browser-only sessions 503 and 200/fallback interception displayed unavailable,
+never “No sessions yet”; Retry recovered to **real API 200**. This is client failure
+acceptance, **not** an induced production DB outage. Runner exited 0, zero page
+errors, no browser/runner children remained. Supplemental artifacts:
+`/tmp/read-closure-live-api.json`, `/tmp/read-closure-live-results.json` and
+`/tmp/read-closure-*.png`; durable findings above do not depend on their retention.
+
+Outstanding owner-authority blockers: **none**. Pending natural observation is an
+evidence gap, not permission to fabricate a job/send/paid continuation. For that
+observation correlate a genuinely requested eligible job ID with its receipt,
+notice outcome, `watched:<job_id>` admission identity and final turn result; a
+done notice receipt is not human receipt, and admission is not execution.
+Historical backfill stays explicitly opt-in; external notice duplicates after
+uncertain sends and best-effort Push remain declared contracts.
+
+Certification scope: current authenticated operator workload and the original
+J1–J5 acceptance, with isolated adversarial/recovery evidence separated from live
+ordinary reads. **Not certified:** arbitrary historical field sizes, absolute RSS,
+native IO/Python/socket total deadlines, 100 stalled response consumers, actual
+production outage recovery, or every dependent federation deployment. VM budget
+is cooperative and per-lock busy timeout is not a total request deadline. Legacy
+urllib retains per-operation timeout/body-size limitations. Keep these S3
+workload/compatibility deferrals before broader untrusted/high-volume exposure;
+no silent truncation or global endpoint framework was introduced. S1 scoped
+retrieval, S2 federation retirement and S4 extra indexes remain optional based on
+measurements; their deferral is not an unfinished mandatory correctness fix.
 
 ## Ordered mandatory jobs
 
@@ -783,7 +862,10 @@ Service boundary (compact option):
   new ownership path, worker restart, paid backend or local full/e2e suite.
 
 
-## Engineering audit — 2026-10-30
+## Engineering audit — 2026-10-30 (historical baseline)
+
+Current status is the 2026-10-31 closure execution above. This dated audit retains
+the earlier evidence and then-open findings; it is not the present closure state.
 
 Audited **after J5 merged** against the original scope/acceptance above, current
 source at `8bb4422` and corrective merge `ee59596`, PR histories #261–#266 and

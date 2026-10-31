@@ -1,6 +1,6 @@
 # AI-Team Gateway — Hot Context
 
-**Last Updated:** 2026-10-05
+**Last Updated:** 2026-10-31
 **Branch policy:** `main` for docs-only; `feat/<slug>` + PR + self-merge for any `src/` or config
 change. Restart the **gateway** freely when deploying merged code. Never restart a worker/node-carrier
 without surfacing it to the operator first.
@@ -29,36 +29,29 @@ instead and leave a one-liner here.
 
 Current work:
 
-**Read-path programme (2026-10-30 audit):** J1–J5 are merged and deployed in
-`ee59596` (schema 48). Audit corrected a jobs UI false-empty-on-error gap via
-PR #266. Ordinary Jobs/Sessions/Detail/Cost reads are directly observed; J2 new
-completion notice/admission/recovery has no live example and remains unverified.
-The remaining work is S1/S3 sizing and deliberate availability/compatibility
-contracts. Scope, evidence and limits:
-[`READ_PATH_BURNDOWN.md`](../docs/backend/READ_PATH_BURNDOWN.md).
+**Read-path closure (2026-10-31):** J1–J5 engineering corrections are merged and
+running in **`20d6167`**, schema 48 (PRs #267–270). Failure-honest session/reason
+reads, preserved intentional file-only mode, shared snapshots/cooperative SQL
+cancellation and verified federation availability are shipped. Real Sessions,
+Detail, Cost and System/API reads pass; browser-only failure/retry recovery passes.
+**J2 natural production completion → notice/admission/execution remains unobserved**
+(94 historical jobs, no eligible terminals/receipts); process death/reopen acceptance
+passes in isolation. Do not manufacture a paid turn or historical replay to certify it.
+Evidence, exact PR/builds and limits: [`READ_PATH_BURNDOWN.md`](../docs/backend/READ_PATH_BURNDOWN.md).
 
-Read-boundary deferrals: J1 jobs reads allow four concurrent materializations, but
-historical text and SQL execution remain unbounded (S3; SQLite's 15 s busy timeout
-only bounds lock waits). J3 adds bounded 500-ID reason evidence queries. J4 replaces
-full-row session-list materialization and admits four concurrent reads through
-serialization (429 otherwise); its isolated-copy 1000-row traced peak is 7.76 MB
-(~31.0 MB for four, excluding SQLite/native memory). Historical scalar text still
-has no absolute byte bound; S3 retains the oversized-history contract and hard SQL
-deadline follow-up before higher-volume/untrusted use. Existing session-list
-JSON fallback and read-error/empty response behavior remain unchanged.
-J5 compact affiliations admits four reads through JSON serialization, streams one
-objective at a time and retains bounded titles; whole-index growth, historical field
-sizes/native SQLite RSS and hard SQL cancellation remain S1/S3. The legacy default
-retains ungated/empty-on-absent-DB compatibility; hardening requires a separate
-compatibility decision. Browser compact reads time out at 15 s without stopping
-server threads. Per-surface gates end at encoded Response creation, not socket
-drain, and do not bound all endpoints together or completed bodies behind slow
-readers. Session evidence/error-to-empty and legacy affiliation availability
-semantics need a separate contract under S3; latest-event probes still have
-history-dependent SQL work. See burndown for measurements and explicit limits.
-J2's durable receipts and notification/admission/restart contracts are recorded in
-the burndown; deployed empty reads do not certify new terminal delivery. Historical
-terminals remain excluded; backfill requires an explicit operator decision.
+Read-boundary deferrals: four-slot admission includes serialization for jobs,
+sessions, both affiliation formats and task-server jobs/completion pages. Mixed
+16-read isolated RSS/PSS and 10× cardinality measurements are in the burndown;
+no absolute historical-byte/native-memory/slow-reader bound is claimed. HTTP read
+snapshots have a 10-second cooperative SQLite VM budget and bounded per-lock wait,
+**not** a hard native IO/Python/socket deadline; cancellation cleans thread-local
+handlers/timeouts. Fallback file bytes and scalar history remain unbounded to
+preserve recovery/legacy fields. Strict federation rejects old servers and needs
+authority-first upgrade; unrelated legacy urllib callers retain best effort,
+per-operation socket timeout and no absolute body limit. Keep authenticated
+operator workload assumptions until S3 oversized-history/native/slow-reader policy
+is sized for broader use. S1 pagination, S2 retirement and S4 extra indexes are
+optional and not justified by present measurements. No worker restarted.
 
 1. **System-One decision layer (TypeSafe Jev) → Governor programme.** Spec
    `docs/SYSTEM_ONE_DECISION_LAYER_SPEC.md` (accepted 2026-10-05). Next: **A94** (core + replay +
