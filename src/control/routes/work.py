@@ -319,8 +319,9 @@ def build_router(orchestrator: Any, *, require_auth: Callable[..., Any]) -> APIR
                 with db.compact_session_case_data() as (links, cases):
                     result = _wrm.build_compact_session_affiliations(links, cases)
                 return Response(json.dumps(result, ensure_ascii=True, separators=(",", ":")), media_type="application/json")
-            rows = db.list_session_case_links()
-            return JSONResponse(_wrm.build_session_affiliations(rows))
+            with db.read_snapshot():
+                rows = db.list_session_case_links()
+                return JSONResponse(_wrm.build_session_affiliations(rows))
         except Exception as exc:
             raise HTTPException(status_code=503, detail="affiliations_unavailable") from exc
         finally:

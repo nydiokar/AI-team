@@ -2256,7 +2256,8 @@ def job_completions(
         db = get_db()
         if db is None:
             raise HTTPException(status_code=503, detail="job_completion_unavailable")
-        return JSONResponse(db.job_completion_page(after_id, limit))
+        with db.read_snapshot():
+            return JSONResponse(db.job_completion_page(after_id, limit))
     except (sqlite3.Error, ValueError):
         raise HTTPException(status_code=503, detail="job_completion_unavailable") from None
     finally:

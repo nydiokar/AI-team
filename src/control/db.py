@@ -1938,6 +1938,43 @@ class MeshDB:
             self._local.conn = conn
         return conn
 
+    @contextmanager
+    def read_snapshot(self, budget_sec: float = 10.0) -> Generator[None, None, None]:
+        """One thread-local read snapshot with a cooperative SQLite VM budget.
+
+        Nested readers inherit the outer scope. Progress callbacks stop expensive
+        SQL in its executing thread; busy timeout bounds each lock wait. This is
+        not a hard wall-clock bound on native IO, Python conversion or socket drain.
+        Always remove the handler before releasing the savepoint/returning a cached
+        connection to subsequent reads or writes.
+        """
+        if getattr(self._local, "read_deadline", None) is not None:
+            yield
+            return
+        conn = self._conn()
+        deadline: float = time.monotonic() + max(0.0, budget_sec)
+        if budget_sec <= 0:
+            raise sqlite3.OperationalError("read execution budget exceeded")
+        previous_busy: int = conn.execute("PRAGMA busy_timeout").fetchone()[0]
+        conn.execute(f"PRAGMA busy_timeout={max(1, min(previous_busy, int(budget_sec * 1000)))}")
+        started: bool = False
+        try:
+            conn.execute("SAVEPOINT read_path_snapshot")
+            started = True
+            self._local.read_deadline = deadline
+            conn.set_progress_handler(lambda: int(time.monotonic() >= deadline), 1000)
+            yield
+            if time.monotonic() >= deadline:
+                raise sqlite3.OperationalError("read execution budget exceeded")
+        finally:
+            conn.set_progress_handler(None, 0)
+            self._local.read_deadline = None
+            try:
+                if started:
+                    conn.execute("RELEASE SAVEPOINT read_path_snapshot")
+            finally:
+                conn.execute(f"PRAGMA busy_timeout={previous_busy}")
+
     def _begin_immediate(self, conn: sqlite3.Connection) -> None:
         """Acquire a write transaction, retrying transient cross-process locks.
 
@@ -7023,23 +7060,22 @@ class MeshDB:
             "WHERE entity_type = 'session' AND entity_id IS NOT NULL AND entity_id != '' "
             "GROUP BY entity_id) "
         )
-        conn.execute("SAVEPOINT compact_affiliations")
-        cursor = None
-        try:
-            links = [dict(row) for row in conn.execute(
-                newest + "SELECT fl.flow_run_id, fl.entity_id AS session_id, fl.role "
-                "FROM flow_links fl JOIN newest n ON n.id = fl.id ORDER BY fl.id DESC"
-            )]
-            cursor = conn.execute(
-                newest + "SELECT fr.flow_run_id, fr.objective_lock, fr.status "
-                "FROM flow_runs fr WHERE fr.flow_run_id IN "
-                "(SELECT fl.flow_run_id FROM flow_links fl JOIN newest n ON n.id = fl.id)"
-            )
-            yield links, (dict(row) for row in cursor)
-        finally:
-            if cursor is not None:
-                cursor.close()
-            conn.execute("RELEASE SAVEPOINT compact_affiliations")
+        with self.read_snapshot():
+            cursor = None
+            try:
+                links = [dict(row) for row in conn.execute(
+                    newest + "SELECT fl.flow_run_id, fl.entity_id AS session_id, fl.role "
+                    "FROM flow_links fl JOIN newest n ON n.id = fl.id ORDER BY fl.id DESC"
+                )]
+                cursor = conn.execute(
+                    newest + "SELECT fr.flow_run_id, fr.objective_lock, fr.status "
+                    "FROM flow_runs fr WHERE fr.flow_run_id IN "
+                    "(SELECT fl.flow_run_id FROM flow_links fl JOIN newest n ON n.id = fl.id)"
+                )
+                yield links, (dict(row) for row in cursor)
+            finally:
+                if cursor is not None:
+                    cursor.close()
 
     def find_open_case_for_session(self, session_id: str) -> Optional[str]:
         """[A36] The session's newest still-OPEN Case, or None.

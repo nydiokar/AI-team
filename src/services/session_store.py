@@ -12,6 +12,7 @@ sync.  The JSON files remain authoritative — the DB is a queryable mirror.
 import json
 import logging
 import socket
+import sqlite3
 import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional
@@ -207,6 +208,7 @@ class SessionStore:
     def read_summaries(self, limit: int = 200, *, keep_pinned: bool | None = None) -> SessionListRead:
         """Compact rows plus explicit fallback/parse-failure provenance."""
         partial: bool = False
+        db = None
         # Read from DB first when available (DB is canonical state source).
         try:
             from src.control.db import get_db
@@ -225,6 +227,9 @@ class SessionStore:
                             sid, e,
                         )
                 return SessionListRead(sessions=sessions, source="database", partial=partial)
+        except sqlite3.OperationalError:
+            if db is not None and getattr(db._local, "read_deadline", None) is not None:
+                raise  # cancellation/SQL failure cannot become an unbudgeted fallback
         except Exception:
             pass
         # Fall back to JSON directory scan when DB is unavailable.

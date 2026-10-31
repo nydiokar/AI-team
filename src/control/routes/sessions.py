@@ -7,6 +7,8 @@ Mounted by ``control_api.build_control_api``; route map: docs/backend/ARCHITECTU
 """
 from __future__ import annotations
 
+from contextlib import nullcontext
+
 import asyncio
 import threading
 from typing import Any, Callable, Dict, Optional
@@ -222,12 +224,14 @@ def build_router(
             raise HTTPException(status_code=429, detail="sessions_busy")
         try:
             try:
-                read = orchestrator.session_service.store.read_summaries(limit=limit, keep_pinned=keep_pinned)
-                # [A83] Reason evidence remains on the batched read path.
-                views = orchestrator.session_service.list_views(
-                    limit=limit, keep_pinned=keep_pinned, db=core._db(), read_result=read
-                )
-                sessions = [v.to_dict() for v in views]
+                db = core._db()
+                with db.read_snapshot() if db is not None else nullcontext():
+                    read = orchestrator.session_service.store.read_summaries(limit=limit, keep_pinned=keep_pinned)
+                    # [A83] Reason evidence remains on the batched read path.
+                    views = orchestrator.session_service.list_views(
+                        limit=limit, keep_pinned=keep_pinned, db=db, read_result=read
+                    )
+                    sessions = [v.to_dict() for v in views]
             except Exception as e:
                 logger.warning("control_api_sessions_failed err=%s", e)
                 raise HTTPException(status_code=503, detail="sessions_unavailable") from None
