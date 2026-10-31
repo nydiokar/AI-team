@@ -114,6 +114,16 @@ def test_process_death_recovers_receipt_and_executes_one_turn(tmp_path, monkeypa
     sink = tmp_path / "accepted-notices"
     assert (len(sink.read_text().splitlines()) if sink.exists() else 0) == notices_before
     db = MeshDB(str(tmp_path / "mesh.db"))
+    receipt = db.get_job_completion("process-job")
+    assert len(_kind(db, "watched_job")) == (1 if boundary == "after_admission" else 0)
+    if boundary == "before_discovery":
+        assert receipt is None
+    else:
+        assert receipt["lease_token"] and receipt["lease_until"] > 0
+        assert receipt["action_state"] == "pending"
+        assert receipt["notification_attempts"] == (0 if boundary == "after_claim" else 1)
+        assert receipt["notification_state"] == ("done" if boundary == "after_admission" else "pending")
+        assert receipt["action_attempts"] == (1 if boundary == "after_admission" else 0)
     # Advance ONLY the isolated test lease instead of sleeping 120 seconds.
     with db._write() as conn:
         conn.execute("UPDATE job_completion_effects SET lease_until=0")
