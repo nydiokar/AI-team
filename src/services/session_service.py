@@ -14,7 +14,7 @@ import socket
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional
 
-from src.services.session_store import SessionStore
+from src.services.session_store import SessionListRead, SessionStore
 from src.core.interfaces import Session, SessionOrigin, SessionStatus
 from src.core.view_models import SessionView
 from src.backends.registry import is_valid_backend, retired_backend_reason, DEFAULT_BACKEND
@@ -22,7 +22,7 @@ from src.backends.registry import is_valid_backend, retired_backend_reason, DEFA
 logger = logging.getLogger(__name__)
 
 
-def session_turn_queue_overlay(db: Any, session_ids: List[str]) -> Dict[str, Dict[str, Any]]:
+def session_turn_queue_overlay(db: Any, session_ids: List[str], *, strict: bool = False) -> Dict[str, Dict[str, Any]]:
     """[A82 Stage 6] Batched ledger overlay ``{session_id: queue state}`` for
     enrolled sessions. No read while nothing is enrolled; a failed read
     degrades to no overlay (presentational — never a write, never BUSY)."""
@@ -32,7 +32,9 @@ def session_turn_queue_overlay(db: Any, session_ids: List[str]) -> Dict[str, Dic
         if db.any_session_enrolled() is False:
             return {}
         return db.session_turn_queue_states(session_ids)
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
+        if strict:
+            raise
         logger.debug("session_turn_queue_overlay_failed err=%s", e)
         return {}
 
@@ -360,6 +362,7 @@ class SessionService:
         *,
         keep_pinned: Optional[bool] = None,
         db: Any = None,
+        read_result: SessionListRead | None = None,
     ) -> List[SessionView]:
         """Sessions as operator-facing read models (DB-first, newest first).
 
@@ -373,12 +376,12 @@ class SessionService:
         no per-Case status/pause reads). ``db`` omitted ⇒ reasons stay None
         and the views are byte-identical to before (Telegram et al. unchanged).
         """
-        sessions = self.store.list_summaries(limit=limit, keep_pinned=keep_pinned)
+        sessions = read_result.sessions if read_result is not None else self.store.list_summaries(limit=limit, keep_pinned=keep_pinned)
         if db is None:
             return [SessionView.from_session(s) for s in sessions]
         from src.core.session_reason import derive_session_reasons
         reasons = derive_session_reasons(db, sessions)
-        queues = session_turn_queue_overlay(db, [s.session_id for s in sessions])
+        queues = session_turn_queue_overlay(db, [s.session_id for s in sessions], strict=read_result is not None)
         return [
             SessionView.from_session(s)
             .with_reason(reasons.get(s.session_id))

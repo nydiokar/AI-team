@@ -13,3 +13,10 @@ it("explicitly requests compact affiliations with a client deadline", async () =
     expect(fetch.mock.calls[0][1].signal.aborted).toBe(false);
   } finally { vi.unstubAllGlobals(); }
 });
+
+
+it.each(["fallback", "partial"])("does not accept %s session inventory as current", async (read_state) => {
+  vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({ sessions: [], read_state }))));
+  try { await expect(api.sessions("token")).rejects.toThrow(`sessions_${read_state}`); }
+  finally { vi.unstubAllGlobals(); }
+});

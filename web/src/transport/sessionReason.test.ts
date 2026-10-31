@@ -73,3 +73,8 @@ describe("A83 sessionAdapter — secondary reason", () => {
     expect(r).toEqual({ kind: "open_case_idle", confidence: "medium", detail: null });
   });
 });
+
+
+it("preserves unavailable evidence as an explicit reason", () => {
+  expect(deriveReason({ ...base, reason: { kind: "unavailable", confidence: "medium", detail: null } })).toEqual({ kind: "unavailable", confidence: "medium", detail: null });
+});

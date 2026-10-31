@@ -12,6 +12,7 @@
  */
 import type {
   RawSessionView,
+  RawSessionListResponse,
   RawNode,
   RawTask,
   RawEventsResponse,
@@ -358,10 +359,11 @@ export const api = {
   async sessions(token: string, limit = 200, keepPinned?: boolean): Promise<RawSessionView[]> {
     const qs = new URLSearchParams({ limit: String(limit) });
     if (keepPinned !== undefined) qs.set("keep_pinned", String(keepPinned));
-    const data = await get<{ sessions: RawSessionView[] }>(
+    const data = await get<RawSessionListResponse>(
       `/api/sessions?${qs.toString()}`,
       token,
     );
+    if (data.read_state) throw new ApiError(503, `sessions_${data.read_state}`);
     return data.sessions ?? [];
   },
 

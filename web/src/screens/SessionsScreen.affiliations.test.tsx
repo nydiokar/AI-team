@@ -2,15 +2,16 @@
 import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { expect, it, vi } from "vitest";
-const hooks = vi.hoisted(() => ({ affiliations: vi.fn() }));
+const hooks = vi.hoisted(() => ({ affiliations: vi.fn(), sessions: vi.fn() }));
 vi.mock("../hooks/useWork", () => ({ useSessionAffiliations: hooks.affiliations }));
-vi.mock("../hooks/useLiveData", () => ({ useSessions: () => ({ data: [], isLoading: false, error: null }) }));
+vi.mock("../hooks/useLiveData", () => ({ useSessions: () => hooks.sessions() }));
 vi.mock("../components/sessions/NewSessionSheet", () => ({ NewSessionSheet: () => null }));
 vi.mock("../components/sessions/SessionRow", () => ({ SessionRow: () => null }));
 import { SessionsScreen } from "./SessionsScreen";
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 it("discloses unknown affiliation reads separately from successful empty membership", () => {
+  hooks.sessions.mockReturnValue({ data: [], isLoading: false, error: null });
   const el = document.createElement("div");
   const root = createRoot(el);
   const render = () => act(() => root.render(<SessionsScreen />));
@@ -26,5 +27,27 @@ it("discloses unknown affiliation reads separately from successful empty members
     render();
     expect(el.textContent).not.toContain("unavailable");
     expect(el.textContent).not.toContain("Loading case links");
+  } finally { act(() => root.unmount()); }
+});
+
+
+it("never renders false empty on initial or cached failure and retries both lists", () => {
+  hooks.affiliations.mockReturnValue({ index: new Map(), isKnown: true, isLoading: false });
+  const refetch = vi.fn();
+  const el = document.createElement("div");
+  const root = createRoot(el);
+  try {
+    for (const data of [undefined, []]) {
+      hooks.sessions.mockReturnValue({ data, isLoading: false, error: new Error("offline"), refetch });
+      act(() => root.render(<SessionsScreen />));
+      expect(el.textContent).toContain("Live sessions are unavailable");
+      expect(el.textContent).not.toContain("No sessions yet");
+    }
+    act(() => Array.from(el.querySelectorAll("button")).find(b => b.textContent === "Retry")!.click());
+    expect(refetch).toHaveBeenCalledTimes(2);
+    hooks.sessions.mockReturnValue({ data: [], isLoading: false, error: null, refetch });
+    act(() => root.render(<SessionsScreen />));
+    expect(el.textContent).toContain("No sessions yet");
+    expect(el.textContent).not.toContain("unavailable");
   } finally { act(() => root.unmount()); }
 });

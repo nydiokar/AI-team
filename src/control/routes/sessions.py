@@ -94,6 +94,7 @@ class SessionOut(BaseModel):
 
 class SessionListOut(BaseModel):
     sessions: list[SessionOut]
+    read_state: str | None = None
 
 
 class CreateSessionOut(BaseModel):
@@ -209,8 +210,9 @@ def build_router(
     @router.get(
         "/api/sessions",
         responses={200: {"model": SessionListOut,
-                         "description": "Known sessions, most-recent first."},
-                   429: {"description": "Concurrent sessions-read limit reached (sessions_busy)."}},
+                         "description": "Known sessions, most-recent first. read_state marks JSON fallback or skipped malformed rows; these do not establish a current complete inventory."},
+                   429: {"description": "Concurrent sessions-read limit reached (sessions_busy)."},
+                   503: {"description": "Session read unavailable (sessions_unavailable)."}},
     )
     def api_sessions(
         limit: int = Query(200, ge=1, le=1000),
@@ -220,14 +222,17 @@ def build_router(
             raise HTTPException(status_code=429, detail="sessions_busy")
         try:
             try:
+                read = orchestrator.session_service.store.read_summaries(limit=limit, keep_pinned=keep_pinned)
                 # [A83] Reason evidence remains on the batched read path.
                 views = orchestrator.session_service.list_views(
-                    limit=limit, keep_pinned=keep_pinned, db=core._db()
+                    limit=limit, keep_pinned=keep_pinned, db=core._db(), read_result=read
                 )
                 sessions = [v.to_dict() for v in views]
             except Exception as e:
                 logger.warning("control_api_sessions_failed err=%s", e)
-                sessions = []
+                raise HTTPException(status_code=503, detail="sessions_unavailable") from None
+            if read.source == "json" or read.partial:
+                return JSONResponse({"sessions": sessions, "read_state": "fallback" if read.source == "json" else "partial"})
             return JSONResponse({"sessions": sessions})
         finally:
             _SESSIONS_READ_SLOTS.release()

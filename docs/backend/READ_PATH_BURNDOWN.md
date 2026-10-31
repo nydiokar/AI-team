@@ -9,6 +9,52 @@ Statuses: TODO / IN PROGRESS / VERIFIED / BLOCKED / DEFERRED. VERIFIED means the
 named layer has evidence, not that it is merged or running in production.
 Implementation, merge and production verification are recorded separately.
 
+## Closure execution — 2026-10-31
+
+Operator authorized implementation, CI/self-merge and gateway/task-server deployment;
+no worker restart, historical replay or unnecessary paid workload. Mandatory work
+is failure honesty and demonstrated recovery, not arbitrary pagination/index/cap changes.
+
+| Gate | Acceptance / evidence owner | Execution state |
+|---|---|---|
+| 1 requirements | Original J1–J5 acceptance below + this record; exact deployed revision recorded at close | Baseline `bfd01d4`, live health `ee59596`; PRs #261–266 confirmed merged |
+| 2 availability | Real SQLite failure tests → HTTP/client/cache → Sessions; reason failures cannot prove idle; recovery files retained | Implemented on `feat/read-availability-close`; six new regressions failed before correction |
+| 3 completion recovery | Existing reliability/protocol tests plus isolated process death/restart around durable effects; natural production observation separate | Pending process acceptance / production observation |
+| 4 resource envelope | Re-measure representative copy + mixed requests/RSS before promoting optional caps; execution cancellation tested if introduced | Existing measurements below are historical, not absolute guarantees |
+| 5 affiliation growth | Complete newest/orphan/title semantics and all consumers; scoped API only if measurements justify promotion | Whole-index compact preserved; legacy now shares four admission slots |
+| 6 consistency/compatibility | Concurrent-writer tests; no second inbox/executor; retain explicit federation and historical cutover | Pending closure verification |
+| 7 ship/certify | Targeted tests, adversarial review, CI, self-merge, gateway/task-server deploy, authenticated functional observation | Pending; no full production certificate claimed |
+
+Availability correction: `read_summaries` preserves JSON recovery and malformed-row
+skip behavior, returning typed provenance. Healthy list JSON is unchanged; fallback
+or partial lists carry `read_state` and remain available to recovery consumers.
+The UI rejects them as current inventory, preserves React Query's failed state,
+and offers Retry; generic exceptions now return sanitized 503 instead of empty 200.
+Queue overlay failure also yields 503 on this API path. Failed reason evidence
+marks affected waiting sessions `unavailable` (medium confidence), including failed
+chunks without hiding successful chunks. Primary state and lifecycle readers stay
+unchanged. Compact and default legacy affiliation success schemas stay unchanged;
+both now reject unavailable DB (503) and excess reads (429), through serialization.
+
+Service boundary: existing authenticated GET parameter limits remain; no body read,
+new store, background producer or worker code. Existing four-slot gates cover the
+new paths; missing/failed backing reads are explicit per-request states. Deadlines,
+byte limits and native RSS remain subject to the measurement gate, not silently
+certified. Self-review targets initial/cached-empty/cached-positive failure, malformed
+rows, recovery, serialization exceptions, source failure and shared admission.
+
+Availability checks: focused ten-module regression **298 passed, 8 existing
+warnings** (38.52 s); final queue/API additions **16 passed, 2 existing warnings**
+(4.79 s). Related frontend **143 passed** (15 files); production build passed.
+Typecheck passed after correcting the test import. New real-query/client cache integration
+check **1 passed** (1.46 s), exercising successful empty→fallback/partial error→
+recovery through existing prefix invalidation. Final API/affiliation rerun **62
+passed, 2 existing warnings** (11.98 s). No paid backend or full/e2e suite run.
+Legacy lint debt compared by diagnostic code/message with `bfd01d4`; no new
+findings retained. Deliberate self-review traced DB→service→API→client→cache→UI:
+recovery records remain intact, unavailable evidence has no routing side effects,
+and healthy success payloads/default legacy fields remain compatible.
+
 ## Ordered mandatory jobs
 
 ### J1 — Jobs authority and enrichment

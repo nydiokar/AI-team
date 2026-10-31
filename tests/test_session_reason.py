@@ -386,7 +386,7 @@ def test_vocabulary_matches_spec():
         "open_case_idle",
         "work_in_flight",
         "idle",
-        "node_offline",
+        "node_offline", "unavailable",
     }
 
 

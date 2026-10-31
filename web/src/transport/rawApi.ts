@@ -8,7 +8,12 @@
  * never in components.
  */
 
-// GET /api/sessions → { sessions: RawSessionView[] }
+// GET /api/sessions. Degraded rows remain available for recovery, but cannot
+// establish the complete current inventory (including when the array is empty).
+export interface RawSessionListResponse {
+  sessions: RawSessionView[];
+  read_state?: "fallback" | "partial";
+}
 // Shape = core.view_models.SessionView.to_dict() (asdict of the dataclass).
 export interface RawSessionView {
   session_id: string;

@@ -268,7 +268,7 @@ async def test_sessions_gate_bounds_100_calls_through_serialization(store_db, mo
 
         monkeypatch.setattr(service, "list_views", unavailable)
         response = await client.get("/api/sessions")
-        assert response.status_code == 200 and response.json() == {"sessions": []}
+        assert response.status_code == 503 and response.json() == {"detail": "sessions_unavailable"}
 
         def serialization_failure(self, body) -> bytes:
             raise RuntimeError("serialization failed")
@@ -280,3 +280,61 @@ async def test_sessions_gate_bounds_100_calls_through_serialization(store_db, mo
         assert slots.acquire(blocking=False)
     for _ in range(4):
         slots.release()
+
+
+def test_summary_read_discloses_fallback_and_partial_rows(store_db, monkeypatch) -> None:
+    store, db = store_db
+    store.save(_session("saved"), touch=False)
+    assert store.read_summaries().source == "database"
+    with db._write() as conn:
+        conn.execute("UPDATE sessions SET status='invalid'")
+    read = store.read_summaries()
+    assert read.partial and read.sessions == []
+    monkeypatch.setattr(db_module, "get_db", lambda: None)
+    read = store.read_summaries()
+    assert read.source == "json" and [s.session_id for s in read.sessions] == ["saved"]
+    (store_module._SESSIONS_DIR / "bad.json").write_text("{")
+    assert store.read_summaries().partial
+
+
+def test_api_discloses_fallback_and_partial_inventory(store_db, monkeypatch) -> None:
+    from fastapi.testclient import TestClient
+    from src.control import control_api
+    store, db = store_db
+    store.save(_session("saved"), touch=False)
+    class Orchestrator:
+        session_service = SessionService(store)
+        quota_coordinator = None
+    monkeypatch.setattr(control_api, "_dashboard_token", lambda: "test")
+    monkeypatch.setattr(control_api, "_db", lambda: db)
+    with TestClient(control_api.build_control_api(Orchestrator())) as client:
+        headers = {"Authorization": "Bearer test"}
+        assert "read_state" not in client.get("/api/sessions", headers=headers).json()
+        with db._write() as conn:
+            conn.execute("UPDATE sessions SET status='invalid'")
+        response = client.get("/api/sessions", headers=headers)
+        assert response.json() == {"sessions": [], "read_state": "partial"}
+        monkeypatch.setattr(db_module, "get_db", lambda: None)
+        response = client.get("/api/sessions", headers=headers)
+        assert response.status_code == 200 and response.json()["read_state"] == "fallback"
+        assert response.json()["sessions"][0]["session_id"] == "saved"
+
+
+def test_api_queue_failure_is_unavailable_not_a_missing_overlay(store_db, monkeypatch) -> None:
+    from fastapi.testclient import TestClient
+    from src.control import control_api
+    store, db = store_db
+    store.save(_session("saved"), touch=False)
+    class Orchestrator:
+        session_service = SessionService(store)
+        quota_coordinator = None
+    monkeypatch.setattr(control_api, "_dashboard_token", lambda: "test")
+    monkeypatch.setattr(control_api, "_db", lambda: db)
+    monkeypatch.setattr(db, "any_session_enrolled", lambda: True)
+    def fail(*args):
+        raise RuntimeError("private error")
+    monkeypatch.setattr(db, "session_turn_queue_states", fail)
+    with TestClient(control_api.build_control_api(Orchestrator())) as client:
+        response = client.get("/api/sessions", headers={"Authorization": "Bearer test"})
+        assert response.status_code == 503
+        assert response.json() == {"detail": "sessions_unavailable"}

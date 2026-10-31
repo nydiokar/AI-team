@@ -124,6 +124,11 @@ that matches.
 6. `idle` — no Case affiliation and nothing pending. **confidence high.** Plain idle: genuinely
    waiting on the operator (or nobody). We do not dress this up.
 
+Read failure override (2026-10-31): if any required reason evidence fails,
+`unavailable` at confidence medium replaces the affected waiting session's derived
+reason. The UI shows “activity unavailable”; failed evidence never proves idle.
+Successful chunks retain their normal reasons. Primary lifecycle state is unchanged.
+
 ### PINNED_NODE_OFFLINE / PAUSED_PINNED_NODE_OFFLINE  → shows the hold reason
 - reason: `node_offline`, `detail = <node_id>` (+ grace remaining if cheap). **high.** Turns a
   cryptic status into "held for node `Horse`". Evidence: `session.machine_id` + node row.
