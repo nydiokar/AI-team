@@ -298,7 +298,7 @@ def build_router(orchestrator: Any, *, require_auth: Callable[..., Any]) -> APIR
 
     @router.get(
         "/api/work/affiliations/sessions",
-        responses={200: {"model": SessionAffiliationsOut | CompactSessionAffiliationsOut, "description": "Whole-substrate index. Default legacy carries objective_lock; format=compact carries case_title only."}},
+        responses={200: {"model": SessionAffiliationsOut | CompactSessionAffiliationsOut, "description": "Whole-substrate index. Default legacy carries objective_lock; format=compact carries case_title only. Both formats return 503 when unavailable and 429 at admission capacity."}},
     )
     def api_work_session_affiliations(format: Literal["legacy", "compact"] = Query("legacy")) -> Response:
         """Authoritative session→case affiliation index over the WHOLE substrate.
@@ -309,23 +309,22 @@ def build_router(orchestrator: Any, *, require_auth: Callable[..., Any]) -> APIR
         BEFORE ``/api/work/{flow_run_id}`` so the literal path is never captured as
         a flow id. Empty ``affiliations`` when the substrate has no session links."""
         from src.control import work_read_model as _wrm
-        if format == "compact":
-            if not _affiliations_gate.acquire(blocking=False):
-                raise HTTPException(status_code=429, detail="affiliations_busy")
-            try:
-                db = core._db()
-                if db is None:
-                    raise RuntimeError("affiliations database unavailable")
+        if not _affiliations_gate.acquire(blocking=False):
+            raise HTTPException(status_code=429, detail="affiliations_busy")
+        try:
+            db = core._db()
+            if db is None:
+                raise RuntimeError("affiliations database unavailable")
+            if format == "compact":
                 with db.compact_session_case_data() as (links, cases):
                     result = _wrm.build_compact_session_affiliations(links, cases)
                 return Response(json.dumps(result, ensure_ascii=True, separators=(",", ":")), media_type="application/json")
-            except Exception as exc:
-                raise HTTPException(status_code=503, detail="affiliations_unavailable") from exc
-            finally:
-                _affiliations_gate.release()
-        db = core._db()
-        rows = db.list_session_case_links() if db is not None else []
-        return JSONResponse(_wrm.build_session_affiliations(rows))
+            rows = db.list_session_case_links()
+            return JSONResponse(_wrm.build_session_affiliations(rows))
+        except Exception as exc:
+            raise HTTPException(status_code=503, detail="affiliations_unavailable") from exc
+        finally:
+            _affiliations_gate.release()
 
     @router.get(
         "/api/work/{flow_run_id}",

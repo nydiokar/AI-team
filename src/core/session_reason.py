@@ -70,6 +70,7 @@ _REASON_KINDS = frozenset(
         "work_in_flight",
         "idle",
         "node_offline",
+        "unavailable",
     }
 )
 
@@ -108,6 +109,7 @@ class _ReasonBatch:
     # "stale idle" mismatch: its own work is live. Unifies the reason across the
     # session list AND the durable timeline panel from one batched read.
     live_task_sessions: frozenset = frozenset()
+    unavailable_sessions: frozenset[str] = frozenset()
 
 
 def build_reason_batch(db: Any, sessions: Sequence[Session | SessionListProjection]) -> _ReasonBatch:
@@ -118,12 +120,13 @@ def build_reason_batch(db: Any, sessions: Sequence[Session | SessionListProjecti
     facts. No per-Case queries or full event-log folds; never run on a timer.
     """
     session_ids: list[str] = list(dict.fromkeys(s.session_id for s in sessions if s.session_id))
+    unavailable_sessions: set[str] = set()
     running_job_sessions: set[str] = set()
     if session_ids:
         try:
             running_job_sessions = set(db.running_job_sessions(session_ids))
         except Exception:
-            pass
+            unavailable_sessions.update(session_ids)
 
     # Candidate Cases and waiting owners come straight from loaded session rows.
     case_ids: set[str] = set()
@@ -147,11 +150,11 @@ def build_reason_batch(db: Any, sessions: Sequence[Session | SessionListProjecti
         try:
             waiting_sessions.update(sid for sid, waiting in db.inbox_waiting_for(chunk).items() if waiting)
         except Exception:
-            pass
+            unavailable_sessions.update(chunk)
         try:
             live_task_sessions.update(db.live_task_sessions(chunk))
         except Exception:
-            pass
+            unavailable_sessions.update(chunk)
 
     open_cases: set[str] = set()
     case_quota_paused: set[str] = set()
@@ -162,6 +165,7 @@ def build_reason_batch(db: Any, sessions: Sequence[Session | SessionListProjecti
             evidence = db.case_reason_evidence(list(case_ids))
         except Exception:
             evidence = {}
+            unavailable_sessions.update(s.session_id for s in sessions if s.current_case_id in case_ids)
         for cid, case in evidence.items():
             if str(case.status or "").strip().lower() in _CLOSED_CASE_STATUSES:
                 continue
@@ -179,6 +183,7 @@ def build_reason_batch(db: Any, sessions: Sequence[Session | SessionListProjecti
         open_cases=frozenset(open_cases),
         waiting_sessions=frozenset(waiting_sessions),
         live_task_sessions=frozenset(live_task_sessions),
+        unavailable_sessions=frozenset(unavailable_sessions),
     )
 
 
@@ -204,6 +209,9 @@ def derive_session_reason(session: Session | SessionListProjection, batch: _Reas
 
     if status not in _WAIT_STATES:
         return None
+
+    if session.session_id in batch.unavailable_sessions:
+        return SessionReason(kind="unavailable", confidence="medium")
 
     case_id = str(getattr(session, "current_case_id", "") or "")
 

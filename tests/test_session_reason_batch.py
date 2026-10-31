@@ -180,3 +180,25 @@ def test_deduplicated_queries_use_existing_indexes_without_history_materializati
     assert "payload_json" not in statements[0] and "objective_lock" not in statements[0]
     job_plan = [str(row[3]) for row in db._conn().execute("EXPLAIN QUERY PLAN " + statements[1])]
     assert any("idx_jobs_session" in detail for detail in job_plan)
+
+
+@pytest.mark.parametrize("method", ["running_job_sessions", "inbox_waiting_for", "live_task_sessions", "case_reason_evidence"])
+def test_failed_evidence_never_establishes_idle(db, monkeypatch, method) -> None:
+    sessions = _page(db, 1)
+    def unavailable(*args, **kwargs):
+        raise RuntimeError("private database detail")
+    monkeypatch.setattr(db, method, unavailable)
+    assert derive_session_reasons(db, sessions)["s0"] == SessionReason("unavailable", "medium")
+
+
+def test_failed_chunk_does_not_hide_successful_chunk(db, monkeypatch) -> None:
+    sessions = _page(db, 501)
+    original = db.inbox_waiting_for
+    def read(ids):
+        if "s0" in ids:
+            raise RuntimeError("offline")
+        return original(ids)
+    monkeypatch.setattr(db, "inbox_waiting_for", read)
+    reasons = derive_session_reasons(db, sessions)
+    assert reasons["s0"] == SessionReason("unavailable", "medium")
+    assert reasons["s500"] == SessionReason("open_case_idle", "medium")

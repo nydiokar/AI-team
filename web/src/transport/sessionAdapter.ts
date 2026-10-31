@@ -17,6 +17,7 @@ const REASON_KINDS: ReadonlySet<string> = new Set<SessionReasonKind>([
   "work_in_flight",
   "idle",
   "node_offline",
+  "unavailable",
 ]);
 
 /**

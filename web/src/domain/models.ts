@@ -132,7 +132,8 @@ export type SessionReasonKind =
   | "open_case_idle"
   | "work_in_flight"
   | "idle"
-  | "node_offline";
+  | "node_offline"
+  | "unavailable";
 
 export interface SessionReason {
   kind: SessionReasonKind;

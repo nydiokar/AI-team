@@ -302,7 +302,8 @@ def test_compact_models(client):
     assert "case_title" in fields and "objective_lock" not in fields
 
 
-def test_compact_gate_includes_serialization_and_releases(client, db, monkeypatch):
+@pytest.mark.parametrize("format", ["legacy", "compact"])
+def test_compact_gate_includes_serialization_and_releases(client, db, monkeypatch, format):
     from src.control.routes import work
     original = work.json.dumps
     entered = Event()
@@ -320,15 +321,17 @@ def test_compact_gate_includes_serialization_and_releases(client, db, monkeypatc
         return original(value, *args, **kwargs)
     monkeypatch.setattr(work.json, "dumps", blocked)
     with ThreadPoolExecutor(max_workers=4) as pool:
-        futures = [pool.submit(client.get, "/api/work/affiliations/sessions?format=compact", headers=_auth()) for _ in range(4)]
+        futures = [pool.submit(client.get, f"/api/work/affiliations/sessions?format={format}", headers=_auth()) for _ in range(4)]
         try:
             assert entered.wait(10)
             for _ in range(96):
-                assert client.get("/api/work/affiliations/sessions?format=compact", headers=_auth()).status_code == 429
+                assert client.get(f"/api/work/affiliations/sessions?format={format}", headers=_auth()).status_code == 429
             assert count == 4
         finally:
             release.set()
         assert [f.result().status_code for f in futures] == [200] * 4
+    if format == "legacy":
+        return  # Both serializers were held above; compact-specific failures below.
     def fail(*args, **kwargs):
         raise ValueError("serialization failed")
     # Patch the serializer at its call site via a wrapper to avoid also breaking
@@ -336,11 +339,11 @@ def test_compact_gate_includes_serialization_and_releases(client, db, monkeypatc
     monkeypatch.setattr(work, "json", type("BrokenJSON", (), {"dumps": fail}))
     monkeypatch.setattr(json, "dumps", original)
     for _ in range(5):
-        assert client.get("/api/work/affiliations/sessions?format=compact", headers=_auth()).status_code == 503
+        assert client.get(f"/api/work/affiliations/sessions?format={format}", headers=_auth()).status_code == 503
     monkeypatch.setattr(work, "json", json)
     monkeypatch.setattr(db, "compact_session_case_data", fail)
     for _ in range(5):
-        assert client.get("/api/work/affiliations/sessions?format=compact", headers=_auth()).status_code == 503
+        assert client.get(f"/api/work/affiliations/sessions?format={format}", headers=_auth()).status_code == 503
 
 
 @pytest.mark.parametrize("objective", ["<" * 65536, "<real_objective>" * 4096])
@@ -358,3 +361,19 @@ def test_compact_db_acquisition_error_releases_gate(client, monkeypatch):
         response = client.get("/api/work/affiliations/sessions?format=compact", headers=_auth())
         assert response.status_code == 503
         assert response.json() == {"detail": "affiliations_unavailable"}
+
+
+@pytest.mark.parametrize("format", ["legacy", "compact"])
+def test_both_formats_report_missing_database_and_release_gate(monkeypatch, format):
+    from src.control.routes import work
+    monkeypatch.setattr(control_api, "_dashboard_token", lambda: TOKEN)
+    monkeypatch.setattr(control_api, "_db", lambda: None)
+    with TestClient(control_api.build_control_api(_StubOrchestrator())) as client:
+        for _ in range(6):
+            response = client.get(f"/api/work/affiliations/sessions?format={format}", headers={"Authorization": f"Bearer {TOKEN}"})
+            assert response.status_code == 503
+            assert response.json() == {"detail": "affiliations_unavailable"}
+    for _ in range(4):
+        assert work._affiliations_gate.acquire(blocking=False)
+    for _ in range(4):
+        work._affiliations_gate.release()

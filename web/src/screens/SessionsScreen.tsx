@@ -170,7 +170,10 @@ export function SessionsScreen() {
       )}
 
       {error && (
-        <p className="px-4 py-10 text-center text-sm text-bad">Couldn't load sessions.</p>
+        <div role="alert" className="px-4 py-10 text-center text-sm text-bad">
+          <p>Live sessions are unavailable. Saved recovery data may still exist.</p>
+          <button className="mt-2 underline" onClick={() => { void keptQuery.refetch(); void unpinnedQuery.refetch(); }}>Retry</button>
+        </div>
       )}
 
       {!isLoading && !error && (

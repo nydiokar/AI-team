@@ -14,7 +14,9 @@ import logging
 import socket
 import uuid
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
+
+from pydantic import BaseModel
 
 from src.core.interfaces import Session, SessionStatus, SessionOrigin
 from src.core.session_projection import SessionListProjection, session_values
@@ -26,6 +28,13 @@ logger = logging.getLogger(__name__)
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 _SESSIONS_DIR = _PROJECT_ROOT / "state" / "sessions"
 _BINDINGS_FILE = _PROJECT_ROOT / "state" / "telegram" / "active_bindings.json"
+
+
+class SessionListRead(BaseModel):
+    """Read provenance; recovered or skipped rows do not establish a live inventory."""
+    sessions: list[SessionListProjection]
+    source: Literal["database", "json"]
+    partial: bool = False
 
 
 class SessionStore:
@@ -192,7 +201,12 @@ class SessionStore:
         return sessions
 
     def list_summaries(self, limit: int = 200, *, keep_pinned: Optional[bool] = None) -> List[SessionListProjection]:
-        """Compact DB reads, with the full reader's same empty/error/JSON rules."""
+        """Compatibility reader; callers needing availability use read_summaries."""
+        return self.read_summaries(limit, keep_pinned=keep_pinned).sessions
+
+    def read_summaries(self, limit: int = 200, *, keep_pinned: bool | None = None) -> SessionListRead:
+        """Compact rows plus explicit fallback/parse-failure provenance."""
+        partial: bool = False
         # Read from DB first when available (DB is canonical state source).
         try:
             from src.control.db import get_db
@@ -204,12 +218,13 @@ class SessionStore:
                     try:
                         sessions.append(SessionListProjection.from_row(row))
                     except Exception as e:
+                        partial = True
                         sid = row.get("session_id", "unknown")
                         logger.warning(
                             "session_db_row_parse_failed id=%s err=%s — skipping",
                             sid, e,
                         )
-                return sessions
+                return SessionListRead(sessions=sessions, source="database", partial=partial)
         except Exception:
             pass
         # Fall back to JSON directory scan when DB is unavailable.
@@ -223,8 +238,8 @@ class SessionStore:
                     continue
                 sessions.append(session)
             except Exception:
-                pass
-        return sessions
+                partial = True
+        return SessionListRead(sessions=sessions, source="json", partial=partial)
 
     def delete(self, session_id: str) -> None:
         path = _SESSIONS_DIR / f"{session_id}.json"
