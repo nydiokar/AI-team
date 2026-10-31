@@ -127,6 +127,7 @@ def test_session_http_page_and_evidence_share_snapshot(db, tmp_path, monkeypatch
     ("/api/work/affiliations/sessions?format=compact", "affiliations_unavailable"),
     ("/api/work/affiliations/sessions", "affiliations_unavailable"),
     ("/jobs/completions", "job_completion_unavailable"),
+    ("/jobs", "jobs_unavailable"),
 ])
 def test_budget_errors_are_structured_and_release_admission(db, monkeypatch, path, error) -> None:
     from types import SimpleNamespace
@@ -145,7 +146,7 @@ def test_budget_errors_are_structured_and_release_admission(db, monkeypatch, pat
     original = db.read_snapshot
     monkeypatch.setattr(db, "read_snapshot", lambda: original(budget_sec=0))
     orch = SimpleNamespace(session_service=SessionService(SessionStore()), quota_coordinator=None)
-    app = task_server.app if path.startswith("/jobs/") else control_api.build_control_api(orch)
+    app = task_server.app if path.startswith("/jobs") else control_api.build_control_api(orch)
     with TestClient(app) as client:
         for _ in range(6):
             response = client.get(path, headers={"Authorization": "Bearer snapshot-token"})

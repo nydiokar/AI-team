@@ -202,6 +202,8 @@ class TaskServerClient:
         session_id: Optional[str] = None,
         ownership: Optional[str] = None,
         limit: int = 20,
+        *,
+        reliable: bool = False,
     ) -> List[Dict[str, Any]]:
         params: Dict[str, Any] = {"limit": limit}
         if node_id:
@@ -212,7 +214,21 @@ class TaskServerClient:
             params["session_id"] = session_id
         elif ownership:
             params["ownership"] = ownership
-        return self._get("/jobs", params) or []
+        if reliable:
+            params["format"] = "verified-v1"
+        result = self._get("/jobs", params)
+        if reliable:
+            if not isinstance(result, dict) or result.get("format") != "verified-v1":
+                raise ValueError("jobs availability protocol unavailable")
+            result = result.get("jobs")
+        if reliable and (
+            not isinstance(result, list) or len(result) > limit or
+            any(not isinstance(row, dict) or not isinstance(row.get("id"), str) or
+                not row["id"] or row.get("status") not in ("running", "done", "failed", "lost")
+                for row in result)
+        ):
+            raise ValueError("jobs response unavailable or malformed")
+        return result or []
 
     def list_job_completions(self, after_id: str = "") -> dict[str, JsonValue]:
         """J2 completion protocol: bounded and fail-closed, unlike legacy lists.

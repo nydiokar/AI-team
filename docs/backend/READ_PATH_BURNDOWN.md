@@ -123,6 +123,59 @@ release on all five HTTP paths, preserved query budgets and actual process exits
 Test DB doubles were extended with the new snapshot interface; no production
 fallback to an unsnapshotted reader was introduced. No paid workload or live failure.
 
+### Federation availability closure
+
+Snapshot/recovery PR [#268](https://github.com/nydiokar/AI-team/pull/268)
+merged `ce765d0`; final head `d753c71` CI run `41205174257` passed (3m16s).
+The four process tests also passed with assertions of the exact persisted state
+at each death boundary (16.60 s), preventing a failed admission from masquerading
+as an admission-before-ack crash.
+
+Eight tests-first federation regressions failed: unreachable remote returned 200
+empty; partial running success was cached after recent failure; failed local SQL
+was hidden by a remote result; expired-cache contention served stale as current;
+strict transport shape/error distinction was absent. Correction preserves the
+explicit mode, successful union/dedupe and gateway-relative ownership, but returns
+`jobs_unavailable` on failed coverage. Healthy empty and fresh two-second cache
+remain success; the remote-only UI topology with deliberately absent local DB
+remains supported (J2 effects still need receipts). No successful effect is replayed.
+
+Adversarial review found a client-only strict check could still trust an old
+server's false-empty response. One existing `/jobs` handler now offers explicit
+`format=verified-v1` with a versioned envelope; strict UI clients reject old-server
+arrays, malformed rows, over-limit arrays and missing format confirmation. Default
+successful arrays and unrelated TaskServerClient best-effort defaults remain.
+Task-server must be upgraded before dependent federated gateways; no federation
+retirement or cross-server atomic-snapshot claim. The deployed gateway was read
+inside its container: `jobs_read_mode=controller`, so no compatibility mode is
+silently activated. No dependent installations were modified.
+
+Service boundary for the existing task-server `/jobs`: worker-token auth; limit
+1–1000 (gateway uses <=50), node/session IDs <=128, validated status/ownership;
+no body consumed. Four active reads held through JSON serialization, 429 before DB
+otherwise, 503 on DB acquisition/query/encoding/budget failures. Both formats'
+100-call tests block four encoders and reject 96 extra reads; malformed input and
+failure/recovery/permit cleanup are tested. Same scoped cooperative SQL budget as
+other HTTP read surfaces; no new service/queue/cache authority. On the isolated
+940-job enlarged copy at limit 1000, four simultaneous encoded arrays were each
+1,045,949 bytes; traced Python peak 12,340,526 bytes; RSS 39,239,680→98,123,776,
+PSS 29,300,736→79,878,144 bytes (native included). At 100 calls only four such
+materializations run. These measured values are not absolute historical-field
+bounds. The legacy urllib transport retains two-second socket-operation timeout
+and unbounded historical body bytes, not a total network deadline; authenticated
+operator/federation trust remains required. S3's native IO/slow-reader/oversized
+history policy remains explicitly deferred, not a reason to invent truncation.
+
+Federation regression command:
+`.venv/bin/pytest tests/test_jobs_federation_availability.py tests/test_watched_jobs.py tests/test_jobs_read_authority.py tests/test_task_server_client.py tests/test_job_completion_protocol.py tests/test_job_completion_reliability.py tests/test_read_snapshot.py tests/test_job_completion_process.py tests/test_control_api_write.py --tb=short -n 4`
+— **171 passed, 8 existing warnings in 23.97 s**. Includes facade→strict client→
+real in-process authenticated task-server, healthy union, remote outage and recovery;
+no socket/network or worker/agent execution. Source lint diagnostic comparison
+against `ce765d0` and new-module Ruff/diff checks pass. Self-review preserves remote-
+only UI support while requiring DB for effects, successful default arrays, fresh
+cache, ownership/filter/dedupe and controller zero-HTTP behavior. Old server cannot
+silently satisfy the versioned contract. Deployment/live checks remain pending.
+
 ## Ordered mandatory jobs
 
 ### J1 — Jobs authority and enrichment
