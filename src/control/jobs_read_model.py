@@ -25,8 +25,9 @@ def list_controller_jobs(
     """
     if db is None:
         raise JobsUnavailableError("jobs_unavailable")
-    return {
-        "running": db.list_jobs(status="running", session_id=session_id,
-                                ownership=ownership, limit=limit),
-        "recent": db.list_jobs(session_id=session_id, ownership=ownership, limit=limit),
-    }
+    with db.read_snapshot():
+        return {
+            "running": db.list_jobs(status="running", session_id=session_id,
+                                    ownership=ownership, limit=limit),
+            "recent": db.list_jobs(session_id=session_id, ownership=ownership, limit=limit),
+        }

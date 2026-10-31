@@ -5,6 +5,8 @@ use a stub orchestrator carrying the REAL SessionService (over an isolated store
 via conftest) plus async spies for submit_instruction / compact_session and a sync
 spy for cancel_task — so we assert the adapter wiring without invoking any backend.
 """
+from contextlib import nullcontext
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -587,6 +589,9 @@ def test_jobs_returns_running_and_recent(client, monkeypatch):
     import src.control.control_api as capi
 
     class _FakeDB:
+        def read_snapshot(self):
+            return nullcontext()
+
         def list_jobs(self, status=None, session_id=None, ownership=None, limit=20):
             return [{"id": "j1", "status": status or "done"}]
 
@@ -623,6 +628,9 @@ def test_jobs_supports_unowned_filter(client, monkeypatch):
     calls = []
 
     class _FakeDB:
+        def read_snapshot(self):
+            return nullcontext()
+
         def list_jobs(self, status=None, session_id=None, ownership=None, limit=20):
             calls.append((status, session_id, ownership, limit))
             if ownership == "unowned":

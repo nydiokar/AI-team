@@ -55,6 +55,74 @@ findings retained. Deliberate self-review traced DB→service→API→client→c
 recovery records remain intact, unavailable evidence has no routing side effects,
 and healthy success payloads/default legacy fields remain compatible.
 
+### Snapshot, cancellation, process recovery and sizing closure
+
+Availability PR [#267](https://github.com/nydiokar/AI-team/pull/267) merged
+`61ba4fb`; CI run `41204034001` passed (3m26s). Deployment follows final code closure.
+
+Four new snapshot regressions failed before implementation, including a committed
+writer immediately before jobs' second SELECT yielding old/new rows in one response.
+Controller jobs arrays and the HTTP session page/reason/queue overlays now share
+one read snapshot. Compact retains its snapshot using the same scoped helper.
+Legacy affiliations and completion pages also use it. No routing, admission or
+write authority changes. The helper applies a 10-second monotonic SQLite VM
+budget (progress check every 1,000 operations) and at most a 10-second per-lock
+busy timeout. Ten seconds leaves headroom under the compact browser's 15-second
+read timeout and is far above measured normal reads. It is **cooperative**, not a
+hard native IO/Python/serialization/socket deadline. Nested reads inherit the
+outer scope; handlers/timeouts/savepoints clear on errors, including interruption,
+without contaminating cached connections or subsequent managed writes. Session
+SQL failures within this scope do not turn cancellation into an unbudgeted JSON
+scan. Every HTTP surface returns structured 503 on budget exhaustion and releases
+admission; existing serialization/100-call tests remain applicable.
+
+J2 fresh-interpreter tests terminate the isolated consumer with exit 73 before
+discovery, after durable claim, after accepted notice and after admission commit.
+Recovery opens the same real SQLite/session state in a new interpreter, executes
+through the real scheduler/claim/start/complete seams, then replays in another
+interpreter. Each yields one deterministic completed continuation and done effect
+receipts. The actual NotificationService and TelegramInterface run against a
+fsynced local transport sink: one notice normally, two after send-before-ack
+uncertainty. Only test leases are advanced instead of waiting 120 seconds. Backend
+spawn guards remain installed; subprocess.run owns/reaps every interpreter.
+This proves process persistence, not a real Telegram receipt or production turn.
+
+Fresh online backup measurements (2026-10-31, all mutations isolated): 2,120
+sessions, 94 jobs, 5,676 links, **zero completion receipts**. Five samples including
+JSON encoding: jobs limit 50 median 2.34 ms / 88,595 bytes; session views with
+reasons/queues limit 1000 median 155.52 ms / 1,149,599 bytes; compact median 29.96 ms /
+271,599 bytes; legacy median 54.62 ms / 5,148,201 bytes. These use stdlib default
+JSON separators; compact live bytes use tighter separators. No p95/absolute bound
+is inferred. Sixteen read/materialization threads (four jobs, four sessions, four
+compact, four completions), bodies held simultaneously: 6,039,304 encoded bytes;
+RSS 210,141,184→790,265,856 bytes, PSS 198,075,392→260,203,520 bytes. PSS accounts
+for repeated mappings of the same SQLite file; do not describe the RSS difference
+as private heap growth. Native allocations are included; allocator/page-cache
+warmup and 100 slow readers are not certified. Available host memory was about
+5.66 GB. Existing independent 100-request gate tests prove excess admission;
+this experiment measures the aggregate at configured active capacity.
+
+On the same isolated copy enlarged to **10,820 affiliations / 940 jobs**, complete
+compact encoding was 2,685,396 bytes / 125.43 ms; jobs filled both 50-row arrays in
+4.50 ms. Plans use `idx_flow_links_entity`, link primary keys and the case primary
+key; newest-link ordering retains a temporary B-tree. These measurements do not
+justify a new scoped API, global gate, byte truncation or jobs index migration.
+S1/S4 remain optional; explicit federation is retained. Historical byte caps and
+slow-reader/native IO guarantees remain outside the authenticated operator
+workload certification; they are not re-labelled as implemented. Local measurement
+artifacts `/tmp/read-closure-measure.json` and `/tmp/read-closure-scale.json` are
+supplemental; the durable values and limitations are recorded here.
+
+Snapshot/recovery verification:
+`.venv/bin/pytest tests/test_read_snapshot.py tests/test_jobs_read_authority.py tests/test_watched_jobs.py tests/test_session_reason_batch.py tests/test_session_list_projection.py tests/test_session_affiliations.py tests/test_job_completion_process.py tests/test_job_completion_reliability.py tests/test_job_completion_protocol.py tests/test_control_api.py tests/test_control_api_write.py --tb=short -n 4`
+— **350 passed, 8 existing warnings in 43.70 s**. New modules + jobs helper pass
+Ruff; modified source adds no diagnostic code/message against `61ba4fb`.
+Self-review covered WAL writer races, nested scopes, handler/timeouts restored after
+interruption/error, thread isolation, next-write recovery, structured 503/admission
+release on all five HTTP paths, preserved query budgets and actual process exits.
+Test DB doubles were extended with the new snapshot interface; no production
+fallback to an unsnapshotted reader was introduced. No paid workload or live failure.
+
 ## Ordered mandatory jobs
 
 ### J1 — Jobs authority and enrichment

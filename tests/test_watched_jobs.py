@@ -9,6 +9,7 @@ import os
 import threading
 import time
 import uuid
+from contextlib import nullcontext
 from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
@@ -480,6 +481,9 @@ def test_orchestrator_lists_local_and_remote_jobs(monkeypatch):
     from src.orchestrator import TaskOrchestrator
 
     class _FakeDB:
+        def read_snapshot(self):
+            return nullcontext()
+
         def list_jobs(self, status=None, session_id=None, ownership=None, limit=20):
             if status == "running":
                 return [{"id": "local-running", "status": "running"}]
@@ -519,6 +523,9 @@ def test_orchestrator_filters_local_and_remote_jobs_by_session(monkeypatch):
     calls = []
 
     class _FakeDB:
+        def read_snapshot(self):
+            return nullcontext()
+
         def list_jobs(self, status=None, session_id=None, ownership=None, limit=20):
             calls.append(("local", status, session_id, ownership, limit))
             if session_id != "sess_jobs":
@@ -562,6 +569,9 @@ def test_orchestrator_filters_local_and_remote_jobs_by_unowned(monkeypatch):
     calls = []
 
     class _FakeDB:
+        def read_snapshot(self):
+            return nullcontext()
+
         def list_jobs(self, status=None, session_id=None, ownership=None, limit=20):
             calls.append(("local", status, session_id, ownership, limit))
             if ownership != "unowned":
@@ -604,6 +614,9 @@ def test_orchestrator_reconciles_remote_orphan_flag_against_gateway_sessions(mon
     calls = []
 
     class _FakeDB:
+        def read_snapshot(self):
+            return nullcontext()
+
         def list_jobs(self, status=None, session_id=None, ownership=None, limit=20):
             calls.append(("local", status, session_id, ownership, limit))
             return []

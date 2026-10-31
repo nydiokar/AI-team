@@ -138,7 +138,9 @@ def test_jobs_api_unavailable_is_503(controller, monkeypatch, facade, failure) -
     if failure == "absent":
         getter = lambda: None
     elif failure == "query":
-        getter = lambda: SimpleNamespace(list_jobs=Mock(side_effect=sqlite3.OperationalError("query failed")))
+        database = get_db()
+        monkeypatch.setattr(database, "list_jobs", Mock(side_effect=sqlite3.OperationalError("query failed")))
+        getter = lambda: database
     else:
         getter = Mock(side_effect=sqlite3.OperationalError("private database path"))
     monkeypatch.setattr(db_mod, "get_db", getter)
