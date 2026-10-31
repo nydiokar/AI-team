@@ -176,6 +176,15 @@ only UI support while requiring DB for effects, successful default arrays, fresh
 cache, ownership/filter/dedupe and controller zero-HTTP behavior. Old server cannot
 silently satisfy the versioned contract. Deployment/live checks remain pending.
 
+Final combined J1–J5/client/API regression (13 targeted files, the snapshot/recovery
+command above plus federation/client modules): **375 passed, 8 existing warnings
+in 40.77 s**. Initial #269 CI found an order-dependent test registry leak: new
+TestClient lifespans left a self-node and changed a later DB-fallback test's source.
+The baseline self-awareness module passed 15 tests alone; the new federation→
+self-awareness sequence reproduced one failure. Isolate/restore the registry in
+both new test modules; no production node-read change is needed. The sequential
+regression and corrected CI are recorded at closure.
+
 ## Ordered mandatory jobs
 
 ### J1 — Jobs authority and enrichment

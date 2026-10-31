@@ -16,6 +16,14 @@ from src.control.task_server_client import TaskServerClient
 from src.orchestrator import TaskOrchestrator
 
 
+@pytest.fixture(autouse=True)
+def isolated_server_registry(monkeypatch) -> None:
+    # Task-server lifespan registers a self-node. Never leave it in another
+    # test's registry or change which authority its DB fallback observes.
+    from src.control import node_registry
+    monkeypatch.setattr(node_registry, "_registry", None)
+
+
 @pytest.fixture
 def federation(monkeypatch):
     monkeypatch.setattr(config.mesh, "jobs_read_mode", "federated")

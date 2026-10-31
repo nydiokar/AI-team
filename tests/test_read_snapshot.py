@@ -11,6 +11,14 @@ from src.control.db import MeshDB
 from src.control.jobs_read_model import list_controller_jobs
 
 
+@pytest.fixture(autouse=True)
+def isolated_server_registry(monkeypatch) -> None:
+    # Task-server lifespan registers a self-node. Never leave it in another
+    # test's registry or change which authority its DB fallback observes.
+    from src.control import node_registry
+    monkeypatch.setattr(node_registry, "_registry", None)
+
+
 @pytest.fixture
 def db(tmp_path) -> Iterator[MeshDB]:
     value = MeshDB(str(tmp_path / "snapshot.db"))
