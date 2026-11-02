@@ -171,8 +171,9 @@ the comment in `routes/sessions.py`). The public surface (no Bearer) is pinned b
 
 ### Turn requests (A82 managed turn queue)
 
-Only meaningful for sessions **enrolled** on the managed queue. Enrollment is gated by
-`TURN_QUEUE_ENROLLMENT_ENABLED` (default off).
+Every session is enrolled at creation or by the cutover migration. Session execution
+requires the durable queue; the former enrollment rollout flag and local execution path
+are retired. The carrier supplies the backend's `TurnControl` for each claimed turn.
 
 | Method | Path | Purpose |
 |---|---|---|
@@ -184,8 +185,8 @@ Only meaningful for sessions **enrolled** on the managed queue. Enrollment is ga
 | POST | `/api/turn-requests/{task_id}/resolve-recovery` | operator exit for a turn held in recovery |
 | POST | `/api/sessions/{id}/turn-requests/pause` | persistent operator queue pause |
 | POST | `/api/sessions/{id}/turn-requests/resume` | clear the operator pause |
-| POST | `/api/sessions/{id}/turn-requests/enroll` | enroll the session (flag-gated, above) |
-| POST | `/api/sessions/{id}/turn-requests/unenroll` | unenroll when no obligations remain |
+| POST | `/api/sessions/{id}/turn-requests/enroll` | idempotent check for an already-enrolled session; unmigrated sessions fail closed |
+| POST | `/api/sessions/{id}/turn-requests/unenroll` | retired; structured 409 because session execution requires enrollment |
 
 ### Monitoring — tasks, turns, events, mesh
 

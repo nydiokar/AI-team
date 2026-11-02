@@ -2495,8 +2495,17 @@ resolved above. Stage 1 authorized (assertion-capable red tests); Stage 2 gated 
 
 ## 17. Closure
 
-Pending implementation. Acceptance of this packet authorizes the work and tests
-above; it does not assert that the design already passed its backend proof gates.
+**Queue/admission arc shipped; closure reconciled 2026-11-02.** R0 (#182), cutover
+(#185), and the admission/session-execution cutoff (#199) are merged. The supporting
+validation documents below record FIFO, Codex/OpenCode and agent-source acceptance
+with their original dates and limits. The old placeholder closure was never updated.
+
+Stage 8b did not delete the backend/carrier compatibility methods. That distinct
+convergence work belongs to [A102](AGENT_102_UNIFY_BACKEND_PATHWAYS.md), including its
+own source checks and runtime acceptance; A82's done state does not certify it.
+Completion delivery was corrected by [A104](AGENT_104_UNIFIED_AGENT_INBOX.md), which
+supersedes A84's original additive-outbox acceptance. Cross-process wake latency remains
+owned by A105. No fresh paid turn or worker restart was performed to reconcile this record.
 
 ## Supporting artifacts (registry reconciliation, 2026-11-02)
 

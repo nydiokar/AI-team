@@ -9,8 +9,9 @@ the source of truth.** The folder is the registry — a file with no block is a 
 
 > **This project (AI-Team):** invoke the tool with the repo venv on Linux —
 > `.venv/bin/python scripts/dispatch/dispatch_state.py <cmd>`. There is no pnpm wrapper here.
-> The `.parquet` query view is intentionally NOT generated (no pandas/pyarrow in this `.venv`);
-> the tool runs **markdown-view-only** and `_DISPATCH_STATE.md` + `--audit` are fully live.
+> The Markdown board and `--audit` work without pandas. When pandas/pyarrow are installed,
+> the tool also regenerates the optional `.parquet` view; both are present in the current
+> environment (verified 2026-11-02). Never hand-edit either generated view.
 
 ## The 3 commands (this is the whole workflow)
 | When | Run |
@@ -55,7 +56,7 @@ anywhere in scope. Waivers need a reason and are printed; never weaken the contr
   its row/section here.
 - `_DISPATCH_STATE.md` — a GENERATED, **complementary** machine/query view (the `--audit` board).
   Read, never write. It is an ADDITIVE query convenience, **never a replacement** for
-  DISPATCH_LOG. (`_dispatch.parquet` is not generated in this repo — md-view-only.)
+  DISPATCH_LOG. (`_dispatch.parquet` is optional and depends on installed query-view packages.)
 
 ## Resolving a gap the audit shows you (on the go)
 - `MISSING_STATE J` → restore the job's canonical state block; `--new` creates a brand-new job.

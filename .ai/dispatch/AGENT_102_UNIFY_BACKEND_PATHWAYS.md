@@ -12,7 +12,7 @@ updated_at: "2026-11-02T14:28:09.291192+00:00"
 # DISPATCH — 102 · One pathway per operation per backend (natural names, managed logic, policy out of backends)
 
 **Level:** 3 (crosses worker + every backend, >5 files; operator-requested 2026-10-08) · **Type:** code
-**Authored:** 2026-10-08 · **Status of this packet:** ready — operator ordered dispatch, all three backends in parallel
+**Authored:** 2026-10-08 · **Status of this packet:** S2 engineering accepted; runtime promotion and live S3 acceptance pending (2026-11-03)
 **Depends on:** S0 = PR #205 (`TurnControl` in `src/core/turn_liveness.py`), PR #204 (`turn_liveness`, merged `ba77b9f`)
 **Branch:** per stage: `feat/a102-claude`, `feat/a102-codex`, `feat/a102-opencode` (S1, parallel, one git worktree each under `.worktrees/`), then `feat/a102-carrier` (S2). Each opens a PR; the Manager reviews and merges.
 
@@ -189,7 +189,7 @@ Owns `src/worker/**`, `src/core/interfaces.py`, `src/core/backend_call.py`, `src
 - New features or behaviour beyond what the managed path does today.
 
 ## TRAIL / EVIDENCE (fill at close)
-- PRs: S0 #205 (merged `4ead64a`), S1-Claude #…, S1-Codex #…, S1-OpenCode #…, S2 #…
+- PRs: S0 #205; S1-Claude #209, S1-Codex #208, S1-OpenCode #207 (all merged); S2 `feat/dispatch-reconciliation`, engineering accepted at `f68d11a` (2026-11-03).
 - Dispatched 2026-10-08 (node `kanebra`, opus, role=worker, one worktree each):
   S1-Claude `task_f40508df` / session `ead810e403bc` (`.worktrees/a102-claude`);
   S1-Codex `task_b5afb280` / session `f65a69f8b50c` (`.worktrees/a102-codex`);
@@ -199,13 +199,107 @@ Owns `src/worker/**`, `src/core/interfaces.py`, `src/core/backend_call.py`, `src
 ---
 ## Milestone (burndown)
 - [x] S0 `TurnControl` contract (PR #205)
-- [ ] S1-Claude merged
-- [ ] S1-Codex merged
-- [ ] S1-OpenCode merged
+- [x] S1-Claude merged
+- [x] S1-Codex merged
+- [x] S1-OpenCode merged
 - [ ] S2 carrier/core/gateway cleanup merged (shims + flags + dead code gone)
-- [ ] Grep proof = 0 hits (ACCEPTANCE 1)
+- [x] Runtime retirement/policy searches clear; arch-contract passes across source/scripts/tests/prompts (only explicit negative-env test waivers)
 - [ ] Gateway deployed; workers restarted (operator)
 - [ ] Live long-turn proof per backend
-- [ ] CONTEXT.md / A82 closure corrected
+- [x] CONTEXT.md / A82 closure corrected
 
-## Closure (fill on completion)
+## Closure — ENGINEERING ACCEPTED, OPERATIONAL GATES PENDING (2026-11-03)
+
+S1 had already merged; its unchecked boxes and empty PR fields were stale. S2 now
+removes deprecated managed APIs/probes, rollout flags and the dead gateway session
+execution/remote-dispatch bodies. The carrier supplies one `TurnControl` and invokes
+natural create/resume/compact/cancel/forget operations. Stateless oneoffs retain their
+wrapper, retry/summary behavior and turn-scoped cancellation; a cancellation waits for
+the native executor outcome instead of orphaning its thread. Host-or-nothing affinity
+is verified at real admission/activation/claim boundaries. Failed turns preserve native
+resume identity; missing conversations never start an unowned hidden retry.
+
+Independent review initially requested rework for oneoff cancellation, false Codex
+readiness and attachment side effects before legacy-turn rejection. All three are
+fixed with regression tests. Final independent verdict: ACCEPT at `f68d11a`, 118
+focused offline assertions passed. No queue schema or carrier HTTP envelope was changed;
+existing workers remain wire-compatible with the upgraded controller.
+
+Verification (repo venv, isolated worktree; no paid/full/e2e suite):
+- `pytest tests/test_turn_queue_rollout.py tests/test_worker_managed_turns_default.py
+  tests/test_session_service.py tests/test_session_service_lifecycle.py
+  tests/test_session_close_propagation.py tests/test_turn_queue_worker.py
+  tests/test_turn_queue_precutover.py tests/test_turn_queue_precutover_rework.py
+  tests/test_turn_queue_backend_conflict.py tests/test_turn_queue_main_merge2.py
+  tests/test_turn_queue_sender.py tests/test_turn_queue_r2.py tests/test_turn_queue_r3.py
+  tests/test_turn_queue_r4.py tests/test_turn_queue_r5.py tests/test_claude_driver.py
+  --tb=short -n 4` — 269 passed. The obsolete clock fixture was corrected to inject
+  the carrier's clock; fake-SDK pending coroutines are now cancelled/awaited at cleanup.
+- `pytest tests/test_a102_carrier_contract.py tests/test_turn_queue_r4.py
+  tests/test_turn_queue_sdk_ownership.py tests/test_claude_job_session_env.py --tb=short`
+  — 58 passed after cleanup, including 31-minute fake-clock progress/stall proof.
+- `pytest tests/test_session_payload_roundtrip.py tests/test_worker_startup_registration.py
+  tests/test_backend_registry.py tests/test_claude_session_backend.py tests/test_docker_boundary.py
+  tests/test_docker_runtime_config.py tests/test_mesh_dispatch_timeout.py
+  tests/test_retry_transient.py tests/test_usage_propagation.py --tb=short -n 4`
+  — 63 passed.
+- Architecture end-state checker at `f68d11a`: CONTRACT MET over 408 files; only
+  retired environment strings in negative compatibility tests are waived. No retired
+  implementation/API definition or production flag is waived. `git diff --check` passes.
+
+Service boundary review:
+- Concurrency/memory: existing worker slots, scheduled-work bound, backend capacity
+  semaphores, staged/result byte limits and 128 MiB per-carrier result-spool budget
+  remain. No new tasks, pools, result copies or parallel DB reads were introduced.
+- Request size/malformed input: existing HTTP/intent limits remain; worker payload,
+  nested metadata/session/staged-file shapes are checked before side effects. Unowned
+  session operations are refused before fetching/deleting attachments. Cancel targets
+  are bounded to 256 characters and scoped to the identified turn.
+- Timeout: carrier hard-cap/progress policy is passed once; the adapters retain
+  ownership/late-recovery semantics on expiry. A cooperative oneoff cancel waits for
+  the native outcome. Existing control-task admission and native IO limits are unchanged;
+  no new hard process-kill or absolute native/Python deadline is claimed.
+- Resource failure: unavailable/unsupported Codex runtime fails readiness offline;
+  registry probe failure excludes only that adapter. Existing DB/claim-token failure,
+  recovery and retry semantics remain fail-closed.
+
+S3 is not certified by offline tests: gateway deployment, worker loaded-build promotion
+and naturally observed long progressing turns are separate facts. Worker restarts need
+the operator decision under AGENTS.md; Kanebra hosts this agent, so any approved local
+promotion must wait for this turn to finish under supervised handoff. No paid 30-minute
+turn will be manufactured. A78's managed reset-metadata gap stays explicit in its own
+blocked packet; a test on retired dispatch code no longer disguises that gap.
+
+## End-state contract (S2, 2026-11-02)
+
+Checks cover runtime code, scripts, tests and role prompts. The only exceptions
+are tests feeding retired environment values adversarially to prove that they
+cannot restore a legacy execution mode. No retired API definition is waived.
+
+```arch-contract
+scope: [src, config, scripts, tests, worker_main.py, docs/harness/roles]
+retired:
+  - run_managed_turn
+  - run_managed_compaction
+  - cancel_managed_turn
+  - forget_managed_turn
+  - supports_managed_turns
+  - cancel_execution
+  - prepare_execution
+  - WORKER_MANAGED_TURNS
+  - TURN_QUEUE_ENROLLMENT_ENABLED
+  - _run_backend_local
+  - _dispatch_or_run_local
+  - _process_task_remote
+  - _dispatch_to_node
+  - _legacy_put_guard
+  - _enrollment_exclusion
+  - _enqueue_remote_cancel_turn
+forbidden_in:
+  src/backends: ['^timeout_seconds$', '^sdk_turn_timeout_sec$', '^MAX_TURN_SECONDS$', '^inactivity_timeout_sec$']
+waivers:
+  - {match: 'retired:WORKER_MANAGED_TURNS', path: tests/test_worker_managed_turns_default.py, reason: 'Adversarial old environment values cannot disable the permanent carrier or SDK correlation.'}
+  - {match: 'retired:WORKER_MANAGED_TURNS', path: tests/test_turn_queue_r4.py, reason: 'Regression checks that a retired opt-out cannot disable turn echo correlation.'}
+  - {match: 'retired:WORKER_MANAGED_TURNS', path: tests/test_turn_queue_r2.py, reason: 'Regression checks that a retired opt-out cannot disable the common worker contract.'}
+  - {match: 'retired:TURN_QUEUE_ENROLLMENT_ENABLED', path: tests/test_turn_queue_rollout.py, reason: 'Adversarial old rollout-flag values cannot enable enrollment rollback or a second execution mode.'}
+```

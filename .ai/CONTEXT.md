@@ -1,6 +1,6 @@
 # AI-Team Gateway — Hot Context
 
-**Last Updated:** 2026-10-31
+**Last Updated:** 2026-11-03
 **Branch policy:** `main` for docs-only; `feat/<slug>` + PR + self-merge for any `src/` or config
 change. Restart the **gateway** freely when deploying merged code. Never restart a worker/node-carrier
 without surfacing it to the operator first.
@@ -93,6 +93,16 @@ Only jobs that are genuinely open. Everything merged/done is in git and the disp
 ---
 
 ## Recent shift notes
+
+**2026-11-03 — A102 S2 engineering accepted.** Carrier-owned `TurnControl` now drives
+the natural backend APIs; compatibility shims, rollout flags and dead gateway session
+execution are removed. Cancellation, runtime readiness, attachment refusal and failed-turn
+native identity have focused regression evidence in the packet. No DB migration or carrier
+HTTP envelope change. Worker promotion and real long-turn evidence remain separate gates.
+Boundary deferral: existing protocol-0 close/cancel controls bypass work slots so they can
+recover a saturated worker. This retirement preserves that behavior and existing HTTP/input
+limits; it adds no new global control-task memory/deadline guarantee. Keep the authenticated,
+low-rate operator workload assumption until control-plane hardening sizes a separate bound.
 
 **2026-11-02 — Dispatch reconciliation.** Supporting artifacts retain stable paths with
 explicit exclusions and parent links; new artifacts belong in `dispatch/evidence/`.
