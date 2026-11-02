@@ -259,8 +259,7 @@ def pooled_claude(monkeypatch):
 
     monkeypatch.setattr(cd, "_SDKSession", _Boot)
     # A mis-attributed turn must fail fast (deadline ⇒ recovery), not hang.
-    # [A102 S1] _managed_stall_sec is gone; inject the short stall through the
-    # module-level turn_control the backend shim builds every turn from.
+    # Inject the short stall at the carrier's shared control constructor.
     import src.core.turn_liveness as _cc
     _orig_tc = _cc.turn_control
     monkeypatch.setattr(_cc, "turn_control", lambda u, **kw: _orig_tc(u, **{"stall_override": 3.0, **kw}))

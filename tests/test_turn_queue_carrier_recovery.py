@@ -36,7 +36,7 @@ def _claims(w) -> List[str]:
 
 
 # =========================================================================== #
-# P1 / M1 — control rows are never starved; flag OFF poll loop == main
+# P1 / M1 — control rows are never starved; work admission is always bounded
 # =========================================================================== #
 def _poll_once(w, rows):
     scheduled: List[str] = []
@@ -66,15 +66,15 @@ def _poll_once(w, rows):
     return scheduled
 
 
-def test_P1_flag_off_control_row_scheduled_and_loop_identical_to_main(tmp_path):
-    """Flag OFF: no dedup and no capacity gate (main's loop) — the close row AND
-    the re-fetched task row are both scheduled, exactly as on main."""
+def test_P1_control_rows_bypass_slots_while_work_stays_bounded(tmp_path):
+    """An old fixture opt-out cannot disable deduplication or capacity limits;
+    close/cancel controls remain schedulable when the work slots are full."""
     w = _worker(tmp_path, None, managed=False)
     w.cfg.max_concurrent = 1
     rows = [{"id": "turn-waiting", "action": "resume_session"},
             {"id": "close-1", "action": "close_session", "session_id": "s"},
             {"id": "cancel-1", "action": "cancel_codex"}]
-    assert _poll_once(w, rows) == ["turn-waiting", "close-1", "cancel-1"]
+    assert _poll_once(w, rows) == ["close-1", "cancel-1"]
 
 
 def test_P1b_flag_on_capacity_gate_exempts_control_rows(tmp_path):
@@ -417,9 +417,9 @@ def test_P4_managed_deadline_late_reply_reaches_sink_as_late_managed():
 
 
 def test_P4b_late_reply_completes_the_held_turn_via_carrier(db, tmp_path, real_claude, monkeypatch):
-    import src.backends.claude_code as _cc
-    _orig_tc = _cc.turn_control
-    monkeypatch.setattr(_cc, "turn_control", lambda u, **kw: _orig_tc(u, stall_override=0.3, **kw))
+    import src.core.turn_liveness as _tc
+    _orig_tc = _tc.turn_control
+    monkeypatch.setattr(_tc, "turn_control", lambda u, **kw: _orig_tc(u, stall_override=0.3, **kw))
     http = _ClientHTTP(TestClient(ts.app))
     w = _worker(tmp_path, http)
     w._backends = {"claude": real_claude.backend}
@@ -571,20 +571,17 @@ def test_m4_orphan_tmp_files_cleaned_at_boot(tmp_path):
     assert not list(w._claim_store.dir.glob(".spool-*.tmp"))
 
 
-def test_m5_flag_off_constructs_no_carrier_state(tmp_path, monkeypatch):
+def test_m5_permanent_carrier_keeps_lazy_durable_state_across_reinitialization(tmp_path, monkeypatch):
     monkeypatch.setenv("WORKER_STATE_DIR", str(tmp_path / "state"))
     w = _worker(tmp_path, None, managed=False)
     w._init_managed_state()
-    assert w._result_spool is None and w._claim_store is None
-    assert not (tmp_path / "state").exists()
-    w.cfg.managed_turns = True
-    w._init_managed_state()
-    assert w._result_spool is not None and not (tmp_path / "state").exists()
-    # Leftover state from a managed run still drains with the flag OFF.
-    (tmp_path / "state" / NODE).mkdir(parents=True)
-    w.cfg.managed_turns = False
+    assert w._result_spool is not None and w._claim_store is not None
+    assert not (tmp_path / "state").exists(), "empty spool storage stays lazy"
+    w._claim_record("restore", claim_token="tok", session_id="s", invoked=False,
+                    incarnation_id="old", backend="claude")
     w._init_managed_state()
     assert w._result_spool is not None and w._claim_store is not None
+    assert w._claim_store.get("restore")["claim_token"] == "tok"
 
 
 def test_m6_reservation_released_on_cancellation(db, tmp_path, monkeypatch):
