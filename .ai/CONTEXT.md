@@ -75,7 +75,7 @@ Only jobs that are genuinely open. Everything merged/done is in git and the disp
 | Job | Packet | Depends on | Status | What it is |
 |---|---|---|---|---|
 | **A105** | `AGENT_105_CROSS_PROCESS_TURN_SIGNAL.md` | A104 ✅ | **ready** — Level 3, operator approval + D1 | Make the task-server's post-commit turn hint reach the gateway; scheduler, effects consumer and inbox wake all wake on that one signal (polls → safety nets). Today worker finish → Manager wake is polled (16.5 s live). |
-| **A102** | `AGENT_102_UNIFY_BACKEND_PATHWAYS.md` | PR #205 (S0) | **ACTIVE** — S1 Claude/Codex/OpenCode workers in parallel worktrees, then S2 carrier cleanup | Finish A82 below the admission layer: each backend gets ONE body per operation under its natural name (`create_session`/`resume_session`/`compact_session`/`cancel`); `run_managed_*` twins, `if managed` branches, per-backend wall clocks, flags, OpenCode CLI and PrintResume deleted; carrier alone decides turn limits (`TurnControl`). |
+| **A102** | `AGENT_102_UNIFY_BACKEND_PATHWAYS.md` | — | **blocked** — S2 merged + gateway live (`7c6d01a`); worker promotion and natural S3 acceptance pending | One carrier-owned `TurnControl` and natural backend operations; shims, rollout gates and dead gateway session execution removed. Worker restart needs the operator decision and drain/ancestry checks; no paid proof turn. |
 | **A94** | `AGENT_94_SYSTEM_ONE_CORE_DELIVERY_SCORECARD.md` | — | ready (Level 3) | S1 core + decision log + replay baseline + advisory wake scorecard. Operator inputs: read-only controller DB copy, `TYPESAFE_API_KEY`. |
 | **A95** | `AGENT_95_SYSTEM_ONE_DISPATCH_PREFLIGHT.md` | A94 | ready after A94 (Level 3) | Soft pre-flight on `dispatch_worker` (Manager can override). |
 | **A96** | `AGENT_96_SYSTEM_ONE_DELIVERY_BOUNCE.md` | A94 + measured precision | blocked | Bounce a clearly-not-ready delivery instead of waking the Manager. |
@@ -94,11 +94,12 @@ Only jobs that are genuinely open. Everything merged/done is in git and the disp
 
 ## Recent shift notes
 
-**2026-11-03 — A102 S2 engineering accepted.** Carrier-owned `TurnControl` now drives
+**2026-11-03 — A102 S2 merged + gateway live (`7c6d01a`, PR #271).** Carrier-owned `TurnControl` now drives
 the natural backend APIs; compatibility shims, rollout flags and dead gateway session
 execution are removed. Cancellation, runtime readiness, attachment refusal and failed-turn
 native identity have focused regression evidence in the packet. No DB migration or carrier
-HTTP envelope change. Worker promotion and real long-turn evidence remain separate gates.
+HTTP envelope change. Both controller containers are healthy on schema 48, coverage true, both nodes online.
+Worker promotion and real long-turn evidence remain separate gates (see packet).
 Boundary deferral: existing protocol-0 close/cancel controls bypass work slots so they can
 recover a saturated worker. This retirement preserves that behavior and existing HTTP/input
 limits; it adds no new global control-task memory/deadline guarantee. Keep the authenticated,
@@ -727,7 +728,8 @@ logs/events.ndjson                    system-wide event log
   - **Unpinned** (`session.machine_id` empty): may run anywhere.
   - **Pinned** (`session.machine_id = <node>`): host-or-nothing. Never relocate to a substitute
     host — `backend_session_id` is machine-local. Fallback = wait / requeue / operator re-pin.
-- `MESH_ENABLED=false` → byte-for-byte old behavior.
+- Session execution requires the canonical DB/durable queue. Mesh-disabled/file-only
+  reads are supported; the retired local session-execution path cannot be restored by a flag.
 - No uncontrolled autonomous behavior. Per-turn audit data (full reply, files changed, usage) is
   mandatory — lives canonically in `mesh_tasks`.
 

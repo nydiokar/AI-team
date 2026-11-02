@@ -1,18 +1,18 @@
 ```yaml
 job_id: AGENT_102_UNIFY_BACKEND_PATHWAYS
 created_at: "2026-10-08T11:03:02.721707+00:00"        # CANONICAL — set once at dispatch, never derive again
-status: active              # ready | active | blocked | done | dead
+status: blocked              # ready | active | blocked | done | dead
 owner: "A102 S2 reconciliation, 2026-11-02"
 depends_on: []
-results_ref: null             # -> DISPATCH_LOG.md section with the verdict prose
-evidence: []                  # artifact paths that PROVE it ran (checked to exist)
-updated_at: "2026-11-02T14:28:09.291192+00:00"
+results_ref: DISPATCH_LOG.md#A102             # -> DISPATCH_LOG.md section with the verdict prose
+evidence: ["tests/test_a102_carrier_contract.py","tests/test_session_cancellation.py","tests/test_turn_queue_carrier_recovery.py","tests/test_affinity_fallback.py","tests/test_failure_text_scope.py","src/core/turn_liveness.py"]                  # artifact paths that PROVE it ran (checked to exist)
+updated_at: "2026-11-02T22:45:37.335501+00:00"
 ```
 
 # DISPATCH — 102 · One pathway per operation per backend (natural names, managed logic, policy out of backends)
 
 **Level:** 3 (crosses worker + every backend, >5 files; operator-requested 2026-10-08) · **Type:** code
-**Authored:** 2026-10-08 · **Status of this packet:** S2 engineering accepted; runtime promotion and live S3 acceptance pending (2026-11-03)
+**Authored:** 2026-10-08 · **Status of this packet:** blocked — S2 merged and gateway live; worker promotion and natural S3 acceptance pending (2026-11-03)
 **Depends on:** S0 = PR #205 (`TurnControl` in `src/core/turn_liveness.py`), PR #204 (`turn_liveness`, merged `ba77b9f`)
 **Branch:** per stage: `feat/a102-claude`, `feat/a102-codex`, `feat/a102-opencode` (S1, parallel, one git worktree each under `.worktrees/`), then `feat/a102-carrier` (S2). Each opens a PR; the Manager reviews and merges.
 
@@ -202,9 +202,10 @@ Owns `src/worker/**`, `src/core/interfaces.py`, `src/core/backend_call.py`, `src
 - [x] S1-Claude merged
 - [x] S1-Codex merged
 - [x] S1-OpenCode merged
-- [ ] S2 carrier/core/gateway cleanup merged (shims + flags + dead code gone)
+- [x] S2 carrier/core/gateway cleanup merged — PR #271, `7c6d01a` (shims + flags + dead code gone)
 - [x] Runtime retirement/policy searches clear; arch-contract passes across source/scripts/tests/prompts (only explicit negative-env test waivers)
-- [ ] Gateway deployed; workers restarted (operator)
+- [x] Gateway + task-server deployed on `7c6d01a`, schema 48 unchanged
+- [ ] Workers promoted after operator decision and idle/ancestry checks
 - [ ] Live long-turn proof per backend
 - [x] CONTEXT.md / A82 closure corrected
 
@@ -305,3 +306,30 @@ waivers:
   - {match: 'retired:WORKER_MANAGED_TURNS', path: tests/test_turn_queue_r2.py, reason: 'Regression checks that a retired opt-out cannot disable the common worker contract.'}
   - {match: 'retired:TURN_QUEUE_ENROLLMENT_ENABLED', path: tests/test_turn_queue_rollout.py, reason: 'Adversarial old rollout-flag values cannot enable enrollment rollback or a second execution mode.'}
 ```
+
+### Merge and deployment record — 2026-11-03
+
+PR [#271](https://github.com/nydiokar/AI-team/pull/271) merged as `7c6d01a`.
+[CI](https://github.com/nydiokar/AI-team/actions/runs/41538770017) passed. Final CI
+fixture corrections cover Telegram carrier teardown and unmigrated compaction
+refusal (`pytest tests/test_telegram_session_flow.py tests/test_turn_queue_4b.py
+--tb=short` — 74 passed); no production behavior was changed after independent acceptance.
+
+Gateway + task-server were rebuilt from a tracked `git archive` snapshot of main;
+Compose still used the host environment. This excludes unrelated untracked analysis
+files from the build. Both containers are healthy; `/health` reports `git_sha=7c6d01a`,
+`coverage_ok=true`; task-server schema remains 48 and both nodes are online. Startup
+log scan found no ERROR/Traceback lines. No migration or live DB retirement occurred.
+Image: `ai-team:prod-7c6d01a`; rollback: `ai-team:pre-7c6d01a`; deploy tag:
+`deploy/20261102T2244Z-7c6d01a` (UTC).
+
+At `2026-11-02T22:44Z`, Kanebra still loaded `618cd4c`, PID 2711734, incarnation
+`d46a8499976d46c4aa5148efbfded203`, running this agent's Codex task `task_94c58e13`.
+Horse loaded `e0e2877`, incarnation `fb5aadfa1d00446aa5d0b93affb08ce3`, no active turns
+and two pooled sessions. Neither worker was restarted. Their unchanged incarnations
+verify that gateway deployment preserved worker processes.
+
+Remaining gate: the operator's worker-promotion decision, then fresh workload checks
+and an out-of-tree supervised handoff for the caller-hosting Kanebra worker after this
+turn drains. Verify new PID/incarnation/loaded build and natural successful work. Do not
+mark S3 done from the image build, the old worker heartbeat, or a paid manufactured turn.
