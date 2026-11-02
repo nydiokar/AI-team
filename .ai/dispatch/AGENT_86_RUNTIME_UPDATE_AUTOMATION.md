@@ -1,18 +1,18 @@
 ```yaml
 job_id: AGENT_86_RUNTIME_UPDATE_AUTOMATION
 created_at: "2026-09-24T18:00:20+00:00"
-status: blocked
+status: dead
 owner: ""
 depends_on: [AGENT_85_WORKER_CONTAINER_ACCEPTANCE]
 results_ref: DISPATCH_LOG.md#A86
 evidence: []
-updated_at: "2026-09-27T16:04:23.404921+00:00"
+updated_at: "2026-11-02T14:26:59.612670+00:00"
 ```
 
 # DISPATCH — A86 · Approved, reversible worker runtime update automation
 
 **Level:** 3 (CI/release automation, deployment control boundary, worker routing) · **Type:** code
-**Authored:** 2026-09-24 · **Status:** blocked on A85 acceptance evidence. **Reviewed by:** A87 before merge and before any activation proposal.
+**Authored:** 2026-09-24 · **Status:** dead — dropped by the operator (2026-09-25); registry reconciled 2026-11-02.
 **Branch:** `feat/runtime-update-automation` + PR; never deploy, restart, drain, publish, or merge a live candidate as part of this job.
 
 > A merged Codex or Claude SDK version must become an available immutable worker image—not an implicit instruction to disrupt a node. After this job, discovery, human approval, image publication, per-node approval, drain, verification, and rollback are distinct auditable states.
@@ -76,3 +76,8 @@ reversible way to update Codex/Claude-SDK versions on a host-process worker (pin
 rollback), but that is a DIFFERENT mechanism (host package/venv management, not image digests) and a
 DIFFERENT job to be authored once the operator's non-container worker plan exists. Do not silently
 morph A86 into it.
+
+### Registry reconciliation (2026-11-02)
+
+Set machine state to `dead` to match the explicit 2026-09-25 dropped-scope closure.
+No implementation or runtime automation is claimed.

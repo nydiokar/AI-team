@@ -1,15 +1,9 @@
-"""A82 Stage 7 — rollout rehearsal on fixtures (ROLL01-05, packet §5/§11, design §10).
+"""Permanent queue enrollment after A102's final cutover.
 
-The enrollment SERVICE (design §10 step 6/8): an operator action inside the
-gateway process that enrolls only a quiescent session with no legacy queued /
-pending / claimed / in-memory work and a managed-capable carrier, behind the
-default-OFF ``TURN_QUEUE_ENROLLMENT_ENABLED`` flag, using an admission exclusion
-that a racing legacy arrival cannot slip past; and the drain/rollback exit that
-removes enrollment only when no waiting/active/recovery obligation remains.
-The flag gates NEW enrollment only — accepted managed work keeps flowing.
-
-Real bound orchestrator (bare instance) + real temp ``MeshDB`` + real task-server
-app; no backend, network or CLI (producer-1 autouse spawn guard).
+The cutover migration and session creation own enrollment. Historical enrollment
+requests are idempotent for already enrolled sessions and refuse unmigrated
+records; retired flag values cannot enable a second execution path. Accepted
+managed rows retain restart/recovery/poller coverage below.
 """
 from __future__ import annotations
 
@@ -66,7 +60,7 @@ def test_ROLL01_flag_off_refuses_new_enrollment(tmp_path: Any, monkeypatch: Any)
     monkeypatch.delenv(FLAG, raising=False)
     db, o = _setup(tmp_path, monkeypatch, enroll=False)
     err = _refused(_enroll, o)
-    assert err.code == "enrollment_disabled" and err.status_code == 409
+    assert err.code == "legacy_execution_retired" and err.status_code == 409
     assert not _enrolled(db)
     # [A82 Stage 8b] The legacy-path tail (a non-enrolled session turn queues)
     # was removed with the legacy execution path: such a turn is now refused
@@ -133,42 +127,20 @@ def test_ROLL02_no_canonical_db_refuses_enrollment(tmp_path: Any, monkeypatch: A
 def test_ROLL03_enrolls_a_quiescent_capable_session_idempotently(
         tmp_path: Any, monkeypatch: Any, flag_on: None) -> None:
     db, o = _setup(tmp_path, monkeypatch, enroll=False)
-    assert _enroll(o) is True and _enrolled(db)
+    db.enroll_session("sess-1")  # migration/session creation, not a runtime flag
+    assert _enroll(o) is False and _enrolled(db)
     assert db.any_session_enrolled() is True
     assert _enroll(o) is False  # already enrolled: idempotent, no error
     tid = _submit(o, operation_id="m-1")
     assert isinstance(tid, tq.TurnAdmission)  # producers now take protocol 1
 
 
-def test_ROLL03b_old_worker_capabilities_refused(tmp_path: Any, monkeypatch: Any, flag_on: None) -> None:
-    db, o = _setup(tmp_path, monkeypatch, enroll=False)
-    _register_carrier(db, "worker-a", managed=())  # old worker: no managed backends
-    err = _refused(_enroll, o)
-    assert err.code == "capability_missing" and err.status_code == 409
-    assert not _enrolled(db)
 
 
-def test_ROLL03c_offline_carrier_refused(tmp_path: Any, monkeypatch: Any, flag_on: None) -> None:
-    db, o = _setup(tmp_path, monkeypatch, enroll=False)
-    db._conn().execute("UPDATE nodes SET status = 'offline' WHERE node_id = 'worker-a'")
-    err = _refused(_enroll, o)
-    assert err.code == "carrier_offline" and not _enrolled(db)
 
 
-@pytest.mark.parametrize("status", [SessionStatus.BUSY, SessionStatus.PINNED_NODE_OFFLINE])
-def test_ROLL03d_busy_session_refused(tmp_path: Any, monkeypatch: Any, flag_on: None,
-                                      status: SessionStatus) -> None:
-    db, o = _setup(tmp_path, monkeypatch, enroll=False)
-    db._conn().execute("UPDATE sessions SET status = ? WHERE session_id = 'sess-1'", (status.value,))
-    err = _refused(_enroll, o)
-    assert err.code == "session_not_quiescent" and not _enrolled(db)
 
 
-def test_ROLL03e_closed_session_refused(tmp_path: Any, monkeypatch: Any, flag_on: None) -> None:
-    db, o = _setup(tmp_path, monkeypatch, enroll=False)
-    db._conn().execute("UPDATE sessions SET status = ? WHERE session_id = 'sess-1'", (SessionStatus.CLOSED.value,))
-    err = _refused(_enroll, o)
-    assert err.code == "session_closed" and not _enrolled(db)
 
 
 # test_ROLL03f_legacy_in_memory_work_refused RETIRED at the A82 Stage-8b
@@ -176,20 +148,6 @@ def test_ROLL03e_closed_session_refused(tmp_path: Any, monkeypatch: Any, flag_on
 # non-enrolled session turn is refused before any legacy put), so the
 # in-memory `legacy_work_in_flight` guard can never fire. The durable
 # pre-cutover-row equivalent is still covered by test_ROLL03g below.
-@pytest.mark.parametrize("status", ["pending", "claimed"])
-def test_ROLL03g_durable_legacy_row_refused(tmp_path: Any, monkeypatch: Any, flag_on: None,
-                                            status: str) -> None:
-    db, o = _setup(tmp_path, monkeypatch, enroll=False)
-    # [A82 Stage 8a] a pre-cutover legacy row (the fence refuses new ones)
-    enqueue_pre_cutover(db, "legacy-row", "sess-1", "worker-a", "claude", "resume_session", {"prompt": "x"})
-    if status == "claimed":
-        assert claim_pre_cutover(db, "legacy-row", "worker-a")
-    err = _refused(_enroll, o)
-    assert err.code == "legacy_work_in_flight" and not _enrolled(db)
-    # A finished legacy row is history, not work: enrollment proceeds.
-    with db._write() as conn:
-        conn.execute("UPDATE mesh_tasks SET status = 'completed' WHERE id = 'legacy-row'")
-    assert _enroll(o) is True
 
 
 # --------------------------------------------------------------------------- #
@@ -273,13 +231,14 @@ def test_ROLL06_enroll_unenroll_routes(tmp_path: Any, monkeypatch: Any) -> None:
     h = {"Authorization": "Bearer tok"}
     monkeypatch.delenv(FLAG, raising=False)
     r = c.post("/api/sessions/sess-1/turn-requests/enroll", headers=h)
-    assert r.status_code == 409 and r.json()["detail"]["reason"] == "enrollment_disabled"
+    assert r.status_code == 409 and r.json()["detail"]["reason"] == "legacy_execution_retired"
     assert c.post("/api/sessions/sess-1/turn-requests/enroll").status_code == 401
     monkeypatch.setenv(FLAG, "1")
     r = c.post("/api/sessions/nope/turn-requests/enroll", headers=h)
     assert r.status_code == 404
+    db.enroll_session("sess-1")
     r = c.post("/api/sessions/sess-1/turn-requests/enroll", headers=h)
-    assert r.status_code == 200 and r.json()["changed"] is True and _enrolled(db)
+    assert r.status_code == 200 and r.json()["changed"] is False and _enrolled(db)
     # [A82 Stage 8b] The unenroll leg (drain-gated `managed_obligation_remaining`)
     # was removed — the unenroll exit is retired and always refuses
     # (test_turn_queue_stage8a.py::test_S8_11).

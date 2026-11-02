@@ -441,7 +441,7 @@ async def test_session_new_rejects_node_without_backend(
 
 
 @pytest.mark.asyncio
-async def test_session_close_closes_local_backend_and_clears_backend_session_id(
+async def test_session_close_dispatches_carrier_teardown_and_clears_backend_session_id(
     monkeypatch,
     isolated_session_store,
 ):
@@ -460,6 +460,7 @@ async def test_session_close_closes_local_backend_and_clears_backend_session_id(
         store.bind(100, session.session_id)
 
         closed = []
+        dispatched = []
 
         class _Backend:
             def close(self, session_obj):
@@ -467,13 +468,20 @@ async def test_session_close_closes_local_backend_and_clears_backend_session_id(
 
         orchestrator = _DummyOrchestrator()
         orchestrator._backends = {"opencode-server": _Backend()}
+        from src.services.session_service import SessionService
+        orchestrator.session_service = SessionService(
+            store, remote_close_dispatcher=lambda s: dispatched.append(
+                (s.session_id, s.backend_session_id)
+            ),
+        )
         bot = TelegramInterface("", orchestrator, allowed_users=[1])
 
         update = _DummyUpdate(user_id=1, chat_id=100)
         await bot._handle_session_close(update, _DummyContext())
 
         saved = store.get(session.session_id)
-        assert closed == [(session.session_id, "ses_close_me")]
+        assert closed == [], "the gateway must not close a native backend locally"
+        assert dispatched == [(session.session_id, "ses_close_me")]
         assert saved.status == session_store_module.SessionStatus.CLOSED
         assert saved.backend_session_id == ""
     finally:

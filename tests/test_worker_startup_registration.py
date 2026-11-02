@@ -13,6 +13,7 @@ def _worker() -> agent_mod.WorkerAgent:
     worker = agent_mod.WorkerAgent.__new__(agent_mod.WorkerAgent)
     worker.cfg = SimpleNamespace(node_id="test-worker")
     worker._shutdown = asyncio.Event()
+    worker._backends = {}
     return worker
 
 

@@ -1,18 +1,18 @@
 ```yaml
 job_id: AGENT_91_OPENCODE_BACKEND_PARITY
 created_at: "2026-09-27T11:43:24.753631+00:00"        # CANONICAL — set once at dispatch, never derive again
-status: active               # ready | active | blocked | done | dead
+status: done               # ready | active | blocked | done | dead
 owner: ""
 depends_on: []
 results_ref: DISPATCH_LOG.md#A91
-evidence: []
-updated_at: "2026-09-27T14:31:42.670426+00:00"
+evidence: ["tests/test_opencode_backend.py", "tests/test_opencode_managed_turns.py", ".ai/dispatch/AGENT_91_OPENCODE_BACKEND_PARITY.md"]
+updated_at: "2026-11-02T14:26:59.601530+00:00"
 ```
 
 # DISPATCH — A91 · OpenCode backend parity and reliability
 
 **Level:** 3 (backend lifecycle + live activity/telemetry integration) · **Type:** backend implementation + acceptance
-**Status:** active (implementation and deterministic tests built; Kanebra direct live acceptance passed; worker UI/forwarding acceptance waits for the operator's worker restart)
+**Status:** done — merged implementation, operator operational acceptance and persisted production telemetry; reconciled 2026-11-02
 **Branch:** `feat/opencode-backend-parity` · PR [#174](https://github.com/nydiokar/AI-team/pull/174)
 **Depends on:** none. Coordinate `cancel()` / `close()` changes with A90 if it is active; do not duplicate its locality refactor.
 
@@ -84,3 +84,16 @@ OpenCode API references: [Server API](https://opencode.ai/docs/server/) document
 - Direct owning-host execution, output, activity labels, usage/tool sink events, abort, and native resume are verified. **Still required before `done`:** after the operator restarts PM2 worker, verify forwarded activity in the UI and persisted telemetry. The current worker process still has its pre-merge module loaded.
 - No user-facing universal API, worker protocol, DB schema, or config values changed. Any deferred service-boundary item has a concrete note here before closure.
 - Update `DISPATCH_LOG.md` A91 closure/status and set YAML `status: done` only with evidence paths that exist. Leave deployment/worker restart operator-gated.
+
+## Closure reconciliation — SHIPPED (2026-11-02)
+
+PR #174 merged on 2026-09-27 (GitHub `0c88c3a`; local-history equivalent
+`8eb6232`). The operator reports having used OpenCode without problems and explicitly
+accepts that operational evidence in this session. No synthetic paid turn is required.
+Read-only production SQLite corroborates completed OpenCode-server turn
+`task_a6fed7d4` on Horse at `2026-10-14T21:06:50.124134+00:00` and its corresponding
+`llm_turns.final_status=success`, ended `2026-10-14T21:06:50.533978Z`, with persisted
+metrics. Other successful persisted turns include `task_6f4a303f` and `task_04f34f73`.
+This closes the old worker-to-controller/persisted-telemetry gate using real historical
+operation plus operator acceptance. The original mocked and direct-driver evidence
+above remains; this is not a claim of a fresh browser activity probe.

@@ -5,6 +5,8 @@ import importlib.util
 import sys
 from pathlib import Path
 
+import pytest
+
 
 def _module():
     path = Path(__file__).parents[1] / "scripts" / "dispatch" / "dispatch_state.py"
@@ -27,6 +29,45 @@ def test_done_packet_requires_evidence() -> None:
     job = dispatch.JobState("DONE", "DONE.md", "done", "", "", evidence=[])
 
     assert "CLAIMED_DONE_NO_PROOF" in dispatch._derive_flags(job)
+
+
+@pytest.mark.parametrize("body", ["# no state\n", "```yaml\nstatus: [broken\n```\n"])
+def test_scan_preserves_missing_state_and_audit_fails(tmp_path: Path, capsys, body: str) -> None:
+    dispatch = _module()
+    dispatch.DISPATCH_DIR = tmp_path
+    (tmp_path / "JOB.md").write_text(body, encoding="utf-8")
+
+    jobs = dispatch.scan()
+
+    assert jobs[0].flags == ["MISSING_STATE"]
+    assert dispatch.audit(jobs, strict=True) == 1
+    output = capsys.readouterr().out
+    assert "0 with state · 1 orphans" in output
+    assert "BAD_STATUS" not in output
+
+
+def test_invalid_status_is_distinct_from_missing_state(tmp_path: Path) -> None:
+    dispatch = _module()
+    dispatch.DISPATCH_DIR = tmp_path
+    (tmp_path / "JOB.md").write_text("```yaml\nstatus: merged\n```\n", encoding="utf-8")
+
+    assert dispatch.scan()[0].flags == ["BAD_STATUS"]
+
+
+def test_supporting_artifacts_are_excluded_without_hiding_unregistered_files(tmp_path: Path) -> None:
+    dispatch = _module()
+    dispatch.DISPATCH_DIR = tmp_path
+    (tmp_path / ".dispatch_not_a_job").write_text("OLD_REPORT.md\n", encoding="utf-8")
+    (tmp_path / "OLD_REPORT.md").write_text("# retained legacy evidence\n", encoding="utf-8")
+    (tmp_path / "UNREGISTERED.md").write_text("# must still flag a gap\n", encoding="utf-8")
+    (tmp_path / "evidence").mkdir()
+    (tmp_path / "evidence" / "A99_PROPOSAL.md").write_text("# job evidence\n", encoding="utf-8")
+    dispatch.NOT_A_JOB |= dispatch._load_sidecar_exclusions()
+
+    jobs = dispatch.scan()
+
+    assert [job.file for job in jobs] == ["UNREGISTERED.md"]
+    assert jobs[0].flags == ["MISSING_STATE"]
 
 
 def test_dependency_never_unblocks_without_explicit_opt_in() -> None:

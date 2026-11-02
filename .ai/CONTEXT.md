@@ -1,6 +1,6 @@
 # AI-Team Gateway — Hot Context
 
-**Last Updated:** 2026-10-31
+**Last Updated:** 2026-11-03
 **Branch policy:** `main` for docs-only; `feat/<slug>` + PR + self-merge for any `src/` or config
 change. Restart the **gateway** freely when deploying merged code. Never restart a worker/node-carrier
 without surfacing it to the operator first.
@@ -62,13 +62,13 @@ optional and not justified by present measurements. No worker restarted.
    an owner ruling.
 
 
-> **Finding active jobs:** until the dispatch-state-kit is installed, read
-> `.ai/dispatch/DISPATCH_LOG.md` → Index table. Each row points to its `AGENT_N_*.md` packet.
-> After A51 lands, use the generated board / script instead.
+> **Finding active jobs:** `.ai/dispatch/DISPATCH_LOG.md` is the human index; run
+> `.venv/bin/python scripts/dispatch/dispatch_state.py --audit` for current machine state.
+> Supporting artifacts live under `evidence/`, linked from their parent job, not as new jobs.
 
 ---
 
-## Active Work (open dispatched jobs, as of 2026-08-03)
+## Active Work (current priorities; registry reconciled 2026-11-02)
 
 Only jobs that are genuinely open. Everything merged/done is in git and the dispatch packets.
 
@@ -76,20 +76,12 @@ Only jobs that are genuinely open. Everything merged/done is in git and the disp
 |---|---|---|---|---|
 | **A105** | `AGENT_105_CROSS_PROCESS_TURN_SIGNAL.md` | A104 ✅ | **ready** — Level 3, operator approval + D1 | Make the task-server's post-commit turn hint reach the gateway; scheduler, effects consumer and inbox wake all wake on that one signal (polls → safety nets). Today worker finish → Manager wake is polled (16.5 s live). |
 | **A102** | `AGENT_102_UNIFY_BACKEND_PATHWAYS.md` | PR #205 (S0) | **ACTIVE** — S1 Claude/Codex/OpenCode workers in parallel worktrees, then S2 carrier cleanup | Finish A82 below the admission layer: each backend gets ONE body per operation under its natural name (`create_session`/`resume_session`/`compact_session`/`cancel`); `run_managed_*` twins, `if managed` branches, per-backend wall clocks, flags, OpenCode CLI and PrintResume deleted; carrier alone decides turn limits (`TurnControl`). |
-| **A82** | `AGENT_82_SESSION_TURN_QUEUE.md` | — | **DONE** — full arc 0→8b merged + LIVE (`prod-0d593c6`, schema 43); convergence cutoff shipped (PR #199) + live-smoke neutral | Unified durable turn queue COMPLETE: born-managed sessions, single admission authority, legacy *admission/session-execution* branches deleted (Stage 8b) — **correction 2026-10-08:** 8b touched no `src/backends/` or `src/worker/` file; backend-level duplicate paths remain → A102. Proven live: FIFO, Codex + opencode-server managed turns, agent-source send. Follow-ups (non-blocking): re-home `manager_loop_integration` wiring proof; verify `GATEWAY_UPLOAD_MAX_MB`; **A84 carry (o)** Case-outbox; **A101** in-session blocking-state surfacing (active). Cert: `A82_E2E_CERTIFICATION.md`. |
 | **A94** | `AGENT_94_SYSTEM_ONE_CORE_DELIVERY_SCORECARD.md` | — | ready (Level 3) | S1 core + decision log + replay baseline + advisory wake scorecard. Operator inputs: read-only controller DB copy, `TYPESAFE_API_KEY`. |
 | **A95** | `AGENT_95_SYSTEM_ONE_DISPATCH_PREFLIGHT.md` | A94 | ready after A94 (Level 3) | Soft pre-flight on `dispatch_worker` (Manager can override). |
 | **A96** | `AGENT_96_SYSTEM_ONE_DELIVERY_BOUNCE.md` | A94 + measured precision | blocked | Bounce a clearly-not-ready delivery instead of waking the Manager. |
-| **A97** | `AGENT_97_FAILURE_TEXT_ERROR_CLASS_FIX.md` | — | ready (Level 2) | Error-class keyword matching scans the agent's reply → wrong retry/pause class. Code fix. |
 | **A75** | `AGENT_75_DASHBOARD_TOKEN_NOT_IN_HTML.md` | A71 design | dispatched | Remove the control token from served dashboard HTML (`window` global); keep TokenGate working via a non-page-inspectable flow. Sequenced after A71's credential design. |
 | **A71** | `AGENT_71_MESH_PER_NODE_CREDENTIALS.md` | — | dispatched | Replace the single shared `WORKER_TOKEN` with gateway-issued per-node credentials bound to `node_id` on register/heartbeat/claim/result; refuse cross-node claims; stop spoofed incarnation-bump DoS. Flag-gated default OFF. Worker-side lands on surfaced redeploy (Horse). |
-| **A54** | `AGENT_54_M34_JOB2_RECONSTRUCTION.md` | A52 ✅ | dispatched | `get_case_brief` DB read + auto-reconcile/re-arm at role-boot. Prerequisite for crash-respawn. |
-| **A55** | `AGENT_55_M34_JOB3_CRASH_RESPAWN.md` | A54 | dispatched | Respawn a role-full Manager on a dead-session Case. Closes "survive a process restart." |
-| **A56** | `AGENT_56_M4_SPEC_AUTHORING_DECOMPOSER.md` | A52 ✅ | dispatched | M4: spec authoring + rubric-scored review + decomposer-as-task-DAG inside ONE Case. |
-| **A57** | `AGENT_57_M4_HYBRID_EXECUTOR_SPIKE.md` | A55 | dispatched — GATED | Go/no-go on SDK Dynamic Workflows vs hand-rolled DAG for intra-task parallel executor. |
 | **A58** | `AGENT_58_QUOTA_COORDINATOR_ACTIVATION.md` | A61 | **blocked** | Activating the quota coordinator — blocked until A61's real Claude adapter is independently reviewed (A63). |
-| **A60** | `AGENT_60_WARM_WORKER_IDLE_REAPER.md` | — | dispatched | Idle-reaper for warm workers (§7 deferral from A48); sequence after M3.4 flag is ON. |
-| **A61** | `AGENT_61_QUOTA_COORDINATOR_FINALIZATION.md` | — | built (direct commit `cbbaa10`, no PR) | Real Claude status-line adapter + quota windows API. **Needs A63 independent audit before treating as done.** |
 | **A62** | `AGENT_62_RUNTIME_FLAG_REGISTRY_NONBOOLEAN.md` | — | dispatched | Extend `/api/flags` to numeric/string knobs; land `CLAUDE_SDK_MAX_TURNS`/`CLAUDE_SDK_MAX_BUDGET_USD` as first real numeric case. |
 | **A63** | `AGENT_63_QUOTA_COORDINATOR_INDEPENDENT_AUDIT.md` | — | dispatched | Independent audit of A61's commit — re-derive every gap claim from the tree, not from the packet. |
 
@@ -101,6 +93,23 @@ Only jobs that are genuinely open. Everything merged/done is in git and the disp
 ---
 
 ## Recent shift notes
+
+**2026-11-03 — A102 S2 engineering accepted.** Carrier-owned `TurnControl` now drives
+the natural backend APIs; compatibility shims, rollout flags and dead gateway session
+execution are removed. Cancellation, runtime readiness, attachment refusal and failed-turn
+native identity have focused regression evidence in the packet. No DB migration or carrier
+HTTP envelope change. Worker promotion and real long-turn evidence remain separate gates.
+Boundary deferral: existing protocol-0 close/cancel controls bypass work slots so they can
+recover a saturated worker. This retirement preserves that behavior and existing HTTP/input
+limits; it adds no new global control-task memory/deadline guarantee. Keep the authenticated,
+low-rate operator workload assumption until control-plane hardening sizes a separate bound.
+
+**2026-11-02 — Dispatch reconciliation.** Supporting artifacts retain stable paths with
+explicit exclusions and parent links; new artifacts belong in `dispatch/evidence/`.
+Missing/malformed job-state blocks are reported as `MISSING_STATE`. A60/A88/A91 closure
+evidence is reconciled; A87 closes against its shipped successors; A85/A86 are retired.
+A78 is blocked on a natural provider-refusal/store comparison, with the mesh reset-metadata
+limitation retained; no paid turn or worker restart is implied by registry cleanup.
 
 **2026-10-28 — Home node activity + Codex usage.** Node cards read complete open-session
 counts and three previews/state from `/api/nodes?activity=true`; managed states use ledger
@@ -471,7 +480,8 @@ spends real money, so the decision stays on the authenticated Web UI). AUTO resu
 framed as already-done. Both channels are best-effort and isolated: a dead bot never undoes a
 proposal already on the ledger. 190 targeted tests green (`test_case_quota_resume` 50,
 `test_quota_window_prewarmer` 21, push 26, coordinator, control API).
-Still open from A78: the 429 is not yet written into the quota store as an event-derived snapshot.
+A78 update (2026-11-02): SDK refusals reach the quota store; the mesh reset-metadata
+limitation and the natural refusal/store comparison remain documented in the blocked packet.
 
 **2026-08-17 — Quota-paused Cases now pause, propose, and resume on purpose (PR #97).**
 A Manager turn killed by the account's quota window used to leave no durable trace, and the harness

@@ -6,11 +6,13 @@ import inspect
 from typing import Any, Callable
 
 from src.core.interfaces import ExecutionResult, ExecutionTelemetry
+from src.core.turn_liveness import TurnControl
 
 
 def call_backend(
     method: Callable[..., Any],
     *args: Any,
+    turn: TurnControl | None = None,
     telemetry_context: Any = None,
     telemetry_sink: Any = None,
 ) -> Any:
@@ -30,6 +32,8 @@ def call_backend(
         accepts_kwargs = False
 
     kwargs = {}
+    if turn is not None and (accepts_kwargs or "turn" in names):
+        kwargs["turn"] = turn
     if accepts_kwargs or "telemetry_context" in names:
         kwargs["telemetry_context"] = telemetry_context
     if accepts_kwargs or "telemetry_sink" in names:

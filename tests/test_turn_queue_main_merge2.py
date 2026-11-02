@@ -186,7 +186,7 @@ def test_managed_carrier_claims_nothing_before_controller_snapshot(monkeypatch):
         w._http = http
         w.cfg = SimpleNamespace(node_id="Horse", backends=["claude"], max_concurrent=1,
                                 accept_unpinned=True, managed_turns=True)
-        w._backends = {"claude": SimpleNamespace(supports_managed_turns=lambda: True)}
+        w._backends = {"claude": SimpleNamespace()}
         w._managed_claims_blocked = None
         assert w._managed_backends() == ["claude"]
         assert remote.refresh() is False  # startup outage: no snapshot yet

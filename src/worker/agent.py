@@ -757,18 +757,44 @@ async def _execute_task(
 
     [A82 Stage 3] ``ownership`` (a ``turn_queue.ManagedTurnOwnership``) marks a
     claimed protocol-1 row: its session turn goes ONLY through the backend
-    interface ``CodingBackend.run_managed_turn`` — no backend-specific branching
+    interface ``CodingBackend.create_session/resume_session`` — no backend-specific branching
     and no legacy fallback (an unsupported backend raises a typed refusal before
-    anything runs). ``ownership=None`` is the unchanged legacy path."""
+    anything runs). Without ownership, only stateless/control actions may run."""
     managed = ownership is not None
-    payload = task_row.get("payload") or {}
+    payload = task_row.get("payload")
+    if payload is None:
+        payload = {}
     if isinstance(payload, str):
         try:
             payload = json.loads(payload)
-        except Exception:
-            payload = {}
+        except (json.JSONDecodeError, TypeError):
+            payload = None
 
+    if (
+        not isinstance(payload, dict)
+        or any(payload.get(key) is not None and not isinstance(payload[key], dict)
+               for key in ("metadata", "session"))
+        or not isinstance(payload.get("prompt", ""), str)
+        or (isinstance(payload.get("metadata"), dict)
+            and payload["metadata"].get("staged_file") is not None
+            and not isinstance(payload["metadata"]["staged_file"], dict))
+    ):
+        return {
+            "success": False, "output": "", "files_modified": [],
+            "errors": ["malformed task payload"], "error_class": "invalid_task_payload",
+            "execution_time": 0.0, "return_code": 1,
+            "timestamp": datetime.now(tz=timezone.utc).isoformat(),
+        }
     action = task_row.get("action", "run_oneoff")
+    if not managed and action in ("create_session", "resume_session", "compact_session"):
+        # Refuse before fetching/deleting any staged attachment or emitting
+        # invocation facts: the canonical queue is the only session entry.
+        return {
+            "success": False, "output": "", "files_modified": [],
+            "errors": ["session turns require a claimed queue attempt"],
+            "error_class": "managed_unsupported", "execution_time": 0.0,
+            "timestamp": datetime.now(tz=timezone.utc).isoformat(), "return_code": 1,
+        }
     if managed and action not in ("create_session", "resume_session", "compact_session"):
         return {
             "success": False,
@@ -851,30 +877,32 @@ async def _execute_task(
         }
 
     if action == "cancel_turn":
-        # Interrupt the in-flight Claude SDK turn on this worker. Does NOT close the
-        # session — the backend process stays pooled so the next turn can reuse it.
-        # Mirrors cancel_codex but targets the SDK interrupt path instead of the
-        # Codex ownership table.
+        # Compatibility for queued control rows: only an explicitly identified
+        # turn may be interrupted. Historical session-wide requests fail visibly.
         session = _make_session_from_payload(payload)
-        if session is not None:
-            backend = backends.get(session.backend or "claude")
-            canceller = getattr(backend, "cancel", None) if backend is not None else None
-            if callable(canceller):
-                try:
-                    await asyncio.to_thread(canceller, session)
-                except Exception as exc:
-                    logger.warning(
-                        "event=cancel_turn_backend_failed session_id=%s err=%s",
-                        getattr(session, "session_id", ""), exc,
-                    )
+        turn_uuid = payload.get("turn_uuid")
+        if session is None or not isinstance(turn_uuid, str) or not turn_uuid or len(turn_uuid) > 256:
+            return {
+                "success": False, "output": "", "errors": ["cancellation requires a target turn_uuid"],
+                "error_class": "invalid_cancellation_target", "files_modified": [],
+                "execution_time": 0.0, "return_code": 1,
+                "timestamp": datetime.now(tz=timezone.utc).isoformat(),
+            }
+        backend = backends.get(session.backend or "claude")
+        try:
+            delivered = bool(await asyncio.to_thread(backend.cancel, session, turn_uuid))
+        except Exception as exc:
+            return {
+                "success": False, "output": "", "errors": [f"cancel failed: {type(exc).__name__}"],
+                "error_class": "cancellation_failed", "files_modified": [],
+                "execution_time": 0.0, "return_code": 1,
+                "timestamp": datetime.now(tz=timezone.utc).isoformat(),
+            }
         return {
-            "success": True,
-            "output": "cancel_turn requested",
-            "errors": [],
-            "files_modified": [],
-            "execution_time": 0.0,
-            "timestamp": datetime.now(tz=timezone.utc).isoformat(),
-            "return_code": 0,
+            "success": delivered, "output": "cancel delivered or armed" if delivered else "target not running",
+            "errors": [] if delivered else ["target not running"], "files_modified": [],
+            "execution_time": 0.0, "timestamp": datetime.now(tz=timezone.utc).isoformat(),
+            "return_code": 0 if delivered else 1,
         }
 
     if action == "cancel_codex":
@@ -1006,66 +1034,44 @@ async def _execute_task(
         from src.core.interfaces import ExecutionResult as _ER
         from src.core.backend_call import call_backend
 
-        if managed and action == "compact_session":
-            # [A82 Stage 4b] Managed compaction: ONLY through the interface
-            # (no backend-name branching, no legacy fallback).
+        if action in ("create_session", "resume_session", "compact_session"):
+            from src.control.turn_queue import ManagedUnsupportedError
+            from src.core.turn_liveness import turn_control
+
+            if ownership is None:
+                raise ManagedUnsupportedError("session turns require a claimed queue attempt")
             session = _make_session_from_payload(payload)
             if session is None:
                 raise ValueError("Session payload missing for session action")
-            raw = await asyncio.to_thread(
-                call_backend,
-                functools.partial(backend.run_managed_compaction, on_process=on_process),
-                session,
-                ownership,
-                telemetry_context=context,
-                telemetry_sink=sink,
+            turn = turn_control(
+                ownership.turn_uuid, ownership=ownership, on_process=on_process,
             )
-        elif action in ("create_session", "resume_session"):
-            session = _make_session_from_payload(payload)
-            if session is None:
-                raise ValueError("Session payload missing for session action")
-            if managed:
-                raw = await asyncio.to_thread(
-                    call_backend,
-                    functools.partial(backend.run_managed_turn, on_process=on_process),
-                    session,
-                    prompt or session.last_user_message or "",
-                    ownership,
-                    telemetry_context=context,
-                    telemetry_sink=sink,
-                )
-                if staged and http is not None and getattr(raw, "error_class", "") not in (
-                    "managed_conflict", "recovery_required",
-                ):
-                    # [A82 pre-cutover P2] submitted ⇒ the staged copy is spent.
-                    await _delete_staged_file(staged, http)
+            if action == "compact_session":
+                method = backend.compact_session
+                args = (session,)
             elif action == "create_session" or not session.backend_session_id:
-                raw = await asyncio.to_thread(
-                    call_backend,
-                    backend.create_session,
-                    session,
-                    telemetry_context=context,
-                    telemetry_sink=sink,
-                )
+                session.last_user_message = prompt or session.last_user_message or ""
+                method = backend.create_session
+                args = (session,)
             else:
-                raw = await asyncio.to_thread(
-                    call_backend,
-                    backend.resume_session,
-                    session,
-                    prompt,
-                    telemetry_context=context,
-                    telemetry_sink=sink,
-                )
-        else:
+                method = backend.resume_session
+                args = (session, prompt or session.last_user_message or "")
+            raw = await asyncio.to_thread(
+                call_backend, functools.partial(method, turn=turn), *args,
+                telemetry_context=context, telemetry_sink=sink,
+            )
+            if staged and http is not None and getattr(raw, "error_class", "") not in (
+                "managed_conflict", "recovery_required",
+            ):
+                await _delete_staged_file(staged, http)
+        elif action == "run_oneoff":
             cwd = payload.get("metadata", {}).get("cwd", "")
             raw = await asyncio.to_thread(
-                call_backend,
-                backend.run_oneoff,
-                cwd,
-                prompt,
-                telemetry_context=context,
-                telemetry_sink=sink,
+                call_backend, backend.run_oneoff, cwd, prompt,
+                telemetry_context=context, telemetry_sink=sink,
             )
+        else:
+            raise ValueError(f"unsupported task action: {action}")
 
         elapsed = time.monotonic() - start
         if isinstance(raw, _ER):
@@ -1188,7 +1194,7 @@ async def _execute_task(
             "timestamp": datetime.now(tz=timezone.utc).isoformat(),
             "return_code": 1,
             "telemetry_invocation_id": context.invocation_id if context else "",
-            **({"error_class": getattr(e, "code", "") or error_class} if managed else {}),
+            "error_class": getattr(e, "code", "") or error_class,
         }
 
 
@@ -1389,19 +1395,12 @@ class WorkerAgent:
             logger.warning("event=managed_result_spool_replay_failed", exc_info=True)
 
     def _init_managed_state(self) -> None:
-        """[A82 Stage 3 rework, m5] Construct the managed result spool + claim
-        store only when the managed flag is ON, or when a previous managed run
-        left carrier state that must still drain. Nothing is created on disk
-        here (dirs are created lazily on first write)."""
+        """Construct carrier result and claim stores; directories are lazy."""
         from src.worker.managed_result_spool import ManagedClaimStore, ManagedResultSpool
 
         state_dir = self._carrier_state_dir()
-        if self._managed_enabled() or os.path.isdir(state_dir):
-            self._result_spool = ManagedResultSpool(state_dir)
-            self._claim_store = ManagedClaimStore(state_dir)
-        else:
-            self._result_spool = None
-            self._claim_store = None
+        self._result_spool = ManagedResultSpool(state_dir)
+        self._claim_store = ManagedClaimStore(state_dir)
 
     def _restore_managed_claims_block(self) -> None:
         """[A82 Stage 4e] An unresolved oversize artifact (durable; survives a
@@ -1524,27 +1523,11 @@ class WorkerAgent:
             return status == "claimed"
         return True
 
-    def _managed_enabled(self) -> bool:
-        """[A82 Stage 3] Managed carrier flag (``WORKER_MANAGED_TURNS``, default
-        OFF). OFF ⇒ legacy protocol-0 poll/claim only, byte-identical."""
-        return bool(getattr(getattr(self, "cfg", None), "managed_turns", False))
-
     def _managed_backends(self) -> List[str]:
-        """[A82 Stage 3 rework] Backends on this worker with a REAL managed
-        execution path (``supports_managed_turns()``; today Claude on the SDK
-        driver only). Codex/opencode have none, so they are never advertised and
-        their managed rows are never polled/claimed here (fail closed)."""
-        if not self._managed_enabled():
-            return []
-        out: List[str] = []
-        for name in self.cfg.backends:
-            probe = getattr((self._backends or {}).get(name), "supports_managed_turns", None)
-            try:
-                if callable(probe) and probe():
-                    out.append(name)
-            except Exception:
-                logger.warning("event=managed_capability_probe_failed backend=%s", name, exc_info=True)
-        return out
+        """Registered adapters whose native runtime can honor queue turns."""
+        from src.backends.registry import available_session_backends
+
+        return list(available_session_backends(self.cfg.backends, self._backends or {}))
 
     # --- durable claim records (B2) ------------------------------------- #
     def _claim_record(self, task_id: str, **fields: Any) -> Dict[str, Any]:
@@ -1576,7 +1559,7 @@ class WorkerAgent:
             self._restore_managed_claims_block()
         turn_uuid = rec.get("turn_uuid")
         backend = (self._backends or {}).get(str(rec.get("backend") or ""))
-        forget = getattr(backend, "forget_managed_turn", None)
+        forget = getattr(backend, "forget_turn", None)
         if turn_uuid and callable(forget):
             session = self._session_for(str(rec.get("session_id") or ""), str(rec.get("backend") or ""))
             try:
@@ -3078,17 +3061,16 @@ class WorkerAgent:
                         # cancel_codex / cancel_turn) bypass the slot semaphore by design and are
                         # EXEMPT from the capacity bound (M1). Flag OFF: the
                         # scheduling loop is exactly main's.
-                        if self._managed_enabled():
-                            if self._is_already_scheduled(task_id):
-                                continue
-                            if (
-                                row.get("action") not in ("close_session", "cancel_codex", "cancel_turn", CANCEL_MANAGED_ACTION)
-                                and not self._scheduling_capacity_available()
-                            ):
-                                # Leave it queued server-side; a later poll picks
-                                # it up once a slot frees. Keep scanning so
-                                # control rows further down are still scheduled.
-                                continue
+                        if self._is_already_scheduled(task_id):
+                            continue
+                        if (
+                            row.get("action") not in ("close_session", "cancel_codex", "cancel_turn", CANCEL_MANAGED_ACTION)
+                            and not self._scheduling_capacity_available()
+                        ):
+                            # Leave it queued server-side; a later poll picks
+                            # it up once a slot frees. Keep scanning so
+                            # control rows further down are still scheduled.
+                            continue
                         self._active_meta[task_id] = {
                             "task_id": task_id,
                             "backend": row.get("backend", ""),
@@ -3138,8 +3120,6 @@ class WorkerAgent:
                     logger.warning("event=fetch_pending_failed attempts=%d err=%s", attempt, exc)
                 else:
                     await asyncio.sleep(1)
-        if not self._managed_enabled():
-            return legacy
         return list(legacy or []) + await self._fetch_pending_managed(params)
 
     async def _fetch_pending_managed(self, params: Dict[str, str]) -> List[Dict[str, Any]]:
@@ -3152,8 +3132,7 @@ class WorkerAgent:
                 self._managed_claims_blocked,
             )
             return []
-        # [A82 pre-cutover] The capability probe may spawn a subprocess (Codex
-        # offline schema probe, cached per binary): never on the event loop.
+        # Every installed registered session adapter uses the turn contract.
         managed_backends = await asyncio.to_thread(self._managed_backends)
         if not managed_backends:
             return []
@@ -3212,7 +3191,7 @@ class WorkerAgent:
                 # frozen task + token (design §5, WRK03), after reserving a result
                 # envelope and a fenced start. Legacy protocol-0 rows keep the
                 # byte-identical /claim path and execute the poll row.
-                managed = self._managed_enabled() and int(task_row.get("queue_protocol", 0) or 0) == 1
+                managed = int(task_row.get("queue_protocol", 0) or 0) == 1
                 claim_token: Optional[str] = None
                 if managed and task_row.get("backend", "") not in await asyncio.to_thread(self._managed_backends):
                     # Fail closed: never claim a managed row for a backend without
@@ -3370,7 +3349,7 @@ class WorkerAgent:
         carrier holds for ``payload.target_task_id``. Claims the control row
         (legacy protocol-0 claim), looks the attempt up in the durable claim
         record (its per-attempt ``turn_uuid``), and asks the backend to cancel
-        EXACTLY that turn (``CodingBackend.cancel_managed_turn``). The attempt's
+        EXACTLY that turn (``CodingBackend.cancel``). The attempt's
         own result / recovery then commits ``cancelled`` server-side (the cancel
         is recorded against its token). No live attempt ⇒ nothing to interrupt
         (it already finished, or the Stage-3 recovery exits own it)."""
@@ -3414,7 +3393,7 @@ class WorkerAgent:
                 rec = dict(self._claim_store.get(target) or {})
             turn_uuid = str(rec.get("turn_uuid") or "")
             backend = (self._backends or {}).get(str(rec.get("backend") or ""))
-            cancel = getattr(backend, "cancel_managed_turn", None)
+            cancel = getattr(backend, "cancel", None)
             if rec and turn_uuid and callable(cancel):
                 session = self._session_for(str(rec.get("session_id") or ""), str(rec.get("backend") or ""))
                 try:

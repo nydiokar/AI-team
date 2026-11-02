@@ -41,6 +41,10 @@ yourself recording *what is happening* here, it belongs in CONTEXT or a dispatch
   → ## Closure` inside its single `AGENT_N_*.md`. No `.milestone.md` / `.closure.md`
   siblings. (Wired into `docs/harness/milestone_template.md`,
   `docs/harness/generators/closure_summary.md`, `docs/harness/dispatch_pipeline.md`.)
+- **Separate job evidence belongs under `.ai/dispatch/evidence/`.** If a report/proposal
+  needs its own file, use an `A<N>_` prefix and bidirectional links to its parent packet;
+  proof paths belong in the parent's YAML `evidence:`. Top-level supporting siblings are
+  forbidden. Legacy excluded files retain their paths so historical links do not break.
 - **Materially-important reference artifacts go in `docs/`, never `.ai/dispatch/`.** The
   dispatch folder is for job packets and their inline lifecycle only. A map/spec/runbook
   that others will reuse is doctrine → `docs/`.

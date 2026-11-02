@@ -1,6 +1,7 @@
 # Database authority — controller vs worker (A88)
 
-**Status:** design + implementation on `feat/database-authority-unification` (2026-10-02).
+**Status:** shipped in PR #180; controller/worker authority and regression evidence reconciled 2026-11-02.
+Historical deployment observations below are dated; current closure is in the parent packet.
 **Packet:** `.ai/dispatch/AGENT_88_DATABASE_AUTHORITY_UNIFICATION.md`.
 
 ## 1. The problem, as observed live (2026-10-02, read-only probes)

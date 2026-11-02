@@ -6,6 +6,8 @@ from typing import Dict, List, Any, Optional
 from dataclasses import dataclass, field
 from enum import Enum
 
+from src.core.turn_liveness import TurnControl
+
 class TaskType(Enum):
     CODE_REVIEW = "code_review"
     SUMMARIZE = "summarize"
@@ -288,14 +290,14 @@ class CodingBackend(ABC):
 
     @abstractmethod
     def create_session(
-        self, session: "Session", *, telemetry_context: Any = None, telemetry_sink: Any = None
+        self, session: "Session", *, turn: "TurnControl", telemetry_context: Any = None, telemetry_sink: Any = None
     ) -> ExecutionResult:
         """Start a new session — runs the first turn with no prior context."""
         pass
 
     @abstractmethod
     def resume_session(
-        self, session: "Session", message: str, *, telemetry_context: Any = None,
+        self, session: "Session", message: str, *, turn: "TurnControl", telemetry_context: Any = None,
         telemetry_sink: Any = None
     ) -> ExecutionResult:
         """Continue an existing session using the backend's native resume mechanism."""
@@ -303,15 +305,15 @@ class CodingBackend(ABC):
 
     @abstractmethod
     def run_oneoff(
-        self, cwd: str, message: str, *, telemetry_context: Any = None,
+        self, cwd: str, message: str, *, turn: Optional[TurnControl] = None, telemetry_context: Any = None,
         telemetry_sink: Any = None
     ) -> ExecutionResult:
         """Run a single stateless turn with no session tracking."""
         pass
 
     @abstractmethod
-    def cancel(self, session: "Session") -> None:
-        """Best-effort cancellation of a running backend session."""
+    def cancel(self, session: "Session", turn_uuid: str) -> bool:
+        """Cancel only the identified turn; never interrupt a different owner."""
         pass
 
     @abstractmethod
@@ -319,43 +321,23 @@ class CodingBackend(ABC):
         """Mark the session closed on the backend side (cleanup if needed)."""
         pass
 
-    def compact_session(self, session: "Session") -> ExecutionResult:
-        """Compact the session's context window by sending /compact to the backend.
-
-        Default implementation delegates to resume_session with the /compact
-        slash command. Backends that do not support compaction should override
-        this to raise NotImplementedError or return an error result.
-        """
-        return self.resume_session(session, "/compact")
-
-    # ------------------------------------------------------------------ #
-    # [A82 Stage 3] Managed (protocol-1) turn contract — the ONE seam a carrier
-    # uses for a claimed managed row. Default: unsupported (fail closed). A
-    # backend opts in by overriding all three; it is then advertised for queue
-    # protocol 1. Legacy create/resume/run_oneoff are untouched.
-    # ------------------------------------------------------------------ #
-    def supports_managed_turns(self) -> bool:
-        """True iff this backend implements :meth:`run_managed_turn`."""
-        return False
-
-    def run_managed_turn(
-        self, session: "Session", message: str, ownership: Any, *,
+    def compact_session(
+        self, session: "Session", *, turn: "TurnControl",
         telemetry_context: Any = None, telemetry_sink: Any = None,
-        on_process: Any = None,
     ) -> ExecutionResult:
-        """Execute one managed turn for ``ownership`` (a
-        ``turn_queue.ManagedTurnOwnership``). Must NEVER interrupt an in-flight
-        turn on conflict (typed ``OwnershipConflictError`` instead) and must
-        raise/report a typed ``RecoveryRequiredError`` when the outcome cannot
-        be attributed (uncorrelated result / deadline). ``on_process`` (optional
-        callable) receives the backend process identity ({pid, create_time})
-        BEFORE the prompt is submitted, so a successor carrier can prove that
-        process is gone. Default: unsupported."""
+        """Compact native context without interrupting another turn."""
         from src.control.turn_queue import ManagedUnsupportedError
 
         raise ManagedUnsupportedError(
-            "backend has no managed execution path", backend=type(self).__name__,
+            "backend has no compaction operation", backend=type(self).__name__,
         )
+
+    def forget_turn(self, session: "Session", turn_uuid: str) -> bool:
+        """Drop a server-terminal turn's pending wait, never native work."""
+        return False
+
+    def set_proactive_sink(self, sink: Any) -> None:
+        """Install the carrier's callback for a correlated late outcome."""
 
     def is_quiescent(self, session: "Session") -> bool:
         """True iff no native work for ``session`` is in flight. Default False
@@ -375,35 +357,9 @@ class CodingBackend(ABC):
         supports a per-session sender tool. Default: unsupported."""
         return False
 
-    def forget_managed_turn(self, session: "Session", turn_uuid: str) -> bool:
-        """The carrier learned the managed turn ``turn_uuid`` is terminal on the
-        server (operator-resolved / definitively refused): drop any in-memory
-        wait for it so the session can become quiescent again. Default: no-op."""
-        return False
 
     # [A82 Stage 4b] Producer 2 — managed compaction + operator cancel.
-    def run_managed_compaction(
-        self, session: "Session", ownership: Any, *,
-        telemetry_context: Any = None, telemetry_sink: Any = None,
-        on_process: Any = None,
-    ) -> ExecutionResult:
-        """Compact ``session``'s native context as ONE managed turn owned by
-        ``ownership``. Same contract as :meth:`run_managed_turn`: never
-        interrupts native work (not quiescent ⇒ typed ``OwnershipConflictError``
-        before anything is submitted), and an unattributable outcome is a typed
-        ``RecoveryRequiredError``. Default: unsupported (fail closed)."""
-        from src.control.turn_queue import ManagedUnsupportedError
 
-        raise ManagedUnsupportedError(
-            "backend has no managed compaction path", backend=type(self).__name__,
-        )
-
-    def cancel_managed_turn(self, session: "Session", turn_uuid: str) -> bool:
-        """Operator cancel of the managed turn ``turn_uuid`` ONLY (never another
-        turn): interrupt it if it is the turn the backend is running, or arm the
-        interrupt for when it begins. True iff a cancel was delivered/armed.
-        Default: False (nothing to cancel on this backend)."""
-        return False
 
 
 class ITaskOrchestrator(ABC):

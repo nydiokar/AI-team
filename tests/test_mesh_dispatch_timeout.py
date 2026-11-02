@@ -1,6 +1,7 @@
 import asyncio
 from datetime import datetime
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -43,7 +44,7 @@ def _task(task_id: str, session_id: str) -> Task:
 
 
 @pytest.mark.asyncio
-async def test_claimed_remote_task_is_not_failed_by_pickup_timeout(tmp_path, monkeypatch):
+async def test_reattached_claimed_task_is_not_failed_by_pickup_timeout(tmp_path, monkeypatch):
     db = MeshDB(str(tmp_path / "mesh.db"))
     session = _session("sess_claimed_timeout")
     task = _task("task_claimed_timeout", session.session_id)
@@ -62,19 +63,29 @@ async def test_claimed_remote_task_is_not_failed_by_pickup_timeout(tmp_path, mon
     assert claim_pre_cutover(db, task.id, session.machine_id)
 
     class MinimalOrchestrator:
-        _task_cancel_events = {}
+        running = True
+        _recover_completed_session = TaskOrchestrator._recover_completed_session
 
         def __init__(self):
             self.session_store = self
+            self.notifier = SimpleNamespace(
+                notify_task_outcome=AsyncMock(), notify_error=AsyncMock(),
+            )
 
         def save(self, saved_session):
             saves.append(saved_session.backend_session_id)
 
-        def _resolve_task_backend(self, _task):
-            return "claude"
+        def _write_session_summary(self, *args):
+            pass
 
-        def _nudge_worker_for_dispatch(self, _node, _node_id, _db):
-            return False
+        def _append_session_event(self, *args):
+            pass
+
+        def _emit_event(self, *args):
+            pass
+
+        def _emit_task_finished(self, *args, **kwargs):
+            pass
 
     sleep_calls = {"count": 0}
     real_sleep = asyncio.sleep
@@ -97,19 +108,19 @@ async def test_claimed_remote_task_is_not_failed_by_pickup_timeout(tmp_path, mon
             )
         await real_sleep(0)
 
-    async def direct_to_thread(func, *args, **kwargs):
-        return func(*args, **kwargs)
-
     monkeypatch.setattr(config.mesh, "oneoff_queue_timeout_sec", 0)
 
     orch = MinimalOrchestrator()
-    bound = TaskOrchestrator._dispatch_to_node.__get__(orch, type(orch))
+    bound = TaskOrchestrator._reattach_remote_task.__get__(orch, type(orch))
     with patch("src.control.db.get_db", return_value=db):
-        with patch("asyncio.sleep", complete_on_sleep), patch("asyncio.to_thread", direct_to_thread):
-            result = await bound(task, session, node=None)
+        with patch("asyncio.sleep", complete_on_sleep):
+            await bound(session, db.get_task(task.id))
 
+    result = orch.notifier.notify_task_outcome.await_args.args[1]
     assert result.success is True
     assert result.output == "finished after claim"
     assert session.backend_session_id == "claude-after"
     assert "claude-after" in saves
     assert db.get_task(task.id)["status"] == "completed"
+    orch.notifier.notify_error.assert_not_awaited()
+    db.close()

@@ -238,10 +238,9 @@ def test_C06c_stop_ledger_unreadable_fails_closed_503(tmp_path, monkeypatch):
     assert r.status_code == 503
 
 
-def test_C07_unenrolled_cancel_stop_compact_close_touch_no_queue_state(tmp_path, monkeypatch):
-    """Legacy byte-identity: with nothing enrolled, none of the producer-2
-    entry points reads the enrollment marker or the managed ledger, and each
-    takes exactly the legacy branch."""
+def test_C07_unenrolled_controls_cannot_bypass_queue_for_compaction(tmp_path, monkeypatch):
+    """Historical controls remain usable, but an unmigrated session cannot
+    execute a native compaction outside the canonical queue."""
     import threading as _th
 
     db, o = _setup(tmp_path, monkeypatch, enroll=False)
@@ -267,11 +266,12 @@ def test_C07_unenrolled_cancel_stop_compact_close_touch_no_queue_state(tmp_path,
     r = c.post("/api/sessions/sess-1/stop", headers={"Authorization": "Bearer tok"})
     assert r.json() == {"ok": True, "cancelled": False, "task_id": _sess().last_task_id}
     r = c.post("/api/sessions/sess-1/compact", headers={"Authorization": "Bearer tok"})
-    assert r.json() == {"ok": True, "output": "legacy compacted", "errors": []}
+    assert r.status_code == 409
+    assert r.json()["detail"]["reason"] == "legacy_execution_retired"
     r = c.post("/api/sessions/sess-1/close", headers={"Authorization": "Bearer tok"})
     assert r.status_code == 200, r.text
     monkeypatch.setattr(type(db), "_conn", real_conn)
-    assert o._backends["claude"].compacted == ["sess-1"]
+    assert o._backends["claude"].compacted == []
     assert len({t for t, _ in stmts}) >= 2  # the route threads were traced too
     bad = [sql for _, sql in stmts if "INSERT INTO sessions" not in sql and (
         "turn_queue_enrolled" in sql or "queue_protocol" in sql or "cancel_managed" in sql

@@ -190,6 +190,12 @@ def _start_fake_session(fake: _FakeClient) -> _SDKSession:
                 await sess._reader_task
             except BaseException:  # noqa: BLE001
                 pass
+            pending = [task for task in asyncio.all_tasks()
+                       if task is not asyncio.current_task() and not task.done()]
+            for task in pending:
+                task.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
 
         loop.run_until_complete(boot())
         loop.close()

@@ -712,7 +712,7 @@ class TestClaudeCodeBackendDriverIntegration:
         monkeypatch.setattr("src.backends.claude_code.ClaudeCodeBackend.create_session",
                             lambda s, session, **kw: backend._driver.start_session(session, session.last_user_message, turn=turn_control("u-create-routes")))
 
-        result = backend.create_session(session)
+        result = backend.create_session(session, turn=turn_control("u-create"))
         assert result.success
         assert result.output == "first response"
 

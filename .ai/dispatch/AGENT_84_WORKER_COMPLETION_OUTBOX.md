@@ -5,8 +5,8 @@ status: done
 owner: A84 worker - slice 1 managed-completion consumer
 depends_on: [AGENT_82_SESSION_TURN_QUEUE]
 results_ref: DISPATCH_LOG.md#A84
-evidence: ["tests/test_completion_outbox.py","tests/test_completion_outbox_reaper.py",".ai/dispatch/A84_OUTBOX_E2E.md"]
-updated_at: "2026-10-07T22:44:44.359338+00:00"
+evidence: ["tests/test_completion_outbox.py", "tests/test_completion_outbox_reaper.py", ".ai/dispatch/A84_OUTBOX_E2E.md"]
+updated_at: "2026-11-02T14:28:59.534310+00:00"
 ```
 
 # DISPATCH — A84 · Worker completion delivery through a durable Case outbox
@@ -344,3 +344,10 @@ Remaining A84 open item is TASK 7 only (A87).
 ## Closure (fill on completion)
 
 Record changed files, exact tests/results, the legacy cutover disposition, any deferred reaper bound, and confirmation that no flag was activated or worker restarted.
+
+## Supporting artifacts (registry reconciliation, 2026-11-02)
+
+These dated supporting documents belong to this packet; they are excluded from job scanning.
+- [A84_OUTBOX_E2E.md](A84_OUTBOX_E2E.md)
+
+A104 supersedes the original outbox acceptance claim; retain this report as historical evidence.

@@ -235,11 +235,11 @@ def test_cancel_interrupts_exact_turn_and_does_not_poison_followup(native):
     with ThreadPoolExecutor() as pool:
         future = pool.submit(run, backend, cwd)
         assert runtime.started.wait(2)
-        backend.cancel_execution("task")
+        _cancel_task(backend, "task")
         result = future.result(timeout=3)
     assert result.errors == ["cancelled"]
     assert ("turn/interrupt", {"threadId": "native-0", "turnId": runtime.active["native-0"]}) in runtime.calls
-    backend.cancel_execution("task")
+    _cancel_task(backend, "task")
     runtime.hold = False
     assert run(backend, cwd, task="later").success
 
@@ -250,7 +250,7 @@ def test_completion_wins_late_interrupt(native):
     def request(method, params, timeout=30, on_late=None):
         reply = original(method, params, timeout)
         if method == "turn/start":
-            backend.cancel_execution("task")
+            _cancel_task(backend, "task")
         return reply
     runtime.request = request
     assert run(backend, cwd).success
@@ -265,7 +265,7 @@ def test_same_session_rejected_without_disrupting_active_turn(native):
         other = run(backend, cwd, task="other")
         assert not other.success and "thread_busy" in other.errors[0]
         assert not first.done()
-        backend.cancel_execution("task")
+        _cancel_task(backend, "task")
         assert first.result(timeout=3).errors == ["cancelled"]
 
 
@@ -279,8 +279,8 @@ def test_distinct_sessions_run_concurrently(native):
         second = pool.submit(run, backend, cwd, "second", None, "second")
         assert runtime.started.wait(2)
         assert not first.done() and not second.done()
-        backend.cancel_execution("first")
-        backend.cancel_execution("second")
+        _cancel_task(backend, "first")
+        _cancel_task(backend, "second")
         assert first.result(timeout=3).backend_session_id != second.result(timeout=3).backend_session_id
 
 
@@ -426,3 +426,11 @@ def test_native_context_updates_forward_account_limits_to_durable_telemetry(nati
     assert event.attributes['context_window_tokens'] == 100000
     assert event.attributes['rate_limit_primary_used_percent'] == 23
     assert event.attributes['rate_limit_primary_window_minutes'] == 300
+
+
+def _cancel_task(backend, task_id):
+    with backend._lock:
+        active = next((turn for turn in backend._active.values() if turn.task_id == task_id), None)
+    if active is not None:
+        return backend.cancel(SimpleNamespace(session_id=active.session_id), active.turn_uuid)
+    return False

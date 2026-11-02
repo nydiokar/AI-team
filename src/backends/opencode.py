@@ -396,13 +396,12 @@ class OpenCodeServerBackend(CodingBackend):
                    telemetry_context=None, telemetry_sink=None) -> ExecutionResult:
         """[R1] A throwaway ``Session`` + :meth:`create_session` with its own
         ``turn_control``. The temporary native session is deleted afterwards."""
+        turn = turn or turn_control(str(uuid.uuid4()))
         sess = Session(
-            session_id=f"oneoff-{uuid.uuid4().hex[:12]}", backend="opencode-server",
+            session_id=f"oneoff-{turn.turn_uuid}", backend="opencode-server",
             repo_path=cwd, status=SessionStatus.IDLE, created_at="", updated_at="",
             last_user_message=message,
         )
-        if turn is None:
-            turn = turn_control(str(uuid.uuid4()))
         result = self.create_session(sess, turn=turn,
                                      telemetry_context=telemetry_context, telemetry_sink=telemetry_sink)
         oc_id = sess.backend_session_id
@@ -496,11 +495,6 @@ class OpenCodeServerBackend(CodingBackend):
         """[A82 step 4 rework, m4] Carrier sink for late managed replies."""
         self._proactive_sink = sink
 
-    def supports_managed_turns(self) -> bool:
-        """The opencode-server protocol supports every managed invariant
-        (client-chosen messageID, status + history reconciliation, abort gated
-        on the provably-running message). The CLI backend does not (default)."""
-        return True
 
     def provision_sender_capability(self, session_id: str, token: Optional[str]) -> bool:
         """Fail closed. OpenCode's only MCP seams are per server PROCESS
@@ -513,36 +507,6 @@ class OpenCodeServerBackend(CodingBackend):
         available on OpenCode."""
         return False
 
-    def _managed_stall_sec(self) -> Optional[float]:
-        """No-progress window for a managed turn; ``None`` ⇒ the shared
-        :func:`turn_limits` default (a long turn that keeps producing native
-        events is never given up on)."""
-        return None
-
-    # ------------------------------------------------------------------
-    # [A102 S1] Deprecated carrier shims — one line each, building a TurnControl
-    # and calling the natural method. S2 deletes these (the carrier will build
-    # turn_control(...) itself); the carrier is unchanged in S1.
-    # ------------------------------------------------------------------
-    def run_managed_turn(self, session: Session, message: str, ownership: Any, *,
-                         telemetry_context: Any = None, telemetry_sink: Any = None,
-                         on_process: Any = None) -> ExecutionResult:
-        return self.resume_session(session, message, turn=self._turn_from(ownership, on_process),
-                                   telemetry_context=telemetry_context, telemetry_sink=telemetry_sink)
-
-    def run_managed_compaction(self, session: Session, ownership: Any, *,
-                               telemetry_context: Any = None, telemetry_sink: Any = None,
-                               on_process: Any = None) -> ExecutionResult:
-        return self.compact_session(session, turn=self._turn_from(ownership, on_process),
-                                    telemetry_context=telemetry_context, telemetry_sink=telemetry_sink)
-
-    def _turn_from(self, ownership: Any, on_process: Any) -> TurnControl:
-        """[A102 S1] The carrier's per-turn TurnControl from the legacy args. The
-        stall window stays overridable via ``_managed_stall_sec`` (a test hook);
-        limits otherwise come from the shared :func:`turn_control` / turn_limits."""
-        return turn_control(str(getattr(ownership, "turn_uuid", "") or ""),
-                            ownership=ownership, on_process=on_process,
-                            stall_override=self._managed_stall_sec())
 
     def _capture_late(self, entry: _ManagedTurn, session: Session, start: float) -> None:
         """[A82 step 4 rework, m4] A held turn's real reply (parented to OUR
@@ -1071,14 +1035,7 @@ class OpenCodeServerBackend(CodingBackend):
             self._armed_cancels.discard(turn_uuid)
         return dropped or armed
 
-    # ------------------------------------------------------------------
-    # [A102 S1] Deprecated carrier shims (S2 deletes these).
-    # ------------------------------------------------------------------
-    def cancel_managed_turn(self, session: Session, turn_uuid: str) -> bool:
-        return self.cancel(session, turn_uuid)
 
-    def forget_managed_turn(self, session: Session, turn_uuid: str) -> bool:
-        return self.forget_turn(session, turn_uuid)
 
     def _turn_result(
         self, response: Dict[str, Any], cwd: str, oc_session_id: str, elapsed: float,

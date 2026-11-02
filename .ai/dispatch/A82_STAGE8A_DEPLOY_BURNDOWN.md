@@ -134,3 +134,5 @@ Re-read this file + `.ai/dispatch/AGENT_82_SESSION_TURN_QUEUE.md` + git log. Run
 checking-live-state skill to see which steps already took effect (image sha, schema_version,
 nodes online, which carriers advertise managed turns). Resume at the first unchecked step. Verify
 everything against git and the running system — do not trust this doc over reality.
+
+Parent job: [AGENT_82_SESSION_TURN_QUEUE.md](AGENT_82_SESSION_TURN_QUEUE.md). Supporting artifact only; not a separate dispatch.

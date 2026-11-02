@@ -1,19 +1,19 @@
 ```yaml
 job_id: AGENT_78_QUOTA_TELEMETRY_TRUTHFULNESS
 created_at: "2026-08-17T21:10:00+00:00"        # CANONICAL — set once at dispatch, never derive again
-status: active              # ready | active | blocked | done | dead
+status: blocked              # ready | active | blocked | done | dead
 owner: ""
 depends_on: []
 results_ref: DISPATCH_LOG.md#A78
-evidence: []
-updated_at: "2026-10-06T12:34:20.795986+00:00"
+evidence: ["tests/test_failure_text_scope.py", "tests/test_quota_window_coordinator.py", "tests/test_case_quota_resume.py"]
+updated_at: "2026-11-02T14:26:59.605265+00:00"
 ```
 
 # DISPATCH — A78 · Quota telemetry that is actually trustworthy (windows, exhaustion, restore)
 
 **Level:** 2 (observability correctness + bounded reads; NO paid provider calls beyond the
 existing `claude get_usage` shell-out the coordinator already performs) · **Type:** fix + verify
-**Authored:** 2026-08-17 · **Status of this packet:** ready (authored, not executed)
+**Authored:** 2026-08-17 · **Status of this packet:** blocked — mesh reset-metadata gap (§3) + natural refusal/store comparison (§6), reconciled 2026-11-02
 **Depends on:** — (A61 built the coordinator, A63 audits it; this fixes what the quota-resume work
 found while USING it)
 
@@ -132,3 +132,28 @@ longer only observed.
   still yields `usage_limit`, but without `resetsAt`.
 - **§6 — OPEN, operator-only.** Needs a real 429 on the host to compare against the store. This is
   the job's only remainder; it stays `active` until the owner splits §6 off (issue #3).
+
+## Reconciliation — BLOCKED / TRANSPORT GAP RECORDED (2026-11-02)
+
+This is not an actively executing implementation job. The remaining §6 acceptance
+requires a naturally occurring real provider refusal and a same-principal, same-window
+quota observation near that instant; no paid/exhaustion turn will be manufactured.
+Record task/node/time, provider reset and store snapshot values, age and provenance
+when that evidence is available. Unblock only when the comparison can actually be made.
+The SDK refusal path has deterministic coverage in `tests/test_failure_text_scope.py`;
+the existing mesh-path reset-metadata limitation is still described by the
+worded-refusal fixtures/tests in `tests/test_case_quota_resume.py` (§11b). A passing SDK test does not certify the
+mesh stream or the natural-refusal comparison.
+Worker/event retention has its existing owner A93 (PRs #245/#248), rather than being
+a second unfinished retention implementation here. No session sensor was added.
+
+Read-only evidence search on 2026-11-02 found no refusal events in the retained
+controller `coordinator_events`. The latest recorded Case quota pauses are dated
+2026-10-09, while retained spent snapshots begin 2026-10-15. These observations
+do not establish a same-principal, same-window comparison, so §6 is not certified.
+
+A102 test migration now checks the actual `_managed_turn_effect_inputs` projection.
+It deliberately reconstructs a reply mirror, not provider NDJSON. SDK-reader/reset-parser
+unit tests remain green, but do not prove reset metadata survives this managed boundary.
+Preserve that §3 transport gap as unfinished work alongside the §6 natural comparison;
+do not close A78 based on tests of the retired gateway dispatch method.

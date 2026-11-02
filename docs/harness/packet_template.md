@@ -64,6 +64,10 @@ here as explicit non-goals.
 
 ## TRAIL / EVIDENCE (fill at close)
 - The artifact paths and verdicts this job will record at close.
+- Keep lifecycle notes in this packet. Necessary separate reports/proposals go under
+  `.ai/dispatch/evidence/A<N>_<DESCRIPTION>.md`, linked both ways with this packet; list proof
+  in the parent's YAML `evidence:`. Durable specs/maps go in `docs/`. Never add top-level
+  support-file siblings to the dispatch registry.
 
 ---
 ## Milestone (burndown)

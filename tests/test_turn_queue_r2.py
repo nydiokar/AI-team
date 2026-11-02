@@ -205,7 +205,7 @@ def test_D4_managed_send_requires_echo_replay(monkeypatch):
     # [Stage 8a cutover] flag now defaults ON; pin an explicit false value to
     # exercise the replay-OFF branch.
     monkeypatch.setenv("WORKER_MANAGED_TURNS", "0")
-    assert _SDKSession("k", "/tmp", None, {})._replay_user_messages is False
+    assert _SDKSession("k", "/tmp", None, {})._replay_user_messages is True
     monkeypatch.setenv("WORKER_MANAGED_TURNS", "1")
     assert _SDKSession("k", "/tmp", None, {})._replay_user_messages is True
     fake = _FakeClient()

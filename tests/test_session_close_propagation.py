@@ -75,7 +75,7 @@ def test_close_remote_without_dispatcher_is_legacy_skip():
     assert svc.store.get(s.session_id).status == SessionStatus.CLOSED
 
 
-def test_close_local_still_calls_backend_not_dispatcher():
+def test_close_same_host_still_dispatches_to_worker_carrier():
     dispatched = []
     svc = _svc(dispatcher=lambda s: dispatched.append(s.session_id))
     s = _make(svc)
@@ -86,11 +86,11 @@ def test_close_local_still_calls_backend_not_dispatcher():
 
     res = svc.close_session(s.session_id, backends={"claude": fake}, host=socket.gethostname())
     assert res.ok
-    assert fake.closed == [s.session_id]          # local → backend.close
-    assert dispatched == []                       # dispatcher NOT used for local
+    assert fake.closed == []                      # gateway owns no native process
+    assert dispatched == [s.session_id]
 
 
-def test_dispatcher_failure_does_not_break_close():
+def test_dispatcher_failure_preserves_session_for_retry():
     def boom(_s):
         raise RuntimeError("enqueue down")
     svc = _svc(dispatcher=boom)
@@ -100,8 +100,8 @@ def test_dispatcher_failure_does_not_break_close():
     svc.store.save(s)
 
     res = svc.close_session(s.session_id, backends={"claude": _FakeBackend()}, host=socket.gethostname())
-    assert res.ok                                 # close still succeeds locally
-    assert svc.store.get(s.session_id).status == SessionStatus.CLOSED
+    assert not res.ok and res.reason == "turn_queue_unavailable"
+    assert svc.store.get(s.session_id).status != SessionStatus.CLOSED
 
 
 # --- Gap 1 worker side: close_session action reaps the pool -----------------

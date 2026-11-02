@@ -5,8 +5,8 @@ status: done              # ready | active | blocked | done | dead
 owner: ""
 depends_on: []
 results_ref: null             # -> DISPATCH_LOG.md section with the verdict prose
-evidence: [".ai/dispatch/A101_O1_FINDINGS_RESUME_DECISION.md","tests/test_a101_block_state.py"]                  # artifact paths that PROVE it ran (checked to exist)
-updated_at: "2026-10-07T20:39:57.401226+00:00"
+evidence: [".ai/dispatch/A101_O1_FINDINGS_RESUME_DECISION.md", "tests/test_a101_block_state.py", ".ai/dispatch/A101_SESSION_BLOCKING_STATE_DIAGNOSIS.md"]                  # artifact paths that PROVE it ran (checked to exist)
+updated_at: "2026-11-02T14:28:59.522638+00:00"
 ```
 
 # DISPATCH — AGENT_101_SESSION_BLOCKING_STATE_SURFACING
@@ -109,3 +109,9 @@ Surfacing MOVE per O1–O5, behaviour-neutral:
   clears to `blocked:false` on resume.
 - **Deferred for the operator**: whether quota resume should ever be AUTOMATIC
   (`CASE_QUOTA_RESUME_AUTO`) stays a policy call — surfaced + one-click, not flipped.
+
+## Supporting artifacts (registry reconciliation, 2026-11-02)
+
+These dated supporting documents belong to this packet; they are excluded from job scanning.
+- [A101_O1_FINDINGS_RESUME_DECISION.md](A101_O1_FINDINGS_RESUME_DECISION.md)
+- [A101_SESSION_BLOCKING_STATE_DIAGNOSIS.md](A101_SESSION_BLOCKING_STATE_DIAGNOSIS.md)

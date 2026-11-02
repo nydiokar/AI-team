@@ -297,3 +297,5 @@ Secondary / hygiene (fold into item 1 or Stage 8b): delete the 7 merged A82 bran
   stage7_pressure,rollout,stage8a}.py`, `test_case_respawn.py`, `web/src/lib/turnQueue.test.ts`.
 </content>
 </invoke>
+
+Parent job: [AGENT_82_SESSION_TURN_QUEUE.md](AGENT_82_SESSION_TURN_QUEUE.md). Supporting artifact only; not a separate dispatch.

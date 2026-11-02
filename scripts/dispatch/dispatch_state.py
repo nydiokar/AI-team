@@ -179,7 +179,8 @@ def scan() -> list[JobState]:
         )
         jobs.append(js)
     for js in jobs:
-        js.flags = _derive_flags(js, jobs)
+        if "MISSING_STATE" not in js.flags:
+            js.flags = _derive_flags(js, jobs)
     return jobs
 
 
@@ -456,11 +457,15 @@ def new_job(job_id: str) -> None:
         "**Goal:** _(what the agent should do — one paragraph)_\n\n"
         "**Depends on:** _(blocker, or none)_\n\n"
         "## Task\n\n_(the concrete steps)_\n\n"
-        "## Done when\n\n_(the deliverable + how it's proven — set `evidence:` to those paths)_\n"
+        "## Done when\n\n_(the deliverable + how it's proven — set `evidence:` to those paths)_\n\n"
+        "## Trail / evidence\n\n"
+        "Keep progress and closure in this packet. Necessary separate supporting artifacts go in "
+        "`evidence/`, linked both ways with this packet; durable specs/maps go in `docs/`. "
+        "Do not create top-level supporting Markdown siblings.\n"
     )
     path.write_text(body, encoding="utf-8")
     print(f"created {path.name} (status: ready, created_at stamped now).")
-    print("  → fill the brief, then work it. When done: pnpm dispatch:set "
+    print("  → fill the brief, then work it. When done: .venv/bin/python scripts/dispatch/dispatch_state.py --set "
           f"{job_id} status done  (and add evidence: paths).")
 
 
@@ -516,9 +521,9 @@ def stop_hook() -> int:
     print("⚠ [dispatch] state has gaps — resolve on the go (does NOT block this session):")
     for j, f in gaps:
         fix = {
-            "MISSING_STATE": f"add a yaml block:  pnpm dispatch:set {j.job_id} status <s>",
+            "MISSING_STATE": f"restore the canonical yaml state block in {j.file}; --set requires an existing block",
             "CLAIMED_DONE_NO_PROOF": f"add real evidence: paths in {j.file}, or set status back",
-            "BAD_STATUS": f"pnpm dispatch:set {j.job_id} status ready|active|blocked|done|dead",
+            "BAD_STATUS": f".venv/bin/python scripts/dispatch/dispatch_state.py --set {j.job_id} status ready|active|blocked|done|dead",
             "READY_TO_UNBLOCK": f"review then run: python scripts/dispatch/dispatch_state.py --resolve-blocks",
         }.get(f, f"review {j.file} — {f}")
         print(f"    {f:22} {j.job_id:34} → {fix}")

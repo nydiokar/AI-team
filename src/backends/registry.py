@@ -1,9 +1,10 @@
 from __future__ import annotations
-from typing import Callable, Dict, Tuple
+from typing import Callable, Dict, Tuple, Iterable, Mapping
+import logging
 
 from src.core.interfaces import CodingBackend
 from .claude_code import ClaudeCodeBackend
-from .codex_native import CodexBackend
+from .codex_native import CodexBackend, runtime_available as codex_runtime_available
 from .opencode import OpenCodeServerBackend
 
 DEFAULT_BACKEND = "claude"
@@ -54,3 +55,28 @@ def valid_backend_names() -> Tuple[str, ...]:
 
 def is_valid_backend(name: str) -> bool:
     return (name or "").strip().lower() in _FACTORIES
+
+
+def available_session_backends(
+    names: Iterable[str], backends: Mapping[str, CodingBackend],
+) -> Tuple[str, ...]:
+    """Installed adapters whose runtime can honor the common turn contract.
+
+    Codex additionally needs the offline app-server protocol check. Other
+    adapters validate their runtime at construction or native session boot.
+    """
+    return tuple(
+        name for name in names
+        if name in _FACTORIES and backends.get(name) is not None
+        and (name != "codex" or _codex_runtime_ready())
+    )
+
+
+def _codex_runtime_ready() -> bool:
+    try:
+        return codex_runtime_available()
+    except Exception:
+        logging.getLogger(__name__).warning(
+            "event=backend_runtime_probe_failed backend=codex", exc_info=True,
+        )
+        return False

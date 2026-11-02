@@ -39,7 +39,7 @@ def _make(svc, **kw):
 
 # --- close_session ----------------------------------------------------------
 
-def test_close_local_calls_backend_and_clears(svc):
+def test_close_never_calls_a_gateway_backend_and_preserves_native_history(svc):
     s = _make(svc)
     s.backend_session_id = "bsid-123"
     s.machine_id = socket.gethostname()
@@ -48,7 +48,7 @@ def test_close_local_calls_backend_and_clears(svc):
 
     res = svc.close_session(s.session_id, backends={"claude": fake}, host=socket.gethostname())
     assert res.ok
-    assert fake.closed == [s.session_id]            # backend.close called (local)
+    assert fake.closed == []                         # native teardown belongs to carrier
     reloaded = svc.store.get(s.session_id)
     assert reloaded.status == SessionStatus.CLOSED
     assert reloaded.backend_session_id == ""        # cleared

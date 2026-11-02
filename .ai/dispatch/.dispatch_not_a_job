@@ -14,3 +14,15 @@ AGENT_10_M3_CLAUDE_TELEMETRY_REVIEW.md
 #
 # --- handoff addendum (a cold-boot continue doc, not a dispatched job) ---
 SUBSTRATE_BUILD_HANDOFF.md
+#
+# --- legacy supporting artifacts (keep paths stable for parent-job evidence/links) ---
+# New supporting artifacts belong under evidence/, linked from their parent packet.
+A101_O1_FINDINGS_RESUME_DECISION.md
+A101_SESSION_BLOCKING_STATE_DIAGNOSIS.md
+A82_E2E_CERTIFICATION.md
+A82_MULTIBACKEND_VALIDATION.md
+A82_STAGE8A_BACKEND_AUDIT.md
+A82_STAGE8A_DEPLOY_BURNDOWN.md
+A82_STAGE8A_VALIDATION.md
+A84_OUTBOX_E2E.md
+A99_TURN_QUEUE_UI_PROPOSAL.md

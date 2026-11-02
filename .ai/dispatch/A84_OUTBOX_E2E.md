@@ -144,3 +144,5 @@ in prod) now yields a genuinely operational outbox:
 
 **Reserved for the Manager (NOT done here):** flag flip / deploy / merge, and **TASK 7**
 (wait-group removal → A87). No Manager-facing wake semantics were changed; no worker restarted.
+
+Parent job: [AGENT_84_WORKER_COMPLETION_OUTBOX.md](AGENT_84_WORKER_COMPLETION_OUTBOX.md). Supporting artifact only; not a separate dispatch.

@@ -9,8 +9,9 @@ the source of truth.** The folder is the registry — a file with no block is a 
 
 > **This project (AI-Team):** invoke the tool with the repo venv on Linux —
 > `.venv/bin/python scripts/dispatch/dispatch_state.py <cmd>`. There is no pnpm wrapper here.
-> The `.parquet` query view is intentionally NOT generated (no pandas/pyarrow in this `.venv`);
-> the tool runs **markdown-view-only** and `_DISPATCH_STATE.md` + `--audit` are fully live.
+> The Markdown board and `--audit` work without pandas. When pandas/pyarrow are installed,
+> the tool also regenerates the optional `.parquet` view; both are present in the current
+> environment (verified 2026-11-02). Never hand-edit either generated view.
 
 ## The 3 commands (this is the whole workflow)
 | When | Run |
@@ -25,8 +26,15 @@ so it never drifts. (A Claude Code Stop hook does the same at session end where 
 setup per repo: `.venv/bin/python scripts/dispatch/dispatch_state.py --install-git-hook`.
 
 ## Non-negotiables
+- **Top-level Markdown is a job unless explicitly excluded.** Keep progress, handoff and closure
+  in the parent packet. When a separate supporting artifact is necessary, write it under
+  `evidence/A<N>_<DESCRIPTION>.md`, identify and link its parent packet, and link it back from
+  that packet's `TRAIL / EVIDENCE` section (`evidence:` for proof). Durable specs/maps belong in
+  `docs/`. Never create a sibling report/proposal as another top-level dispatch file. Existing
+  legacy support files are preserved in `.dispatch_not_a_job` so evidence paths remain valid;
+  exclusions are not a way to hide an actual job with missing state.
 - **NEVER hand-edit the yaml block with a regex/sed** — it corrupts them (control chars, mojibake).
-  Use `pnpm dispatch:set`. It round-trips through yaml and verifies the block still parses.
+  Use `.venv/bin/python scripts/dispatch/dispatch_state.py --set`. It verifies the block still parses.
 - **NEVER hand-edit `_DISPATCH_STATE.md` or `_dispatch.parquet`** — generated, hook-denied.
 - **`created_at` is CANONICAL** — written once at dispatch, never changed, never re-derived from git.
   Only `updated_at` bumps (automatically, on `--set`).
@@ -48,11 +56,12 @@ anywhere in scope. Waivers need a reason and are printed; never weaken the contr
   its row/section here.
 - `_DISPATCH_STATE.md` — a GENERATED, **complementary** machine/query view (the `--audit` board).
   Read, never write. It is an ADDITIVE query convenience, **never a replacement** for
-  DISPATCH_LOG. (`_dispatch.parquet` is not generated in this repo — md-view-only.)
+  DISPATCH_LOG. (`_dispatch.parquet` is optional and depends on installed query-view packages.)
 
 ## Resolving a gap the audit shows you (on the go)
-- `MISSING_STATE J` → `pnpm dispatch:set J status <s>` (or `--new` if it's brand new).
+- `MISSING_STATE J` → restore the job's canonical state block; `--new` creates a brand-new job.
+  `--set` requires an existing block. Do not infer or migrate an existing job's history blindly.
 - `CLAIMED_DONE_NO_PROOF J` → the `done` job's `evidence:` path doesn't exist. Fix the path in
   `J.md`, or set `status` back if it isn't actually done.
-- `BAD_STATUS J` → the status isn't one of the 5 valid words. `--set` it to a real one.
+- `BAD_STATUS J` → a parsed state block has a status outside the 5 valid words. `--set` it to a real one.
 - `STALE_<n>d J` → an `active` job untouched >14d. Finish it, block it, or mark it dead.

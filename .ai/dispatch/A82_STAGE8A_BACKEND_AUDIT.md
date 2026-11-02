@@ -173,3 +173,5 @@ mutation on acceptance, and commit strictly precedes acknowledgement.
 **Single-admission-authority invariant: HONORED.**
 **Convergence point: `MeshDB.enqueue_turn` — `src/control/db.py:2868`.**
 **No defect found — no code change made; no reserved decision raised.**
+
+Parent job: [AGENT_82_SESSION_TURN_QUEUE.md](AGENT_82_SESSION_TURN_QUEUE.md). Supporting artifact only; not a separate dispatch.

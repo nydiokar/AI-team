@@ -154,11 +154,11 @@ def test_R4_flag_off_session_with_ended_reader_is_not_evicted(monkeypatch):
 # =========================================================================== #
 def test_R4_operator_resolution_frees_session_for_next_managed_turn(db, tmp_path, real_claude, admin, monkeypatch):
     real_claude.fake.defer_echo = True          # the CLI never begins our turn
-    # [A102 rule 8] inject a short stall through every shim-built turn.
-    import src.backends.claude_code as _cc
-    _orig_tc = _cc.turn_control
+    # Inject the test clock at the carrier, which now owns turn limits.
+    import src.core.turn_liveness as _tc
+    _orig_tc = _tc.turn_control
     _stall = {"s": 0.3}
-    monkeypatch.setattr(_cc, "turn_control", lambda u, **kw: _orig_tc(u, stall_override=_stall["s"], **kw))
+    monkeypatch.setattr(_tc, "turn_control", lambda u, **kw: _orig_tc(u, stall_override=_stall["s"], **kw))
     http = _ClientHTTP(TestClient(ts.app))
     w = _worker(tmp_path, http)
     w._backends = {"claude": real_claude.backend}
@@ -219,10 +219,10 @@ def test_R4_not_submitted_attestation_returns_turn_to_pending(db, tmp_path, real
         return await real_orig(*a, **k)
 
     monkeypatch.setattr(sess, "_submit_turn", slow_submit)
-    # [A102 rule 8] inject a short stall through every shim-built turn.
-    import src.backends.claude_code as _cc
-    _orig_tc = _cc.turn_control
-    monkeypatch.setattr(_cc, "turn_control", lambda u, **kw: _orig_tc(u, stall_override=0.2, **kw))
+    # Inject the test clock at the carrier, which now owns turn limits.
+    import src.core.turn_liveness as _tc
+    _orig_tc = _tc.turn_control
+    monkeypatch.setattr(_tc, "turn_control", lambda u, **kw: _orig_tc(u, stall_override=0.2, **kw))
     http = _ClientHTTP(TestClient(ts.app))
     w = _worker(tmp_path, http)
     w._backends = {"claude": real_claude.backend}

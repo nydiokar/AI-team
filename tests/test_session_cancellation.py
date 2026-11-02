@@ -1,79 +1,85 @@
-from datetime import datetime
-from pathlib import Path
-import sys
-import uuid
+"""Gateway stateless cancellation reaches the exact native turn before returning."""
+from __future__ import annotations
+
+import asyncio
 import threading
-import time
+from datetime import datetime
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
-
-from src.orchestrator import TaskOrchestrator
-from src.core.interfaces import Task, TaskType, TaskPriority, TaskStatus, ExecutionResult
-from src.services.session_store import SessionStore
-import src.services.session_store as session_store_module
 from config import config
+from src.core.interfaces import ExecutionResult, Task, TaskPriority, TaskStatus, TaskType
+from src.orchestrator import TaskOrchestrator
 
 
-def _make_task(session_id: str) -> Task:
+def _task(task_id: str, *, timeout_sec: int) -> Task:
     return Task(
-        id=f"timeout_{uuid.uuid4().hex[:8]}",
-        type=TaskType.ANALYZE,
-        priority=TaskPriority.MEDIUM,
-        status=TaskStatus.PENDING,
-        created=datetime.now().isoformat(),
-        title="Timeout session task",
-        target_files=[],
-        prompt="Do work",
-        success_criteria=[],
-        context="",
-        metadata={"session_id": session_id, "timeout_sec": 1},
+        id=task_id, type=TaskType.ANALYZE, priority=TaskPriority.MEDIUM,
+        status=TaskStatus.PENDING, created=datetime.now().isoformat(),
+        title="Stateless work", target_files=[], prompt="Do work",
+        success_criteria=[], context="",
+        metadata={"backend": "codex", "timeout_sec": timeout_sec},
     )
 
 
+class _BlockingBackend:
+    def __init__(self) -> None:
+        self.started = threading.Event()
+        self.release = threading.Event()
+        self.ended = threading.Event()
+        self.turn_uuid = ""
+        self.cancelled: list[tuple[str, str]] = []
+
+    def run_oneoff(self, cwd, message, *, turn, **kwargs) -> ExecutionResult:
+        self.turn_uuid = turn.turn_uuid
+        self.started.set()
+        try:
+            assert self.release.wait(4), "native turn was never cancelled"
+            return ExecutionResult(False, "", errors=["cancelled"], error_class="cancelled")
+        finally:
+            self.ended.set()
+
+    def cancel(self, session, turn_uuid: str) -> bool:
+        self.cancelled.append((session.session_id, turn_uuid))
+        assert turn_uuid == self.turn_uuid
+        self.release.set()
+        return True
+
+
 @pytest.mark.asyncio
-async def test_session_timeout_calls_backend_cancel(tmp_path, monkeypatch):
-    sessions_dir = tmp_path / "state" / "sessions"
-    bindings_file = tmp_path / "state" / "telegram" / "active_bindings.json"
-    sessions_dir.mkdir(parents=True, exist_ok=True)
-    bindings_file.parent.mkdir(parents=True, exist_ok=True)
-    monkeypatch.setattr(session_store_module, "_SESSIONS_DIR", sessions_dir, raising=False)
-    monkeypatch.setattr(session_store_module, "_BINDINGS_FILE", bindings_file, raising=False)
+async def test_oneoff_timeout_cancels_exact_turn_and_waits_for_native_exit(monkeypatch):
+    monkeypatch.setattr(config.system, "local_execution_enabled", True)
+    orchestrator = TaskOrchestrator()
+    backend = _BlockingBackend()
+    orchestrator._backends["codex"] = backend
+    task = _task("timeout", timeout_sec=1)
+    try:
+        result = await asyncio.wait_for(orchestrator.process_task(task), timeout=3)
+        assert not result.success
+        assert any("timed out" in e.lower() or "timeout" in e.lower() for e in result.errors)
+        assert backend.cancelled == [("oneoff-timeout-1", "timeout-1")]
+        assert backend.ended.is_set()
+    finally:
+        backend.release.set()
 
-    orch = TaskOrchestrator()
-    store = SessionStore()
-    session = store.create("codex", str(tmp_path))
 
-    cancelled = []
-    release = threading.Event()
-
-    class _FakeBackend:
-        def create_session(self, session_obj):
-            release.wait(timeout=2.0)
-            return ExecutionResult(success=True, output="late", execution_time=0.0)
-
-        def resume_session(self, session_obj, message):
-            release.wait(timeout=2.0)
-            return ExecutionResult(success=True, output="late", execution_time=0.0)
-
-        def run_oneoff(self, cwd, message):
-            return ExecutionResult(success=True, output="noop", execution_time=0.0)
-
-        def cancel(self, session_obj):
-            cancelled.append(session_obj.session_id)
-            release.set()
-
-        def close(self, session_obj):
-            return None
-
-    orch._backends["codex"] = _FakeBackend()
-
-    start = time.time()
-    result = await orch.process_task(_make_task(session.session_id))
-    elapsed = time.time() - start
-
-    assert result.success is False
-    assert any("timed out" in e.lower() or "timeout" in e.lower() for e in result.errors)
-    assert cancelled == [session.session_id]
-    assert elapsed < 2.0
+@pytest.mark.asyncio
+async def test_cancel_task_consumes_event_before_cancelling_wrapper(monkeypatch):
+    monkeypatch.setattr(config.system, "local_execution_enabled", True)
+    orchestrator = TaskOrchestrator()
+    backend = _BlockingBackend()
+    orchestrator._backends["codex"] = backend
+    task = _task("operator-cancel", timeout_sec=0)
+    orchestrator.active_tasks[task.id] = task
+    running = asyncio.create_task(orchestrator.process_task(task))
+    try:
+        assert await asyncio.to_thread(backend.started.wait, 2)
+        assert orchestrator.cancel_task(task.id) is True
+        result = await asyncio.wait_for(asyncio.shield(running), timeout=2)
+        assert not result.success and result.errors == ["cancelled"]
+        assert backend.cancelled == [("oneoff-operator-cancel-1", "operator-cancel-1")]
+        assert backend.ended.is_set()
+    finally:
+        backend.release.set()
+        if not running.done():
+            await running

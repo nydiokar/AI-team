@@ -139,7 +139,7 @@ def main() -> None:
     ).stdout
     relevant = [
         line for line in log_out.splitlines()
-        if task_id in line or "affinity_unrouted" in line or "_process_task_remote" in line or "codex_started" in line
+        if task_id in line or "affinity_unrouted" in line or "managed_carrier" in line or "codex_started" in line
     ]
     print("log lines:")
     for line in relevant[-20:]:
