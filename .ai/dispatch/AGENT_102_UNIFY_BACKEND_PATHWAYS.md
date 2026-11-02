@@ -189,7 +189,7 @@ Owns `src/worker/**`, `src/core/interfaces.py`, `src/core/backend_call.py`, `src
 - New features or behaviour beyond what the managed path does today.
 
 ## TRAIL / EVIDENCE (fill at close)
-- PRs: S0 #205; S1-Claude #209, S1-Codex #208, S1-OpenCode #207 (all merged); S2 `feat/dispatch-reconciliation`, engineering accepted at `f68d11a` (2026-11-03).
+- PRs: S0 #205; S1-Claude #209, S1-Codex #208, S1-OpenCode #207 (all merged); S2 PR #271 (`feat/dispatch-reconciliation`), engineering accepted at `f68d11a` (2026-11-03).
 - Dispatched 2026-10-08 (node `kanebra`, opus, role=worker, one worktree each):
   S1-Claude `task_f40508df` / session `ead810e403bc` (`.worktrees/a102-claude`);
   S1-Codex `task_b5afb280` / session `f65a69f8b50c` (`.worktrees/a102-codex`);
@@ -243,6 +243,8 @@ Verification (repo venv, isolated worktree; no paid/full/e2e suite):
   tests/test_docker_runtime_config.py tests/test_mesh_dispatch_timeout.py
   tests/test_retry_transient.py tests/test_usage_propagation.py --tb=short -n 4`
   — 63 passed.
+- `pytest tests/test_turn_queue_carrier_recovery.py --tb=short` — 24 passed after
+  moving the recovery fixture clock to the carrier and asserting permanent capacity/state.
 - Architecture end-state checker at `f68d11a`: CONTRACT MET over 408 files; only
   retired environment strings in negative compatibility tests are waived. No retired
   implementation/API definition or production flag is waived. `git diff --check` passes.
