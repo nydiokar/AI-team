@@ -693,148 +693,95 @@ def test_write_artifacts_include_session_metadata_and_archive_copy(monkeypatch):
         shutil.rmtree(root, ignore_errors=True)
 
 
-def test_failed_backend_result_does_not_overwrite_session_id(monkeypatch):
-    root = Path.cwd() / ".test_session_artifacts" / uuid.uuid4().hex[:8]
-    from config import config
+def test_failed_worker_result_commits_native_identity_for_next_resume(tmp_path):
+    """A failed native turn can still establish its resume identity. The
+    managed completion transaction persists it without gateway-local execution."""
+    from types import SimpleNamespace
+    from src.control.db import MeshDB
+    from src.control.turn_queue import ManagedTurnOwnership
+    from src.core.interfaces import Session
+    from src.worker.agent import _execute_task
+
+    db = MeshDB(str(tmp_path / "mesh.db"))
     try:
-        results_dir = root / "results"
-        summaries_dir = root / "summaries"
-        logs_dir = root / "logs"
-        state_dir = root / "state"
-        for path in (results_dir, summaries_dir, logs_dir, state_dir):
-            path.mkdir(parents=True, exist_ok=True)
-
-        monkeypatch.setattr(config.system, "results_dir", str(results_dir), raising=False)
-        monkeypatch.setattr(config.system, "summaries_dir", str(summaries_dir), raising=False)
-        monkeypatch.setattr(config.system, "logs_dir", str(logs_dir), raising=False)
-
-        import src.services.session_store as session_store_module
-        monkeypatch.setattr(session_store_module, "_SESSIONS_DIR", state_dir / "sessions", raising=False)
-        monkeypatch.setattr(session_store_module, "_BINDINGS_FILE", state_dir / "telegram" / "active_bindings.json", raising=False)
-
-        orch = TaskOrchestrator()
-        session = orch.session_store.create("claude", str(root), telegram_chat_id=1, owner_user_id=2)
-        session.backend_session_id = "stable-session-id"
-        orch.session_store.save(session)
-
-        task = Task(
-            id="task_failed_session_resume",
-            type=TaskType.ANALYZE,
-            priority=TaskPriority.MEDIUM,
-            status=TaskStatus.PENDING,
-            created=datetime.now().isoformat(),
-            title="Test",
-            target_files=[],
-            prompt="Inspect",
-            success_criteria=[],
-            context="",
-            metadata={"session_id": session.session_id, "cwd": str(root), "source": "telegram_session"},
+        session = Session(
+            session_id="failed-native", backend="claude", repo_path=str(tmp_path),
+            status=SessionStatus.IDLE, created_at="2026-11-02T12:00:00Z",
+            updated_at="2026-11-02T12:00:00Z", backend_session_id="stable-session-id",
+            machine_id="worker-a",
         )
-
+        db.upsert_node(node_id="worker-a", tailscale_ip="127.0.0.1", api_port=9001,
+                       backends=["claude"], max_concurrent=1, incarnation_id="inc-a")
+        db.upsert_session(session)
+        db.enroll_session(session.session_id)
+        db.enqueue_turn(
+            task_id="failed-turn", session_id=session.session_id, backend="claude",
+            machine_id="worker-a", action="resume_session", payload={"prompt": "Inspect"},
+            turn_source="human", turn_kind="instruction",
+        )
+        db.activate_turn("failed-turn")
+        claim = db.claim_turn("failed-turn", "worker-a", "worker_daemon", "inc-a")
+        db.start_turn("failed-turn", str(claim), "inc-a")
         failing = ExecutionResult(
-            success=False,
-            output="",
-            backend_session_id="bad-new-session-id",
-            errors=["Claude exited with code 1"],
-            execution_time=0.01,
-            raw_stdout="",
-            raw_stderr="",
-            parsed_output={"errors": ["Claude exited with code 1"]},
-            return_code=1,
+            success=False, output="", backend_session_id="native-from-failed-turn",
+            errors=["Claude exited with code 1"], return_code=1,
+        )
+        backend = SimpleNamespace(resume_session=lambda *args, **kwargs: failing)
+        row = {"id": "failed-turn", "session_id": session.session_id, "backend": "claude",
+               "action": "resume_session", "payload": {"prompt": "Inspect", "session": {
+                   "session_id": session.session_id, "backend": "claude", "repo_path": str(tmp_path),
+                   "backend_session_id": session.backend_session_id,
+               }}}
+        ownership = ManagedTurnOwnership(
+            task_id="failed-turn", session_id=session.session_id, node_id="worker-a",
+            incarnation_id="inc-a", claim_token=str(claim), turn_uuid="uuid-failed",
+        )
+        result = asyncio.run(_execute_task(row, {"claude": backend}, ownership=ownership))
+        assert result["success"] is False
+        assert result["errors"] == ["Claude exited with code 1"]
+        db.complete_turn("failed-turn", str(claim), result, status="failed",
+                         native_session_id=result["backend_session_id"])
+        reloaded = db.get_session(session.session_id)
+        assert reloaded["backend_session_id"] == "native-from-failed-turn"
+        assert db.get_active_turn(session.session_id) is None
+    finally:
+        db.close()
+
+
+def test_missing_backend_conversation_does_not_create_an_unowned_retry(tmp_path):
+    """The retired gateway path silently recreated missing conversations. A
+    claimed carrier attempt returns its failure once; recovery belongs to the queue."""
+    from types import SimpleNamespace
+    from src.control.turn_queue import ManagedTurnOwnership
+    from src.worker.agent import _execute_task
+
+    calls = []
+
+    def resume(session, prompt, *, turn, **kwargs):
+        calls.append((session.backend_session_id, turn.turn_uuid))
+        return ExecutionResult(
+            success=False, output="", backend_session_id=session.backend_session_id,
+            errors=["No conversation found with session ID: stale-session-id"],
+            error_class="session_lost", return_code=1,
         )
 
-        async def fake_to_thread(_fn, *_args, **_kwargs):
-            return failing
+    def create(*args, **kwargs):
+        raise AssertionError("carrier must not create a second unowned attempt")
 
-        monkeypatch.setattr(asyncio, "to_thread", fake_to_thread)
-
-        result = asyncio.run(orch.process_task(task))
-
-        reloaded = orch.session_store.get(session.session_id)
-        assert result.success is False
-        assert result.errors == ["Claude exited with code 1"]
-        assert reloaded is not None
-        # backend_session_id is persisted even on failure so the next turn can resume.
-        assert reloaded.backend_session_id == "bad-new-session-id"
-    finally:
-        shutil.rmtree(root, ignore_errors=True)
-
-
-def test_missing_backend_conversation_recreates_session_and_retries(monkeypatch):
-    root = Path.cwd() / ".test_session_artifacts" / uuid.uuid4().hex[:8]
-    from config import config
-    try:
-        results_dir = root / "results"
-        summaries_dir = root / "summaries"
-        logs_dir = root / "logs"
-        state_dir = root / "state"
-        for path in (results_dir, summaries_dir, logs_dir, state_dir):
-            path.mkdir(parents=True, exist_ok=True)
-
-        monkeypatch.setattr(config.system, "results_dir", str(results_dir), raising=False)
-        monkeypatch.setattr(config.system, "summaries_dir", str(summaries_dir), raising=False)
-        monkeypatch.setattr(config.system, "logs_dir", str(logs_dir), raising=False)
-
-        import src.services.session_store as session_store_module
-        monkeypatch.setattr(session_store_module, "_SESSIONS_DIR", state_dir / "sessions", raising=False)
-        monkeypatch.setattr(session_store_module, "_BINDINGS_FILE", state_dir / "telegram" / "active_bindings.json", raising=False)
-
-        orch = TaskOrchestrator()
-        session = orch.session_store.create("claude", str(root), telegram_chat_id=1, owner_user_id=2)
-        session.backend_session_id = "stale-session-id"
-        orch.session_store.save(session)
-
-        task = Task(
-            id="task_session_recreate",
-            type=TaskType.ANALYZE,
-            priority=TaskPriority.MEDIUM,
-            status=TaskStatus.PENDING,
-            created=datetime.now().isoformat(),
-            title="Test",
-            target_files=[],
-            prompt="Inspect",
-            success_criteria=[],
-            context="",
-            metadata={"session_id": session.session_id, "cwd": str(root), "source": "telegram_session"},
-        )
-
-        attempts = {"count": 0}
-
-        async def fake_to_thread(fn, *args, **kwargs):
-            attempts["count"] += 1
-            if attempts["count"] == 1:
-                return ExecutionResult(
-                    success=False,
-                    output="",
-                    backend_session_id="bad-replacement-id",
-                    errors=["No conversation found with session ID: stale-session-id"],
-                    execution_time=0.01,
-                    raw_stdout="",
-                    raw_stderr="",
-                    parsed_output={"errors": ["No conversation found with session ID: stale-session-id"]},
-                    return_code=1,
-                )
-            return ExecutionResult(
-                success=True,
-                output="Recovered session reply",
-                backend_session_id="fresh-session-id",
-                errors=[],
-                execution_time=0.01,
-                raw_stdout="Recovered session reply",
-                raw_stderr="",
-                parsed_output={"content": "Recovered session reply"},
-                return_code=0,
-            )
-
-        monkeypatch.setattr(asyncio, "to_thread", fake_to_thread)
-
-        result = asyncio.run(orch.process_task(task))
-
-        reloaded = orch.session_store.get(session.session_id)
-        assert result.success is True
-        assert result.output == "Recovered session reply"
-        assert attempts["count"] == 2
-        assert reloaded is not None
-        assert reloaded.backend_session_id == "fresh-session-id"
-    finally:
-        shutil.rmtree(root, ignore_errors=True)
+    row = {"id": "lost-turn", "session_id": "lost-session", "backend": "claude",
+           "action": "resume_session", "payload": {"prompt": "Inspect", "session": {
+               "session_id": "lost-session", "backend": "claude", "repo_path": str(tmp_path),
+               "backend_session_id": "stale-session-id",
+           }}}
+    ownership = ManagedTurnOwnership(
+        task_id="lost-turn", session_id="lost-session", node_id="worker-a",
+        claim_token="token", turn_uuid="uuid-lost",
+    )
+    result = asyncio.run(_execute_task(
+        row, {"claude": SimpleNamespace(resume_session=resume, create_session=create)},
+        ownership=ownership,
+    ))
+    assert result["success"] is False
+    assert result["error_class"] == "session_lost"
+    assert result["backend_session_id"] == "stale-session-id"
+    assert calls == [("stale-session-id", "uuid-lost")]
