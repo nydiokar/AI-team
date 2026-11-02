@@ -239,13 +239,19 @@ def _result_wire(**kw) -> dict:
 
 
 def _through_driver_and_orchestrator(outcome) -> TaskResult:
-    """Drive the SDK error branch, worker serialization and gateway result
-    reconstruction without starting a provider process."""
+    """SDK-reader -> driver -> classifier unit boundary. The managed transport
+    deliberately omits raw events; its separate checks below do not claim reset
+    metadata reaches the store (the remaining A78 gap)."""
     with patch.object(_SDKSession, "send", lambda self_inner, message, **_kw: outcome), \
             patch.object(_SDKSession, "start", lambda self_inner: None), \
             patch("src.core.test_guard.assert_live_calls_allowed", lambda *a, **k: None):
         raw = ClaudeSDKClientDriver().run_oneoff("/repo", "do it", turn=turn_control("t-sdk"))
-    return _through_worker_and_gateway(raw)
+    return _result(
+        success=raw.success, output=raw.output, errors=raw.errors,
+        raw_stdout=raw.raw_stdout, raw_stderr=raw.raw_stderr,
+        parsed_output=raw.parsed_output, return_code=raw.return_code,
+        error_class=raw.error_class,
+    )
 
 
 def test_sdk_429_with_rate_limit_event_records_refusal_snapshot():
@@ -367,18 +373,13 @@ def test_untyped_error_dict_in_a_real_stream_is_not_evidence():
 
 
 def _dispatch_failed_row(r: dict, row_error_class: str = "", store=None) -> TaskResult:
-    """Run the real ``_dispatch_to_node`` against a fake DB row in the shape
-    the worker writes for a failed turn (``src/worker/agent.py`` payload)."""
+    """Run the actual durable-effects reconstruction used after a managed
+    result commits. Raw worker events are not persisted by that boundary."""
     row = {"id": "t-mesh", "status": "failed", "result": json.dumps(r),
-           "error": "worker failed", "backend": "claude", "error_class": row_error_class}
-    db = SimpleNamespace(get_task=lambda task_id: row)
-    orch = TaskOrchestrator.__new__(TaskOrchestrator)
-    orch._nudge_worker_for_dispatch = lambda *a, **k: None
-    orch._task_cancel_events = {}
-    orch.quota_coordinator = SimpleNamespace(store=store) if store is not None else None
-    task = SimpleNamespace(id="t-mesh", prompt="p", metadata={})
-    with patch("src.control.db.get_db", return_value=db):
-        return asyncio.run(orch._dispatch_to_node(task, None, SimpleNamespace(node_id="w1")))
+           "payload": {"prompt": "p"}, "error": "worker failed", "backend": "claude",
+           "error_class": row_error_class or r.get("error_class") or ""}
+    _, result, _ = _orch(store)._managed_turn_effect_inputs(row)
+    return result
 
 
 @pytest.mark.parametrize("err", [
@@ -387,9 +388,8 @@ def _dispatch_failed_row(r: dict, row_error_class: str = "", store=None) -> Task
     "TimeoutError: read timed out",
 ])
 def test_mesh_session_path_keeps_the_workers_structured_class(err):
-    """Session turns run through ``_dispatch_to_node``; it used to drop the
-    worker's ``error_class``, so a worker-side ``sdk_stream_closed`` was
-    re-derived from its text (``fatal`` / ``network`` / ``timeout``)."""
+    """Managed result projection keeps the durable worker class even when
+    its text suggests a different retry policy."""
     result = _dispatch_failed_row({
         "success": False, "output": "partial work", "errors": [err],
         "raw_stderr": "error_class=sdk_stream_closed", "error_class": "sdk_stream_closed",
@@ -451,12 +451,10 @@ def _worker_payload(raw: ExecutionResult) -> dict:
 
 
 @pytest.mark.parametrize("with_result_line", [False, True])
-def test_mesh_print_resume_stream_as_output_keeps_the_refusal(with_result_line):
-    """print_resume sets ``output = stdout`` when the stream holds no
-    extractable text, and the worker ships ``output`` and ``raw_stdout``
-    byte-identical with no ``parsed_output``. That is a REAL stream: the
-    rejected rate_limit_event must still classify ``usage_limit`` and reach
-    the store (equality alone used to mark it a mirror)."""
+def test_managed_projection_does_not_treat_a_reply_mirror_as_provider_events(with_result_line):
+    """Historical CLI output can resemble event JSON. The actual durable
+    projection exposes a reply mirror; it cannot establish provider reset evidence.
+    SDK reset parsing remains tested above, separately from the A78 transport gap."""
     from src.backends.claude_driver import _parse_print_resume
     lines = [
         json.dumps({"type": "system", "subtype": "init", "session_id": "s"}),
@@ -470,15 +468,14 @@ def test_mesh_print_resume_stream_as_output_keeps_the_refusal(with_result_line):
     assert raw.output == raw.raw_stdout.strip()
     store = _FakeStore()
     result = _dispatch_failed_row(_worker_payload(raw), store=store)
-    assert _classify(result, store) == "usage_limit"
-    assert len(store.calls) == 1
-    assert store.calls[0]["reset_at"] == datetime.fromtimestamp(RESETS_AT, tz=timezone.utc)
+    assert TaskOrchestrator._extract_rate_limit_info(result) is None
+    assert _classify(result, store) == "fatal"
+    assert store.calls == []
 
 
 def test_mesh_error_detail_stdout_tail_is_not_error_text():
-    """Worker stderr empty ⇒ the gateway falls back to ``error_detail`` for
-    ``raw_stderr``. Its ``stdout_tail`` is the print_resume stream with the
-    agent's own words; only the error parts may be read."""
+    """Durable projection keeps the diagnostic separate from error-bearing
+    fields, so the agent's own words cannot become quota evidence."""
     stream = "\n".join([
         json.dumps({"type": "assistant", "message": {"content": [{"type": "text",
                     "text": "I reworked the quota banner so a usage limit shows the reset time."}]}}),
@@ -492,6 +489,6 @@ def test_mesh_error_detail_stdout_tail_is_not_error_text():
     payload.pop("raw_stderr")  # legacy workers ship none; new ones ship "" — same fallback
     result = _dispatch_failed_row(payload)
     assert "usage limit" not in result.raw_stderr
-    assert "exit_code=1" in result.raw_stderr
+    assert result.raw_stderr == ""
     assert _classify(result) == "auth"
     assert "usage limit" not in TaskOrchestrator._short_failure_reason(result).lower()

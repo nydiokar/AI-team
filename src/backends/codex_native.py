@@ -131,6 +131,13 @@ def _publish_codex_activity(context: TelemetryContext | None, method: object, it
     )
 
 
+def runtime_available() -> bool:
+    """Offline executable/protocol readiness; never starts an agent turn."""
+    env = ensure_node_on_path()
+    executable = resolve_codex_executable(env)
+    return executable is not None and _managed_protocol_supported(executable, env)
+
+
 class ActiveTurn(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
     session_id: str
@@ -338,9 +345,7 @@ class CodexBackend(CodingBackend):
         not-yet-submitted turn is then never submitted), signal its live run
         (whose loop interrupts only its OWN native turn id), and interrupt a held
         turn's native id. Abort only that turn if running; arm if not started;
-        refuse (no-op) otherwise. Without ``turn_uuid`` (session-wide shutdown /
-        the S1 gateway-local graceful-cancel path, plus :meth:`close`): signal
-        the session's active turn. Returns whether a cancel was armed/delivered."""
+        refuse (no-op) otherwise. Returns whether a cancel was armed/delivered."""
         if not turn_uuid:
             return False
         with self._lock:
@@ -460,9 +465,7 @@ class CodexBackend(CodingBackend):
         gateway-local path / a one-off) gets a self-owned ``turn_control``."""
         from src.control.turn_queue import ManagedUnsupportedError, OwnershipConflictError
 
-        env = ensure_node_on_path()
-        executable = resolve_codex_executable(env)
-        if executable is None or not _managed_protocol_supported(executable, env):
+        if not runtime_available():
             raise ManagedUnsupportedError("codex app-server is not available on this carrier",
                                           backend=type(self).__name__)
         ownership = turn.ownership

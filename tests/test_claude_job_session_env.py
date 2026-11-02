@@ -9,6 +9,7 @@ and an "unlinked session" job in the UI.
 from src.backends.claude_code import ClaudeCodeBackend
 from src.core import test_guard
 from src.core.interfaces import ExecutionResult, Session, SessionStatus
+from src.core.turn_liveness import turn_control
 
 
 class _CapturingDriver:
@@ -49,11 +50,12 @@ def _session(backend_session_id: str | None) -> Session:
 
 def test_create_session_exports_gateway_session_id(monkeypatch) -> None:
     backend, driver = _backend(monkeypatch)
-    backend.create_session(_session(None))
+    backend.create_session(_session(None), turn=turn_control("env-create"))
     assert driver.envs[0]["SESSION_ID"] == "5725a4bf260c"
 
 
 def test_resume_session_exports_gateway_not_backend_session_id(monkeypatch) -> None:
     backend, driver = _backend(monkeypatch)
-    backend.resume_session(_session("c392358c-a4a0-47ed-9b12-f11b6b53a852"), "next")
+    backend.resume_session(_session("c392358c-a4a0-47ed-9b12-f11b6b53a852"), "next",
+                           turn=turn_control("env-resume"))
     assert driver.envs[0]["SESSION_ID"] == "5725a4bf260c"

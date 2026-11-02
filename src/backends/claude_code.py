@@ -362,9 +362,8 @@ class ClaudeCodeBackend(CodingBackend):
         """[A102] With a ``turn_uuid``: abort EXACTLY that turn if the CLI is
         running it, arm the interrupt for its echo if it has not begun, and never
         touch another turn (ARM first so a prompt not yet registered is never
-        submitted; then deliver to the live pending entry and disarm). Without one:
-        a session-wide interrupt of whatever is in flight (kept for the legacy
-        in-process caller S2 removes). Returns True iff delivered or durably armed."""
+        submitted; then deliver to the live pending entry and disarm).
+        Returns True iff delivered or durably armed."""
         from src.backends.claude_driver import arm_managed_cancel, disarm_managed_cancel
 
         if not turn_uuid:

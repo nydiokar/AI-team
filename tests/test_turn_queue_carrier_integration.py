@@ -593,7 +593,6 @@ def real_claude(monkeypatch):
     import src.core.test_guard as tg
     from tests.test_turn_queue_sdk_ownership import _FakeClient, _start_fake_session
 
-    monkeypatch.setenv("WORKER_MANAGED_TURNS", "1")  # managed carrier ⇒ echo correlation on
     fake = _FakeClient()
     sess = _start_fake_session(fake)
     proactive: List[Any] = []
@@ -730,7 +729,7 @@ def test_INT13_pre_cutover_legacy_row_never_runs_on_a_managed_worker(db, tmp_pat
 
     real_claude.fake.replies["legacy prompt"] = [_result("legacy bare reply")]
     http = _ClientHTTP(TestClient(ts.app))
-    w = _worker(tmp_path, http)  # WORKER_MANAGED_TURNS=ON
+    w = _worker(tmp_path, http)  # the common carrier contract is permanent
     w._backends = {"claude": real_claude.backend}
     db.upsert_session(Session(session_id="sess-13", backend="claude", repo_path="",
                               status=SessionStatus.IDLE, created_at=NOW, updated_at=NOW, machine_id=NODE))

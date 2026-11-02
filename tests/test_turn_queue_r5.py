@@ -30,7 +30,6 @@ class _DeadWriteClient(_FakeClient):
 
 
 def test_R5_refused_managed_write_is_not_submitted_at_driver(monkeypatch):
-    monkeypatch.setenv("WORKER_MANAGED_TURNS", "1")
     fake = _DeadWriteClient()
     sess = _start_fake_session(fake)
     drv = ClaudeSDKClientDriver()

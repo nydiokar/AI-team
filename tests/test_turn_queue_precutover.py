@@ -439,13 +439,14 @@ class _StagedBackend:
         self.seen = []
         self.log = log
 
-    def supports_managed_turns(self) -> bool:
-        return True
 
     def is_quiescent(self, session) -> bool:
         return True
 
-    def run_managed_turn(self, session, prompt, ownership, *, on_process=None, **_k):
+    def create_session(self, session, *, turn, **kwargs):
+        return self.resume_session(session, session.last_user_message, turn=turn, **kwargs)
+
+    def resume_session(self, session, prompt, *, turn, **_k):
         f = self.repo / "uploads" / "spec.md"
         self.seen.append(f.read_bytes() if f.exists() else None)
         if self.log is not None:
@@ -483,7 +484,7 @@ def test_PC08_carrier_fetches_staged_file_before_managed_invoke(tmp_path):
     repo.mkdir()
     http = _StageHTTP()
     b = _StagedBackend(repo, log=http.calls)
-    own = tq.ManagedTurnOwnership(task_id="t-1", session_id="s", node_id="n", claim_token="tok")
+    own = tq.ManagedTurnOwnership(task_id="t-1", session_id="s", node_id="n", claim_token="tok", turn_uuid="u-staged")
     out = asyncio.run(agent_mod._execute_task(_staged_row(repo), {"claude": b}, http, ownership=own))
     assert out["success"] is True and b.seen == [b"# spec"]
     # The staged copy is removed only AFTER the prompt was submitted.
@@ -498,15 +499,17 @@ def test_PC08b_carrier_fetch_failure_never_invokes_backend(tmp_path):
     repo.mkdir()
     b = _StagedBackend(repo)
     http = _StageHTTP(fail=True)
-    own = tq.ManagedTurnOwnership(task_id="t-1", session_id="s", node_id="n", claim_token="tok")
+    own = tq.ManagedTurnOwnership(task_id="t-1", session_id="s", node_id="n", claim_token="tok", turn_uuid="u-staged")
     out = asyncio.run(agent_mod._execute_task(_staged_row(repo), {"claude": b}, http, ownership=own))
     assert b.seen == [] and out["success"] is False
     assert out["error_class"] == "managed_conflict"
     assert out["errors"][0].startswith("staged_file_unavailable")
     assert ("DELETE", f"/files/{STAGED['file_id']}") not in http.calls
-    # Legacy (no ownership) keeps its behavior: runs without the file.
+    # Refused protocol-0 session turns never consume staged attachments.
+    http.calls.clear()
     out = asyncio.run(agent_mod._execute_task(_staged_row(repo), {"claude": _LegacyRun()}, http))
-    assert out["success"] is True
+    assert out["success"] is False and out["error_class"] == "managed_unsupported"
+    assert http.calls == []
 
 
 class _LegacyRun:

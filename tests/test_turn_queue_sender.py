@@ -585,8 +585,6 @@ class _ClaudeCarrierBackend:
 
         self.driver = ClaudeSDKClientDriver()
 
-    def supports_managed_turns(self) -> bool:
-        return True
 
     def is_quiescent(self, session) -> bool:
         return True

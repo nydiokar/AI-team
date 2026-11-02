@@ -761,14 +761,40 @@ async def _execute_task(
     and no legacy fallback (an unsupported backend raises a typed refusal before
     anything runs). Without ownership, only stateless/control actions may run."""
     managed = ownership is not None
-    payload = task_row.get("payload") or {}
+    payload = task_row.get("payload")
+    if payload is None:
+        payload = {}
     if isinstance(payload, str):
         try:
             payload = json.loads(payload)
-        except Exception:
-            payload = {}
+        except (json.JSONDecodeError, TypeError):
+            payload = None
 
+    if (
+        not isinstance(payload, dict)
+        or any(payload.get(key) is not None and not isinstance(payload[key], dict)
+               for key in ("metadata", "session"))
+        or not isinstance(payload.get("prompt", ""), str)
+        or (isinstance(payload.get("metadata"), dict)
+            and payload["metadata"].get("staged_file") is not None
+            and not isinstance(payload["metadata"]["staged_file"], dict))
+    ):
+        return {
+            "success": False, "output": "", "files_modified": [],
+            "errors": ["malformed task payload"], "error_class": "invalid_task_payload",
+            "execution_time": 0.0, "return_code": 1,
+            "timestamp": datetime.now(tz=timezone.utc).isoformat(),
+        }
     action = task_row.get("action", "run_oneoff")
+    if not managed and action in ("create_session", "resume_session", "compact_session"):
+        # Refuse before fetching/deleting any staged attachment or emitting
+        # invocation facts: the canonical queue is the only session entry.
+        return {
+            "success": False, "output": "", "files_modified": [],
+            "errors": ["session turns require a claimed queue attempt"],
+            "error_class": "managed_unsupported", "execution_time": 0.0,
+            "timestamp": datetime.now(tz=timezone.utc).isoformat(), "return_code": 1,
+        }
     if managed and action not in ("create_session", "resume_session", "compact_session"):
         return {
             "success": False,
@@ -1498,12 +1524,10 @@ class WorkerAgent:
         return True
 
     def _managed_backends(self) -> List[str]:
-        """Installed session adapters using the common carrier turn contract."""
-        return [
-            name for name in self.cfg.backends
-            if name in {"claude", "codex", "opencode-server"}
-            and (self._backends or {}).get(name) is not None
-        ]
+        """Registered adapters whose native runtime can honor queue turns."""
+        from src.backends.registry import available_session_backends
+
+        return list(available_session_backends(self.cfg.backends, self._backends or {}))
 
     # --- durable claim records (B2) ------------------------------------- #
     def _claim_record(self, task_id: str, **fields: Any) -> Dict[str, Any]:

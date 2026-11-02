@@ -887,9 +887,7 @@ class _SDKSession:
         # the next ResultMessage closes that turn and is served to it.
         # their echo, so a later echo still routes their reply as late_managed.
         self._turn_owner: Optional["_PendingTurn"] = None
-        # Managed correlation needs the CLI's user-message echo; the flag is
-        # decided per process (managed carrier ON) so a legacy-only worker's
-        # CLI stream is byte-identical to before.
+        # Every carrier turn requires the CLI's user-message echo for correlation.
         self._replay_user_messages: bool = True
         # [A82 Stage 3 rework 6] True once the reader loop has ended for ANY
         # reason (normal EOF on a clean CLI exit included): the CLI is gone, no

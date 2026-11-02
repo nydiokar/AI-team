@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import pytest
 
-from src.backends.claude_driver import _replay_user_messages_enabled
+from src.backends.claude_driver import _SDKSession
 from src.worker.config import WorkerConfig
 
 
@@ -43,6 +43,6 @@ def test_managed_turns_default_on(monkeypatch, value, expected):
         monkeypatch.setenv("WORKER_MANAGED_TURNS", value)
 
     # Config site (src/worker/config.py)
-    assert WorkerConfig.from_env().managed_turns is expected
+    assert not hasattr(WorkerConfig.from_env(), "managed_turns")
     # Driver site (src/backends/claude_driver.py) — must mirror, no split-brain
-    assert _replay_user_messages_enabled() is expected
+    assert _SDKSession("s", "/tmp", None, {})._replay_user_messages is True

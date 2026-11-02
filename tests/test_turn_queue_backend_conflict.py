@@ -105,8 +105,6 @@ class _Busy:
     def __init__(self, reason: str | None) -> None:
         self.reason = reason
 
-    def supports_managed_turns(self) -> bool:
-        return True
 
     def is_quiescent(self, session: Any) -> bool:
         return False
@@ -116,8 +114,7 @@ class _Busy:
 
 
 class _BusyNoReason:
-    def supports_managed_turns(self) -> bool:
-        return True
+    pass
 
     def is_quiescent(self, session: Any) -> bool:
         return False
@@ -218,11 +215,11 @@ class _SlowProbe:
     def __init__(self) -> None:
         self.calls = 0
 
-    def supports_managed_turns(self) -> bool:
+    def __call__(self) -> bool:
         import time
 
         self.calls += 1
-        time.sleep(0.4)
+        time.sleep(0.3)
         return True
 
     def is_quiescent(self, session: Any) -> bool:
@@ -251,20 +248,23 @@ def _max_loop_stall(coro_factory) -> float:
     return asyncio.run(scenario())
 
 
-def test_capability_probe_in_the_managed_poll_never_blocks_the_event_loop(tmp_path):
+def test_capability_probe_in_the_managed_poll_never_blocks_the_event_loop(tmp_path, monkeypatch):
     w = _worker(tmp_path, _RecordingHTTP())
     probe = _SlowProbe()
-    w._backends = {"claude": probe}
+    w._backends = {"codex": probe}
+    w.cfg.backends = ["codex"]
+    monkeypatch.setattr("src.backends.registry.codex_runtime_available", probe)
     assert _max_loop_stall(lambda: w._fetch_pending_managed({})) < 0.2
     assert probe.calls == 1
 
 
-def test_capability_probe_in_the_task_gate_never_blocks_the_event_loop(tmp_path):
+def test_capability_probe_in_the_task_gate_never_blocks_the_event_loop(tmp_path, monkeypatch):
     w = _worker(tmp_path, _RecordingHTTP())
     probe = _SlowProbe()
     w._backends = {}  # the row's backend has no managed path: refused at the gate
-    w._backends["other"] = probe
-    w.cfg.backends = ["claude", "other"]
+    w._backends["codex"] = probe
+    w.cfg.backends = ["claude", "codex"]
+    monkeypatch.setattr("src.backends.registry.codex_runtime_available", probe)
     row = {"id": "t-p", "session_id": "s-p", "backend": "claude", "queue_protocol": 1}
     assert _max_loop_stall(lambda: w._handle_task(row)) < 0.2
     assert probe.calls == 1

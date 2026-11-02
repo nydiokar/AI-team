@@ -134,3 +134,62 @@ def test_carrier_control_survives_31_minutes_of_native_progress(monkeypatch):
         _row("resume_session"), {"claude": Progressing()}, ownership=control.ownership,
     ))
     assert out["success"] is True
+
+
+@pytest.mark.parametrize("available", [False, True])
+def test_codex_runtime_readiness_controls_worker_advertisement(monkeypatch, available):
+    monkeypatch.setattr("src.backends.registry.codex_runtime_available", lambda: available)
+    worker = WorkerAgent.__new__(WorkerAgent)
+    worker.cfg = SimpleNamespace(backends=["claude", "codex"])
+    worker._backends = {"claude": _Backend(), "codex": _Backend()}
+    assert worker._managed_backends() == (["claude", "codex"] if available else ["claude"])
+
+
+@pytest.mark.parametrize("action", ["create_session", "resume_session", "compact_session"])
+def test_unclaimed_session_refusal_precedes_staged_attachment_side_effects(action):
+    class NoHTTP:
+        def get_bytes(self, *args, **kwargs):
+            raise AssertionError("refused turn fetched an attachment")
+
+        def delete(self, *args, **kwargs):
+            raise AssertionError("refused turn deleted an attachment")
+
+    backend = _Backend()
+    row = _row(action)
+    row["payload"]["metadata"] = {"staged_file": {"file_id": "f", "filename": "spec.md"}}
+    out = asyncio.run(_execute_task(row, {"claude": backend}, http=NoHTTP()))
+    assert out["error_class"] == "managed_unsupported" and backend.calls == []
+
+
+@pytest.mark.parametrize("executable", [None, "/fake/codex"])
+def test_missing_or_unsupported_codex_runtime_is_not_advertised(monkeypatch, executable):
+    monkeypatch.setattr("src.backends.codex_native.resolve_codex_executable", lambda env: executable)
+    monkeypatch.setattr("src.backends.codex_native._managed_protocol_supported", lambda *a: False)
+    worker = WorkerAgent.__new__(WorkerAgent)
+    worker.cfg = SimpleNamespace(backends=["claude", "codex"])
+    worker._backends = {"claude": _Backend(), "codex": _Backend()}
+    assert worker._managed_backends() == ["claude"]
+
+
+def test_unavailable_probe_does_not_hide_healthy_adapters(monkeypatch):
+    def failed_probe():
+        raise OSError("runtime unavailable")
+    monkeypatch.setattr("src.backends.registry.codex_runtime_available", failed_probe)
+    worker = WorkerAgent.__new__(WorkerAgent)
+    worker.cfg = SimpleNamespace(backends=["claude", "codex"])
+    worker._backends = {"claude": _Backend(), "codex": _Backend()}
+    assert worker._managed_backends() == ["claude"]
+
+
+@pytest.mark.parametrize("payload", [
+    "[]", "broken JSON", [], False, 0, ["not", "an", "object"], {"metadata": ["bad"]},
+    {"session": ["bad"]}, {"prompt": ["bad"]},
+    {"metadata": {"staged_file": "bad"}},
+])
+def test_malformed_task_payload_is_rejected_before_backend_or_attachment_access(payload):
+    backend = _Backend()
+    row = _row("resume_session")
+    row["payload"] = payload
+    out = asyncio.run(_execute_task(row, {"claude": backend}, ownership=_ownership()))
+    assert out["success"] is False and out["error_class"] == "invalid_task_payload"
+    assert backend.calls == []

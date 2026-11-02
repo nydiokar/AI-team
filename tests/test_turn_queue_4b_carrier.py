@@ -223,7 +223,6 @@ def pooled_claude(monkeypatch):
     from src.backends.claude_code import ClaudeCodeBackend
     import src.core.test_guard as tg
 
-    monkeypatch.setenv("WORKER_MANAGED_TURNS", "1")
     monkeypatch.setattr(tg, "assert_live_calls_allowed", lambda name: None)
     script: dict = {}
     booted: List[Any] = []

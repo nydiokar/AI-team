@@ -299,13 +299,11 @@ def test_file_only_delivery_during_a_running_managed_turn_leaves_the_turn_and_se
     started, release = threading.Event(), threading.Event()
 
     class _Blocking:
-        def supports_managed_turns(self) -> bool:
-            return True
 
         def is_quiescent(self, session) -> bool:
             return True
 
-        def run_managed_turn(self, session, prompt, ownership, *, on_process=None, **_k):
+        def resume_session(self, session, prompt, *, turn, **_k):
             started.set()
             assert release.wait(10)
             return ExecutionResult(success=True, output="managed reply", errors=[], backend_session_id="n")
@@ -329,7 +327,10 @@ def test_file_only_delivery_during_a_running_managed_turn_leaves_the_turn_and_se
     async def scenario():
         rows = [r for r in await w._fetch_pending() if r["id"] == "t-1"]
         turn = asyncio.create_task(w._handle_task(rows[0]))
+        deadline = asyncio.get_running_loop().time() + 5
         while not started.is_set():
+            assert not turn.done(), "carrier failed before invoking the native turn"
+            assert asyncio.get_running_loop().time() < deadline, "carrier never invoked the turn"
             await asyncio.sleep(0.01)
         # The file-only delivery (the shape _deliver_staged_file_control enqueues).
         fid = f"fetch-staged-{STAGED['file_id']}"

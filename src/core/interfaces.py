@@ -6,6 +6,8 @@ from typing import Dict, List, Any, Optional
 from dataclasses import dataclass, field
 from enum import Enum
 
+from src.core.turn_liveness import TurnControl
+
 class TaskType(Enum):
     CODE_REVIEW = "code_review"
     SUMMARIZE = "summarize"
@@ -303,7 +305,7 @@ class CodingBackend(ABC):
 
     @abstractmethod
     def run_oneoff(
-        self, cwd: str, message: str, *, telemetry_context: Any = None,
+        self, cwd: str, message: str, *, turn: Optional[TurnControl] = None, telemetry_context: Any = None,
         telemetry_sink: Any = None
     ) -> ExecutionResult:
         """Run a single stateless turn with no session tracking."""
@@ -311,7 +313,7 @@ class CodingBackend(ABC):
 
     @abstractmethod
     def cancel(self, session: "Session", turn_uuid: str) -> bool:
-        """Best-effort cancellation of a running backend session."""
+        """Cancel only the identified turn; never interrupt a different owner."""
         pass
 
     @abstractmethod

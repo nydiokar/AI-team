@@ -1079,7 +1079,7 @@ def test_create_session_runs_the_first_prompt_under_the_turn_uuid(h):
     assert start["params"]["input"][0]["text"] == "first prompt"
 
 
-def test_deprecated_shims_delegate_to_the_natural_methods(h):
+def test_natural_methods_preserve_turn_identity_compaction_and_cancellation(h):
     first = session_turn(h.backend, h.session(), "hi", own(turn_uuid="uuid-shim"))  # → resume_session
     assert first.success, first.errors
     native = first.backend_session_id

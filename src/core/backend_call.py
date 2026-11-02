@@ -6,12 +6,13 @@ import inspect
 from typing import Any, Callable
 
 from src.core.interfaces import ExecutionResult, ExecutionTelemetry
+from src.core.turn_liveness import TurnControl
 
 
 def call_backend(
     method: Callable[..., Any],
     *args: Any,
-    turn: Any = None,
+    turn: TurnControl | None = None,
     telemetry_context: Any = None,
     telemetry_sink: Any = None,
 ) -> Any:

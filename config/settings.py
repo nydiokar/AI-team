@@ -176,8 +176,8 @@ class OpenCodeConfig:
     mode="server" → OpenCodeServerBackend (persistent HTTP server, env: OPENCODE_MODE=server)
 
     The active backend is selected by the gateway session's `backend` field:
-      "opencode"        → CLI mode
-      "opencode-server" → server mode
+      "opencode-server" → persistent server adapter
+    The retired "opencode" name is refused at admission.
     OPENCODE_MODE is reserved for future auto-wiring.
     """
     default_model: Optional[str] = "opencode/big-pickle"

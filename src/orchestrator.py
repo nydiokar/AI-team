@@ -16,7 +16,7 @@ ARCHITECTURE — data flow
                                                       │
                                               ┌───────┴────────┐
                                               ▼                ▼
-                                  _dispatch_or_run_local()  _process_task_remote()
+                                  carrier queue admission
                                   (local backend)           (mesh node)
                                               │
                                               ▼
@@ -41,12 +41,12 @@ SECTIONS (in source order)
   12. Task submission & context injection    (submit_instruction ★, compact/restart ctx)
   13. Worker loop                            (_task_worker coroutine pool)
   14. Task execution — local path            (process_task ★)
-  15. Task execution — remote path           (_process_task_remote)
+  15. Task execution — remote path           (carrier queue admission)
   16. Artifact write                         (_write_artifacts)
   17. Error classification & retry           (_classify_error, _get_retry_strategy)
   18. Events & telemetry                     (_emit_event, _emit_turn_telemetry)
   19. Status / session recording             (get_status, _write_session_summary)
-  20. Mesh routing                           (_run_backend_local, _dispatch_to_node)
+  20. Mesh routing                           (carrier assignment)
   21. Mesh DB shadow-write helpers           (_mesh_enqueue_task, reconcile)
   22. Proactive turns (reach-back)           (_handle_proactive_turn, _notify_proactive_turn)
 
@@ -1412,7 +1412,7 @@ class TaskOrchestrator(ITaskOrchestrator):
         session.last_result_summary = full_out[-400:] if len(full_out) > 400 else full_out
         session.last_files_modified = result_dict.get("files_modified") or []
         # Propagate the backend_session_id the worker established, exactly as the
-        # live dispatch path does (_dispatch_to_node). Without this the recovered
+        # managed effects consumer does. Without this the recovered
         # session has no backend_session_id and the next turn can't resume the
         # remote Claude session — it would silently start a fresh one.
         recovered_bsid = result_dict.get("backend_session_id", "")
@@ -4689,7 +4689,7 @@ class TaskOrchestrator(ITaskOrchestrator):
         owns the task's terminal state in the DB. We poll the row until it
         reaches a terminal status, then report the worker's *real* result to
         Telegram — never a fabricated one. This is the startup half of the
-        detach/reattach handoff (the shutdown half lives in _dispatch_to_node).
+        detach/reattach handoff for durable turn ownership.
 
         Pending pickup is bounded by the same oneoff_queue_timeout. Once the
         worker has claimed the row, that queue timeout no longer applies.
@@ -5516,7 +5516,7 @@ class TaskOrchestrator(ITaskOrchestrator):
         the HTTP handlers and the orchestrator share one get_registry() singleton.
 
         When embedded is off, node discovery in the remote path falls through to
-        the shared DB (see _process_task_remote), so dispatch still works.
+        the shared DB for carrier admission, so dispatch still works.
         """
         if not config.mesh.enabled:
             return
@@ -8219,8 +8219,8 @@ class TaskOrchestrator(ITaskOrchestrator):
     # ===========================================================================
     # TASK EXECUTION — LOCAL PATH                                ★ ENTRY POINT
     # process_task() is THE execution entry point.  It decides local vs remote:
-    #   Local  → _dispatch_or_run_local() → _run_backend_local()
-    #   Remote → _process_task_remote() (MESH_ENABLED + session.machine_id set)
+    #   Stateless work → native backend oneoff wrapper.
+    #   Session turns → canonical carrier queue; this pipeline handles oneoffs.
     # After execution: _write_artifacts(), _emit_event(), session state update.
     # ===========================================================================
 
@@ -8242,7 +8242,7 @@ class TaskOrchestrator(ITaskOrchestrator):
         """Process a single task through the complete pipeline.
 
         Steps:
-        1) Execute the task via backend-native session resume or stateless Claude bridge
+        1) Execute stateless work through its native backend oneoff wrapper
         2) Summarize results with LLAMA (or fallback) for `summaries/*.txt`
         3) Run validation engine and attach metadata
         4) Persist `results/*.json` and emit events
@@ -8274,22 +8274,18 @@ class TaskOrchestrator(ITaskOrchestrator):
             backoff_mult = max(1, getattr(config.validation, "backoff_multiplier", 2))
             attempt = 0
             last_result: Optional[TaskResult] = None
-            session_recreated = False
             next_spawn_reason = "initial"
             # Per-task timeout override via frontmatter metadata `timeout_sec`, else system default
             try:
                 timeout_s = int(task.metadata.get("timeout_sec", config.system.task_timeout)) if getattr(task, "metadata", None) else config.system.task_timeout
             except Exception:
                 timeout_s = config.system.task_timeout
-            cancel_ev = self._task_cancel_events.get(task.id)
-
-            session = None
-            route_remote = False
+            cancel_ev = self._task_cancel_events.setdefault(task.id, asyncio.Event())
 
             # Defense-in-depth for controller-only deployments. Admission rejects
             # this path before queueing; retain this guard for direct callers that
             # intentionally bypass _enqueue_task in tests or maintenance code.
-            if not route_remote and not config.system.local_execution_enabled:
+            if not config.system.local_execution_enabled:
                 return TaskResult(
                     task_id=task.id,
                     success=False,
@@ -8300,20 +8296,16 @@ class TaskOrchestrator(ITaskOrchestrator):
                     timestamp=now_iso(),
                 )
 
-            while not route_remote:
+            while True:
                 attempt += 1
                 from src.core.telemetry import TelemetryContext
-                from config.models import resolve_model
                 local_action = "run_oneoff"
                 telemetry_context = TelemetryContext.create(
                     turn_id=task.id,
                     node_id=socket.gethostname(),
-                    session_id=session_id or None,
-                    backend=session.backend if session else self._resolve_task_backend(task),
-                    # Record the RESOLVED model actually launched (default → catalog),
-                    # not the raw stored NULL — otherwise the turn ledger reports no
-                    # model for every default session. Mirrors the driver's resolve_model.
-                    model=resolve_model(session) if session else None,
+                    session_id=None,
+                    backend=self._resolve_task_backend(task),
+                    model=None,
                     source="gateway",
                     attempt=attempt,
                     spawn_reason=next_spawn_reason,
@@ -8346,9 +8338,7 @@ class TaskOrchestrator(ITaskOrchestrator):
                     model=telemetry_context.model,
                 )
                 # Run execution as a task to allow timeout/cancel
-                # Use session backend (with native resume) when task belongs to a session.
-                # For non-session tasks, use the native backend directly instead of
-                # the legacy Claude bridge/task-file execution path.
+                # Stateless work uses the oneoff wrapper around the same adapter.
                 backend_name = str((task.metadata or {}).get("backend") or "claude").strip().lower()
                 backend = self._backends.get(backend_name, self._backends["claude"])
                 cwd_override = str((task.metadata or {}).get("cwd") or "").strip()
@@ -8356,6 +8346,7 @@ class TaskOrchestrator(ITaskOrchestrator):
                     cwd_override = str(getattr(config.claude, "base_cwd", "") or "").strip()
                 from src.core.backend_call import call_backend
                 from src.core.turn_liveness import turn_control
+                from src.core.interfaces import Session
                 oneoff_turn = turn_control(f"{task.id}-{attempt}")
                 oneoff_session = Session(
                     session_id=f"oneoff-{oneoff_turn.turn_uuid}", backend=backend_name,
@@ -8384,7 +8375,7 @@ class TaskOrchestrator(ITaskOrchestrator):
                     heartbeat_interval = getattr(config.system, "task_heartbeat_interval_sec", 300)
                     if self.telegram_interface and heartbeat_interval > 0:
                         heartbeat_task = asyncio.create_task(
-                            self._send_task_heartbeats(task, session, start_time, heartbeat_interval, timeout_s)
+                            self._send_task_heartbeats(task, None, start_time, heartbeat_interval, timeout_s)
                         )
                     done, pending = await asyncio.wait(wait_set, return_when=asyncio.FIRST_COMPLETED)
                     if exec_task in done:
@@ -8392,25 +8383,6 @@ class TaskOrchestrator(ITaskOrchestrator):
                         # Normalize ExecutionResult (from backends) to TaskResult
                         from src.core.interfaces import ExecutionResult as _ER
                         if isinstance(raw, _ER):
-                            # Persist backend session ID back onto the session record.
-                            # Save on both success and failure — if the backend created/
-                            # recreated a session (e.g. after server restart) but the
-                            # first message failed, we still want the new ID persisted so
-                            # the next turn can resume rather than starting fresh again.
-                            if session and (
-                                raw.backend_session_id
-                                or session.cache_health != "unknown"
-                                or session.driver_status
-                            ):
-                                # _observe_cache_health mutates cache_health /
-                                # cache_unhealthy_count in place on this session
-                                # object during the backend call; persist them
-                                # (alongside any new backend_session_id) so the
-                                # cache_unhealthy_count>=2 guard survives across
-                                # turns rather than resetting each time.
-                                if raw.backend_session_id:
-                                    session.backend_session_id = raw.backend_session_id
-                                self.session_store.save(session)
                             result = TaskResult(
                                 task_id=task.id,
                                 success=raw.success,
@@ -8458,16 +8430,13 @@ class TaskOrchestrator(ITaskOrchestrator):
                             backend=backend_name,
                         )
                         with contextlib.suppress(Exception):
-                            backend.cancel(oneoff_session, oneoff_turn.turn_uuid)
-                        exec_task.cancel()
-                        with contextlib.suppress(asyncio.CancelledError):
-                            await exec_task
+                            await asyncio.to_thread(backend.cancel, oneoff_session, oneoff_turn.turn_uuid)
+                        # Keep the native thread tracked until the adapter confirms
+                        # cancellation or returns its bounded recovery outcome.
+                        await asyncio.shield(exec_task)
                         execution_time = time.time() - start_time
                         self._emit_event("cancelled", task, {"when": "during_execution"})
                         interrupted = task.id in self._shutdown_interrupted_tasks
-                        if session:
-                            session.status = SessionStatus.ERROR if interrupted else SessionStatus.CANCELLED
-                            self.session_store.save(session)
                         result = TaskResult(
                             task_id=task.id,
                             success=False,
@@ -8501,10 +8470,10 @@ class TaskOrchestrator(ITaskOrchestrator):
                             backend=backend_name,
                         )
                         with contextlib.suppress(Exception):
-                            backend.cancel(oneoff_session, oneoff_turn.turn_uuid)
-                        exec_task.cancel()
-                        with contextlib.suppress(asyncio.CancelledError):
-                            await exec_task
+                            await asyncio.to_thread(backend.cancel, oneoff_session, oneoff_turn.turn_uuid)
+                        # Keep the native thread tracked until the adapter confirms
+                        # cancellation or returns its bounded recovery outcome.
+                        await asyncio.shield(exec_task)
                         execution_time = time.time() - start_time
                         self._emit_event("timeout", task, {"timeout_s": timeout_s})
                         self._emit_turn_telemetry(
@@ -8517,9 +8486,6 @@ class TaskOrchestrator(ITaskOrchestrator):
                             invocation_id=telemetry_context.invocation_id,
                             backend=backend_name,
                         )
-                        if session:
-                            session.status = SessionStatus.ERROR
-                            self.session_store.save(session)
                         elapsed_min = int(execution_time // 60)
                         timeout_min = int(timeout_s // 60)
                         timeout_error = (
@@ -8574,25 +8540,6 @@ class TaskOrchestrator(ITaskOrchestrator):
                     model=telemetry_context.model,
                 )
 
-                if session and not result.success and not session_recreated and self._is_missing_backend_conversation(result):
-                    stale_id = session.backend_session_id
-                    session.backend_session_id = ""
-                    session.status = SessionStatus.BUSY
-                    self.session_store.save(session)
-                    session_recreated = True
-                    logger.warning(
-                        "event=session_recreated task_id=%s stale_backend_session_id=%s reason=missing_conversation",
-                        task.id,
-                        stale_id,
-                    )
-                    self._emit_event(
-                        "session_recreated",
-                        task,
-                        {"stale_backend_session_id": stale_id, "reason": "missing_conversation"},
-                    )
-                    last_result = result
-                    next_spawn_reason = "session_recreate"
-                    continue
 
                 # Determine retry strategy per error class
                 strategy = self._get_retry_strategy(error_class)
@@ -8630,41 +8577,27 @@ class TaskOrchestrator(ITaskOrchestrator):
             # retry-eligible usage_limit/rate_limit turn would never get retried).
             _reclassify_salvaged_turn_success(last_result)
 
-            # Step 4: Summarize results with LLAMA — skip for session tasks so
-            # Claude's actual response is preserved unmodified in output.
-            if not session_id:
-                logger.debug(f"Step 4: Summarizing results for task {task.id}")
-                summary = self.llama_mediator.summarize_result(last_result, task)
-                last_result.output = summary + "\n\n" + last_result.output
-                logger.info(f"event=summarized task_id={task.id}")
-                self._emit_event("summarized", task)
-            else:
-                logger.debug(f"Step 4: Skipping LLAMA summarization for session task {task.id}")
+            # Step 4: Summarize stateless work with the existing mediator.
+            logger.debug(f"Step 4: Summarizing results for task {task.id}")
+            summary = self.llama_mediator.summarize_result(last_result, task)
+            last_result.output = summary + "\n\n" + last_result.output
+            logger.info(f"event=summarized task_id={task.id}")
+            self._emit_event("summarized", task)
             
-            # Step 5: Validation pass (MVP) — skip sentence-transformer similarity
-            # for session tasks; the llama check is meaningless there and triggers
-            # the expensive SentenceTransformer encode on every turn.
+            # Step 5: Validate the stateless result using the existing checks.
             try:
-                if session_id:
-                    llama_validation = self.validation_engine.validate_task_result(
+                validation_summary = {
+                    "llama": self.validation_engine.validate_llama_output(
+                        input_text=task.prompt or "",
+                        output=last_result.output or "",
+                        task_type=task.type,
+                    ).__dict__,
+                    "result": self.validation_engine.validate_task_result(
                         result=last_result,
                         expected_files=task.target_files or [],
                         task_type=task.type,
-                    ).__dict__
-                    validation_summary = {"llama": {"valid": True, "skipped": True}, "result": llama_validation}
-                else:
-                    validation_summary = {
-                        "llama": self.validation_engine.validate_llama_output(
-                            input_text=task.prompt or "",
-                            output=last_result.output or "",
-                            task_type=task.type,
-                        ).__dict__,
-                        "result": self.validation_engine.validate_task_result(
-                            result=last_result,
-                            expected_files=task.target_files or [],
-                            task_type=task.type,
-                        ).__dict__,
-                    }
+                    ).__dict__,
+                }
                 # Attach lightweight validation data into parsed_output for artifacts
                 if isinstance(last_result.parsed_output, dict):
                     last_result.parsed_output.setdefault("validation", validation_summary)
@@ -8701,372 +8634,9 @@ class TaskOrchestrator(ITaskOrchestrator):
             )
 
     # ===========================================================================
-    # TASK EXECUTION — REMOTE PATH  (MESH_ENABLED + session.machine_id set)
-    # _process_task_remote() mirrors process_task()'s bookkeeping but dispatches
-    # to the remote node via _dispatch_to_node() and polls for completion.
-    # Session-affinity is the hard correctness invariant here: this method is
-    # only reached when session.machine_id names a node that is NOT this host.
+    # RESULT CLASSIFICATION — shared with the canonical turn effects consumer.
     # ===========================================================================
 
-    async def _process_task_remote(
-        self,
-        task: "Task",
-        session: Any,
-        start_time: float,
-        timeout_s: int,
-    ) -> "TaskResult":
-        """Execute a mesh-pinned session's task on its assigned remote node.
-
-        Only reachable when `MESH_ENABLED=true` AND `session.machine_id` is
-        set — see the routing check in `process_task`. Mirrors the bookkeeping
-        `process_task`'s local retry loop performs (BUSY status, heartbeats,
-        cancellation, error classification, session error state) around a
-        single call to `_dispatch_to_node`, which enqueues the task, waits for
-        the pinned worker to claim and post a result, and returns a terminal
-        `TaskResult`.
-
-        Session affinity is a hard requirement: if the pinned node is not
-        registered or not online, this fails loudly with no local fallback —
-        silently running on this machine would corrupt `backend_session_id`
-        continuity, since backend sessions are machine-local.
-        """
-        from src.control.node_registry import get_registry
-        from src.core.observability import set_log_context
-
-        # Correlate every log line + event emitted during this remote dispatch
-        # with the task and session, across this gateway's logs and (by the same
-        # task_id) the worker's logs on the remote machine.
-        set_log_context(task_id=task.id, session_id=session.session_id)
-
-        backend_name = session.backend
-        session.status = SessionStatus.BUSY
-        session.last_user_message = task.prompt
-        self.session_store.save(session)
-
-        def _routing_failure(msg: str) -> "TaskResult":
-            logger.error("event=mesh_routing_failed task_id=%s session_id=%s machine_id=%s reason=%s",
-                         task.id, session.session_id, session.machine_id, msg)
-            self._emit_event("mesh_routing_failed", task, {"machine_id": session.machine_id, "reason": msg})
-            result = TaskResult(
-                task_id=task.id,
-                success=False,
-                output="",
-                errors=[msg],
-                files_modified=[],
-                execution_time=time.time() - start_time,
-                timestamp=now_iso(),
-            )
-            setattr(result, "backend_name", backend_name)
-            return result
-
-        registry = get_registry()
-
-        def _check_pinned_liveness() -> Tuple[Any, bool]:
-            """Return ``(node_handle_or_None, is_online)`` for the pinned node.
-
-            Checks the in-memory registry first, then falls back to the shared
-            DB. The in-memory registry is only populated when this process also
-            runs the task server (co-located deployment); in a split setup, or
-            after a gateway restart that wiped the in-memory registry, the node
-            may only exist in the DB — without the fallback a live node reads as
-            offline and needlessly kills the session. Used both for the initial
-            check and for each poll during the A18 offline grace hold."""
-            _node = registry.get(session.machine_id)
-            if _node is not None and _node.status == "online":
-                return _node, True
-            try:
-                from src.control.db import get_db as _get_db
-                _db = _get_db()
-                if _db is not None:
-                    _row = _db.get_node(session.machine_id)
-                    if _row and _row.get("status") == "online":
-                        return _node, True
-            except Exception:
-                logger.warning(
-                    "event=affinity_liveness_db_check_failed task_id=%s machine_id=%s",
-                    task.id, session.machine_id, exc_info=True,
-                )
-            return _node, False
-
-        node, node_online = _check_pinned_liveness()
-
-        if not node_online:
-            # A18 — pinned-worker offline fallback. `grace=0` ⇒ disabled: reproduce
-            # the pre-A18 (A11) behavior byte-for-byte (immediate honest fail,
-            # terminal ERROR, no hold). `grace>0` ⇒ bounded hold-and-requeue: a
-            # transient worker blip no longer permanently kills a healthy session.
-            grace_sec = max(0, int(getattr(config.mesh, "affinity_offline_grace_sec", 0) or 0))
-            if grace_sec <= 0:
-                result = _routing_failure(f"Node {session.machine_id!r} is offline; cannot continue session (no local fallback — affinity is required)")
-                session.status = SessionStatus.ERROR
-                self.session_store.save(session)
-                result.error_class = self._classify_error(result)
-                result.retries = 0
-                return result
-
-            # Option A — bounded hold-and-requeue. The pinned node is offline right
-            # now, but the outage may clear within the grace window. Hold the
-            # session in a distinct, honest PAUSED state and poll liveness. The
-            # turn is NEVER relocated: it is only dispatched (below) once the node
-            # is confirmed online again, and the mesh claim filter (db.py) still
-            # guarantees only the pinned node can ever claim it. A11 invariant is
-            # preserved exactly — no off-host execution, ever.
-            poll_interval = max(0.5, float(getattr(config.mesh, "affinity_offline_poll_interval_sec", 5.0) or 5.0))
-            poll_interval = min(poll_interval, float(grace_sec))
-            deadline = time.time() + grace_sec
-
-            logger.warning(
-                "event=affinity_hold_started task_id=%s session_id=%s machine_id=%s grace_sec=%s poll_sec=%.1f",
-                task.id, session.session_id, session.machine_id, grace_sec, poll_interval,
-            )
-            self._emit_event("affinity_hold_started", task, {
-                "session_id": session.session_id,
-                "machine_id": session.machine_id,
-                "grace_sec": grace_sec,
-            })
-            session.status = SessionStatus.PAUSED_PINNED_NODE_OFFLINE
-            self.session_store.save(session)
-
-            hold_cancel_ev = self._task_cancel_events.get(task.id)
-            polls = 0
-            while time.time() < deadline:
-                # Honor an operator cancel during the hold rather than pinning the
-                # session to a node that may never return.
-                if hold_cancel_ev is not None and hold_cancel_ev.is_set():
-                    break
-                await asyncio.sleep(min(poll_interval, max(0.0, deadline - time.time())))
-                polls += 1
-                node, node_online = _check_pinned_liveness()
-                if node_online:
-                    break
-
-            if not node_online:
-                # Grace expired (or cancelled) with the node still down. Honest,
-                # resumable terminal state + a distinct event — the operator can
-                # retry once the node returns, or re-pin the session to another
-                # node. Not a bare ERROR; not an off-host fallback.
-                cancelled = hold_cancel_ev is not None and hold_cancel_ev.is_set()
-                reason = (
-                    f"Node {session.machine_id!r} still offline after {grace_sec}s affinity "
-                    f"grace window; session paused (retry when the node returns, or re-pin to "
-                    f"another node). No off-host fallback — affinity is required."
-                )
-                logger.error(
-                    "event=affinity_offline_timeout task_id=%s session_id=%s machine_id=%s "
-                    "grace_sec=%s polls=%s cancelled=%s",
-                    task.id, session.session_id, session.machine_id, grace_sec, polls, cancelled,
-                )
-                self._emit_event("affinity_offline_timeout", task, {
-                    "session_id": session.session_id,
-                    "machine_id": session.machine_id,
-                    "grace_sec": grace_sec,
-                    "polls": polls,
-                    "cancelled": cancelled,
-                })
-                result = TaskResult(
-                    task_id=task.id,
-                    success=False,
-                    output="",
-                    errors=[reason],
-                    files_modified=[],
-                    execution_time=time.time() - start_time,
-                    timestamp=now_iso(),
-                )
-                setattr(result, "backend_name", backend_name)
-                session.status = (
-                    SessionStatus.CANCELLED if cancelled else SessionStatus.PINNED_NODE_OFFLINE
-                )
-                self.session_store.save(session)
-                result.error_class = self._classify_error(result)
-                result.retries = polls
-                return result
-
-            # Node re-registered within the grace window — the blip was invisible
-            # to the operator. Resume normal dispatch below (emits mesh_dispatch).
-            logger.info(
-                "event=affinity_hold_resolved task_id=%s session_id=%s machine_id=%s polls=%s",
-                task.id, session.session_id, session.machine_id, polls,
-            )
-            self._emit_event("affinity_hold_resolved", task, {
-                "session_id": session.session_id,
-                "machine_id": session.machine_id,
-                "polls": polls,
-            })
-            session.status = SessionStatus.BUSY
-            self.session_store.save(session)
-
-        cancel_ev = self._task_cancel_events.get(task.id)
-        heartbeat_task: Optional[asyncio.Task] = None
-        heartbeat_interval = getattr(config.system, "task_heartbeat_interval_sec", 300)
-        try:
-            try:
-                if self.telegram_interface and heartbeat_interval > 0:
-                    heartbeat_task = asyncio.create_task(
-                        self._send_task_heartbeats(task, session, start_time, heartbeat_interval, timeout_s)
-                    )
-                # node may be None here when liveness was confirmed via the DB
-                # fallback (the in-memory registry didn't have it). machine_id is
-                # the reliable identifier in every case.
-                target_node = node.node_id if node is not None else session.machine_id
-                # A18/A11 defense-in-depth: a pinned turn dispatches to its own
-                # node or not at all. The mesh claim filter (db.py) already keeps
-                # the local worker pool from ever claiming a pinned task; enforce
-                # the invariant here too so a routing regression fails CLOSED
-                # rather than silently forking the conversation on a substitute
-                # host. Deliberately NOT an `assert` — this is a hard correctness
-                # invariant that must survive `python -O` / PYTHONOPTIMIZE, which
-                # strips asserts. Never reached for unpinned/mesh-disabled work.
-                if target_node != session.machine_id:
-                    result = _routing_failure(
-                        f"affinity violation: session pinned to {session.machine_id!r} "
-                        f"but dispatch target resolved to {target_node!r}; refusing off-host dispatch"
-                    )
-                    session.status = SessionStatus.ERROR
-                    self.session_store.save(session)
-                    result.error_class = self._classify_error(result)
-                    result.retries = 0
-                    return result
-                logger.info("mesh_dispatch backend=%s -> %s", backend_name, target_node)
-                self._emit_event("mesh_dispatch", task, {
-                    "backend": backend_name,
-                    "target_node": target_node,
-                })
-                # A11 follow-up: attribute this turn's execution_node_id to the
-                # remote node instead of leaving it null. The worker's own rich
-                # per-invocation telemetry (tool calls, model usage) ships
-                # separately via the worker's own sink and may or may not arrive
-                # depending on its connectivity to this gateway (see the A10 §T1
-                # revalidation: it didn't, for the mesh path exercised there).
-                # This pair of events is the one fact the gateway can assert
-                # unconditionally around the dispatch call — that execution
-                # happened on `target_node`, not here. Without it,
-                # telemetry_projection.project_turn() has no event carrying
-                # event_name in ("invocation.started", "process.spawned") for
-                # mesh-dispatched turns, so execution_node_id (and
-                # llm_invocations.node_id, derived from it) silently default to
-                # null. If the worker's own telemetry later starts arriving too,
-                # this will show as a second invocation row for the same
-                # turn_id — acceptable overlap, not a correctness bug, since
-                # each invocation_id is independently minted.
-                _mesh_invocation_id = None
-                try:
-                    from src.core.telemetry import (
-                        EMITTER_PROCESS_INSTANCE_ID,
-                        build_event,
-                        new_telemetry_id,
-                    )
-                    from config.models import resolve_model
-                    # Resolved (gateway-side), not the raw session.model — mirrors
-                    # _session_dispatch_payload so the gateway's own mesh_dispatch
-                    # telemetry never reports a blank/wrong model for default-model turns.
-                    _mesh_model = resolve_model(session)
-                    _mesh_invocation_id = new_telemetry_id("inv")
-                    self._telemetry_sink.emit(
-                        build_event(
-                            "invocation.started",
-                            turn_id=task.id,
-                            session_id=session.session_id,
-                            node_id=target_node,
-                            emitter_process_instance_id=EMITTER_PROCESS_INSTANCE_ID,
-                            source="worker",
-                            invocation_id=_mesh_invocation_id,
-                            backend=backend_name,
-                            model=_mesh_model,
-                            attributes={"action": "mesh_dispatch"},
-                        )
-                    )
-                except Exception:
-                    logger.warning("event=mesh_dispatch_telemetry_emit_failed task_id=%s", task.id, exc_info=True)
-                result = await self._dispatch_to_node(task, session, node)
-                if _mesh_invocation_id is not None:
-                    try:
-                        self._telemetry_sink.emit(
-                            build_event(
-                                "invocation.completed",
-                                turn_id=task.id,
-                                session_id=session.session_id,
-                                node_id=target_node,
-                                emitter_process_instance_id=EMITTER_PROCESS_INSTANCE_ID,
-                                source="worker",
-                                invocation_id=_mesh_invocation_id,
-                                backend=backend_name,
-                                model=_mesh_model,
-                                attributes={
-                                    "status": "success" if getattr(result, "success", False) else "failed",
-                                    "duration_ms": int(getattr(result, "execution_time", 0.0) * 1000),
-                                    "exit_code": getattr(result, "return_code", None),
-                                },
-                            )
-                        )
-                    except Exception:
-                        logger.warning("event=mesh_dispatch_telemetry_emit_failed task_id=%s", task.id, exc_info=True)
-            finally:
-                if heartbeat_task and not heartbeat_task.done():
-                    heartbeat_task.cancel()
-                    with contextlib.suppress(asyncio.CancelledError):
-                        await heartbeat_task
-        except Exception as exc:
-            # Unexpected dispatch failure — return a clean error and unblock
-            # the session rather than leaving it stuck as BUSY.
-            result = _routing_failure(f"Unexpected dispatch error: {exc}")
-
-        result.error_class = self._classify_error(result)
-        result.retries = 0
-        _reclassify_salvaged_turn_success(result)
-
-        # Detached = gateway is shutting down while the remote worker keeps
-        # running. Leave the session BUSY (do not touch its status) so startup
-        # recovery reattaches and reports the worker's real result. Marking it
-        # CANCELLED/ERROR here would be the fabricated state we're fixing.
-        if getattr(result, "detached", False):
-            logger.info(
-                "event=mesh_dispatch_detached task_id=%s session_id=%s reason=gateway_shutdown",
-                task.id, session.session_id,
-            )
-            return result
-
-        session.status = _session_status_after_result(
-            result,
-            cancel_requested=cancel_ev is not None and cancel_ev.is_set(),
-        )
-        self.session_store.save(session)
-
-        # Annotate failure errors with the node name so users see *which* machine failed.
-        node_label = node.node_id if node is not None else session.machine_id
-        if not result.success and node_label:
-            if not result.errors:
-                result.errors = [f"[{node_label}] Task failed with no error details"]
-            else:
-                result.errors = [
-                    (f"[{node_label}] {e}" if e.strip() else f"[{node_label}] Task failed (no error message)")
-                    if not str(e).startswith(f"[{node_label}]") else e
-                    for e in result.errors
-                ]
-
-        first_error = result.errors[0] if result.errors else ""
-        logger.info(
-            "mesh_result success=%s elapsed=%.1fs%s",
-            result.success, result.execution_time,
-            "" if result.success else f" error={first_error}",
-        )
-        error_detail = getattr(result, "error_detail", "") or getattr(result, "raw_stderr", "") or ""
-        if not result.success and error_detail:
-            logger.info(
-                "mesh_result_detail task_id=%s node=%s detail=%s",
-                task.id,
-                node_label,
-                error_detail[:4000],
-            )
-        self._emit_event("mesh_result", task, {
-            "success": result.success,
-            "target_node": node.node_id if node is not None else session.machine_id,
-            "duration_s": round(result.execution_time, 3),
-            "error_class": result.error_class,
-            "error": first_error,
-            "error_detail": error_detail[:4000],
-        })
-
-        return result
 
     # ===========================================================================
     # ARTIFACT WRITE & CONTENT RECONSTRUCTION
@@ -9393,10 +8963,9 @@ created: {task.created}
                 # cancellation must never call backend.cancel(session).
                 self._emit_event("cancel_requested", t, None)
                 return True
-            # Best-effort cancel running exec task
-            task = self._running_exec_tasks.get(task_id)
-            if task is not None and not task.done():
-                task.cancel()
+            # The running oneoff consumes this event and cancels its exact
+            # native turn before awaiting its outcome. Cancelling the asyncio
+            # wrapper here would detach the still-running backend thread.
             # Emit cancel_requested event
             self._emit_event("cancel_requested", t if t else None, None)
             return True
@@ -9884,23 +9453,8 @@ Generated from user description: {description}
 
     # ===========================================================================
     # MESH ROUTING
-    # _run_backend_local()     — execute task on THIS machine using backend pool.
-    # _dispatch_to_node()      — HTTP POST to remote node's task server; polls
-    #                            for completion, handles pinned-node-offline grace.
-    # _dispatch_or_run_local() — top-level router: local vs remote decision gate.
-    # _nudge_worker_for_dispatch() — wake a sleeping worker daemon on the node.
-    # _refresh_capable_nodes_before_routing() — pre-flight node capability check.
-    # _dispatch_remote_close() — send a close signal to the node when a session ends.
-    #
-    # HARD INVARIANT: a session with machine_id set NEVER runs on a substitute
-    # node — it waits, errors (PINNED_NODE_OFFLINE), or is operator re-pinned.
-    #
-    # FUTURE EXTRACTION → MeshRouter (post-M4, ~14 methods, highest value extract).
-    #   This is the largest coherent cluster.  High coupling TODAY: needs
-    #   session_store, push_service, notifier, _mesh_complete_task, _emit_event.
-    #   Extract only once M4 executor shape is settled (no more routing additions).
-    #   When done, inject deps via constructor; keep the affinity invariant as a
-    #   MeshRouter-level assertion, not scattered across process_task callers.
+    # Session execution belongs to the carrier. Gateway methods below dispatch
+    # only control signals and maintain durable admission/projection state.
     # ===========================================================================
 
 
@@ -9960,261 +9514,6 @@ Generated from user description: {description}
             session_id, machine_id, task_id,
         )
 
-    async def _dispatch_to_node(
-        self,
-        task: "Task",
-        session: Optional[Any],
-        node: Any,
-    ) -> "TaskResult":
-        """Enqueue task on the DB as pending (it is already enqueued by _mesh_enqueue_task).
-
-        Then poll the DB until it reaches completed/failed status, up to
-        `mesh.oneoff_queue_timeout_sec` seconds. Once a worker claims it, the
-        queue timeout no longer applies; the worker owns execution and we wait
-        for the terminal DB state.
-
-        The session dict is embedded in the payload by _mesh_enqueue_task so
-        the worker can reconstruct the Session object.
-        """
-        import asyncio as _aio
-        from src.control.db import get_db
-
-        db = get_db()
-        if db is None:
-            # DB unavailable: cannot dispatch to worker. Fail loudly rather
-            # than silently falling back to local execution, which would break
-            # backend_session_id continuity for machine-pinned sessions.
-            result = TaskResult(
-                task_id=task.id,
-                success=False,
-                output="",
-                errors=["Mesh DB unavailable; cannot dispatch to remote worker"],
-                files_modified=[],
-                execution_time=0.0,
-                timestamp=now_iso(),
-            )
-            setattr(result, "backend_name", self._resolve_task_backend(task))
-            return result
-
-        pickup_timeout_sec = getattr(config.mesh, "oneoff_queue_timeout_sec", 600)
-        pickup_deadline = time.time() + pickup_timeout_sec
-        poll_interval = 3.0
-        first_poll = True
-        codex_cancel_sent = False
-        target_node_id = getattr(node, "node_id", None) or (session.machine_id if session else "")
-        await _aio.to_thread(self._nudge_worker_for_dispatch, node, target_node_id, db)
-
-        while True:
-            row = db.get_task(task.id)
-            if row is None and first_poll:
-                # Row not found on the very first poll — _mesh_enqueue_task
-                # must have failed silently. Fail fast instead of burning the
-                # full timeout (up to 600s) before the user sees an error.
-                result = TaskResult(
-                    task_id=task.id,
-                    success=False,
-                    output="",
-                    errors=["Task row missing from DB — enqueue failed before dispatch; check logs for mesh_enqueue_failed"],
-                    files_modified=[],
-                    execution_time=0.0,
-                    timestamp=now_iso(),
-                )
-                setattr(result, "backend_name", self._resolve_task_backend(task))
-                return result
-            first_poll = False
-            if row:
-                status = row.get("status", "pending")
-                if status == "completed":
-                    result_raw = row.get("result")
-                    try:
-                        r = json.loads(result_raw) if isinstance(result_raw, str) else (result_raw or {})
-                    except Exception:
-                        r = {}
-                    # Propagate the worker's backend_session_id so the next
-                    # turn can resume the remote-side backend session.
-                    new_bsid = r.get("backend_session_id", "")
-                    if session:
-                        changed = False
-                        if new_bsid:
-                            session.backend_session_id = new_bsid
-                            changed = True
-                        for attr in ("driver_type", "driver_status", "cache_health"):
-                            value = r.get(attr)
-                            if value is not None:
-                                setattr(session, attr, value)
-                                changed = True
-                        if "cache_unhealthy_count" in r:
-                            session.cache_unhealthy_count = int(r.get("cache_unhealthy_count") or 0)
-                            changed = True
-                        if "previous_backend_session_ids" in r:
-                            session.previous_backend_session_ids = r.get("previous_backend_session_ids") or []
-                            changed = True
-                        if changed:
-                            self.session_store.save(session)
-                    worker_output = r.get("output", "")
-                    result = TaskResult(
-                        task_id=task.id,
-                        success=r.get("success", True),
-                        output=worker_output,
-                        errors=r.get("errors") or [],
-                        files_modified=r.get("files_modified") or [],
-                        execution_time=r.get("execution_time", 0.0),
-                        timestamp=r.get("timestamp", now_iso()),
-                        return_code=r.get("return_code", 0),
-                        # Prefer the worker's real transcript when it ships one
-                        # (full backend NDJSON); fall back to mirroring `output`
-                        # for older workers so the artifact JSON (which persists
-                        # raw_stdout, not output) never ends up empty (T2).
-                        raw_stdout=r.get("raw_stdout") or worker_output,
-                        raw_stderr=r.get("raw_stderr") or "",
-                        error_class=str(r.get("error_class") or row.get("error_class") or ""),
-                    )
-                    mark_reply_mirror(result, not r.get("raw_stdout") and bool(worker_output))
-                    setattr(result, "usage", r.get("usage"))
-                    setattr(result, "backend_name", row.get("backend", "claude"))
-                    if r.get("error_detail"):
-                        setattr(result, "error_detail", r.get("error_detail"))
-                    setattr(
-                        result,
-                        "telemetry_invocation_id",
-                        r.get("telemetry_invocation_id") or None,
-                    )
-                    return result
-
-                if status in ("failed", "failed_node_offline"):
-                    result_raw = row.get("result")
-                    try:
-                        r = json.loads(result_raw) if isinstance(result_raw, str) else (result_raw or {})
-                    except Exception:
-                        r = {}
-                    if session and r:
-                        changed = False
-                        if session.backend == "codex" and r.get("backend_session_id"):
-                            session.backend_session_id = r["backend_session_id"]
-                            changed = True
-                        for attr in ("driver_type", "driver_status", "cache_health"):
-                            value = r.get(attr)
-                            if value is not None:
-                                setattr(session, attr, value)
-                                changed = True
-                        if "cache_unhealthy_count" in r:
-                            session.cache_unhealthy_count = int(r.get("cache_unhealthy_count") or 0)
-                            changed = True
-                        if "previous_backend_session_ids" in r:
-                            session.previous_backend_session_ids = r.get("previous_backend_session_ids") or []
-                            changed = True
-                        if changed:
-                            self.session_store.save(session)
-                    error_msg = row.get("error") or f"Task {status}"
-                    error_detail = (r.get("error_detail") if r else "") or ""
-                    result = TaskResult(
-                        task_id=task.id,
-                        success=False,
-                        output=r.get("output", "") if r else "",
-                        errors=r.get("errors") or [error_msg],
-                        files_modified=r.get("files_modified") or [],
-                        execution_time=r.get("execution_time", 0.0),
-                        timestamp=r.get("timestamp", now_iso()) if r else now_iso(),
-                        return_code=r.get("return_code", 1) if r else 1,
-                        # Preserve the worker's full backend transcript (NDJSON)
-                        # when shipped; only mirror `output` for legacy workers.
-                        # Previously raw_stdout was overwritten with `output`,
-                        # which erased the error_during_execution marker and hid
-                        # the agent's complete payload from the artifact.
-                        raw_stdout=(r.get("raw_stdout") if r else "") or (r.get("output", "") if r else ""),
-                        # error_detail's stdout_tail is the agent's stream, not
-                        # an error: only its error parts may stand in (A97).
-                        raw_stderr=(r.get("raw_stderr") if r else "") or error_detail_without_stdout(error_detail),
-                        # The worker's structured class (its driver's own
-                        # signal) — dropping it made _classify_error re-derive
-                        # from text on every mesh session turn (A97).
-                        error_class=str((r.get("error_class") if r else "") or row.get("error_class") or ""),
-                    )
-                    mark_reply_mirror(result, not (r.get("raw_stdout") if r else "") and bool(result.raw_stdout))
-                    setattr(result, "error_detail", error_detail)
-                    setattr(result, "usage", r.get("usage") if r else None)
-                    setattr(result, "backend_name", row.get("backend", "claude"))
-                    setattr(
-                        result,
-                        "telemetry_invocation_id",
-                        r.get("telemetry_invocation_id") if r else None,
-                    )
-                    return result
-
-                if status != "claimed" and time.time() >= pickup_deadline:
-                    db.fail_task(task.id, f"dispatch timeout after {pickup_timeout_sec}s waiting for worker")
-                    result = TaskResult(
-                        task_id=task.id,
-                        success=False,
-                        output="",
-                        errors=[f"Dispatch timeout: no worker picked up the task within {pickup_timeout_sec}s"],
-                        files_modified=[],
-                        execution_time=pickup_timeout_sec,
-                        timestamp=now_iso(),
-                    )
-                    setattr(result, "backend_name", self._resolve_task_backend(task))
-                    return result
-
-                # status == claimed: a worker has picked up the task. Do not
-                # apply the pickup timeout to execution time; wait for the
-                # worker's real completed/failed state or an offline update.
-            elif time.time() >= pickup_deadline:
-                result = TaskResult(
-                    task_id=task.id,
-                    success=False,
-                    output="",
-                    errors=["Task row disappeared from DB while waiting for worker pickup"],
-                    files_modified=[],
-                    execution_time=pickup_timeout_sec,
-                    timestamp=now_iso(),
-                )
-                setattr(result, "backend_name", self._resolve_task_backend(task))
-                return result
-
-            # Check for cancellation
-            cancel_ev = self._task_cancel_events.get(task.id)
-            if cancel_ev and cancel_ev.is_set():
-                # Distinguish a genuine user cancel from a gateway shutdown.
-                # On shutdown we are only *detaching* our poll loop — the remote
-                # worker keeps running and owns the task's real terminal state in
-                # the DB. Writing fail_task here would fabricate a 'failed' row
-                # that overwrites the worker's truth, which is exactly the
-                # restart-cancel bug. So on shutdown we leave the DB row as-is
-                # (still 'claimed') and return a non-terminal detached result;
-                # startup recovery (_recover_stale_busy_sessions) reattaches and
-                # reports whatever the worker actually wrote.
-                interrupted = task.id in self._shutdown_interrupted_tasks
-                if not interrupted and session and session.backend == "codex":
-                    if not codex_cancel_sent:
-                        db.enqueue_task(
-                            task_id=f"cancel-{task.id}",
-                            session_id=session.session_id,
-                            machine_id=session.machine_id,
-                            backend="codex",
-                            action="cancel_codex",
-                            payload={"target_task_id": task.id},
-                        )
-                        codex_cancel_sent = True
-                    # The worker owns the result. Keep this session reserved
-                    # until it confirms the actual child stopped.
-                    await _aio.sleep(poll_interval)
-                    continue
-                if not interrupted:
-                    db.fail_task(task.id, "cancelled by gateway")
-                result = TaskResult(
-                    task_id=task.id,
-                    success=False,
-                    output="",
-                    errors=["interrupted by gateway restart" if interrupted else "cancelled"],
-                    files_modified=[],
-                    execution_time=0.0,
-                    timestamp=now_iso(),
-                )
-                setattr(result, "backend_name", self._resolve_task_backend(task))
-                setattr(result, "detached", interrupted)
-                return result
-
-            await _aio.sleep(poll_interval)
 
     def _nudge_worker_for_dispatch(self, node: Any, node_id: str, db: Any) -> bool:
         """Best-effort wake-up for a worker after enqueuing remote work.
@@ -12137,13 +11436,8 @@ Generated from user description: {description}
           worker daemon can pick up the row as claimable work. The row is a
           faithful historical mirror; `_mesh_complete_task` finalises it.
 
-        Remote dispatch (machine_id names a DIFFERENT host and MESH_ENABLED=true):
-          Insert as 'pending' WITHOUT self-claiming. The row is the actual
-          dispatch signal — the pinned worker polls `get_pending_tasks`, sees
-          it (machine_id filter matches), claims it, executes, and posts the
-          result. `process_task` (via `_dispatch_to_node`) polls the DB for
-          completion. `_mesh_complete_task` later enriches the row with the
-          local artifact_path.
+        Session turns are admitted separately through the durable carrier queue;
+        this helper mirrors legacy stateless work for audit/reconciliation.
 
         BUGFIX: the self-claim used to fire only when machine_id was UNSET, so a
         session pinned to THIS host (e.g. a standalone worker daemon sharing the
@@ -12179,7 +11473,7 @@ Generated from user description: {description}
             # registered at all (e.g. a session whose node was renamed/deleted —
             # 'kanebra' vs 'kanebra-worker'). Left pending, such a row can never be
             # claimed and lingers forever, inflating the pending count. Mark it
-            # failed immediately so `_dispatch_to_node`'s first poll fails fast
+            # failed immediately so it cannot remain an unclaimable pending row
             # instead of burning the queue timeout, and so it never becomes an
             # orphan. An OFFLINE (but registered) node is NOT rejected — it may
             # re-register, and the affinity-offline grace path owns that case.
