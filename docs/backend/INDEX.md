@@ -12,6 +12,7 @@ project as a whole, start at [`.ai/CONTEXT.md`](../../.ai/CONTEXT.md); for the f
 | [`CONTROL_CONTRACT.md`](CONTROL_CONTRACT.md) | The M1 inbound/outbound contract — event envelope, entry points, backend registry, read model. Read before adding a surface or a backend. |
 | [`CONVERSATION_DATA_FLOW.md`](CONVERSATION_DATA_FLOW.md) | Where conversation/artifact data lives and how it flows; §0 is the DB-canonical migration. |
 | [`DATABASE_AUTHORITY.md`](DATABASE_AUTHORITY.md) | Controller vs. worker DB authority (A88) — the controller owns `mesh.db`; workers read controller state over the task-server API. |
+| [`BUILD_VS_BUY_MODERNIZATION.md`](BUILD_VS_BUY_MODERNIZATION.md) | Proposed replacement of hand-built plumbing — Alembic, SQLAlchemy Core, Postgres `SKIP LOCKED`/`LISTEN/NOTIFY`, pydantic-settings, CI gates — as packet-ready workstreams W0–W6. |
 | [`ENV_FEATURE_FLAGS.md`](ENV_FEATURE_FLAGS.md) | Inventory of default-OFF feature flags. Check here before assuming a built feature is live. |
 | [`MESH_SECURITY.md`](MESH_SECURITY.md) | Mesh trust domain, threat model, token-leak response. |
 | [`CODEX_APP_SERVER_ADAPTER_CONVERGENCE.md`](CODEX_APP_SERVER_ADAPTER_CONVERGENCE.md) | The single Codex backend (`codex_native` over the app-server RPC) and its runtime-recycle boundary. |
