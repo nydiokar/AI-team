@@ -1,18 +1,18 @@
 ```yaml
 job_id: AGENT_87_SESSION_RUNTIME_COORDINATOR
 created_at: "2026-09-24T18:00:20+00:00"
-status: active
+status: done
 owner: mgr-a2a819ff
 depends_on: []
 results_ref: DISPATCH_LOG.md#A87
-evidence: []
-updated_at: "2026-09-25T08:26:14.805928+00:00"
+evidence: ["tests/test_a104_single_pending_source.py", "tests/test_agent_inbox.py", "tests/test_agent_inbox_delivery.py", "tests/test_session_reason.py", ".ai/dispatch/AGENT_104_UNIFIED_AGENT_INBOX.md"]
+updated_at: "2026-11-02T14:26:59.609257+00:00"
 ```
 
 # DISPATCH — A87 · Manager review and integration control for session reliability and runtime delivery
 
 **Level:** 3 (cross-cutting behavior/architecture review and release gating) · **Type:** manager / audit
-**Authored:** 2026-09-24 · **Status:** ready. **Manages:** A82, A83, A84, A85, and A86.
+**Authored:** 2026-09-24 · **Status:** done — final review reconciled 2026-11-02. **Historical scope:** A82, A83, A84, A85, and A86.
 **Branch:** `main` for packet/review-only changes; feature branch + PR only if a corrective code change is required. No merge/deploy/restart authority beyond existing branch policy and explicit operator approval.
 
 > These jobs change adjacent truths: turn ordering (A82), what an operator is told about waiting (A83), how a Manager is notified of worker completion (A84), and when a worker image may disrupt a node (A85/A86). A document-compliant patch can still make these truths contradict each other. This manager owns the behavioral contract and reviews workers against the repository and operational evidence, not against design prose alone.
@@ -173,7 +173,7 @@ retires the premise of **BOTH** container-track jobs, not just A86 —
 3. **Codex and OpenCode must implement the contract** before Stage 8 can delete protocol 0 (scope added to A82; each adapter implements against its own native protocol).
 4. **A84 is built only on the managed path** — no completion-delivery logic for protocol 0.
 
-## Milestone (burndown)
+## Historical milestone (superseded by final review reconciliation below)
 
 - [x] Current compatibility ledger created from repository evidence (2026-09-25)
 - [x] A83 legacy/new wait-source compatibility reviewed (verdict ACCEPT; reconciliation note carried to A84)
@@ -188,3 +188,22 @@ retires the premise of **BOTH** container-track jobs, not just A86 —
 ## Closure (fill on completion)
 
 State reviewed job verdicts, unresolved evidence, and why any release/deploy action remains operator-gated.
+
+## Final review reconciliation — CLOSED (2026-11-02)
+
+The stage-gate entries above are historical, not current release blockers. A82/A83
+shipped, A84's additive-outbox acceptance was invalidated by the production wake loop,
+and A104 replaced it with the agent-addressed inbox. The current ownership contract
+is terminal transaction -> agent inbox -> one `pending_for()` read -> bounded delivery,
+not the retired wait-group/outbox dual-source scheme.
+Current review evidence: `pytest tests/test_a104_single_pending_source.py
+tests/test_agent_inbox.py tests/test_agent_inbox_delivery.py tests/test_session_reason.py
+tests/test_a101_block_state.py --tb=short` — 85 passed on 2026-11-02, covering
+single-source enforcement, transactional/leased delivery, reason projection and UI
+blocking-state projection. A82's later certification and A104's packet record the
+intervening corrections; no claim is made that the missing original A84 gates occurred.
+A85/A86's container scope is retired by the recorded 2026-09-25 decision; their
+registry entries now say `dead`, with artifacts preserved. A102 owns the remaining
+backend/carrier convergence; A105 owns cross-process notification latency. Neither
+is silently certified by closing this obsolete coordinating dispatch.
+No new runtime, queue, store, deployment authority or worker restart was introduced.

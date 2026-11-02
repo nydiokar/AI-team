@@ -26,6 +26,12 @@ column (that is Phase 2, spec §16).
 > **reference artifacts (maps, specs, runbooks) go in `docs/`, NEVER `.ai/dispatch/`** —
 > the dispatch folder holds job packets and their inline lifecycle only.
 
+Necessary separate supporting reports/proposals belong under
+`.ai/dispatch/evidence/A<N>_<DESCRIPTION>.md`, linked both ways with the parent packet.
+List proof in that parent's YAML `evidence:`. Never create top-level support-file siblings:
+the registry scans every unexcluded top-level Markdown file as a job. Existing legacy
+reports stay at their excluded paths to preserve references; new artifacts use `evidence/`.
+
 > ⚠️ **Test Cost Guard.** No stage invokes the paid Claude/Codex CLI to "verify".
 > Use targeted `pytest`, `--collect-only`, import smoke, `tsc -b`,
 > `curl http://127.0.0.1:9003/health`. Never run `python main.py status` (kills the

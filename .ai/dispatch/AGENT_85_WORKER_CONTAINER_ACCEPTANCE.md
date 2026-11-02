@@ -1,18 +1,18 @@
 ```yaml
 job_id: AGENT_85_WORKER_CONTAINER_ACCEPTANCE
 created_at: "2026-09-24T18:00:20+00:00"
-status: blocked
+status: dead
 owner: mgr-a2a819ff:worker
 depends_on: []
 results_ref: DISPATCH_LOG.md#A85
 evidence: tests/test_container_acceptance.py
-updated_at: "2026-09-27T16:04:22.797137+00:00"
+updated_at: "2026-11-02T14:26:59.611128+00:00"
 ```
 
 # DISPATCH — A85 · Containerized worker acceptance baseline
 
 **Level:** 3 (new deployment boundary, runtime/tooling compatibility) · **Type:** code + test
-**Authored:** 2026-09-24 · **Status:** ready. **Reviewed by:** A87 before A86 can start.
+**Authored:** 2026-09-24 · **Status:** dead — container premise retired (2026-09-25); registry reconciled 2026-11-02.
 **Branch:** `feat/worker-container-acceptance` + PR; no production container switch or worker restart.
 
 > Runtime-update automation is unsafe to build against an unproven deployment unit. Establish a reproducible, non-root worker image and executable acceptance evidence first, so an update later has a real immutable target rather than a host-process assumption.
@@ -72,3 +72,9 @@ clean artifact to resume from if workers are ever re-containerized.
 **Not merged on purpose:** merging container-acceptance scaffolding to `main` while the strategic
 direction is to leave containers would add dead surface. Left on its branch pending the operator's
 non-container worker plan. If that plan lands and containers are truly gone, this branch can be dropped.
+
+### Registry reconciliation (2026-11-02)
+
+Set machine state to `dead` to represent the already-recorded retired container
+premise in the supported vocabulary. This does not claim the container acceptance
+was executed or merged. Its packet and historical branch artifacts are preserved.

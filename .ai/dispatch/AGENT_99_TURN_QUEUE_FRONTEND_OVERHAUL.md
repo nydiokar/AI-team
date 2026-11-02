@@ -6,7 +6,7 @@ owner:
 depends_on: []
 results_ref: DISPATCH_LOG.md#A99             # -> DISPATCH_LOG.md section with the verdict prose
 evidence: [".ai/dispatch/A99_TURN_QUEUE_UI_PROPOSAL.md"]                  # artifact paths that PROVE it ran (checked to exist)
-updated_at: "2026-10-07T19:33:59.513381+00:00"
+updated_at: "2026-11-02T14:28:59.537195+00:00"
 ```
 
 # DISPATCH — AGENT_99_TURN_QUEUE_FRONTEND_OVERHAUL
@@ -176,3 +176,8 @@ PAUSED scratch session (zero paid execution).
 **What follows / continuation plan:** Phase 2 (build on `feat/a99-turn-queue-ui`) is **gated on operator
 approval of the proposal**. On approval, dispatch the Phase-2 build worker against the 9-step plan in the
 proposal §5. Status set `blocked` (awaiting operator Phase-2 go/no-go), not `done`.
+
+## Supporting artifacts (registry reconciliation, 2026-11-02)
+
+These dated supporting documents belong to this packet; they are excluded from job scanning.
+- [A99_TURN_QUEUE_UI_PROPOSAL.md](A99_TURN_QUEUE_UI_PROPOSAL.md)

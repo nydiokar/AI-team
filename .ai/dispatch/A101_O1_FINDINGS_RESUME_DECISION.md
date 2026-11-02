@@ -112,3 +112,5 @@ projection on the turn-queue read-model, which purely mirrors the scheduler gate
 scheduling behavior. The in-session banner appears when the session has a **held (queued) managed
 turn** on a quota pause — exactly the incident condition — and the push alerts the operator at pause
 time regardless of whether a message is queued yet.
+
+Parent job: [AGENT_101_SESSION_BLOCKING_STATE_SURFACING.md](AGENT_101_SESSION_BLOCKING_STATE_SURFACING.md). Supporting artifact only; not a separate dispatch.

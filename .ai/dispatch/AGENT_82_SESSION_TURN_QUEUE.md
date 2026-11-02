@@ -4,9 +4,9 @@ created_at: "2026-09-22T11:39:06.841262+00:00"        # CANONICAL — set once a
 status: done              # ready | active | blocked | done | dead
 owner: worker-a82-stage4e
 depends_on: []
-results_ref: .ai/dispatch/A82_E2E_CERTIFICATION.md#A82             # -> DISPATCH_LOG.md section with the verdict prose
-evidence: tests/test_turn_queue_respawn_revalidation.py                  # artifact paths that PROVE it ran (checked to exist)
-updated_at: "2026-10-07T19:44:14.106355+00:00"
+results_ref: DISPATCH_LOG.md#A82#A82             # -> DISPATCH_LOG.md section with the verdict prose
+evidence: ["tests/test_turn_queue_respawn_revalidation.py", ".ai/dispatch/A82_E2E_CERTIFICATION.md", ".ai/dispatch/A82_MULTIBACKEND_VALIDATION.md", ".ai/dispatch/A82_STAGE8A_BACKEND_AUDIT.md", ".ai/dispatch/A82_STAGE8A_DEPLOY_BURNDOWN.md", ".ai/dispatch/A82_STAGE8A_VALIDATION.md"]                  # artifact paths that PROVE it ran (checked to exist)
+updated_at: "2026-11-02T14:28:59.540016+00:00"
 ```
 
 # A82 — Build the unified session turn queue
@@ -2497,3 +2497,12 @@ resolved above. Stage 1 authorized (assertion-capable red tests); Stage 2 gated 
 
 Pending implementation. Acceptance of this packet authorizes the work and tests
 above; it does not assert that the design already passed its backend proof gates.
+
+## Supporting artifacts (registry reconciliation, 2026-11-02)
+
+These dated supporting documents belong to this packet; they are excluded from job scanning.
+- [A82_E2E_CERTIFICATION.md](A82_E2E_CERTIFICATION.md)
+- [A82_MULTIBACKEND_VALIDATION.md](A82_MULTIBACKEND_VALIDATION.md)
+- [A82_STAGE8A_BACKEND_AUDIT.md](A82_STAGE8A_BACKEND_AUDIT.md)
+- [A82_STAGE8A_DEPLOY_BURNDOWN.md](A82_STAGE8A_DEPLOY_BURNDOWN.md)
+- [A82_STAGE8A_VALIDATION.md](A82_STAGE8A_VALIDATION.md)

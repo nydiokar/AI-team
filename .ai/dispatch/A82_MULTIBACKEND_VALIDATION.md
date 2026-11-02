@@ -224,3 +224,5 @@ The three preconditions flagged as "advisable but not met" in `A82_E2E_CERTIFICA
 **Case-outbox carry (o)** under A84 is still open (not addressed here — separate A84 scope).
 
 Stage-8b may now proceed. The deletion scope is defined in `A82_E2E_CERTIFICATION.md §5`.
+
+Parent job: [AGENT_82_SESSION_TURN_QUEUE.md](AGENT_82_SESSION_TURN_QUEUE.md). Supporting artifact only; not a separate dispatch.

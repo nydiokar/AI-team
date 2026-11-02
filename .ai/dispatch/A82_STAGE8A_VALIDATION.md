@@ -358,3 +358,5 @@ committed honest `failed` terminals. Turns: `task_e6e6ded3` (seq 1), `task_bfe49
 The second run (this document's primary section) used the same carrier with a different
 `repo_path` (`/home/cifran/dev/AI-team`); both turns completed successfully, and
 `resume_session` was directly observed. All 4 properties are now proven.
+
+Parent job: [AGENT_82_SESSION_TURN_QUEUE.md](AGENT_82_SESSION_TURN_QUEUE.md). Supporting artifact only; not a separate dispatch.

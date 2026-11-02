@@ -2,11 +2,11 @@
 job_id: AGENT_102_UNIFY_BACKEND_PATHWAYS
 created_at: "2026-10-08T11:03:02.721707+00:00"        # CANONICAL — set once at dispatch, never derive again
 status: active              # ready | active | blocked | done | dead
-owner: "Manager (Claude Code session, 2026-10-08)"
+owner: "A102 S2 reconciliation, 2026-11-02"
 depends_on: []
 results_ref: null             # -> DISPATCH_LOG.md section with the verdict prose
 evidence: []                  # artifact paths that PROVE it ran (checked to exist)
-updated_at: "2026-10-08T11:04:11.906705+00:00"
+updated_at: "2026-11-02T14:28:09.291192+00:00"
 ```
 
 # DISPATCH — 102 · One pathway per operation per backend (natural names, managed logic, policy out of backends)

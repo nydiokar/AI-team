@@ -222,3 +222,5 @@ No backend scheduling change is recommended beyond the read-model in (b).
   `src/orchestrator.py:3026` (`_handle_quota_paused_case`), `3525` (`resume_case`), `3365/3706`;
   `web/src/screens/SessionDetailScreen.tsx:1335,1356`; `web/src/components/timeline/TurnQueuePanel.tsx:22,100,260,283`;
   `web/src/hooks/useWork.ts:264`; `web/src/components/work/{PausedCaseInbox,CaseResumePanel}.tsx`.
+
+Parent job: [AGENT_101_SESSION_BLOCKING_STATE_SURFACING.md](AGENT_101_SESSION_BLOCKING_STATE_SURFACING.md). Supporting artifact only; not a separate dispatch.

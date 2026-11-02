@@ -457,3 +457,5 @@ the rail; resume only on a throwaway if the operator wants a paid FIFO-activatio
   swap), each Vitest-covered with MSW, invalidation regression-locked, live-verified via the zero-paid
   paused-scratch-session method — no new backend routes, no telemetry changes.
 ```
+
+Parent job: [AGENT_99_TURN_QUEUE_FRONTEND_OVERHAUL.md](AGENT_99_TURN_QUEUE_FRONTEND_OVERHAUL.md). Supporting artifact only; not a separate dispatch.

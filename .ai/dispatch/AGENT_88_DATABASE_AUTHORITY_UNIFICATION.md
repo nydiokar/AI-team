@@ -1,18 +1,18 @@
 ```yaml
 job_id: AGENT_88_DATABASE_AUTHORITY_UNIFICATION
 created_at: "2026-09-26T16:09:11.750309+00:00"        # CANONICAL — set once at dispatch, never derive again
-status: active              # ready | active | blocked | done | dead
+status: done              # ready | active | blocked | done | dead
 owner: claude-session-2026-10-02:feat/database-authority-unification
 depends_on: []
 results_ref: DISPATCH_LOG.md#A88             # -> DISPATCH_LOG.md section with the verdict prose
-evidence: docs/backend/DATABASE_AUTHORITY.md,tests/test_database_authority.py,tests/test_database_authority_process.py,scripts/db_authority_report.py                  # artifact paths that PROVE it ran (checked to exist)
-updated_at: "2026-10-01T22:10:17.101887+00:00"
+evidence: ["docs/backend/DATABASE_AUTHORITY.md", "tests/test_database_authority.py", "tests/test_database_authority_process.py", "scripts/db_authority_report.py"]                  # artifact paths that PROVE it ran (checked to exist)
+updated_at: "2026-11-02T14:26:59.597213+00:00"
 ```
 
 # DISPATCH — A88 · Controller/worker database authority unification
 
 **Level:** 3 (cross-process state authority, configuration propagation, migration) · **Type:** investigation + one coordinated remediation
-**Authored:** 2026-09-26 · **Status:** ready
+**Authored:** 2026-09-26 · **Status:** done — PR #180; closure reconciled 2026-11-02
 **Depends on:** —. Coordinate file overlap with A82/A84 before editing shared task/control paths.
 **Branch:** `feat/database-authority-unification` + PR. No production restart, data copy, database deletion, flag activation, or worker deployment without explicit operator approval.
 
@@ -79,7 +79,7 @@ The intended end state is one canonical controller-owned control-plane and runti
 - [x] Shared authenticated worker state/config seam implemented; all direct controller-owned DB paths removed
 - [x] Conflict-safe reconciliation and rollback/dry-run tooling implemented
 - [x] Separate-root integration tests and service-boundary checklist pass
-- [ ] Documentation, CONTEXT note, DISPATCH_LOG closure, PR, and operator-gated rollout runbook complete
+- [x] Documentation, CONTEXT note, DISPATCH_LOG closure, PR, and rollout runbook complete (reconciled 2026-11-02)
 
 ## Execution record — 2026-10-02 (branch `feat/database-authority-unification`)
 
@@ -116,3 +116,18 @@ The intended end state is one canonical controller-owned control-plane and runti
 ## Closure (fill on completion)
 
 (Do not mark done until the inventory demonstrates that every discovered duplicate authority was either eliminated or explicitly classified as non-canonical worker-private state, with evidence.)
+
+## Closure reconciliation — SHIPPED (2026-11-02)
+
+PR #180 merged on 2026-10-01 (GitHub merge `684b506`; local-history merge
+`424d0f1`). The execution record's held-merge/restart statements above are historical.
+On 2026-11-02 the authenticated worker-context probe reported native node `kanebra`
+loaded build `618cd4c`; local merge `424d0f1` is its ancestor. A read-only enumeration
+of that worker's `/proc/2711734/fd` found no `mesh.db` handles. Gateway health was OK
+on `20d6167`, which contains the controller cutover.
+Verification: `pytest tests/test_warm_worker_idle_reaper.py tests/test_database_authority.py
+tests/test_database_authority_process.py --tb=short` — 34 passed, including distinct-root
+HTTP propagation/outage tests. Corrected `evidence` from one comma-containing string
+to four real paths. No data was moved/deleted and no worker restarted. Retiring an
+inert old DB file is optional operator housekeeping, not a second authority.
+The existing runbook retains its boundary bounds and env-only observation-knob limitation.

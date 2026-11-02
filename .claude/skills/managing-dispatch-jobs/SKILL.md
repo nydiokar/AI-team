@@ -47,6 +47,14 @@ script. Never edit the yaml block with sed/regex and never hand-edit `_DISPATCH_
 
 ## Update status
 
+Supporting reports and proposals are not jobs. Keep lifecycle notes in the parent packet;
+when a separate artifact is necessary use `.ai/dispatch/evidence/A<N>_<DESCRIPTION>.md`,
+link its parent packet, and link it back from the packet's evidence section. Add proof paths
+to the parent's `evidence:` list. Durable specs/maps go in `docs/`. Do not create top-level
+Markdown siblings: the scanner intentionally flags every unexcluded file without job state.
+The `.dispatch_not_a_job` sidecar preserves legacy artifacts without breaking evidence links;
+it must never hide a real job or become the default location for new support documents.
+
 `DS --set <job> status active|blocked|done|dead` (bumps `updated_at`, re-renders). Set `owner`
 when someone picks it up. `DS --resolve-blocks` flips `blocked` jobs whose deps are done *and*
 that opted in with `auto_unblock: true`.

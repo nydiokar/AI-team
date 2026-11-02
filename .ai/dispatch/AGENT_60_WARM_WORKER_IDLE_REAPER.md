@@ -1,18 +1,18 @@
 ```yaml
 job_id: AGENT_60_WARM_WORKER_IDLE_REAPER
 created_at: "2026-07-30T03:07:45+03:00"        # CANONICAL — set once at dispatch, never derive again
-status: active              # ready | active | blocked | done | dead
+status: done              # ready | active | blocked | done | dead
 owner: "claude"
 depends_on: []
-results_ref: null             # -> DISPATCH_LOG.md section with the verdict prose
+results_ref: DISPATCH_LOG.md#A60             # -> DISPATCH_LOG.md section with the verdict prose
 evidence: ["tests/test_warm_worker_idle_reaper.py"]
-updated_at: "2026-08-21T15:10:00.000000+00:00"
+updated_at: "2026-11-02T14:26:59.592585+00:00"
 ```
 
 # DISPATCH — A60 · Warm-worker idle-reaper (§7 resource leak)
 
 **Level:** 3 (worker lifecycle) · **Type:** code
-**Authored:** 2026-07-30 · **Status of this packet:** ready (authored, not yet executed)
+**Authored:** 2026-07-30 · **Status of this packet:** done — PR #102; closure reconciled 2026-11-02
 **Depends on:** — (independent; complements A52/A55 autonomy). **Unblocks:** safe *long* autonomous runs.
 **Ultimate goal this serves:** `SPEC_COMPLETION_PLAN.md` §0 bounded-resources clause; the §7 deferral from A48.
 
@@ -130,7 +130,7 @@ Turn/cost governor (A53); wake-dispatch (A52); any change to the warm-keep *poli
 - [x] never reaps open-Case-joined / mid-turn / non-worker sessions
 - [x] idempotent + configurable TTL + safe default
 - [x] targeted pytest green
-- [ ] PR opened + merged
+- [x] PR opened + merged (#102, 2026-08-21)
 
 ## Closure (fill on completion)
 Pulled forward from "ready" (deferred pending live M3.4 load) after directly observing the leak it
@@ -139,3 +139,13 @@ predicts: 3 real orphaned worker sessions on a 6-day-uptime worker daemon, confi
 Implemented as scoped in SEAM MAP: reused `_stale_busy_reconciliation_loop`, no new scheduler; reuses
 `session_service.close_session` + `_clear_session_case_affiliation`, no new close mechanism. PR open
 next.
+
+## Closure reconciliation — SHIPPED (2026-11-02)
+
+PR #102 merged on 2026-08-21 (GitHub merge `9cf3e0e`; local-history merge
+`71321c5`, ancestor of main). The outstanding PR checkbox was bookkeeping drift.
+The existing reconciler still calls `_reap_idle_warm_workers_once`; it closes only idle
+worker sessions past TTL and excludes open Cases. No new scheduler or store was added.
+Verification: `pytest tests/test_warm_worker_idle_reaper.py tests/test_database_authority.py
+tests/test_database_authority_process.py --tb=short` — 34 passed on 2026-11-02.
+No worker restart or live session cleanup was performed for this reconciliation.
