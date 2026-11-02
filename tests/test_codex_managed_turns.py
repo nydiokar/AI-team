@@ -11,6 +11,9 @@ codex CLI is never invoked.
 """
 from __future__ import annotations
 
+from functools import partial
+from tests.turn_control_helpers import session_turn, session_compaction
+
 import json
 import os
 import signal
@@ -335,7 +338,7 @@ def drop_turn(backend, session, turn_uuid):
 # Capability + happy path: attribution by write-ahead mapping, identity first
 # --------------------------------------------------------------------------- #
 def test_capability_and_attributed_turn_with_process_identity_before_submit(h):
-    assert h.backend.supports_managed_turns() is True
+    assert _protocol_available() is True
     seen: list[dict] = []
 
     def on_process(ident: dict) -> None:
@@ -364,7 +367,7 @@ def test_capability_and_attributed_turn_with_process_identity_before_submit(h):
 
 def test_unsupported_backend_without_executable_fails_closed(h, monkeypatch):
     monkeypatch.setenv("PATH", "/nonexistent-bin")
-    assert CodexBackend().supports_managed_turns() is False
+    assert _protocol_available() is False
 
 
 def test_mismatched_ownership_session_refused_before_anything_runs(h):
@@ -782,7 +785,7 @@ def test_M1_legacy_turn_start_deadline_never_kills_a_managed_neighbour(h, monkey
     th_a, box_a, pid = _held_neighbour(h)
     monkeypatch.setattr(app_server_mod, "RPC_TIMEOUT", 0.3)
     h.ctl(hold=h.release_path, start_delay=1.0)
-    legacy = h.backend.resume_session(h.session("sess-legacy"), "x")
+    legacy = h.backend.resume_session(h.session("sess-legacy"), "x", turn=_tc(own(sid="sess-legacy")))
     assert legacy.success is False
     assert h.backend.is_quiescent(h.session("sess-legacy")) is False, "held, never blindly released"
     _neighbour_survives(h, th_a, box_a, pid)
@@ -854,16 +857,16 @@ def test_m5_capability_probe_refuses_an_app_server_without_the_managed_protocol(
     from src.control.turn_queue import ManagedUnsupportedError
 
     h.ctl(**{missing: True})
-    assert h.backend.supports_managed_turns() is False
+    assert _protocol_available() is False
     with pytest.raises(ManagedUnsupportedError):
         run_turn(h.backend, h.session(), "x", own())
     assert h.requests() == [], "the probe is offline: no app-server protocol traffic"
 
 
 def test_m5_capability_probe_is_cached_per_binary(h):
-    assert h.backend.supports_managed_turns() is True
+    assert _protocol_available() is True
     h.ctl(schema_no_thread_read=True)  # would fail if probed again
-    assert CodexBackend().supports_managed_turns() is True
+    assert _protocol_available() is True
 
 
 @pytest.mark.parametrize("where", ["attach", "loaded"])
@@ -1077,15 +1080,24 @@ def test_create_session_runs_the_first_prompt_under_the_turn_uuid(h):
 
 
 def test_deprecated_shims_delegate_to_the_natural_methods(h):
-    first = h.backend.run_managed_turn(h.session(), "hi", own(turn_uuid="uuid-shim"))  # → resume_session
+    first = session_turn(h.backend, h.session(), "hi", own(turn_uuid="uuid-shim"))  # → resume_session
     assert first.success, first.errors
     native = first.backend_session_id
     assert h.requests("turn/start")[0]["params"]["clientUserMessageId"] == "uuid-shim"
-    compact = h.backend.run_managed_compaction(h.session(native=native),  # → compact_session
+    compact = session_compaction(h.backend, h.session(native=native),  # → compact_session
                                                own(turn_uuid="uuid-shim-c"))
     assert compact.success, compact.errors
     assert {r["turn_uuid"]: r["kind"] for r in managed_rows(h.home)}["uuid-shim-c"] == "compaction"
-    assert h.backend.cancel_managed_turn(h.session(), "uuid-armed-shim") is True  # → cancel (arm)
-    armed = h.backend.run_managed_turn(h.session(), "x", own(turn_uuid="uuid-armed-shim"))
+    assert h.backend.cancel(h.session(), "uuid-armed-shim") is True  # → cancel (arm)
+    armed = session_turn(h.backend, h.session(), "x", own(turn_uuid="uuid-armed-shim"))
     assert armed.error_class == "managed_conflict"
-    assert h.backend.forget_managed_turn(h.session(), "uuid-unknown-shim") is False  # → forget_turn
+    assert h.backend.forget_turn(h.session(), "uuid-unknown-shim") is False  # → forget_turn
+
+
+def _protocol_available() -> bool:
+    from src.backends.codex_native import _managed_protocol_supported
+    from src.core.process_utils import resolve_codex_executable, ensure_node_on_path
+
+    env = ensure_node_on_path()
+    executable = resolve_codex_executable(env)
+    return executable is not None and _managed_protocol_supported(executable, env)

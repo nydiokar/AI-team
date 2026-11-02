@@ -398,16 +398,6 @@ def disarm_managed_cancel(turn_uuid: str) -> bool:
         return _ARMED_CANCELS.pop(turn_uuid or "", None) is not None
 
 
-def _replay_user_messages_enabled() -> bool:
-    """[A82 Stage 3 rework 4] Managed correlation needs the CLI's replayed
-    user-message echoes. Enabled only when this process runs the managed
-    carrier (``WORKER_MANAGED_TURNS``), so a legacy-only worker's CLI stream is
-    byte-identical to before (and the legacy reader ignores echoes anyway).
-
-    [Stage 8a cutover] Default-ON: empty/unset enables managed turns; only an
-    explicit false value (0/false/no/off) opts a worker back out — mirrors
-    ``WorkerConfig.from_env`` so the two sites cannot split-brain."""
-    return os.getenv("WORKER_MANAGED_TURNS", "").strip().lower() not in ("0", "false", "no", "off")
 
 
 @dataclass
@@ -900,7 +890,7 @@ class _SDKSession:
         # Managed correlation needs the CLI's user-message echo; the flag is
         # decided per process (managed carrier ON) so a legacy-only worker's
         # CLI stream is byte-identical to before.
-        self._replay_user_messages: bool = _replay_user_messages_enabled()
+        self._replay_user_messages: bool = True
         # [A82 Stage 3 rework 6] True once the reader loop has ended for ANY
         # reason (normal EOF on a clean CLI exit included): the CLI is gone, no
         # backend work can be in flight. Managed-visible only.
@@ -2353,7 +2343,7 @@ class ClaudeSDKClientDriver(ClaudeDriver):
         assert_live_calls_allowed("claude")
         _ts = now_iso()
         ephemeral = Session(
-            session_id=f"oneoff-{uuid.uuid4().hex[:12]}",
+            session_id=f"oneoff-{turn.turn_uuid}",
             backend="claude",
             repo_path=cwd,
             status=SessionStatus.BUSY,

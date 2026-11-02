@@ -10,6 +10,9 @@ spawn fails closed.
 """
 from __future__ import annotations
 
+from functools import partial as bind
+from tests.turn_control_helpers import session_turn, session_compaction
+
 import asyncio
 import json
 import subprocess
@@ -276,7 +279,7 @@ def backend(fake, stand_in_proc, tmp_path, monkeypatch):
     oc._MANAGED_RECONCILE_TRIES = 3
     oc._MANAGED_IDLE_GRACE_POLLS = 3
     oc._MANAGED_ABSENT_GRACE_SEC = 0.5
-    oc._managed_stall_sec = lambda: 20.0
+    oc._test_stall_sec = 20.0
     return oc
 
 
@@ -321,7 +324,6 @@ def _wait(pred, timeout: float = 5.0) -> None:
 # Capability / identity
 # --------------------------------------------------------------------------- #
 def test_capability_matrix_server_supports_managed_turns():
-    assert OpenCodeServerBackend().supports_managed_turns() is True
     # Sender capability: OpenCode MCP config is per server process (shared by
     # every session in the repo) ⇒ never provisioned (fail closed).
     assert OpenCodeServerBackend().provision_sender_capability("gw-1", "secret") is False
@@ -349,7 +351,7 @@ def test_managed_turn_creates_native_session_submits_deterministic_id(backend, f
         assert fake.prompts == [], "process identity must be reported BEFORE submit"
 
     s = _session(tmp_path)
-    res = backend.run_managed_turn(s, "hello", _own(), on_process=on_process)
+    res = session_turn(backend, s, "hello", _own(), on_process=on_process)
     assert res.success is True, res.errors
     assert res.output == "managed reply"
     assert res.backend_session_id == fake.created[0]
@@ -361,13 +363,13 @@ def test_managed_turn_creates_native_session_submits_deterministic_id(backend, f
 
 def test_ownership_mismatch_raises_typed_conflict(backend, tmp_path):
     with pytest.raises(OwnershipConflictError):
-        backend.run_managed_turn(_session(tmp_path, sid="gw-1"), "x", _own(sid="gw-OTHER"))
+        session_turn(backend, _session(tmp_path, sid="gw-1"), "x", _own(sid="gw-OTHER"))
 
 
 def test_busy_native_session_is_conflict_and_never_interrupted(backend, fake, tmp_path):
     fake.add_session("ses_busy")
     fake.busy["ses_busy"] = True
-    res = backend.run_managed_turn(_session(tmp_path, native="ses_busy"), "x", _own())
+    res = session_turn(backend, _session(tmp_path, native="ses_busy"), "x", _own())
     assert res.success is False and res.error_class == "managed_conflict"
     assert fake.prompts == [] and fake.aborts == []
     assert backend.is_quiescent(_session(tmp_path, native="ses_busy")) is False
@@ -376,9 +378,9 @@ def test_busy_native_session_is_conflict_and_never_interrupted(backend, fake, tm
 def test_local_active_turn_is_conflict(backend, fake, tmp_path):
     fake.add_session("ses_a")
     fake.release.clear()
-    th, out = _bg(backend.run_managed_turn, _session(tmp_path, native="ses_a"), "first", _own(turn="u-a"))
+    th, out = _bg(bind(session_turn, backend), _session(tmp_path, native="ses_a"), "first", _own(turn="u-a"))
     _wait(lambda: len(fake.prompts) == 1)
-    res = backend.run_managed_turn(_session(tmp_path, native="ses_a"), "second", _own(turn="u-b"))
+    res = session_turn(backend, _session(tmp_path, native="ses_a"), "second", _own(turn="u-b"))
     assert res.error_class == "managed_conflict"
     assert len(fake.prompts) == 1 and fake.aborts == []
     fake.release.set()
@@ -391,7 +393,7 @@ def test_foreign_and_late_messages_are_never_our_result(backend, fake, tmp_path)
     fake.release.clear()
     fake.idle_while_held = True             # idle window: history is consulted
     backend._MANAGED_IDLE_GRACE_POLLS = 10_000
-    th, out = _bg(backend.run_managed_turn, _session(tmp_path, native="ses_f"), "mine", _own(turn="u-f"))
+    th, out = _bg(bind(session_turn, backend), _session(tmp_path, native="ses_f"), "mine", _own(turn="u-f"))
     _wait(lambda: len(fake.prompts) == 1)
     # A late reply of an EARLIER turn and a foreign user/assistant pair land
     # while ours runs; then the session goes idle before our reply exists.
@@ -415,7 +417,7 @@ def test_in_progress_and_tool_step_replies_are_never_our_result(backend, fake, t
     fake.release.clear()
     fake.idle_while_held = True
     backend._MANAGED_IDLE_GRACE_POLLS = 10_000
-    th, out = _bg(backend.run_managed_turn, _session(tmp_path, native="ses_p"), "mine", _own(turn="u-p"))
+    th, out = _bg(bind(session_turn, backend), _session(tmp_path, native="ses_p"), "mine", _own(turn="u-p"))
     _wait(lambda: len(fake.prompts) == 1)
     mid = fake.prompts[0]["messageID"]
     step = {"info": {
@@ -438,7 +440,7 @@ def test_in_progress_and_tool_step_replies_are_never_our_result(backend, fake, t
 def test_lost_ack_reconciled_by_our_message_id(backend, fake, tmp_path):
     fake.add_session("ses_l")
     fake.ack_delay = 2.0  # > ack timeout ⇒ the client never sees the 204
-    res = backend.run_managed_turn(_session(tmp_path, native="ses_l"), "x", _own(turn="u-l"))
+    res = session_turn(backend, _session(tmp_path, native="ses_l"), "x", _own(turn="u-l"))
     assert res.success is True and res.output == "managed reply"
     assert len(fake.prompts) == 1, "never resubmitted"
     assert fake.aborts == [], "ambiguity is never resolved by aborting"
@@ -449,7 +451,7 @@ def test_lost_ack_never_recorded_is_recovery_required(backend, fake, tmp_path):
     fake.ack_delay = 2.0
     fake.record_prompt = False
     s = _session(tmp_path, native="ses_r")
-    res = backend.run_managed_turn(s, "x", _own(turn="u-r"))
+    res = session_turn(backend, s, "x", _own(turn="u-r"))
     assert res.success is False and res.error_class == "recovery_required"
     assert fake.aborts == []
     # held entry blocks a new turn on the session until resolved natively
@@ -461,9 +463,9 @@ def test_lost_ack_never_recorded_is_recovery_required(backend, fake, tmp_path):
 def test_deadline_is_recovery_required_without_abort_and_late_reply_not_bound(backend, fake, tmp_path):
     fake.add_session("ses_d")
     fake.release.clear()
-    backend._managed_stall_sec = lambda: 0.5
+    backend._test_stall_sec = 0.5
     s = _session(tmp_path, native="ses_d")
-    res = backend.run_managed_turn(s, "x", _own(turn="u-d"))
+    res = session_turn(backend, s, "x", _own(turn="u-d"))
     assert res.error_class == "recovery_required"
     assert fake.aborts == []
     # carrier reconcile path: session rebuilt from the id only
@@ -471,12 +473,12 @@ def test_deadline_is_recovery_required_without_abort_and_late_reply_not_bound(ba
                    created_at="x", updated_at="x")
     assert backend.is_quiescent(bare) is False, "native turn still running ⇒ not quiescent"
     # a NEW turn on the session is refused while the held one runs
-    res2 = backend.run_managed_turn(s, "next", _own(turn="u-d2"))
+    res2 = session_turn(backend, s, "next", _own(turn="u-d2"))
     assert res2.error_class == "managed_conflict"
     fake.release.set()
     _wait(lambda: not fake.busy.get("ses_d"))
     assert backend.is_quiescent(bare) is True
-    assert backend.forget_managed_turn(s, "u-d") is True
+    assert backend.forget_turn(s, "u-d") is True
     # the late reply is in native history parented to OUR id only
     late = [m for m in fake.sessions["ses_d"] if m["info"].get("parentID") == managed_message_id("u-d")]
     assert late and late[0]["parts"][0]["text"] == "managed reply"
@@ -489,8 +491,8 @@ def test_working_turn_longer_than_the_stall_window_is_never_cut_off(backend, fak
     fake.add_session("ses_long")
     fake.release.clear()
     fake.progress_session = "ses_long"
-    backend._managed_stall_sec = lambda: 0.6
-    th, out = _bg(backend.run_managed_turn, _session(tmp_path, native="ses_long"), "x", _own(turn="u-long"))
+    backend._test_stall_sec = 0.6
+    th, out = _bg(bind(session_turn, backend), _session(tmp_path, native="ses_long"), "x", _own(turn="u-long"))
     time.sleep(1.8)  # 3x the stall window, progress flowing every 0.2 s
     assert out == {}, f"a progressing turn was given up on: {out}"
     fake.release.set()
@@ -518,7 +520,7 @@ def test_carrier_crash_attribution_by_deterministic_id(fake, stand_in_proc, tmp_
     oc._procs[key] = stand_in_proc
     oc._base_urls[key] = fake.url
     oc._MANAGED_POLL_SEC = 0.05
-    res = oc.run_managed_turn(_session(tmp_path, native="ses_c"), "x", _own(turn="u-crash"))
+    res = session_turn(oc, _session(tmp_path, native="ses_c"), "x", _own(turn="u-crash"))
     assert res.success is True and res.output == "reply of the crashed attempt"
     assert fake.prompts == [], "the attempt's prompt is never resubmitted"
 
@@ -527,7 +529,7 @@ def test_server_death_mid_turn_is_recovery_with_process_gone_proof(backend, fake
     fake.add_session("ses_x")
     fake.release.clear()
     idents: List[Dict[str, Any]] = []
-    th, out = _bg(backend.run_managed_turn, _session(tmp_path, native="ses_x"), "x", _own(turn="u-x"),
+    th, out = _bg(bind(session_turn, backend), _session(tmp_path, native="ses_x"), "x", _own(turn="u-x"),
                   on_process=idents.append)
     _wait(lambda: len(fake.prompts) == 1)
     assert process_gone_proof(idents[0]) is None, "server alive ⇒ no proof"
@@ -540,7 +542,7 @@ def test_server_death_mid_turn_is_recovery_with_process_gone_proof(backend, fake
 
 
 def test_native_session_lost_goes_to_recovery_not_recreated(backend, fake, tmp_path):
-    res = backend.run_managed_turn(_session(tmp_path, native="ses_gone"), "x", _own(turn="u-g"))
+    res = session_turn(backend, _session(tmp_path, native="ses_gone"), "x", _own(turn="u-g"))
     assert res.error_class == "recovery_required"
     assert fake.created == [] and fake.prompts == []
 
@@ -572,9 +574,9 @@ def test_quiescence_unknown_or_busy_is_false(backend, fake, tmp_path):
 def test_cancel_aborts_only_our_running_turn(backend, fake, tmp_path):
     fake.add_session("ses_k")
     fake.release.clear()
-    th, out = _bg(backend.run_managed_turn, _session(tmp_path, native="ses_k"), "x", _own(turn="u-k"))
+    th, out = _bg(bind(session_turn, backend), _session(tmp_path, native="ses_k"), "x", _own(turn="u-k"))
     _wait(lambda: len(fake.prompts) == 1)
-    assert backend.cancel_managed_turn(_session(tmp_path), "u-k") is True
+    assert backend.cancel(_session(tmp_path), "u-k") is True
     th.join(5)
     assert fake.aborts == ["ses_k"]
     assert out["result"].success is False and out["result"].error_class == "cancelled"
@@ -583,8 +585,8 @@ def test_cancel_aborts_only_our_running_turn(backend, fake, tmp_path):
 
 def test_cancel_armed_before_start_never_submits(backend, fake, tmp_path):
     fake.add_session("ses_p")
-    assert backend.cancel_managed_turn(_session(tmp_path), "u-p") is True
-    res = backend.run_managed_turn(_session(tmp_path, native="ses_p"), "x", _own(turn="u-p"))
+    assert backend.cancel(_session(tmp_path), "u-p") is True
+    res = session_turn(backend, _session(tmp_path, native="ses_p"), "x", _own(turn="u-p"))
     assert res.error_class == "cancelled"
     assert fake.prompts == [] and fake.aborts == []
 
@@ -592,10 +594,10 @@ def test_cancel_armed_before_start_never_submits(backend, fake, tmp_path):
 def test_cancel_refused_when_another_message_runs(backend, fake, tmp_path):
     fake.add_session("ses_o")
     fake.release.clear()
-    th, out = _bg(backend.run_managed_turn, _session(tmp_path, native="ses_o"), "x", _own(turn="u-o"))
+    th, out = _bg(bind(session_turn, backend), _session(tmp_path, native="ses_o"), "x", _own(turn="u-o"))
     _wait(lambda: len(fake.prompts) == 1)
     fake.add_user("ses_o", "msg_someone_else")  # a foreign prompt is now the running one
-    assert backend.cancel_managed_turn(_session(tmp_path), "u-o") is False
+    assert backend.cancel(_session(tmp_path), "u-o") is False
     assert fake.aborts == []
     fake.release.set()
     th.join(5)
@@ -605,9 +607,9 @@ def test_cancel_refused_when_another_message_runs(backend, fake, tmp_path):
 def test_cancel_unknown_turn_never_aborts(backend, fake, tmp_path):
     fake.add_session("ses_u")
     fake.busy["ses_u"] = True
-    backend.cancel_managed_turn(_session(tmp_path, native="ses_u"), "u-never-ran")
+    backend.cancel(_session(tmp_path, native="ses_u"), "u-never-ran")
     assert fake.aborts == []
-    assert backend.forget_managed_turn(_session(tmp_path), "u-never-ran") is True
+    assert backend.forget_turn(_session(tmp_path), "u-never-ran") is True
 
 
 # --------------------------------------------------------------------------- #
@@ -617,7 +619,7 @@ def test_managed_compaction_native_summarize(backend, fake, tmp_path, monkeypatc
     fake.add_session("ses_s")
     monkeypatch.setattr(backend, "_parse_model", lambda _m: ("model-x", "prov-x"))
     seen: List[Dict[str, Any]] = []
-    res = backend.run_managed_compaction(_session(tmp_path, native="ses_s"), _own(turn="u-s"), on_process=seen.append)
+    res = session_compaction(backend, _session(tmp_path, native="ses_s"), _own(turn="u-s"), on_process=seen.append)
     assert res.success is True, res.errors
     assert fake.summaries[0]["providerID"] == "prov-x" and fake.summaries[0]["modelID"] == "model-x"
     assert seen and fake.aborts == []
@@ -627,11 +629,11 @@ def test_managed_compaction_conflict_when_busy_and_recovery_when_ambiguous(backe
     fake.add_session("ses_t")
     monkeypatch.setattr(backend, "_parse_model", lambda _m: ("m", "p"))
     fake.busy["ses_t"] = True
-    res = backend.run_managed_compaction(_session(tmp_path, native="ses_t"), _own(turn="u-t1"))
+    res = session_compaction(backend, _session(tmp_path, native="ses_t"), _own(turn="u-t1"))
     assert res.error_class == "managed_conflict" and fake.summaries == []
     fake.busy.pop("ses_t")
     fake.summarize_error = True
-    res = backend.run_managed_compaction(_session(tmp_path, native="ses_t"), _own(turn="u-t2"))
+    res = session_compaction(backend, _session(tmp_path, native="ses_t"), _own(turn="u-t2"))
     assert res.error_class == "recovery_required"
     assert fake.aborts == []
 
@@ -640,9 +642,9 @@ def test_cancel_managed_compaction_aborts_only_the_compaction(backend, fake, tmp
     fake.add_session("ses_v")
     monkeypatch.setattr(backend, "_parse_model", lambda _m: ("m", "p"))
     fake.release.clear()
-    th, out = _bg(backend.run_managed_compaction, _session(tmp_path, native="ses_v"), _own(turn="u-v"))
+    th, out = _bg(bind(session_compaction, backend), _session(tmp_path, native="ses_v"), _own(turn="u-v"))
     _wait(lambda: len(fake.summaries) == 1 and fake.busy.get("ses_v"))
-    assert backend.cancel_managed_turn(_session(tmp_path), "u-v") is True
+    assert backend.cancel(_session(tmp_path), "u-v") is True
     assert fake.aborts == ["ses_v"]
     fake.release.set()
     th.join(5)
@@ -685,13 +687,13 @@ def _oc_worker(tmp_path, backend):
 def test_INT_opencode_managed_turn_end_to_end(db, backend, fake, tmp_path):
     fake.add_session("ses_int")
     seen_uuids: List[str] = []
-    real = backend.run_managed_turn
+    real = backend.resume_session
 
-    def spy(session, message, ownership, **kw):
-        seen_uuids.append(ownership.turn_uuid)
-        return real(session, message, ownership, **kw)
+    def spy(session, message, *, turn, **kw):
+        seen_uuids.append(turn.turn_uuid)
+        return real(session, message, turn=turn, **kw)
 
-    backend.run_managed_turn = spy
+    backend.resume_session = spy
     w = _oc_worker(tmp_path, backend)
     _seed_oc_turn(db, "t-oc1", "sess-oc1", "do the work", str(tmp_path), "ses_int")
     _run_one(w, "t-oc1")
@@ -750,7 +752,7 @@ def _native_store(tmp_path, monkeypatch):
 def test_m4_late_reply_is_captured_bound_to_the_turn_and_session_busy_until_delivered(backend, fake, tmp_path):
     fake.add_session("ses_late")
     fake.release.clear()
-    backend._managed_stall_sec = lambda: 0.5
+    backend._test_stall_sec = 0.5
     in_sink, release_sink = threading.Event(), threading.Event()
     got: List[Any] = []
     s = _session(tmp_path, native="ses_late")
@@ -761,7 +763,7 @@ def test_m4_late_reply_is_captured_bound_to_the_turn_and_session_busy_until_deli
         release_sink.wait(5)
 
     backend.set_proactive_sink(sink)
-    res = backend.run_managed_turn(s, "x", _own(turn="u-late"))
+    res = session_turn(backend, s, "x", _own(turn="u-late"))
     assert res.error_class == "recovery_required"
     assert backend.is_quiescent(s) is False
     fake.release.set()
@@ -779,22 +781,25 @@ def test_m4_late_reply_is_captured_bound_to_the_turn_and_session_busy_until_deli
 def test_m4_forgotten_turn_gets_no_late_delivery(backend, fake, tmp_path):
     fake.add_session("ses_fg")
     fake.release.clear()
-    backend._managed_stall_sec = lambda: 0.5
+    backend._test_stall_sec = 0.5
     got: List[Any] = []
     backend.set_proactive_sink(lambda sid, outcome: got.append(outcome))
     s = _session(tmp_path, native="ses_fg")
-    assert backend.run_managed_turn(s, "x", _own(turn="u-fg")).error_class == "recovery_required"
-    assert backend.forget_managed_turn(s, "u-fg") is True
+    assert session_turn(backend, s, "x", _own(turn="u-fg")).error_class == "recovery_required"
+    assert backend.forget_turn(s, "u-fg") is True
     fake.release.set()
     _wait(lambda: backend.is_quiescent(s))
     time.sleep(0.3)
     assert got == []
 
 
-def test_m4_late_reply_completes_the_held_turn_through_the_carrier(db, backend, fake, tmp_path):
+def test_m4_late_reply_completes_the_held_turn_through_the_carrier(db, backend, fake, tmp_path, monkeypatch):
     fake.add_session("ses_lc")
     fake.release.clear()
-    backend._managed_stall_sec = lambda: 0.5
+    import src.core.turn_liveness as liveness
+    original = liveness.turn_control
+    monkeypatch.setattr(liveness, "turn_control",
+                        lambda u, **kw: original(u, stall_override=0.5, **kw))
     w = _oc_worker(tmp_path, backend)
     w._setup_proactive_delivery()
     _seed_oc_turn(db, "t-oc-late", "sess-oc-late", "slow", str(tmp_path), "ses_lc")
@@ -836,7 +841,7 @@ def test_m6_probe_transport_error_never_terminates_the_shared_server(backend, fa
     fake.add_session("ses_a")
     fake.add_session("ses_b")
     fake.release.clear()
-    th, out = _bg(backend.run_managed_turn, _session(tmp_path, native="ses_a"), "a", _own(turn="u-a"))
+    th, out = _bg(bind(session_turn, backend), _session(tmp_path, native="ses_a"), "a", _own(turn="u-a"))
     _wait(lambda: len(fake.prompts) == 1)
     exc = urllib.error.URLError(socket.timeout("timed out")) if kind == "connect_timeout" \
         else ConnectionResetError("reset by peer")
@@ -866,7 +871,7 @@ def test_m7_first_turn_conflict_creates_no_native_session(backend, fake, tmp_pat
     lock = _get_repo_lock(str(tmp_path))
     assert lock.acquire(blocking=False)
     try:
-        res = backend.run_managed_turn(_session(tmp_path, native=""), "x", _own(turn="u-first"))
+        res = session_turn(backend, _session(tmp_path, native=""), "x", _own(turn="u-first"))
     finally:
         lock.release()
     assert res.error_class == "managed_conflict"
@@ -875,7 +880,7 @@ def test_m7_first_turn_conflict_creates_no_native_session(backend, fake, tmp_pat
 
 def test_m7_first_turn_recovery_keeps_its_native_session_across_a_restart(backend, fake, tmp_path, stand_in_proc):
     fake.record_prompt = False  # the first prompt's acceptance is ambiguous ⇒ recovery
-    first = backend.run_managed_turn(_session(tmp_path, native=""), "x", _own(turn="u-r1"))
+    first = session_turn(backend, _session(tmp_path, native=""), "x", _own(turn="u-r1"))
     assert first.error_class == "recovery_required"
     assert len(fake.created) == 1
     native = fake.created[0]
@@ -888,7 +893,7 @@ def test_m7_first_turn_recovery_keeps_its_native_session_across_a_restart(backen
     successor._procs[key] = stand_in_proc
     successor._base_urls[key] = fake.url
     successor._MANAGED_POLL_SEC = 0.05
-    nxt = successor.run_managed_turn(_session(tmp_path, native=""), "y", _own(turn="u-r2"))
+    nxt = session_turn(successor, _session(tmp_path, native=""), "y", _own(turn="u-r2"))
     assert nxt.success is True, nxt.errors
     assert nxt.backend_session_id == native and fake.created == [native], "history lost: a second session"
     assert [p["session"] for p in fake.prompts] == [native, native]
@@ -961,10 +966,10 @@ def test_m7_write_ahead_store_lives_under_the_carrier_state_dir(monkeypatch, tmp
 
 def test_m7_first_turn_resolved_by_late_capture_clears_its_write_ahead_row(backend, fake, tmp_path):
     fake.release.clear()
-    backend._managed_stall_sec = lambda: 0.5
+    backend._test_stall_sec = 0.5
     got: List[Any] = []
     backend.set_proactive_sink(lambda sid, outcome: got.append(outcome))
-    res = backend.run_managed_turn(_session(tmp_path, native=""), "x", _own(turn="u-wa"))
+    res = session_turn(backend, _session(tmp_path, native=""), "x", _own(turn="u-wa"))
     assert res.error_class == "recovery_required"
     native = fake.created[0]
     assert _stored_rows(tmp_path) == [("gw-1", native)]
@@ -980,7 +985,7 @@ def test_m7_a_session_whose_native_id_is_known_drops_a_stale_write_ahead_row(bac
     key = backend._server_key(str(tmp_path))
     _native_store("INSERT OR REPLACE INTO native_sessions VALUES (?, ?, ?)", ("gw-1", key, "ses_stale"))
     fake.add_session("ses_known")
-    res = backend.run_managed_turn(_session(tmp_path, native="ses_known"), "x", _own(turn="u-known"))
+    res = session_turn(backend, _session(tmp_path, native="ses_known"), "x", _own(turn="u-known"))
     assert res.success is True, res.errors
     assert _stored_rows(tmp_path) == []
 
@@ -989,11 +994,11 @@ def test_close_stops_that_sessions_late_watcher_and_no_late_delivery(backend, fa
     fake.add_session("ses_cl")
     fake.add_session("ses_other")
     fake.release.clear()
-    backend._managed_stall_sec = lambda: 0.5
+    backend._test_stall_sec = 0.5
     got: List[Any] = []
     backend.set_proactive_sink(lambda sid, outcome: got.append(sid))
     s = _session(tmp_path, native="ses_cl")
-    assert backend.run_managed_turn(s, "x", _own(turn="u-close")).error_class == "recovery_required"
+    assert session_turn(backend, s, "x", _own(turn="u-close")).error_class == "recovery_required"
 
     def watching(turn: str) -> bool:
         return any(t.name == f"opencode-late-{turn[:12]}" and t.is_alive() for t in threading.enumerate())

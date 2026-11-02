@@ -282,7 +282,7 @@ class ClaimToken(str):
 
 class ManagedTurnOwnership(BaseModel):
     """[A82 Stage 3 rework] The typed ownership a carrier passes to
-    ``CodingBackend.run_managed_turn``: the claimed protocol-1 attempt the
+    ``CodingBackend.resume_session``: the claimed protocol-1 attempt the
     backend call executes on behalf of. The claim token is an execution
     credential — excluded from repr so it never lands in logs/tracebacks."""
 

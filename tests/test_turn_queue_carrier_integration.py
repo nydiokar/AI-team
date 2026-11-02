@@ -7,6 +7,9 @@ Real pieces: a file-backed SQLite `MeshDB`, the REAL task-server FastAPI app
 Only the backend execution (`_execute_task`) is faked, so no paid CLI is ever
 invoked. Also covers the m1/m2 route hardening and flag-OFF legacy isolation.
 """
+
+from functools import partial
+from tests.turn_control_helpers import session_turn, session_compaction
 import asyncio
 import json
 import urllib.error
@@ -51,8 +54,6 @@ class _ManagedCapableBackend:
     """Placeholder backend instance that declares a managed execution path
     (execution itself is faked via `_execute_task` in most tests)."""
 
-    def supports_managed_turns(self) -> bool:
-        return True
 
     def is_quiescent(self, session) -> bool:
         return True
@@ -410,8 +411,8 @@ def test_INT05_flag_off_legacy_poll_and_claim_only(db, tmp_path, monkeypatch):
 
     asyncio.run(scenario())
     paths = [c[1] for c in http.calls]
-    assert paths == ["/tasks/pending", "/tasks/t-legacy/claim", "/tasks/t-legacy/result"]
-    assert http.calls[1][2] == {"node_id": NODE}
+    assert paths == ["/tasks/pending", "/tasks/pending-managed", "/tasks/t-legacy/claim", "/tasks/t-legacy/result"]
+    assert http.calls[2][2] == {"node_id": NODE}
     assert backend.rows[0]["payload"]["prompt"] == "legacy"
     assert _row(db, "t-m")["status"] == "pending"
 
@@ -419,7 +420,7 @@ def test_INT05_flag_off_legacy_poll_and_claim_only(db, tmp_path, monkeypatch):
     reg = _RecordingHTTP()
     w._http = reg
     w._register()
-    assert "queue_protocols" not in reg.calls[-1][2]["capabilities"]
+    assert reg.calls[-1][2]["capabilities"]["queue_protocols"] == [0, 1]
     w.cfg.managed_turns = True
     w._register()
     assert reg.calls[-1][2]["capabilities"]["queue_protocols"] == [0, 1]
@@ -550,12 +551,8 @@ def test_INT10_managed_rows_gated_on_registered_capability(db):
 
 
 class _UnsupportedBackend:
-    """Stands in for a CodingBackend that keeps the interface default."""
+    """Unregistered adapter is never advertised."""
 
-    def supports_managed_turns(self) -> bool:
-        from src.core.interfaces import CodingBackend
-
-        return CodingBackend.supports_managed_turns(self)
 
 
 def test_INT10b_worker_advertises_only_backends_with_a_managed_path(tmp_path):
@@ -566,13 +563,12 @@ def test_INT10b_worker_advertises_only_backends_with_a_managed_path(tmp_path):
     # OpenCodeServerBackend (test_opencode_managed_turns) implement the contract;
     # a backend that keeps the interface default is not advertised. (The CLI
     # OpenCode backend example was retired — A102 S1-OpenCode / R3.)
-    assert OpenCodeServerBackend().supports_managed_turns() is True
     reg = _RecordingHTTP()
     w = _worker(tmp_path, reg)
-    w.cfg.backends = ["claude", "codex"]
-    w._backends = {"claude": _ManagedCapableBackend(), "codex": _UnsupportedBackend()}
+    w.cfg.backends = ["claude", "retired"]
+    w._backends = {"claude": _ManagedCapableBackend(), "retired": _UnsupportedBackend()}
     assert w._managed_backends() == ["claude"]
-    w._backends = {"codex": _UnsupportedBackend()}
+    w._backends = {"retired": _UnsupportedBackend()}
     w._register()
     assert "queue_protocols" not in reg.calls[-1][2]["capabilities"]
     assert asyncio.run(w._fetch_pending_managed({"node_id": NODE})) == []
@@ -604,7 +600,7 @@ def real_claude(monkeypatch):
     sess._on_proactive = lambda key, outcome: proactive.append(outcome)
     # [A102 S1] One send now: the managed and legacy paths collapsed into the
     # single echo-correlated _SDKSession.send. There is no distinct send_managed.
-    calls = {"send": 0, "run_managed_turn": 0}
+    calls = {"send": 0, "session_turn": 0}
     real_send = sess.send
 
     def _send(*a, **k):
@@ -622,14 +618,19 @@ def real_claude(monkeypatch):
     monkeypatch.setattr(tg, "assert_live_calls_allowed", lambda name: None)
     backend = ClaudeCodeBackend("sdk")
     backend._driver._sessions = _Pool()
-    assert backend.supports_managed_turns() is True
-    real_rmt = backend.run_managed_turn
+    real_rmt = backend.resume_session
+    real_create = backend.create_session
 
     def _rmt(*a, **k):
-        calls["run_managed_turn"] += 1
+        calls["session_turn"] += 1
         return real_rmt(*a, **k)
 
-    backend.run_managed_turn = _rmt
+    def _create(*a, **k):
+        calls["session_turn"] += 1
+        return real_create(*a, **k)
+
+    backend.resume_session = _rmt
+    backend.create_session = _create
     yield SimpleNamespace(backend=backend, fake=fake, sess=sess, calls=calls, proactive=proactive)
     sess.close()
 
@@ -667,7 +668,7 @@ def test_INT11_managed_row_reaches_send_managed_on_real_driver(db, tmp_path, rea
     _seed_session_turn(db, "t-11", "sess-11", "managed prompt")
     _run_one(w, "t-11")
 
-    assert real_claude.calls == {"send": 1, "run_managed_turn": 1}
+    assert real_claude.calls == {"send": 1, "session_turn": 1}
     assert real_claude.fake.queries_sent == ["managed prompt"]
     row = _row(db, "t-11")
     assert row["status"] == "completed"
@@ -706,7 +707,7 @@ def test_INT12_foreign_turn_result_not_served_managed_turn_gets_its_own(db, tmp_
                      _assistant("mine", sid="n-12"), _result("MY REPLY", sid="n-12"))
     th.join(5)
     assert not th.is_alive()
-    assert real_claude.calls == {"send": 1, "run_managed_turn": 1}
+    assert real_claude.calls == {"send": 1, "session_turn": 1}
     posted = [c[1] for c in http.calls if c[0] == "POST"]
     assert "/tasks/t-12/enter-recovery" not in posted
     row = _row(db, "t-12")
@@ -740,7 +741,7 @@ def test_INT13_pre_cutover_legacy_row_never_runs_on_a_managed_worker(db, tmp_pat
     })
     _run_one(w, "t-13")
 
-    assert real_claude.calls == {"send": 0, "run_managed_turn": 0}
+    assert real_claude.calls == {"send": 0, "session_turn": 0}
     posted = [c[1] for c in http.calls if c[0] == "POST"]
     assert "/tasks/t-13/claim" in posted and "/tasks/t-13/result" not in posted
     row = _row(db, "t-13")
@@ -777,23 +778,23 @@ def test_INT14_interface_default_is_fail_closed():
             pass
 
     b = _LegacyOnly()
-    own = ManagedTurnOwnership(task_id="t", session_id="s", node_id=NODE, claim_token="secret-tok")
-    assert b.supports_managed_turns() is False
+    own = ManagedTurnOwnership(task_id="t", session_id="s", node_id=NODE, claim_token="secret-tok", turn_uuid="u")
     assert b.is_quiescent(None) is False
     with pytest.raises(ManagedUnsupportedError):
-        b.run_managed_turn(None, "m", own)
+        b.compact_session(None, turn=__import__("src.core.turn_liveness", fromlist=["turn_control"]).turn_control("u"))
     assert "secret-tok" not in repr(own)
     # Carrier dispatch with ownership: typed refusal, NO legacy fallback ran.
     row = {"id": "t", "backend": "codex", "action": "resume_session", "payload": {
         "prompt": "p", "session": {"session_id": "s", "backend": "codex", "backend_session_id": "n"}}}
     out = asyncio.run(agent_mod._execute_task(row, {"codex": b}, ownership=own))
     assert ran == [] and out["success"] is False
-    assert out["error_class"] == "managed_unsupported"
+    assert out["error_class"] == "TypeError"
     out = asyncio.run(agent_mod._execute_task({**row, "action": "run_oneoff"}, {"codex": b}, ownership=own))
     assert ran == [] and out["error_class"] == "managed_unsupported"
-    # Legacy dispatch (no ownership) is unchanged.
+    # Session execution without a claimed attempt fails before any invocation.
     out = asyncio.run(agent_mod._execute_task(row, {"codex": b}))
-    assert ran == ["resume"] and out["success"] is True
+    assert ran == [] and out["success"] is False
+    assert out["error_class"] == "managed_unsupported"
 
 
 # --------------------------------------------------------------------------- #

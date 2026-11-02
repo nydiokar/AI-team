@@ -134,7 +134,7 @@ class ClaudeConfig:
     allowed_root: Optional[str] = None
     # Default model (alias like "sonnet"/"opus", or full name). None = CLI default.
     default_model: Optional[str] = None
-    # Driver preference: "sdk" (default, raises if unavailable) | "auto" (SDK w/ CLI fallback) | "print_resume" (legacy CLI only)
+    # Driver preference: "sdk" (default) | "auto" (SDK); retired CLI modes fail closed
     driver_type: str = "sdk"
 
 @dataclass
@@ -172,7 +172,7 @@ class TelegramConfig:
 class OpenCodeConfig:
     """OpenCode backend configuration.
 
-    mode="cli"    → OpenCodeBackend    (subprocess per turn, env: OPENCODE_MODE=cli)
+    The CLI backend is retired; legacy mode values remain accepted as metadata.
     mode="server" → OpenCodeServerBackend (persistent HTTP server, env: OPENCODE_MODE=server)
 
     The active backend is selected by the gateway session's `backend` field:
@@ -213,8 +213,8 @@ class SystemConfig:
     # flag rejects work that would otherwise enter the local backend path.
     local_execution_enabled: bool = True
     task_timeout: int = 0  # explicit wall-clock kill (0 = use driver fallback of 4x inactivity_timeout_sec; drivers always enforce a hard cap now)
-    inactivity_timeout_sec: int = 36000  # PrintResume driver: kill process after N seconds of no stdout (10 hours)
-    sdk_turn_timeout_sec: int = 36000   # SDK driver: total-turn deadline in seconds (10 hours; 0 = no limit)
+    inactivity_timeout_sec: int = 36000  # Turn no-progress budget consumed by the carrier (10 hours)
+    sdk_turn_timeout_sec: int = 36000   # Legacy accepted config; carrier TurnControl owns session deadlines
     task_heartbeat_interval_sec: int = 300  # send "still working" every 5 min for long tasks
     guarded_write: bool = False
     # When True, _write_artifacts moves the heavy raw_stdout NDJSON (87% of

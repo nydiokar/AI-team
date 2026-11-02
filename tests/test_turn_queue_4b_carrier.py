@@ -9,6 +9,9 @@ admission + scheduler + preparation on a bare orchestrator. The base
 ``_SDKSession.start`` / ``ClaudeSDKClient.connect`` / subprocess spawn stay
 guarded (they raise); fresh sessions boot a fake client via a subclass.
 """
+
+from functools import partial
+from tests.turn_control_helpers import session_turn, session_compaction
 import asyncio
 import json
 import threading
@@ -259,11 +262,10 @@ def pooled_claude(monkeypatch):
     # A mis-attributed turn must fail fast (deadline ⇒ recovery), not hang.
     # [A102 S1] _managed_stall_sec is gone; inject the short stall through the
     # module-level turn_control the backend shim builds every turn from.
-    import src.backends.claude_code as _cc
+    import src.core.turn_liveness as _cc
     _orig_tc = _cc.turn_control
-    monkeypatch.setattr(_cc, "turn_control", lambda u, **kw: _orig_tc(u, stall_override=3.0, **kw))
+    monkeypatch.setattr(_cc, "turn_control", lambda u, **kw: _orig_tc(u, **{"stall_override": 3.0, **kw}))
     backend = ClaudeCodeBackend("sdk")
-    assert backend.supports_managed_turns()
     yield SimpleNamespace(backend=backend, script=script, booted=booted)
     for s in booted:
         s._closed = True
@@ -325,7 +327,7 @@ def test_K04b_compaction_after_carrier_restart_resumes_the_native_session(pooled
                 created_at="t", updated_at="t", backend_session_id="native-8")
     own = tq.ManagedTurnOwnership(task_id="k", session_id="sess-r", node_id=NODE,
                                   claim_token="tok", incarnation_id="inc", turn_uuid=str(uuid.uuid4()))
-    res = pooled_claude.backend.run_managed_compaction(s, own)
+    res = session_compaction(pooled_claude.backend, s, own)
     assert res.success and res.backend_session_id == "native-9"
     [fresh] = pooled_claude.booted
     assert fresh.resume == "native-8" and fresh.fake.queries_sent == ["/compact"]
@@ -340,12 +342,12 @@ def test_K05_non_quiescent_process_refuses_compaction_without_interrupt(pooled_c
                 created_at="t", updated_at="t", backend_session_id="native-1")
     own = tq.ManagedTurnOwnership(task_id="a", session_id="sess-q", node_id=NODE,
                                   claim_token="tok", incarnation_id="inc", turn_uuid=str(uuid.uuid4()))
-    assert backend.run_managed_turn(s, "first", own).success
+    assert session_turn(backend, s, "first", own).success
     [first] = pooled_claude.booted
     first._bg_task_status["bg-1"] = "running"  # native background work in flight
     own2 = tq.ManagedTurnOwnership(task_id="k", session_id="sess-q", node_id=NODE,
                                    claim_token="tok2", incarnation_id="inc", turn_uuid=str(uuid.uuid4()))
-    res = backend.run_managed_compaction(s, own2)
+    res = session_compaction(backend, s, own2)
     assert not res.success and res.error_class == "managed_conflict"
     assert not first._closed and first.fake.interrupts == 0
     assert len(pooled_claude.booted) == 1 and "/compact" not in first.fake.queries_sent
@@ -362,7 +364,7 @@ def test_K05b_used_process_cannot_take_an_unechoed_local_command(pooled_claude):
                 created_at="t", updated_at="t", backend_session_id="native-1")
     own = tq.ManagedTurnOwnership(task_id="a", session_id="sess-g", node_id=NODE,
                                   claim_token="tok", incarnation_id="inc", turn_uuid=str(uuid.uuid4()))
-    assert backend.run_managed_turn(s, "first", own).success
+    assert session_turn(backend, s, "first", own).success
     [first] = pooled_claude.booted
     from src.core.turn_liveness import turn_control
     with pytest.raises(tq.OwnershipConflictError):
@@ -377,11 +379,12 @@ def test_K06_backends_without_a_managed_compaction_path_fail_closed():
     # compaction/cancel natively; a backend that does NOT override the interface
     # default fails closed. (The CLI OpenCode backend that was the fail-closed
     # example was retired — A102 S1-OpenCode / R3.)
-    assert OpenCodeServerBackend.run_managed_compaction is not CodingBackend.run_managed_compaction
+    assert OpenCodeServerBackend.compact_session is not CodingBackend.compact_session
     fake = SimpleNamespace()
     with pytest.raises(tq.ManagedUnsupportedError):
-        CodingBackend.run_managed_compaction(fake, None, None)
-    assert CodingBackend.cancel_managed_turn(fake, None, "u") is False
+        from src.core.turn_liveness import turn_control
+        CodingBackend.compact_session(fake, None, turn=turn_control("u"))
+    assert CodingBackend.forget_turn(fake, None, "u") is False
 
 
 # --------------------------------------------------------------------------- #
@@ -396,13 +399,18 @@ def test_R01_cancel_in_boot_window_is_armed_and_the_turn_never_runs(db, tmp_path
     fake.replies["slow boot"] = [_assistant("work", sid="n-p"), _result("real output", sid="n-p")]
     _interrupt_ends_turn(fake, sid="n-p")
     gate = threading.Event()
-    inner = real_claude.backend.run_managed_turn
+    inner = real_claude.backend.resume_session
 
     def gated(*a, **k):
         assert gate.wait(10)
         return inner(*a, **k)
 
-    real_claude.backend.run_managed_turn = gated
+    real_claude.backend.resume_session = gated
+    original_create = real_claude.backend.create_session
+    def gated_create(*a, **k):
+        assert gate.wait(10)
+        return original_create(*a, **k)
+    real_claude.backend.create_session = gated_create
     w = _worker(tmp_path, _ClientHTTP(TestClient(ts.app)))
     w._backends = {"claude": real_claude.backend}
     _seed_session_turn(db, "t-p", "sess-p", "slow boot")
@@ -443,4 +451,4 @@ def test_R02_cancel_before_the_turn_uuid_exists_is_caught_pre_invoke(db, tmp_pat
     w._claim_and_start_managed = start_then_cancel
     _run_one(w, "t-q")
     assert _row(db, "t-q")["status"] == "cancelled"
-    assert real_claude.calls["run_managed_turn"] == 0 and fake.queries_sent == []
+    assert real_claude.calls["session_turn"] == 0 and fake.queries_sent == []

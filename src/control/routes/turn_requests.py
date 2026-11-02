@@ -353,7 +353,7 @@ def build_router(
                                   "description": "Enrollment state after the operation."}})
     async def api_enroll_turn_queue(session_id: str) -> JSONResponse:
         """[A82 Stage 7] Operator enrollment onto the managed turn queue (design
-        §10 step 6). Default-OFF flag ``TURN_QUEUE_ENROLLMENT_ENABLED``; typed
+        §10 step 6). Enrollment is permanent after the cutover; typed
         refusal (409 + reason) for a busy / closed session, legacy work, or a
         carrier without managed capability; 503 without the canonical DB."""
         from src.control.turn_queue import TurnQueueError

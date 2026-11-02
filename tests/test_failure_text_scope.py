@@ -183,17 +183,22 @@ def test_unknown_backend_class_is_still_rederived_from_text():
     assert _classify(_result(error_class="backend_error", errors=["boom"])) == "fatal"
 
 
-def test_run_backend_local_keeps_the_backend_error_class():
-    """``_run_backend_local`` used to rebuild the TaskResult without
-    ``error_class``, so the structured class never reached ``_classify_error``."""
+def test_worker_result_keeps_the_backend_error_class():
+    """The real worker payload and gateway reconstruction retain the backend
+    class, so retry policy does not have to guess it from the text."""
     raw = ExecutionResult(success=False, output="", errors=["x"], error_class="upstream_error")
-    orch = TaskOrchestrator.__new__(TaskOrchestrator)
-    orch._backends = {"claude": SimpleNamespace(run_oneoff=lambda cwd, prompt: raw)}
-    orch._task_cancel_events = {}
-    orch._running_exec_tasks = {}
-    task = SimpleNamespace(id="t-local", prompt="p", metadata={"cwd": "/repo"})
-    result = asyncio.run(orch._run_backend_local(task, None, "claude"))
+    result = _through_worker_and_gateway(raw)
     assert result.error_class == "upstream_error"
+
+
+def _through_worker_and_gateway(raw: ExecutionResult) -> TaskResult:
+    from src.worker.agent import _execute_task
+
+    task = {"id": "t-worker", "backend": "claude", "action": "run_oneoff",
+            "payload": {"prompt": "p", "metadata": {"cwd": "/repo"}}}
+    backends = {"claude": SimpleNamespace(run_oneoff=lambda cwd, prompt: raw)}
+    payload = asyncio.run(_execute_task(task, backends))
+    return _dispatch_failed_row(payload)
 
 
 # --------------------------------------------------------------------------- #
@@ -234,18 +239,13 @@ def _result_wire(**kw) -> dict:
 
 
 def _through_driver_and_orchestrator(outcome) -> TaskResult:
-    """ExecutionResult from the driver's real error branch, then the
-    orchestrator's real ``_run_backend_local`` TaskResult construction."""
+    """Drive the SDK error branch, worker serialization and gateway result
+    reconstruction without starting a provider process."""
     with patch.object(_SDKSession, "send", lambda self_inner, message, **_kw: outcome), \
             patch.object(_SDKSession, "start", lambda self_inner: None), \
             patch("src.core.test_guard.assert_live_calls_allowed", lambda *a, **k: None):
         raw = ClaudeSDKClientDriver().run_oneoff("/repo", "do it", turn=turn_control("t-sdk"))
-    orch = TaskOrchestrator.__new__(TaskOrchestrator)
-    orch._backends = {"claude": SimpleNamespace(run_oneoff=lambda cwd, prompt: raw)}
-    orch._task_cancel_events = {}
-    orch._running_exec_tasks = {}
-    task = SimpleNamespace(id="t-sdk", prompt="p", metadata={"cwd": "/repo"})
-    return asyncio.run(orch._run_backend_local(task, None, "claude"))
+    return _through_worker_and_gateway(raw)
 
 
 def test_sdk_429_with_rate_limit_event_records_refusal_snapshot():

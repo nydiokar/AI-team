@@ -246,7 +246,6 @@ class CodexBackend(CodingBackend):
         self._client: CodexAppServerClient | None = None
         self._loaded: dict[str, str] = {}
         self._active: dict[str, ActiveTurn] = {}
-        self._execution_cancels: dict[str, threading.Event] = {}
         self._capacity = threading.BoundedSemaphore(8)
         # [A82 Stage 5] session_key → current sender capability (memory only),
         # and native thread id → the capability its loaded config carries.
@@ -306,44 +305,34 @@ class CodexBackend(CodingBackend):
             logger.info("event=codex_app_server_ready pid=%s", client.process.pid)
             return client
 
-    def prepare_execution(self, task_id: str) -> None:
-        with self._lock:
-            self._execution_cancels.setdefault(task_id, threading.Event())
 
-    def cancel_execution(self, task_id: str) -> None:
-        # [A102 S1] Retained for the gateway-local execution path in the
-        # orchestrator (outside this worker's files); S2 deletes it once that
-        # path routes cancellation through :meth:`cancel`.
-        with self._lock:
-            event = self._execution_cancels.get(task_id)
-            if event is not None:
-                event.set()
 
-    def create_session(self, session: Session, *, turn: TurnControl | None = None,
+    def create_session(self, session: Session, *, turn: TurnControl,
                         telemetry_context=None, telemetry_sink=None) -> ExecutionResult:
         """Start the native session if needed and run the first prompt
         (``session.last_user_message``) tagged with ``turn.turn_uuid``."""
         return self._run_turn(session, session.last_user_message, turn,
                               telemetry_context, telemetry_sink, compact=False)
 
-    def resume_session(self, session: Session, message: str, *, turn: TurnControl | None = None,
+    def resume_session(self, session: Session, message: str, *, turn: TurnControl,
                        telemetry_context=None, telemetry_sink=None) -> ExecutionResult:
         """Submit ``message`` on the native session tagged with ``turn.turn_uuid``
         (busy ⇒ typed conflict before submit; never interrupts)."""
         return self._run_turn(session, message, turn,
                               telemetry_context, telemetry_sink, compact=False)
 
-    def run_oneoff(self, cwd: str, message: str, *, telemetry_context=None, telemetry_sink=None) -> ExecutionResult:
+    def run_oneoff(self, cwd: str, message: str, *, turn: TurnControl | None = None, telemetry_context=None, telemetry_sink=None) -> ExecutionResult:
         """[A102 R1] A thin wrapper: a throwaway ``Session`` + ``create_session``
         with its own ``turn_control`` (production refuses gateway-local one-offs,
         so this is consolidation only — one body per operation)."""
-        session = Session(session_id="", backend="codex", repo_path=cwd,
+        turn = turn or turn_control(uuid.uuid4().hex)
+        session = Session(session_id=f"oneoff-{turn.turn_uuid}", backend="codex", repo_path=cwd,
                           status=SessionStatus.IDLE, created_at="", updated_at="",
                           last_user_message=message)
-        return self.create_session(session, turn=turn_control(uuid.uuid4().hex),
+        return self.create_session(session, turn=turn,
                                    telemetry_context=telemetry_context, telemetry_sink=telemetry_sink)
 
-    def cancel(self, session: Session, turn_uuid: str | None = None) -> bool:
+    def cancel(self, session: Session, turn_uuid: str) -> bool:
         """[A102] The single turn-cancel seam (collapses the four Codex cancel
         mechanisms). With ``turn_uuid``: cancel EXACTLY that turn — arm it (a
         not-yet-submitted turn is then never submitted), signal its live run
@@ -352,12 +341,6 @@ class CodexBackend(CodingBackend):
         refuse (no-op) otherwise. Without ``turn_uuid`` (session-wide shutdown /
         the S1 gateway-local graceful-cancel path, plus :meth:`close`): signal
         the session's active turn. Returns whether a cancel was armed/delivered."""
-        if turn_uuid is None:
-            with self._lock:
-                active = self._active.get(session.session_id)
-                if active is not None:
-                    active.cancel.set()
-                return active is not None
         if not turn_uuid:
             return False
         with self._lock:
@@ -376,7 +359,10 @@ class CodexBackend(CodingBackend):
         return True
 
     def close(self, session: Session) -> None:
-        self.cancel(session)
+        with self._lock:
+            active = self._active.get(session.session_id)
+        if active is not None:
+            self.cancel(session, active.turn_uuid)
         with self._lock:
             if session.session_id in self._active:
                 return  # The turn's owner unloads after confirmed interruption.
@@ -439,7 +425,7 @@ class CodexBackend(CodingBackend):
             self._loaded.clear()
             self._sender_attached.clear()
 
-    def compact_session(self, session: Session, *, turn: TurnControl | None = None,
+    def compact_session(self, session: Session, *, turn: TurnControl,
                         telemetry_context=None, telemetry_sink=None) -> ExecutionResult:
         """Native compaction run as ONE turn under ``turn.turn_uuid`` (same
         ownership/liveness contract as :meth:`resume_session`)."""
@@ -457,33 +443,14 @@ class CodexBackend(CodingBackend):
     # native userMessage ``clientId``); the native turn id from the
     # ``turn/start`` response is bound to it. Never interrupts on conflict.
     # ------------------------------------------------------------------ #
-    def supports_managed_turns(self) -> bool:
-        """Managed execution needs the native app-server binary on this host AND
-        that binary's protocol (``thread/read`` + ``clientUserMessageId``),
-        probed offline once per binary ([A82 step 4 rework, m5])."""
-        env = ensure_node_on_path()
-        executable = resolve_codex_executable(env)
-        return executable is not None and _managed_protocol_supported(executable, env)
 
     def set_proactive_sink(self, sink: Callable[[str, LateManagedOutcome], Any]) -> None:
         """Carrier sink for late managed replies (bound by turn uuid there)."""
         self._proactive_sink = sink
 
-    # [A102 S1] Deprecated managed-twin shims. The managed semantics now live in
-    # the natural methods above; these remain ONLY so the worker carrier
-    # (src/worker/agent.py, unchanged in S1) keeps working until S2 deletes them.
-    # Each builds the carrier ``TurnControl`` and calls the natural method.
-    def run_managed_turn(self, session: Session, message: str, ownership: Any, *, telemetry_context=None,
-                         telemetry_sink=None, on_process=None) -> ExecutionResult:
-        return self.resume_session(session, message, telemetry_context=telemetry_context, telemetry_sink=telemetry_sink,
-                                   turn=turn_control(ownership.turn_uuid, ownership=ownership, on_process=on_process))
 
-    def run_managed_compaction(self, session: Session, ownership: Any, *, telemetry_context=None,
-                               telemetry_sink=None, on_process=None) -> ExecutionResult:
-        return self.compact_session(session, telemetry_context=telemetry_context, telemetry_sink=telemetry_sink,
-                                    turn=turn_control(ownership.turn_uuid, ownership=ownership, on_process=on_process))
 
-    def _run_turn(self, session: Session, message: str, turn: TurnControl | None, telemetry_context,
+    def _run_turn(self, session: Session, message: str, turn: TurnControl, telemetry_context,
                   telemetry_sink, *, compact: bool) -> ExecutionResult:
         """Run ONE turn: submit ``message`` (or a compaction) tagged with the
         turn uuid on a worker thread, and await progress under ``turn``'s clock.
@@ -493,11 +460,11 @@ class CodexBackend(CodingBackend):
         gateway-local path / a one-off) gets a self-owned ``turn_control``."""
         from src.control.turn_queue import ManagedUnsupportedError, OwnershipConflictError
 
-        if not self.supports_managed_turns():
+        env = ensure_node_on_path()
+        executable = resolve_codex_executable(env)
+        if executable is None or not _managed_protocol_supported(executable, env):
             raise ManagedUnsupportedError("codex app-server is not available on this carrier",
                                           backend=type(self).__name__)
-        if turn is None:
-            turn = turn_control(uuid.uuid4().hex)
         ownership = turn.ownership
         if ownership is not None and (ownership.session_id or "") != (session.session_id or ""):
             raise OwnershipConflictError("managed ownership does not match the session",
@@ -568,11 +535,7 @@ class CodexBackend(CodingBackend):
 
     # [A102 S1] Deprecated managed-twin shims (S2 deletes them; the carrier
     # still calls them in S1).
-    def cancel_managed_turn(self, session: Session, turn_uuid: str) -> bool:
-        return self.cancel(session, turn_uuid)
 
-    def forget_managed_turn(self, session: Session, turn_uuid: str) -> bool:
-        return self.forget_turn(session, turn_uuid)
 
     def forget_turn(self, session: Session, turn_uuid: str) -> bool:
         """Drop the wait for ``turn_uuid`` (its row is terminal server-side): no
@@ -866,9 +829,7 @@ class CodexBackend(CodingBackend):
             with self._lock:
                 if key in self._active:
                     raise CodexProtocolError("codex_thread_busy")
-                self.prepare_execution(task_id)
                 active = ActiveTurn(session_id=key, task_id=task_id,
-                                    cancel=self._execution_cancels[task_id],
                                     turn_uuid=call.turn_uuid)
                 self._active[key] = active
             ownership = CodexOwnership()
@@ -1108,7 +1069,6 @@ class CodexBackend(CodingBackend):
             with self._lock:
                 if active and self._active.get(key) is active:
                     self._active.pop(key, None)
-                    self._execution_cancels.pop(task_id, None)
             self._capacity.release()
             try:
                 sink.flush()

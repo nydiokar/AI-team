@@ -5923,7 +5923,6 @@ class TaskOrchestrator(ITaskOrchestrator):
         # [A82 Stage 7] Admission exclusion (design §10 step 6): a legacy arrival
         # for a session being / just enrolled in THIS gateway is refused before
         # any side effect (no await between here and the legacy put).
-        self._legacy_put_guard(_sid)
         if task.metadata:
             task.metadata.pop(self._TURN_OPERATION_META_KEY, None)
 
@@ -5969,9 +5968,6 @@ class TaskOrchestrator(ITaskOrchestrator):
                 raise RuntimeError("Task queue is full")
             logger.warning(f"event=throttled task_id={task.id} reason=queue_full priority={priority_val}")
             self._emit_event("throttled", task, {"reason": "queue_full", "priority": priority_val})
-            admitting = self._enrollment_exclusion()[2] if _sid else None
-            if admitting is not None:  # [A82 Stage 7] visible to a racing enrollment
-                admitting[_sid] = admitting.get(_sid, 0) + 1
             try:
                 await asyncio.wait_for(self.task_queue.put(task), timeout=5.0)
                 self.active_tasks[task.id] = task
@@ -5985,13 +5981,6 @@ class TaskOrchestrator(ITaskOrchestrator):
                 logger.error(f"event=dropped_after_throttle task_id={task.id}")
                 self._emit_event("dropped_after_throttle", task, {"timeout": 5.0})
                 raise RuntimeError("Task queue is full") from exc
-            finally:
-                if admitting is not None:
-                    left = admitting.get(_sid, 1) - 1
-                    if left > 0:
-                        admitting[_sid] = left
-                    else:
-                        admitting.pop(_sid, None)
         return task.id
 
     def _task_requires_local_execution(self, task: Task) -> bool:
@@ -7440,34 +7429,11 @@ class TaskOrchestrator(ITaskOrchestrator):
         if await self._session_turn_queue_enrolled(session_id):
             return await self._admit_managed_compaction(session, operation_id)
 
-        # If the session is pinned to a remote mesh node, dispatch there — running
-        # the backend locally would use the wrong cwd (the Pi doesn't have the
-        # Windows/remote path that session.repo_path points to).
-        if config.mesh.enabled and session.machine_id and session.machine_id != socket.gethostname():
-            compact_task = Task(
-                id=f"compact-{session_id[:8]}-{int(time.time())}",
-                type=TaskType.ANALYZE,
-                priority=TaskPriority.HIGH,
-                status=TaskStatus.PENDING,
-                created=now_iso(),
-                title="Compact session context",
-                target_files=[],
-                prompt="/compact",
-                success_criteria=["Context compacted"],
-                context="",
-                metadata={"session_id": session_id, "source": "compact", "task_origin": "runtime"},
-            )
-            backend_name = session.backend or "claude"
-            self._mesh_enqueue_task(compact_task, backend_name)
-            result = await self._process_task_remote(compact_task, session, time.time(), config.system.task_timeout)
-            from src.core.interfaces import ExecutionResult as ER
-            return ER(
-                success=result.success,
-                output=result.output,
-                errors=result.errors or [],
-            )
+        from src.control.turn_queue import LegacyExecutionRetiredError
 
-        return await asyncio.to_thread(backend.compact_session, session)
+        raise LegacyExecutionRetiredError(
+            "session compaction requires the durable turn queue", session_id=session_id,
+        )
 
     def load_compact_context(self, task_id: str) -> Dict[str, Any]:
         """Load compact, prompt-ready context for a given task_id.
@@ -8282,7 +8248,14 @@ class TaskOrchestrator(ITaskOrchestrator):
         4) Persist `results/*.json` and emit events
         """
         start_time = time.time()
-        
+        session_id = str((task.metadata or {}).get("session_id") or "").strip()
+        if session_id:
+            from src.control.turn_queue import LegacyExecutionRetiredError
+
+            raise LegacyExecutionRetiredError(
+                "session execution requires the durable turn queue", session_id=session_id,
+            )
+
         try:
             task.status = TaskStatus.PROCESSING
 
@@ -8310,87 +8283,8 @@ class TaskOrchestrator(ITaskOrchestrator):
                 timeout_s = config.system.task_timeout
             cancel_ev = self._task_cancel_events.get(task.id)
 
-            # Resolve session up front so we can decide whether this task is
-            # pinned to a remote mesh node before entering the local retry loop.
-            session_id = (task.metadata or {}).get("session_id", "").strip()
-            session = self.session_store.get(session_id) if session_id else None
-
-            # Mesh routing: only sessions explicitly pinned to a remote node
-            # (`session.machine_id` set) with MESH_ENABLED=true take this path.
-            # Everything else falls through to the untouched local retry loop
-            # below — zero behavior change for ordinary local sessions.
-            _host = socket.gethostname()
-            _pinned_elsewhere = bool(
-                session and session.machine_id and session.machine_id != _host
-            )
-            route_remote = bool(config.mesh.enabled and _pinned_elsewhere)
-
-            # Affinity guard (A11): a session pinned to a *different* node must NOT
-            # execute in this host's local worker pool. Before A11, if `route_remote`
-            # came out False for any reason (mesh flag not seen at this call site,
-            # etc.) while the session named another node, the task silently ran
-            # locally on the wrong machine — corrupting backend_session_id continuity
-            # and producing a null/duplicate gateway_node_id (the #9 smoke failure).
-            # Make that case loud instead of silent: log the exact sub-conditions and
-            # refuse local execution.
-            if _pinned_elsewhere and not route_remote:
-                logger.error(
-                    "event=affinity_unrouted task_id=%s session_id=%s machine_id=%s host=%s "
-                    "mesh_enabled=%s — refusing local execution of a remote-pinned session",
-                    task.id, getattr(session, "session_id", None),
-                    getattr(session, "machine_id", None), _host, config.mesh.enabled,
-                )
-                self._emit_event(
-                    "affinity_unrouted",
-                    task,
-                    {
-                        "session_id": getattr(session, "session_id", None),
-                        "machine_id": getattr(session, "machine_id", None),
-                        "host": _host,
-                        "mesh_enabled": bool(config.mesh.enabled),
-                    },
-                )
-                if config.mesh.enabled:
-                    # Mesh is on and the node is named — honor the pin via the remote
-                    # path (which fails loudly if the node is offline; no local fallback).
-                    route_remote = True
-                else:
-                    # Mesh disabled but the session is pinned elsewhere: we cannot
-                    # honor affinity and must not run on the wrong host. Fail honestly.
-                    last_result = TaskResult(
-                        task_id=task.id,
-                        success=False,
-                        output="",
-                        errors=[
-                            f"Session pinned to node {session.machine_id!r} but mesh is "
-                            f"disabled on {_host!r}; cannot execute without violating "
-                            f"session affinity."
-                        ],
-                        files_modified=[],
-                        execution_time=time.time() - start_time,
-                        timestamp=now_iso(),
-                    )
-                    setattr(last_result, "backend_name", getattr(session, "backend", None))
-                    last_result.error_class = self._classify_error(last_result)
-                    last_result.retries = 0
-                    route_remote = True  # skip the local loop below
-
-            if route_remote and last_result is None:
-                last_result = await self._process_task_remote(task, session, start_time, timeout_s)
-
-            # Defense-in-depth (A11/A18 invariant): the local worker loop must
-            # never execute a turn for a session pinned to a *different* host —
-            # that would fork backend_session_id continuity onto the wrong box.
-            # The affinity guard above already forces route_remote=True for such
-            # sessions (so this loop is unreachable for them); assert it rather
-            # than trust the guard alone. The mesh claim filter (db.py) is the
-            # other, independent line of defense at claim time.
-            if not route_remote:
-                assert not _pinned_elsewhere, (
-                    f"affinity invariant violated: session {getattr(session, 'session_id', None)!r} "
-                    f"pinned to {getattr(session, 'machine_id', None)!r} reached the local worker "
-                    f"loop on host {_host!r}"
-                )
+            session = None
+            route_remote = False
 
             # Defense-in-depth for controller-only deployments. Admission rejects
             # this path before queueing; retain this guard for direct callers that
@@ -8410,13 +8304,7 @@ class TaskOrchestrator(ITaskOrchestrator):
                 attempt += 1
                 from src.core.telemetry import TelemetryContext
                 from config.models import resolve_model
-                local_action = (
-                    "resume_session"
-                    if session and session.backend_session_id
-                    else "create_session"
-                    if session
-                    else "run_oneoff"
-                )
+                local_action = "run_oneoff"
                 telemetry_context = TelemetryContext.create(
                     turn_id=task.id,
                     node_id=socket.gethostname(),
@@ -8461,54 +8349,25 @@ class TaskOrchestrator(ITaskOrchestrator):
                 # Use session backend (with native resume) when task belongs to a session.
                 # For non-session tasks, use the native backend directly instead of
                 # the legacy Claude bridge/task-file execution path.
-                if session:
-                    session.status = SessionStatus.BUSY
-                    self.session_store.save(session)
-                    backend_name = session.backend
-                    backend = self._backends.get(backend_name, self._backends["claude"])
-                    if backend_name == "codex" and hasattr(backend, "prepare_execution"):
-                        backend.prepare_execution(task.id)
-                    session.last_user_message = task.prompt
-                    if session.backend_session_id:
-                        from src.core.backend_call import call_backend
-                        exec_task = asyncio.create_task(
-                            asyncio.to_thread(
-                                call_backend,
-                                backend.resume_session,
-                                session,
-                                task.prompt,
-                                telemetry_context=telemetry_context,
-                                telemetry_sink=self._telemetry_sink,
-                            )
-                        )
-                    else:
-                        from src.core.backend_call import call_backend
-                        exec_task = asyncio.create_task(
-                            asyncio.to_thread(
-                                call_backend,
-                                backend.create_session,
-                                session,
-                                telemetry_context=telemetry_context,
-                                telemetry_sink=self._telemetry_sink,
-                            )
-                        )
-                else:
-                    backend_name = str((task.metadata or {}).get("backend") or "claude").strip().lower()
-                    backend = self._backends.get(backend_name, self._backends["claude"])
-                    cwd_override = str((task.metadata or {}).get("cwd") or "").strip()
-                    if not cwd_override:
-                        cwd_override = str(getattr(config.claude, "base_cwd", "") or "").strip()
-                    from src.core.backend_call import call_backend
-                    exec_task = asyncio.create_task(
-                        asyncio.to_thread(
-                            call_backend,
-                            backend.run_oneoff,
-                            cwd_override,
-                            task.prompt,
-                            telemetry_context=telemetry_context,
-                            telemetry_sink=self._telemetry_sink,
-                        )
+                backend_name = str((task.metadata or {}).get("backend") or "claude").strip().lower()
+                backend = self._backends.get(backend_name, self._backends["claude"])
+                cwd_override = str((task.metadata or {}).get("cwd") or "").strip()
+                if not cwd_override:
+                    cwd_override = str(getattr(config.claude, "base_cwd", "") or "").strip()
+                from src.core.backend_call import call_backend
+                from src.core.turn_liveness import turn_control
+                oneoff_turn = turn_control(f"{task.id}-{attempt}")
+                oneoff_session = Session(
+                    session_id=f"oneoff-{oneoff_turn.turn_uuid}", backend=backend_name,
+                    repo_path=cwd_override, status=SessionStatus.BUSY,
+                    created_at=now_iso(), updated_at=now_iso(),
+                )
+                exec_task = asyncio.create_task(
+                    asyncio.to_thread(
+                        call_backend, backend.run_oneoff, cwd_override, task.prompt,
+                        turn=oneoff_turn, telemetry_context=telemetry_context, telemetry_sink=self._telemetry_sink,
                     )
+                )
                 self._running_exec_tasks[task.id] = exec_task
                 # Wait for whichever happens first
                 wait_set = {exec_task}
@@ -8598,16 +8457,9 @@ class TaskOrchestrator(ITaskOrchestrator):
                             invocation_id=telemetry_context.invocation_id,
                             backend=backend_name,
                         )
-                        if backend_name == "codex" and hasattr(backend, "cancel_execution"):
-                            backend.cancel_execution(task.id)
-                            raw = await asyncio.shield(exec_task)
-                            if session and raw.backend_session_id:
-                                session.backend_session_id = raw.backend_session_id
-                        elif session:
-                            with contextlib.suppress(Exception):
-                                backend.cancel(session)
-                        if backend_name != "codex":
-                            exec_task.cancel()
+                        with contextlib.suppress(Exception):
+                            backend.cancel(oneoff_session, oneoff_turn.turn_uuid)
+                        exec_task.cancel()
                         with contextlib.suppress(asyncio.CancelledError):
                             await exec_task
                         execution_time = time.time() - start_time
@@ -8648,16 +8500,9 @@ class TaskOrchestrator(ITaskOrchestrator):
                             invocation_id=telemetry_context.invocation_id,
                             backend=backend_name,
                         )
-                        if backend_name == "codex" and hasattr(backend, "cancel_execution"):
-                            backend.cancel_execution(task.id)
-                            raw = await asyncio.shield(exec_task)
-                            if session and raw.backend_session_id:
-                                session.backend_session_id = raw.backend_session_id
-                        elif session:
-                            with contextlib.suppress(Exception):
-                                backend.cancel(session)
-                        if backend_name != "codex":
-                            exec_task.cancel()
+                        with contextlib.suppress(Exception):
+                            backend.cancel(oneoff_session, oneoff_turn.turn_uuid)
+                        exec_task.cancel()
                         with contextlib.suppress(asyncio.CancelledError):
                             await exec_task
                         execution_time = time.time() - start_time
@@ -9548,47 +9393,6 @@ created: {task.created}
                 # cancellation must never call backend.cancel(session).
                 self._emit_event("cancel_requested", t, None)
                 return True
-            # Interrupt the live backend turn directly, right now. The execution
-            # loop's own graceful-cancel branch (which calls backend.cancel(session)
-            # before tearing down exec_task) only fires if it's watching a
-            # cancel_waiter built from THIS event — but that loop reads
-            # `self._task_cancel_events.get(task.id)` once, before the task starts,
-            # so for any task that was already running when cancel is requested
-            # (the normal case) the event created just above is invisible to it.
-            # Without this direct call, only the asyncio wrapper around
-            # `asyncio.to_thread(...)` gets cancelled: the backend thread and its
-            # live subprocess/session keep running unattended, never removed from
-            # the driver's session pool, so the next turn on this session queues
-            # up behind the abandoned one and appends the same prompt into the
-            # same still-live conversation (the ever-growing-session bug).
-            if t is not None:
-                try:
-                    session_id = (t.metadata or {}).get("session_id", "").strip()
-                    session = self.session_store.get(session_id) if session_id else None
-                    if session is not None:
-                        backend_name = str(
-                            (t.metadata or {}).get("backend") or session.backend or "claude"
-                        ).strip().lower()
-                        backend = self._backends.get(backend_name)
-                        if backend is not None:
-                            backend.cancel(session)
-                        # When the session is pinned to a remote worker node, the
-                        # gateway's local SDK session pool does not contain this
-                        # session — backend.cancel() above is a no-op.  Send the
-                        # interrupt to the owning process via a lightweight
-                        # cancel_turn control task (codex has its own path).
-                        if backend_name != "codex" and getattr(session, "machine_id", ""):
-                            try:
-                                self._enqueue_remote_cancel_turn(session)
-                            except Exception:
-                                logger.warning(
-                                    "event=remote_cancel_turn_failed task_id=%s",
-                                    task_id, exc_info=True,
-                                )
-                except Exception:
-                    logger.warning(
-                        "event=cancel_backend_interrupt_failed task_id=%s", task_id, exc_info=True
-                    )
             # Best-effort cancel running exec task
             task = self._running_exec_tasks.get(task_id)
             if task is not None and not task.done():
@@ -10099,158 +9903,7 @@ Generated from user description: {description}
     #   MeshRouter-level assertion, not scattered across process_task callers.
     # ===========================================================================
 
-    async def _run_backend_local(
-        self,
-        task: "Task",
-        session: Optional[Any],
-        backend_name: str,
-    ) -> "TaskResult":
-        """Execute the task on this machine using the local backend pool.
 
-        This is the existing execution path extracted so that
-        `_dispatch_or_run_local` can call it when mesh routing is off or no
-        capable remote node is available.
-        """
-        from src.core.interfaces import ExecutionResult as _ER
-        backend = self._backends.get(backend_name, self._backends["claude"])
-        start = time.time()
-        cancel_ev = self._task_cancel_events.get(task.id)
-
-        if session:
-            session.last_user_message = task.prompt
-            if session.backend_session_id:
-                exec_task = asyncio.create_task(
-                    asyncio.to_thread(backend.resume_session, session, task.prompt)
-                )
-            else:
-                exec_task = asyncio.create_task(
-                    asyncio.to_thread(backend.create_session, session)
-                )
-        else:
-            cwd_override = str((task.metadata or {}).get("cwd") or "").strip()
-            if not cwd_override:
-                cwd_override = str(getattr(config.claude, "base_cwd", "") or "").strip()
-            exec_task = asyncio.create_task(
-                asyncio.to_thread(backend.run_oneoff, cwd_override, task.prompt)
-            )
-
-        self._running_exec_tasks[task.id] = exec_task
-
-        wait_set = {exec_task}
-        cancel_waiter: Optional[asyncio.Task] = None
-        if cancel_ev is not None:
-            cancel_waiter = asyncio.create_task(cancel_ev.wait())
-            wait_set.add(cancel_waiter)
-
-        try:
-            done, _ = await asyncio.wait(wait_set, return_when=asyncio.FIRST_COMPLETED)
-        finally:
-            if cancel_waiter and not cancel_waiter.done():
-                cancel_waiter.cancel()
-
-        if exec_task in done:
-            raw = exec_task.result()
-            if isinstance(raw, _ER):
-                if session and (
-                    raw.backend_session_id
-                    or session.cache_health != "unknown"
-                    or session.driver_status
-                ):
-                    if raw.backend_session_id:
-                        session.backend_session_id = raw.backend_session_id
-                    self.session_store.save(session)
-                result = TaskResult(
-                    task_id=task.id,
-                    success=raw.success,
-                    output=raw.output,
-                    errors=raw.errors,
-                    files_modified=raw.files_modified,
-                    execution_time=raw.execution_time,
-                    timestamp=now_iso(),
-                    file_changes=getattr(raw, "file_changes", []),
-                    raw_stdout=getattr(raw, "raw_stdout", ""),
-                    raw_stderr=getattr(raw, "raw_stderr", ""),
-                    parsed_output=getattr(raw, "parsed_output", None),
-                    return_code=getattr(raw, "return_code", 0),
-                    error_class=getattr(raw, "error_class", "") or "",
-                )
-                setattr(result, "backend_name", backend_name)
-                return result
-            setattr(raw, "backend_name", backend_name)
-            return raw
-
-        # Cancel signal
-        if session:
-            import contextlib
-            with contextlib.suppress(Exception):
-                backend.cancel(session)
-        exec_task.cancel()
-        import contextlib
-        with contextlib.suppress(asyncio.CancelledError):
-            await exec_task
-        result = TaskResult(
-            task_id=task.id,
-            success=False,
-            output="",
-            errors=["cancelled"],
-            files_modified=[],
-            execution_time=time.time() - start,
-            timestamp=now_iso(),
-        )
-        setattr(result, "backend_name", backend_name)
-        return result
-
-    def _enqueue_remote_cancel_turn(self, session: Any) -> None:
-        """Fire-and-forget: ask the owning worker to interrupt its live Claude turn.
-
-        Used by cancel_task when the session is pinned to a remote node — in that
-        case the gateway's own ClaudeSDKClientDriver._sessions pool does not contain
-        the session (it lives in the worker process), so backend.cancel(session)
-        called above is a no-op.  Enqueueing a cancel_turn control task delivers the
-        SDK interrupt to the right process without consuming a work slot, so it is
-        not delayed behind the very turn we want to stop.
-        """
-        machine_id = getattr(session, "machine_id", "") or ""
-        if not machine_id:
-            return
-        from src.control.db import get_db
-        db = get_db()
-        if db is None:
-            logger.warning(
-                "event=remote_cancel_turn_no_db session_id=%s node=%s",
-                getattr(session, "session_id", ""), machine_id,
-            )
-            return
-        session_id = getattr(session, "session_id", "") or ""
-        backend = getattr(session, "backend", "") or "claude"
-        payload = {
-            "session": {
-                "session_id": session_id,
-                "backend": backend,
-                "backend_session_id": getattr(session, "backend_session_id", "") or "",
-                "machine_id": machine_id,
-            }
-        }
-        task_id = f"cancel-turn-{session_id}-{uuid.uuid4().hex[:8]}"
-        try:
-            db.enqueue_task(
-                task_id=task_id,
-                session_id=session_id,
-                machine_id=machine_id,
-                backend=backend,
-                action="cancel_turn",
-                payload=payload,
-            )
-        except Exception as e:
-            logger.warning(
-                "event=remote_cancel_turn_enqueue_failed session_id=%s node=%s err=%s",
-                session_id, machine_id, e,
-            )
-            return
-        logger.info(
-            "event=remote_cancel_turn_enqueued session_id=%s node=%s task_id=%s",
-            session_id, machine_id, task_id,
-        )
 
     def _dispatch_remote_close(self, session: Any, node_id: Optional[str] = None) -> None:
         """Enqueue a fire-and-forget close_session task pinned to the session's
@@ -10634,56 +10287,6 @@ Generated from user description: {description}
                     return
             await _aio.sleep(0.1)
 
-    async def _dispatch_or_run_local(
-        self,
-        task: "Task",
-        session: Optional[Any],
-        backend_name: str,
-    ) -> "TaskResult":
-        """Route task to a worker node or fall back to local execution.
-
-        `MESH_ENABLED=false` (default) → always runs locally, zero regression.
-        `MESH_ENABLED=true`            → routes through node registry when nodes
-                                         are available; falls back to local if not.
-        """
-        from src.control.node_registry import get_registry
-
-        if not config.mesh.enabled:
-            return await self._run_backend_local(task, session, backend_name)
-
-        registry = get_registry()
-        if registry.is_empty():
-            return await self._run_backend_local(task, session, backend_name)
-
-        def _routing_failure(msg: str) -> "TaskResult":
-            result = TaskResult(
-                task_id=task.id,
-                success=False,
-                output="",
-                errors=[msg],
-                files_modified=[],
-                execution_time=0.0,
-                timestamp=now_iso(),
-            )
-            setattr(result, "backend_name", backend_name)
-            return result
-
-        if session and session.machine_id:
-            node = registry.get(session.machine_id)
-            if not node or node.status != "online":
-                return _routing_failure(f"Node {session.machine_id!r} is offline; cannot continue session")
-        else:
-            await self._refresh_capable_nodes_before_routing(registry, backend_name)
-            node = registry.pick_capable(
-                backend=backend_name,
-                max_live_state_age_sec=getattr(config.mesh, "routing_live_state_max_age_sec", 90),
-            )
-            if not node:
-                return _routing_failure(
-                    f"No online node supports backend {backend_name!r} with available capacity"
-                )
-
-        return await self._dispatch_to_node(task, session, node)
 
     # ===========================================================================
     # MESH DB SHADOW-WRITE HELPERS
@@ -10749,107 +10352,24 @@ Generated from user description: {description}
         "manager_invoke": "automation",
     }
 
-    def _enrollment_exclusion(self) -> Tuple[Set[str], Set[str], Dict[str, int]]:
-        """[A82 Stage 7] Gateway-loop admission exclusion state: sessions being
-        enrolled, sessions enrolled by THIS process (enrollment happens only in
-        the gateway — Stage 4a M3), legacy admissions parked in a throttled put.
-        Lazily created (bounded by the enrolled-session count)."""
-        state = self.__dict__
-        return (
-            state.setdefault("_enrolling_sessions", set()),
-            state.setdefault("_enrolled_here", set()),
-            state.setdefault("_legacy_admitting", {}),
-        )
 
-    def _legacy_put_guard(self, session_id: str) -> None:
-        """[A82 Stage 7] Refuse a legacy put for a session that is being, or was
-        just, enrolled here: its marker read may predate the commit. Typed 409
-        (``enrollment_in_progress``); a retry reads the marker and goes managed."""
-        if not session_id:
-            return
-        enrolling, enrolled_here, _admitting = self._enrollment_exclusion()
-        if session_id in enrolling or session_id in enrolled_here:
-            from src.control.turn_queue import EnrollmentRefusedError
-
-            raise EnrollmentRefusedError(
-                "the session is being enrolled on the managed turn queue; retry",
-                reason="enrollment_in_progress", session_id=session_id, retry_after=1,
-            )
 
     async def enroll_session_turn_queue(self, session_id: str) -> bool:
-        """[A82 Stage 7] The enrollment service (design §10 step 6) — an operator
-        action that must run in the gateway process. Behind the default-OFF
-        ``TURN_QUEUE_ENROLLMENT_ENABLED`` flag; needs the canonical DB. Refuses
-        (typed, nothing written) a session with legacy work queued / running /
-        mid-admission in this gateway, a carrier without the backend's managed
-        capability (``capability_missing``) or offline (``carrier_offline``), and
-        — in one bounded DB txn — a closed / non-quiescent session or open
-        durable legacy execution rows. The exclusion: while enrolling (and
-        after, for this process) the legacy put refuses the session. True when
-        newly enrolled, False when already enrolled.
-
-        Native unsolicited work on a REMOTE carrier is not observable here; the
-        carrier's pre-start quiescence gate (``is_quiescent`` → requeue with
-        ``managed_conflict``) remains the backstop for each managed turn."""
-        from src.control.db import get_db, runtime_flag_enabled
-        from src.control.turn_queue import (
-            BackingStoreError,
-            CarrierOfflineError,
-            CarrierUnavailableError,
-            EnrollmentRefusedError,
-            TurnNotFoundError,
-        )
+        """Enrollment is permanent and performed at session creation/migration."""
+        from src.control.db import get_db
+        from src.control.turn_queue import BackingStoreError, LegacyExecutionRetiredError, TurnNotFoundError
 
         sid = (session_id or "").strip()
-        if not runtime_flag_enabled("TURN_QUEUE_ENROLLMENT_ENABLED"):
-            raise EnrollmentRefusedError(
-                "new enrollment is disabled (TURN_QUEUE_ENROLLMENT_ENABLED)",
-                reason="enrollment_disabled", session_id=sid,
-            )
         db = get_db()
         if db is None:
-            raise BackingStoreError(
-                "enrollment needs the canonical mesh DB (MESH_ENABLED)", session_id=sid,
-            )
-        session = self.session_store.get(sid) if sid else None
-        if session is None:
+            raise BackingStoreError("enrollment needs the canonical mesh DB", session_id=sid)
+        if self.session_store.get(sid) is None:
             raise TurnNotFoundError("session not found", session_id=sid)
-        enrolling, enrolled_here, admitting = self._enrollment_exclusion()
-        if sid in enrolling:
-            raise EnrollmentRefusedError(
-                "an enrollment of this session is already in progress",
-                reason="enrollment_in_progress", session_id=sid,
-            )
-        enrolling.add(sid)
-        try:
-            in_memory = sum(
-                1 for t in list((getattr(self, "active_tasks", None) or {}).values())
-                if str((getattr(t, "metadata", None) or {}).get("session_id") or "") == sid
-            )
-            if admitting.get(sid) or in_memory:
-                raise EnrollmentRefusedError(
-                    "legacy work for the session is queued, running or being admitted",
-                    reason="legacy_work_in_flight", session_id=sid,
-                )
-            backend: str = str(getattr(session, "backend", "") or "")
-            try:
-                await asyncio.to_thread(self._managed_carrier_assignment, session, backend)
-            except CarrierOfflineError as e:
-                raise EnrollmentRefusedError(
-                    str(e.detail), reason="carrier_offline", session_id=sid,
-                    node_id=e.context.get("node_id"),
-                )
-            except CarrierUnavailableError as e:
-                raise EnrollmentRefusedError(
-                    str(e.detail), reason="capability_missing", session_id=sid,
-                    node_id=e.context.get("node_id"),
-                )
-            enrolled: bool = bool(await asyncio.to_thread(db.enroll_session_checked, sid))
-            enrolled_here.add(sid)
-            logger.info("event=turn_queue_session_enrolled session_id=%s new=%s", sid, enrolled)
-            return enrolled
-        finally:
-            enrolling.discard(sid)
+        if await self._session_turn_queue_enrolled(sid):
+            return False
+        raise LegacyExecutionRetiredError(
+            "unenrolled session requires the cutover migration", session_id=sid,
+        )
 
     async def unenroll_session_turn_queue(self, session_id: str) -> bool:
         """[A82 Stage 7 → 8b] The rollback (unenroll) exit is retired. Legacy
@@ -12045,7 +11565,7 @@ Generated from user description: {description}
 
             raise CarrierRequiredError(
                 "session turns need a managed carrier: enable the mesh (MESH_ENABLED) "
-                "and run a worker with WORKER_MANAGED_TURNS=1; one-off tasks still run here",
+                "and run a worker carrier; one-off tasks still run here",
                 session_id=session_id,
             )
 

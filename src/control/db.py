@@ -358,12 +358,6 @@ RUNTIME_FLAG_DEFINITIONS: Dict[str, Dict[str, str]] = {
         "registry_writable": "1",
         "description": "A65 cost-alert enforcement: when ON, alerting surfaces the existing SDK governor ceiling (sdk_max_budget_usd) as the lever. Never a new kill mechanism.",
     },
-    "TURN_QUEUE_ENROLLMENT_ENABLED": {
-        "default": "0",
-        "effect_scope": "live",
-        "registry_writable": "1",
-        "description": "A82: allow NEW sessions to be enrolled on the managed per-session turn queue. OFF never abandons accepted managed work (consumption, recovery, drain/unenroll stay available).",
-    },
     "HARNESS_LEVEL3_GUARD": {
         "default": "0",
         "effect_scope": "live",

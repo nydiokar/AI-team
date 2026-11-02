@@ -178,19 +178,15 @@ class SessionService:
         backends: Optional[Dict[str, Any]] = None,
         host: Optional[str] = None,
     ) -> CommandResult:
-        """Close a session — transport-neutral extraction of the Telegram close path.
+        """Close durable session state and dispatch teardown to its carrier.
 
-        If the session has a live ``backend_session_id`` and is local (no
-        ``machine_id`` or it equals this ``host``), call ``backend.close(session)``;
-        a remote session skips the backend close (the owning node will clean up).
-        Then clear ``backend_session_id``, set status CLOSED, save. Chat unbinding is
-        a transport concern and stays with the caller. ``backends`` is the name→adapter
-        map (the orchestrator's ``_backends``); omit it to skip the backend call.
+        The gateway never owns a native session process. Managed closure fences
+        the active turn before dispatch; historical pinned sessions use the same
+        remote control dispatcher. Native history remains available for audit.
         """
         s = self.store.get(session_id)
         if not s:
             return CommandResult(False, reason="session_not_found")
-        host = host or socket.gethostname()
         managed_carrier: Optional[str] = None
         if self._managed_close is not None:
             try:
@@ -204,35 +200,17 @@ class SessionService:
         # Enrolled (managed_carrier is not None): the managed close already
         # cancelled the active turn and dispatched the teardown to the carrier
         # that owns the process — skip the gateway-side backend close.
-        if managed_carrier is None and s.backend_session_id:
-            is_local = (not s.machine_id) or (s.machine_id == host)
-            backend = (backends or {}).get(s.backend)
-            if backend and is_local:
+        if managed_carrier is None and s.backend_session_id and s.machine_id:
+            if self._remote_close_dispatcher is not None:
                 try:
-                    backend.close(s)
+                    self._remote_close_dispatcher(s)
                 except Exception as e:
                     logger.warning(
-                        "event=session_backend_close_failed session_id=%s backend=%s err=%s",
-                        s.session_id, s.backend, e,
+                        "event=session_remote_close_dispatch_failed session_id=%s backend=%s node=%s err=%s",
+                        s.session_id, s.backend, s.machine_id, e,
                     )
-            elif not is_local:
-                if self._remote_close_dispatcher is not None:
-                    try:
-                        self._remote_close_dispatcher(s)
-                        logger.info(
-                            "event=session_backend_close_remote_dispatched session_id=%s backend=%s node=%s",
-                            s.session_id, s.backend, s.machine_id,
-                        )
-                    except Exception as e:
-                        logger.warning(
-                            "event=session_remote_close_dispatch_failed session_id=%s backend=%s node=%s err=%s",
-                            s.session_id, s.backend, s.machine_id, e,
-                        )
-                else:
-                    logger.info(
-                        "event=session_backend_close_remote_skipped session_id=%s backend=%s node=%s",
-                        s.session_id, s.backend, s.machine_id,
-                    )
+                    return CommandResult(False, reason="turn_queue_unavailable", session=s,
+                                         detail=str(e)[:300])
         if s.backend_session_id:
             # Preserve the native (Claude Code) session id for the Info panel /
             # audit before clearing the *active* field. Clearing stays (so no

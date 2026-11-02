@@ -259,14 +259,12 @@ class ClaudeCodeBackend(CodingBackend):
         self._maybe_emit_telemetry(result, telemetry_context, telemetry_sink)
         return result
 
-    def create_session(self, session: Session, *, turn: Optional[TurnControl] = None, telemetry_context=None, telemetry_sink=None) -> ExecutionResult:
+    def create_session(self, session: Session, *, turn: TurnControl, telemetry_context=None, telemetry_sink=None) -> ExecutionResult:
         """[A102] Start the native session if needed and run the first prompt
         (``session.last_user_message``), tagged with ``turn.turn_uuid`` for echo
-        correlation. ``turn`` carries the carrier's liveness policy; a synthesized
-        one is used only by the legacy in-process caller (S2 removes it)."""
+        correlation. ``turn`` carries the carrier's liveness policy."""
         from src.core.test_guard import assert_live_calls_allowed
         assert_live_calls_allowed("claude")
-        turn = turn or turn_control(str(uuid.uuid4()))
         self._log_driver_turn("create_session", session.session_id or "")
         proc_env = self._build_proc_env(session.session_id, telemetry_context)
         before_snapshot = _snapshot_worktree(session.repo_path) if session.repo_path else {}
@@ -281,7 +279,7 @@ class ClaudeCodeBackend(CodingBackend):
         )
         return self._finish(session, result, before_snapshot, telemetry_context, telemetry_sink)
 
-    def resume_session(self, session: Session, message: str, *, turn: Optional[TurnControl] = None, telemetry_context=None, telemetry_sink=None) -> ExecutionResult:
+    def resume_session(self, session: Session, message: str, *, turn: TurnControl, telemetry_context=None, telemetry_sink=None) -> ExecutionResult:
         """[A102] Resume the live session with ``message``: busy/not quiescent ⇒
         typed ``OwnershipConflictError`` before submit (never interrupt); submit
         tagged with ``turn.turn_uuid``; lost ack ⇒ reconcile by id, never
@@ -290,7 +288,6 @@ class ClaudeCodeBackend(CodingBackend):
         proactive sink. (All of that is enforced by the driver's single send.)"""
         from src.core.test_guard import assert_live_calls_allowed
         assert_live_calls_allowed("claude")
-        turn = turn or turn_control(str(uuid.uuid4()))
         self._log_driver_turn("resume_session", session.session_id or "")
         proc_env = self._build_proc_env(session.session_id, telemetry_context)
         before_snapshot = _snapshot_worktree(session.repo_path) if session.repo_path else {}
@@ -305,12 +302,11 @@ class ClaudeCodeBackend(CodingBackend):
         )
         return self._finish(session, result, before_snapshot, telemetry_context, telemetry_sink)
 
-    def compact_session(self, session: Session, *, turn: Optional[TurnControl] = None, telemetry_context=None, telemetry_sink=None) -> ExecutionResult:
+    def compact_session(self, session: Session, *, turn: TurnControl, telemetry_context=None, telemetry_sink=None) -> ExecutionResult:
         """[A102] `/compact` on the continuous SDK driver (see
         ``ClaudeSDKClientDriver.compact_session``)."""
         from src.core.test_guard import assert_live_calls_allowed
         assert_live_calls_allowed("claude")
-        turn = turn or turn_control(str(uuid.uuid4()))
         self._log_driver_turn("compact_session", session.session_id or "")
         proc_env = self._build_proc_env(session.session_id, telemetry_context)
         before_snapshot = _snapshot_worktree(session.repo_path) if session.repo_path else {}
@@ -324,13 +320,6 @@ class ClaudeCodeBackend(CodingBackend):
         )
         return self._finish(session, result, before_snapshot, telemetry_context, telemetry_sink)
 
-    def supports_managed_turns(self) -> bool:
-        """The single turn pipeline needs the SDK session's ``--replay-user-messages``
-        echo correlation (``WORKER_MANAGED_TURNS``, default ON). A worker without
-        it advertises no managed path."""
-        from src.backends.claude_driver import _replay_user_messages_enabled
-
-        return self._driver.driver_type() == "sdk" and _replay_user_messages_enabled()
 
     def provision_sender_capability(self, session_id: str, token: Optional[str]) -> bool:
         """[A82 Stage 5] Per-session sender tool on the SDK driver only."""
@@ -369,16 +358,13 @@ class ClaudeCodeBackend(CodingBackend):
         if callable(setter):
             setter(sink)
 
-    def cancel(self, session: Session, turn_uuid: Optional[str] = None) -> bool:
+    def cancel(self, session: Session, turn_uuid: str) -> bool:
         """[A102] With a ``turn_uuid``: abort EXACTLY that turn if the CLI is
         running it, arm the interrupt for its echo if it has not begun, and never
         touch another turn (ARM first so a prompt not yet registered is never
         submitted; then deliver to the live pending entry and disarm). Without one:
         a session-wide interrupt of whatever is in flight (kept for the legacy
         in-process caller S2 removes). Returns True iff delivered or durably armed."""
-        if turn_uuid is None:
-            self._driver.cancel(session)
-            return True
         from src.backends.claude_driver import arm_managed_cancel, disarm_managed_cancel
 
         if not turn_uuid:
@@ -390,24 +376,6 @@ class ClaudeCodeBackend(CodingBackend):
         if callable(cancel) and cancel(turn_uuid):
             disarm_managed_cancel(turn_uuid)  # delivered to the registered prompt
         return True
-
-    # ------------------------------------------------------------------ #
-    # [A102 S1] Deprecated managed-* shims — one-liners that build a
-    # TurnControl from the carrier's ownership and call the natural method.
-    # The carrier (src/worker/agent.py) still calls these until S2 deletes
-    # both the shims and this seam.
-    # ------------------------------------------------------------------ #
-    def run_managed_turn(self, session: Session, message: str, ownership, *, telemetry_context=None, telemetry_sink=None, on_process=None) -> ExecutionResult:
-        return self.resume_session(session, message, turn=turn_control(getattr(ownership, "turn_uuid", None) or "", ownership=ownership, on_process=on_process), telemetry_context=telemetry_context, telemetry_sink=telemetry_sink)
-
-    def run_managed_compaction(self, session: Session, ownership, *, telemetry_context=None, telemetry_sink=None, on_process=None) -> ExecutionResult:
-        return self.compact_session(session, turn=turn_control(getattr(ownership, "turn_uuid", None) or "", ownership=ownership, on_process=on_process), telemetry_context=telemetry_context, telemetry_sink=telemetry_sink)
-
-    def cancel_managed_turn(self, session: Session, turn_uuid: str) -> bool:
-        return self.cancel(session, turn_uuid)
-
-    def forget_managed_turn(self, session: Session, turn_uuid: str) -> bool:
-        return self.forget_turn(session, turn_uuid)
 
     def close(self, session: Session) -> None:
         self._driver.close(session)
