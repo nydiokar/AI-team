@@ -76,7 +76,6 @@ def test_emit_task_finished_resolves_case_from_lineage(tmp_path, monkeypatch):
     # hint), the terminal fact must land on the Case resolved from the durable
     # task->Case lineage. If this breaks, recovery silently drops task.finished
     # again — exactly the live regression.
-    monkeypatch.setenv("HARNESS_FLOW_DRIVE", "1")
     db = _db(tmp_path)
     _patch_db(monkeypatch, db)
     case_id = db.open_case("obj", "mgr-1", role="manager")
@@ -95,7 +94,6 @@ def test_recover_completed_session_emits_task_finished(tmp_path, monkeypatch):
     # resolves. Drives the REAL _recover_completed_session; stubbed
     # session_store/notifier isolate the one effect under test. Deleting the emit
     # from recovery fails this test.
-    monkeypatch.setenv("HARNESS_FLOW_DRIVE", "1")
     db = _db(tmp_path)
     _patch_db(monkeypatch, db)
     case_id = db.open_case("obj", "mgr-1", role="manager")

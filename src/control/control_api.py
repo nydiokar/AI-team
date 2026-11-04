@@ -345,13 +345,11 @@ class InstructionBody(BaseModel):
     upload_attachment: Optional[UploadedFileAttachment] = None
     # [A32] Optional Manager→worker lineage. When a Manager session dispatches a
     # worker via mcp_manager, it passes its own flow_run id (the case). Stamped
-    # onto the child's flow_runs row ONLY when HARNESS_FLOW_DRIVE is ON (else a
-    # no-op ⇒ byte-identical). Absent/None on every normal Telegram/Web request.
+    # onto the child's flow_runs row. Absent/None on every normal Telegram/Web request.
     parent_flow_run_id: Optional[str] = None
     # [A38] Manager→worker MEMBERSHIP. When set, the worker task JOINS this existing
     # Case (a `task` link on it) instead of birthing a child Case — the M3.1 default
-    # for a Manager dispatching into its own Case. Attach only happens when
-    # HARNESS_FLOW_DRIVE is ON; absent/None on every normal request ⇒ byte-identical.
+    # for a Manager dispatching into its own Case. Absent/None on every normal request.
     case_id: Optional[str] = None
     # [A104 I2] The ai-team session that REQUESTED this work (mcp_manager
     # dispatch_worker sends its own SESSION_ID). Only honoured on an automation

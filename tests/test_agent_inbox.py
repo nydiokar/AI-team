@@ -34,7 +34,7 @@ from src.control.db import MeshDB
 from src.core.interfaces import Session, SessionStatus as SS
 from tests.test_turn_queue_4b import _pass, _run, _wire
 from tests.test_turn_queue_producer1 import (  # noqa: F401
-    NOW, _flags, _no_cli_spawn, _setup, _submit,
+    NOW, _no_cli_spawn, _setup, _submit,
 )
 
 
@@ -44,7 +44,6 @@ def _fresh_allowance(monkeypatch):
 
 
 def _env(tmp_path, monkeypatch):
-    monkeypatch.setenv("HARNESS_FLOW_DRIVE", "1")
     db, o = _setup(tmp_path, monkeypatch)
     _wire(o)
     s = o.session_store.get("sess-1")

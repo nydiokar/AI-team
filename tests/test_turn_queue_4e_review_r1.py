@@ -14,7 +14,7 @@ from src.control import turn_admission as ta
 from src.core.interfaces import Session, SessionStatus
 from tests.test_turn_queue_4b import _pass, _wire
 from tests.test_turn_queue_producer1 import (  # noqa: F401
-    NOW, _flags, _no_cli_spawn, _setup,
+    NOW, _no_cli_spawn, _setup,
 )
 from tests.stage8a_legacy import enqueue_pre_cutover, unenrolled
 
@@ -300,7 +300,6 @@ def test_reconcile_row_is_never_claimable(tmp_path, monkeypatch):
 # ---------------------------------------------------------------- F5
 
 def test_unbound_quota_resume_refused_while_a_pause_exists(tmp_path, monkeypatch):
-    monkeypatch.setenv("HARNESS_FLOW_DRIVE", "1")
     db, o = _setup(tmp_path, monkeypatch)
     _wire(o)
     case_id: str = db.open_case("objective", "sess-1", role="manager")

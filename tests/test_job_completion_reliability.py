@@ -15,7 +15,7 @@ from src.control import turn_admission as ta
 from src.control.db import MeshDB, producer_turn_id
 from src.orchestrator import TaskOrchestrator
 from tests.test_turn_queue_4d import _env, _job, _kind, _restart
-from tests.test_turn_queue_producer1 import _flags, _no_cli_spawn  # noqa: F401
+from tests.test_turn_queue_producer1 import _no_cli_spawn  # noqa: F401
 
 
 @pytest.fixture(autouse=True)

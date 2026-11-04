@@ -56,7 +56,6 @@ def _patch_db(monkeypatch, db):
 
 @pytest.fixture(autouse=True)
 def _clear_flags(monkeypatch):
-    monkeypatch.delenv("HARNESS_FLOW_DRIVE", raising=False)
     monkeypatch.delenv("MANAGER_ROLE_ENABLED", raising=False)
     monkeypatch.delenv("MANAGER_TOOLS_ENABLED", raising=False)
 
@@ -164,7 +163,6 @@ def test_role_boot_manager_session_when_flag_on(monkeypatch):
 # ---------------------------------------------------------------------------
 
 def test_join_attaches_worker_to_case_no_child(tmp_path, monkeypatch):
-    monkeypatch.setenv("HARNESS_FLOW_DRIVE", "1")
     db = _db(tmp_path)
     _patch_db(monkeypatch, db)
     orch = _orch()
@@ -189,7 +187,6 @@ def test_join_attaches_worker_to_case_no_child(tmp_path, monkeypatch):
 
 
 def test_join_completion_leaves_case_open(tmp_path, monkeypatch):
-    monkeypatch.setenv("HARNESS_FLOW_DRIVE", "1")
     db = _db(tmp_path)
     _patch_db(monkeypatch, db)
     orch = _orch()
@@ -203,7 +200,6 @@ def test_join_completion_leaves_case_open(tmp_path, monkeypatch):
 
 
 def test_join_absent_or_closed_case_falls_through(tmp_path, monkeypatch):
-    monkeypatch.setenv("HARNESS_FLOW_DRIVE", "1")
     db = _db(tmp_path)
     _patch_db(monkeypatch, db)
     orch = _orch()

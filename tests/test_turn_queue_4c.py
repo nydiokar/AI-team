@@ -30,7 +30,7 @@ from src.core.interfaces import Session, SessionStatus as SS
 from tests.inbox_seed import seed_child, seed_finished_child
 from tests.test_turn_queue_4b import _pass, _run, _wire
 from tests.test_turn_queue_producer1 import (  # noqa: F401
-    NOW, _flags, _managed_rows, _no_cli_spawn, _setup, _submit, _sess,
+    NOW, _managed_rows, _no_cli_spawn, _setup, _submit, _sess,
 )
 
 
@@ -40,8 +40,6 @@ def _fresh_allowance(monkeypatch):
 
 
 def _env(tmp_path, monkeypatch, *, status=SS.AWAITING_INPUT, enroll=True):
-    # set here (after the imported autouse `_flags`, which clears the drive flag)
-    monkeypatch.setenv("HARNESS_FLOW_DRIVE", "1")
     db, o = _setup(tmp_path, monkeypatch, enroll=enroll)
     _wire(o)
     s = _sess()

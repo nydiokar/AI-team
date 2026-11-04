@@ -52,7 +52,6 @@ SECTIONS (in source order)
 
 FEATURE FLAGS (runtime-gated, all default OFF unless noted)
 ------------------------------------------------------------
-  HARNESS_FLOW_DRIVE          — write flow_runs stage transitions (M1/M2, shadow)
   MANAGER_ROLE_ENABLED        — enable M3 Manager role boot via /api/manager
   QUOTA_COORDINATOR_ENABLED   — observe-only quota/session-window coordinator
 """
@@ -2511,8 +2510,6 @@ class TaskOrchestrator(ITaskOrchestrator):
         """
         try:
             from src.control.db import get_db
-            if not self._harness_flow_drive_enabled():
-                return
             if not is_quota_pause_result(result):
                 return
             meta = getattr(task, "metadata", None) or {}
@@ -2614,8 +2611,6 @@ class TaskOrchestrator(ITaskOrchestrator):
         """
         try:
             from src.control.db import get_db
-            if not self._harness_flow_drive_enabled():
-                return
             if not is_transient_provider_pause_result(result):
                 return
             meta = getattr(task, "metadata", None) or {}
@@ -5725,9 +5720,8 @@ class TaskOrchestrator(ITaskOrchestrator):
     # TASK CREATION & ENQUEUE
     # _make_task()    — build an in-memory Task object (does NOT enqueue).
     # _enqueue_task() — admission gate + queue push; raises HarnessAdmissionBlocked
-    #                   if the level-3 guard is ON and the task is unapproved.
-    #                   Also records the flow_run row (M1) and stamps dispatch
-    #                   lineage (M2) when HARNESS_FLOW_DRIVE is ON.
+    #                   when admission refuses the task. Also records the
+    #                   flow_run row (M1) and stamps dispatch lineage (M2).
     # ===========================================================================
 
     def _make_task(
@@ -5868,14 +5862,10 @@ class TaskOrchestrator(ITaskOrchestrator):
                 {"priority": getattr(task.priority, "value", str(task.priority))},
             )
             logger.info(f"Queued runtime task: {task.id} ({task.type.value}, {task.priority.value})")
-            # [FlowRun A19/A22] Best-effort stage transition. When HARNESS_FLOW_DRIVE
-            # is OFF this is A19's exact `queued` write (byte-identical). When ON the
-            # task is now admitted/queued ⇒ the objective is locked in: write the
-            # §11 `objective_lock` stage instead (SHADOW record; nothing reads it).
-            if self._harness_flow_drive_enabled():
-                self._record_flow_stage(flow_run_id, "objective_lock")
-            else:
-                self._record_flow_stage(flow_run_id, "queued")
+            # [FlowRun A19/A22] Best-effort stage transition: the task is now
+            # admitted/queued ⇒ the objective is locked in: write the §11
+            # `objective_lock` stage (SHADOW record; nothing reads it).
+            self._record_flow_stage(flow_run_id, "objective_lock")
         except asyncio.QueueFull:
             priority_val = getattr(task.priority, "value", str(task.priority))
             if priority_val == "low":
@@ -5919,9 +5909,7 @@ class TaskOrchestrator(ITaskOrchestrator):
         logged: a telemetry write must never fail or delay a real task. Returns
         the flow_run_id on success, or None if the write was skipped/failed.
 
-        The initial stage is `intent` (the first §11 stage) when HARNESS_FLOW_DRIVE
-        is ON, and A19's legacy `dispatch_start` when it is OFF — so OFF behavior is
-        byte-identical to A19. The generated flow_run_id is stashed on
+        The initial stage is `intent` (the first §11 stage). The generated flow_run_id is stashed on
         ``task.metadata[_FLOW_RUN_META_KEY]`` so later transition points on the
         worker loop can resolve it without new plumbing.
         """
@@ -5930,14 +5918,8 @@ class TaskOrchestrator(ITaskOrchestrator):
             db = get_db()
             if db is None:
                 return None
-            drive_on = self._harness_flow_drive_enabled()
 
-            # OFF path — byte-identical to A19: exactly one dispatch-start RECORD
-            # per task, no admission, no stash. Nothing reads current_stage.
-            if not drive_on:
-                return db.create_flow_run(task.id, "dispatch_start")
-
-            # ---- Flag ON: A36 Case-admission policy -------------------------
+            # ---- A36 Case-admission policy ----------------------------------
             # The retired per-turn mint is replaced. A turn now: (A) BIRTHS a Case
             # iff it is a dispatched child (M2 lineage) or an explicit managed
             # root; (B) ATTACHES to the session's open Case; or (C) runs Case-less
@@ -6743,17 +6725,6 @@ class TaskOrchestrator(ITaskOrchestrator):
         if not self._manager_role_enabled():
             return {"ok": False, "reason": "manager_role_disabled"}
 
-        # The Manager's Case machinery (per-turn attach + worker JOIN + task.finished
-        # timeline) is all guarded by HARNESS_FLOW_DRIVE. With it OFF the Manager still
-        # boots with its role prompt, but workers can't join the Case and wait_for_worker
-        # has no timeline to watch — surface that mismatch instead of failing silently.
-        if not self._harness_flow_drive_enabled():
-            logger.warning(
-                "event=manager_invoke_without_flow_drive session_repo=%s — MANAGER_ROLE_ENABLED "
-                "is ON but HARNESS_FLOW_DRIVE is OFF; Case attach/JOIN/timeline are inert.",
-                repo_path,
-            )
-
         resolved_node_id = node_id
         if not resolved_node_id or resolved_node_id == "__local__":
             try:
@@ -6849,7 +6820,6 @@ class TaskOrchestrator(ITaskOrchestrator):
 
     # ===========================================================================
     # FLOW TRACKING  (M1 flow_runs / M2 flow_events + flow_links)
-    # Flag: HARNESS_FLOW_DRIVE (default OFF ⇒ shadow-only, nothing reads stage).
     #
     # These are WRITE-ONLY observability records.  No execution path reads
     # current_stage or flow_events to decide what runs — they exist purely for
@@ -7042,14 +7012,11 @@ class TaskOrchestrator(ITaskOrchestrator):
         ``parent_flow_run_id`` directly. An explicit value takes precedence over
         one derived from ``parent_task``; either seam records the same edge.
 
-        Flag-guarded: when HARNESS_FLOW_DRIVE is OFF this is a NO-OP — the child's
-        metadata is left untouched ⇒ byte-identical to today. SHADOW/best-effort:
+        SHADOW/best-effort:
         wrapped so any failure logs and returns; it can NEVER raise into the
         dispatch path. Nothing reads the stamped keys to drive execution.
         """
         try:
-            if not self._harness_flow_drive_enabled():
-                return
             # Explicit loose id (A32 HTTP seam) wins; else derive from parent_task.
             if parent_task is not None:
                 pmeta = getattr(parent_task, "metadata", None) or {}
@@ -7073,33 +7040,16 @@ class TaskOrchestrator(ITaskOrchestrator):
                 getattr(child_task, "id", "?"), e,
             )
 
-    @staticmethod
-    def _harness_flow_drive_enabled() -> bool:
-        """Whether authoritative stage transitions are written (A22).
-
-        Opt-in via ``HARNESS_FLOW_DRIVE`` (truthy: 1/true/yes/on); default OFF.
-        When OFF, flow-stage behavior is byte-identical to A19 (legacy
-        `dispatch_start`/`queued` record only). When ON, the §11 vocabulary
-        (FLOW_STAGES) is written at each harness transition — a SHADOW record:
-        NO code path reads current_stage to decide what runs.
-        """
-        from src.control.db import flow_drive_enabled
-        return flow_drive_enabled()
-
     def _flow_stage_transition(self, task: "Task", stage: str) -> None:
-        """[A22] Single flag-guarded, best-effort stage-transition helper.
+        """[A22] Single best-effort stage-transition helper.
 
-        Called at each harness transition on the loop/driver surface. When
-        HARNESS_FLOW_DRIVE is OFF this is a no-op (⇒ byte-identical to A19). When
-        ON it resolves the flow_run_id stashed on the task and writes the given
+        Called at each harness transition on the loop/driver surface. It resolves the flow_run_id stashed on the task and writes the given
         FLOW_STAGES vocabulary stage (update_flow_stage also stamps updated_at).
 
         SHADOW ONLY — this only ever WRITES current_stage. It is wrapped so any
         failure logs and returns; it can NEVER raise into task execution.
         """
         try:
-            if not self._harness_flow_drive_enabled():
-                return
             meta = getattr(task, "metadata", None) or {}
             flow_run_id = meta.get(self._FLOW_RUN_META_KEY)
             if not flow_run_id:
@@ -7171,7 +7121,7 @@ class TaskOrchestrator(ITaskOrchestrator):
         logs and returns; it can NEVER raise into task handling. ``once=True`` makes
         the write idempotent (used by the reconciliation callers)."""
         try:
-            if not task_id or not self._harness_flow_drive_enabled():
+            if not task_id:
                 return
             case = flow_run_id
             if not case:
@@ -7234,8 +7184,7 @@ class TaskOrchestrator(ITaskOrchestrator):
         [M2] When this call is a child dispatch (a parent flow/task spawning
         another), pass ``parent_task`` (whose metadata carries the parent
         flow_run_id) and/or ``dispatched_by`` / ``dispatch_file``. These are
-        stamped onto the child task's flow_runs row for lineage — but ONLY when
-        HARNESS_FLOW_DRIVE is ON; otherwise stamping is a no-op ⇒ byte-identical.
+        stamped onto the child task's flow_runs row for lineage.
 
         [A32] When the caller only has the parent's *loose* flow_run_id (the HTTP
         ``/api/instructions`` seam — a Manager session dispatching a worker via
@@ -7790,9 +7739,8 @@ class TaskOrchestrator(ITaskOrchestrator):
                 await self._maybe_inject_compact_context(task)
                 self._mesh_enqueue_task(task, backend_name)
 
-                # [FlowRun A22] Harness transition → `execution`. Flag-guarded,
-                # best-effort SHADOW write (no-op when HARNESS_FLOW_DRIVE is OFF);
-                # nothing below reads current_stage to decide what runs.
+                # [FlowRun A22] Harness transition → `execution`. Best-effort
+                # SHADOW write; nothing below reads current_stage to decide what runs.
                 self._flow_stage_transition(task, "execution")
 
                 # Process the task
@@ -9665,10 +9613,7 @@ Generated from user description: {description}
             "turn.queued", task,
             {"priority": getattr(task.priority, "value", str(task.priority))},
         )
-        if self._harness_flow_drive_enabled():
-            self._record_flow_stage(flow_run_id, "objective_lock")
-        else:
-            self._record_flow_stage(flow_run_id, "queued")
+        self._record_flow_stage(flow_run_id, "objective_lock")
         notify_turn_queue_changed()
         return admission
 
@@ -9837,9 +9782,7 @@ Generated from user description: {description}
             "turn.queued", task,
             {"priority": getattr(task.priority, "value", str(task.priority))},
         )
-        self._record_flow_stage(
-            flow_run_id, "objective_lock" if self._harness_flow_drive_enabled() else "queued",
-        )
+        self._record_flow_stage(flow_run_id, "objective_lock")
         notify_turn_queue_changed()
         return admission
 
@@ -9876,14 +9819,10 @@ Generated from user description: {description}
         re-route a half-written lineage. ``fence()`` (lease + withdrawal) runs
         after the decision read and before every write group. Sync; run it in a
         worker thread. Returns (flow_run_id, case_id)."""
-        drive_on = self._harness_flow_drive_enabled()
         prior = db.existing_task_lineage(task.id)
         fence()
         meta = task.metadata or {}
         session_id = str(meta.get("session_id") or "").strip()
-        if not drive_on:
-            fid = db.get_or_create_task_flow_run(task.id, "dispatch_start")
-            return fid, fid
         lineage = self._dispatch_lineage_fields(task)
         parent_fid = lineage.get("parent_flow_run_id")
         managed = bool(meta.get(self._MANAGED_CASE_META_KEY))
@@ -11151,7 +11090,7 @@ Generated from user description: {description}
             TelemetryStore(db).reconcile(turn_id=tid, since_hours=0)
         except Exception as e:  # noqa: BLE001 — retried
             errors.append(_effect_error("telemetry", e))
-        if conversational and case_id and self._harness_flow_drive_enabled():
+        if conversational and case_id:
             try:
                 self._record_flow_event(
                     case_id, "task.finished", "system", entity_type="task", entity_id=tid,

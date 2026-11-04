@@ -32,7 +32,7 @@ from tests.test_agent_inbox_delivery import (  # noqa: F401 — autouse fixtures
     _drive, _env, _fresh_allowance, _wakes,
 )
 from tests.test_turn_queue_4b import _pass, _run
-from tests.test_turn_queue_producer1 import _flags, _no_cli_spawn  # noqa: F401
+from tests.test_turn_queue_producer1 import _no_cli_spawn  # noqa: F401
 
 
 # --------------------------------------------------------------------------- #

@@ -121,8 +121,7 @@ def test_dispatch_worker_posts_and_reports(monkeypatch):
 
 def test_dispatch_worker_sends_parent_lineage(monkeypatch):
     """[A32/A33] Endpoint now accepts parent_flow_run_id, so dispatch_worker sends
-    it as the Manager→worker lineage edge (persisted server-side when
-    HARNESS_FLOW_DRIVE is ON)."""
+    it as the Manager→worker lineage edge (persisted server-side)."""
     seen = {}
 
     def fake_request(method, path, payload=None, timeout=20.0, headers=None):

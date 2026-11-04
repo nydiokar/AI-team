@@ -15,7 +15,7 @@ from src.control import turn_queue as tq
 from src.core.interfaces import Session, SessionStatus
 from src.services.session_service import SessionService
 from tests.test_turn_queue_producer1 import (  # noqa: F401
-    NOW, _client, _flags, _managed_rows, _no_cli_spawn, _setup,
+    NOW, _client, _managed_rows, _no_cli_spawn, _setup,
 )
 
 
@@ -30,7 +30,6 @@ def _fresh_allowance(monkeypatch):
 def _manager_orch(tmp_path, monkeypatch, machine):
     """Born-managed Manager sessions (``mgr-1``, ``mgr-2`` …) created by a REAL
     SessionService whose close path is the orchestrator's managed close."""
-    monkeypatch.setenv("HARNESS_FLOW_DRIVE", "1")
     db, o = _setup(tmp_path, monkeypatch, enroll=False)
     o._manager_role_enabled = lambda: True
     svc = SessionService(o.session_store, remote_close_dispatcher=o._dispatch_remote_close,

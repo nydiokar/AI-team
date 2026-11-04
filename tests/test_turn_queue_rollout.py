@@ -23,7 +23,7 @@ from src.core.session_task_queue import SessionTaskQueue
 from tests.test_turn_queue_4b import _pass, _run, _wire  # noqa: F401
 from tests.stage8a_legacy import claim_pre_cutover, enqueue_pre_cutover
 from tests.test_turn_queue_producer1 import (  # noqa: F401
-    _flags, _managed_rows, _no_cli_spawn, _register_carrier, _sess, _setup, _submit,
+    _managed_rows, _no_cli_spawn, _register_carrier, _sess, _setup, _submit,
 )
 
 FLAG = "TURN_QUEUE_ENROLLMENT_ENABLED"

@@ -19,7 +19,7 @@ from src.control.db import MeshDB
 from src.control.task_server_client import TaskServerClient
 from tests.test_job_completion_reliability import _register
 from tests.test_turn_queue_4d import _env
-from tests.test_turn_queue_producer1 import _flags, _no_cli_spawn  # noqa: F401
+from tests.test_turn_queue_producer1 import _no_cli_spawn  # noqa: F401
 
 
 @pytest.fixture

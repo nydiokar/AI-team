@@ -54,7 +54,6 @@ def _no_cli_spawn(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(claude_driver._SDKSession, "start", _boom, raising=False)
     monkeypatch.setattr(asyncio, "create_subprocess_exec", _boom)
-    monkeypatch.delenv("HARNESS_FLOW_DRIVE", raising=False)
     monkeypatch.setattr(ta, "ALLOWANCE", ta.SharedWaitingAllowance())
 
 

@@ -49,7 +49,7 @@ from src.core.interfaces import Session, SessionStatus
 from src.orchestrator import HarnessAdmissionBlocked, TaskOrchestrator
 from tests.test_turn_queue_4b import _pass, _run, _wire
 from tests.test_turn_queue_producer1 import (  # noqa: F401  (autouse fixtures)
-    NOW, _flags, _managed_rows, _no_cli_spawn, _register_carrier, _sess, _setup, _submit,
+    NOW, _managed_rows, _no_cli_spawn, _register_carrier, _sess, _setup, _submit,
 )
 
 LEGACY_ACTIONS = ("create_session", "resume_session", "compact_session")

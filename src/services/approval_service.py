@@ -38,14 +38,6 @@ from src.services.workflow_service import WorkflowService
 logger = logging.getLogger(__name__)
 
 
-def _flow_drive_enabled() -> bool:
-    """Whether the Work Control Substrate write path is active (HARNESS_FLOW_DRIVE).
-
-    Mirrors Orchestrator._harness_flow_drive_enabled; default OFF ⇒ the approval
-    gate behaves byte-identically to before this seam existed."""
-    from src.control.db import flow_drive_enabled
-    return flow_drive_enabled()
-
 # Called when an approval is APPROVED, with the approval row. May be sync or
 # async; the resolver awaits it if it returns an awaitable. Optional — a service
 # wired without one is a pure queue (the demo/queue case).
@@ -142,13 +134,10 @@ class ApprovalService:
         Links the approval to the case that owns its task (via the task's
         flow_run), or directly to ``case_id`` when the gated action is a
         Case-level decision with no owning task, and appends an append-only
-        case event. Flag-guarded (no-op when HARNESS_FLOW_DRIVE is OFF) and
-        fully isolated: any failure logs and returns — an approval must
+        case event. Fully isolated: any failure logs and returns — an approval must
         resolve/persist regardless. SHADOW only — nothing reads these rows to
         drive execution. Missing task/flow/case_id ⇒ no-op (never inferred)."""
         try:
-            if not _flow_drive_enabled():
-                return
             flow_run_id = case_id
             if not flow_run_id and task_id:
                 runs = self._db.list_flow_runs(task_id=task_id, limit=1)

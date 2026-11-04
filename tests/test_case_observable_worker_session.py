@@ -1,8 +1,7 @@
 """
 A47 — Case observability: the worker SESSION as a first-class Case-graph node.
 
-When a dispatched worker task JOINs a Manager's Case (admission branch J, under
-``HARNESS_FLOW_DRIVE`` ON) the orchestrator now ALSO writes a durable
+When a dispatched worker task JOINs a Manager's Case (admission branch J) the orchestrator now ALSO writes a durable
 ``flow_links(entity_type='session', role='worker')`` row — mirroring the manager
 session link ``open_case`` writes — and marks the worker's TASK link
 ``created_by='manager'`` so the Case graph tells it apart from the Manager's own
@@ -65,11 +64,6 @@ def _turn(task_id, session_id):
     return types.SimpleNamespace(id=task_id, metadata={"session_id": session_id})
 
 
-@pytest.fixture(autouse=True)
-def _clear_flag(monkeypatch):
-    monkeypatch.delenv("HARNESS_FLOW_DRIVE", raising=False)
-
-
 def _patch_db(monkeypatch, db) -> None:
     import src.control.db as db_mod
     monkeypatch.setattr(db_mod, "get_db", lambda: db)
@@ -90,7 +84,6 @@ def _wired_orch(monkeypatch, db, *session_ids):
 # ---------------------------------------------------------------------------
 
 def test_worker_join_writes_session_link(tmp_path, monkeypatch):
-    monkeypatch.setenv("HARNESS_FLOW_DRIVE", "1")
     db = _db(tmp_path)
     orch = _wired_orch(monkeypatch, db, "mgr-sess", "wrk-sess")
 
@@ -122,7 +115,6 @@ def test_worker_join_writes_session_link(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 
 def test_worker_join_session_link_is_idempotent(tmp_path, monkeypatch):
-    monkeypatch.setenv("HARNESS_FLOW_DRIVE", "1")
     db = _db(tmp_path)
     orch = _wired_orch(monkeypatch, db, "mgr-sess", "wrk-sess")
 
@@ -151,7 +143,6 @@ def test_worker_join_session_link_is_idempotent(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 
 def test_case_view_distinguishes_worker_from_manager(tmp_path, monkeypatch):
-    monkeypatch.setenv("HARNESS_FLOW_DRIVE", "1")
     db = _db(tmp_path)
     orch = _wired_orch(monkeypatch, db, "mgr-sess", "wrk-sess")
 

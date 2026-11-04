@@ -85,7 +85,6 @@ def orch(tmp_path, monkeypatch):
 
     # Both gates ON — the Manager Case machinery (attach / JOIN / timeline / close) lives
     # entirely behind these; OFF ⇒ byte-identical (covered by the A38 unit suite).
-    monkeypatch.setenv("HARNESS_FLOW_DRIVE", "1")
     monkeypatch.setenv("MANAGER_ROLE_ENABLED", "1")
 
     o = TaskOrchestrator()

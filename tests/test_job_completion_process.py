@@ -19,7 +19,7 @@ from src.services import session_store as store_module
 from src.services.notification_service import NotificationService
 from src.telegram.interface import TelegramInterface
 from tests.test_turn_queue_4d import _env, _kind, _restart
-from tests.test_turn_queue_producer1 import _flags, _no_cli_spawn  # noqa: F401
+from tests.test_turn_queue_producer1 import _no_cli_spawn  # noqa: F401
 
 
 def _child(directory: str, boundary: str) -> None:

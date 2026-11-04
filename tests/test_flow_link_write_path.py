@@ -47,11 +47,6 @@ def _managed_task(task_id, metadata=None):
     return _task(task_id, meta)
 
 
-@pytest.fixture(autouse=True)
-def _clear_flag(monkeypatch):
-    monkeypatch.delenv("HARNESS_FLOW_DRIVE", raising=False)
-
-
 def _patch_db(monkeypatch, db):
     import src.control.db as db_mod
     monkeypatch.setattr(db_mod, "get_db", lambda: db)
@@ -62,7 +57,6 @@ def _patch_db(monkeypatch, db):
 # ---------------------------------------------------------------------------
 
 def test_on_flow_creation_records_event_and_root_link(tmp_path, monkeypatch):
-    monkeypatch.setenv("HARNESS_FLOW_DRIVE", "1")
     db = _db(tmp_path)
     _patch_db(monkeypatch, db)
     orch = _orch()
@@ -85,7 +79,6 @@ def test_on_flow_creation_records_event_and_root_link(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 
 def test_on_child_dispatch_records_child_flow_link_on_parent(tmp_path, monkeypatch):
-    monkeypatch.setenv("HARNESS_FLOW_DRIVE", "1")
     db = _db(tmp_path)
     _patch_db(monkeypatch, db)
     orch = _orch()
@@ -123,7 +116,6 @@ def test_on_child_dispatch_records_child_flow_link_on_parent(tmp_path, monkeypat
 # ---------------------------------------------------------------------------
 
 def test_on_stage_transition_appends_event(tmp_path, monkeypatch):
-    monkeypatch.setenv("HARNESS_FLOW_DRIVE", "1")
     db = _db(tmp_path)
     _patch_db(monkeypatch, db)
     orch = _orch()
@@ -141,31 +133,10 @@ def test_on_stage_transition_appends_event(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# (4) OFF: no link/event writes at all (byte-identical)
-# ---------------------------------------------------------------------------
-
-def test_off_writes_no_links_or_events(tmp_path, monkeypatch):
-    # flag unset by fixture
-    db = _db(tmp_path)
-    _patch_db(monkeypatch, db)
-    orch = _orch()
-
-    fid = orch._record_flow_run_start(_task("task-off"))
-    orch._flow_stage_transition(_task("task-off", {TaskOrchestrator._FLOW_RUN_META_KEY: fid}),
-                                "execution")
-
-    assert db.list_flow_links(flow_run_id=fid) == []
-    assert db.list_flow_events(fid) == []
-    # The legacy flow_runs record is unchanged (A19 dispatch_start).
-    assert db.get_flow_run(fid)["current_stage"] == "dispatch_start"
-
-
-# ---------------------------------------------------------------------------
 # (5) Fault isolation: a forced link/event write failure never raises
 # ---------------------------------------------------------------------------
 
 def test_link_write_failure_does_not_raise(tmp_path, monkeypatch):
-    monkeypatch.setenv("HARNESS_FLOW_DRIVE", "1")
     db = _db(tmp_path)
 
     def boom(*a, **k):

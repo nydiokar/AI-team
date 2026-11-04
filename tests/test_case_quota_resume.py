@@ -63,7 +63,6 @@ def _now() -> datetime:
 
 
 def _flags(monkeypatch, *, auto="0", ceiling=None) -> None:
-    monkeypatch.setenv("HARNESS_FLOW_DRIVE", "1")
     monkeypatch.setenv("MANAGER_ROLE_ENABLED", "1")
     monkeypatch.setenv("CASE_QUOTA_RESUME_AUTO", auto)
     if ceiling is not None:
@@ -193,9 +192,6 @@ class _Orch:
     # -- real implementations ------------------------------------------------
     def _emit_event(self, name, _t=None, payload=None):
         self.emitted.append((name, payload or {}))
-
-    def _harness_flow_drive_enabled(self):
-        return TaskOrchestrator._harness_flow_drive_enabled()
 
     def _manager_role_enabled(self):
         return TaskOrchestrator._manager_role_enabled(self)

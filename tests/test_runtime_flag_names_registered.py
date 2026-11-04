@@ -32,7 +32,9 @@ def _flag_reads() -> dict[str, list[str]]:
 
 def test_scan_finds_registry_reads() -> None:
     # Sanity: the regex must actually see the seam, or the guard below is vacuous.
-    assert len(_flag_reads()) >= 10
+    # Pinned to long-lived operator knobs, not a count (rollout flags keep retiring).
+    reads = _flag_reads()
+    assert {"CACHE_HEARTBEAT_ACTIVE", "QUOTA_PREWARM_ENABLED"} <= set(reads)
 
 
 def test_every_flag_read_is_registered() -> None:

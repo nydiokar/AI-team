@@ -26,7 +26,7 @@ from src.core.interfaces import Session, SessionStatus as SS
 from tests.test_session_cache_heartbeat import _cache_evidence
 from tests.test_turn_queue_4b import _pass, _run, _wire
 from tests.test_turn_queue_producer1 import (  # noqa: F401
-    NOW, _flags, _managed_rows, _no_cli_spawn, _setup, _submit, _sess,
+    NOW, _managed_rows, _no_cli_spawn, _setup, _submit, _sess,
 )
 
 
@@ -44,7 +44,6 @@ class _Notifier:
 
 
 def _env(tmp_path, monkeypatch, *, enroll=True, status=SS.AWAITING_INPUT):
-    monkeypatch.setenv("HARNESS_FLOW_DRIVE", "1")
     monkeypatch.setenv("CACHE_HEARTBEAT_ACTIVE", "1")
     monkeypatch.setenv("CACHE_HEARTBEAT_MIN_CACHE_TOKENS", "100")
     db, o = _setup(tmp_path, monkeypatch, enroll=enroll)

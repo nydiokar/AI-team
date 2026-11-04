@@ -1,8 +1,7 @@
 """
 A36 — M2.5 Case admission & Task/Session affiliation tests.
 
-Under ``HARNESS_FLOW_DRIVE`` ON the retired per-turn mint is replaced by an
-admission policy: a turn either BIRTHS a Case (dispatched/managed task),
+The retired per-turn mint is replaced by an admission policy: a turn either BIRTHS a Case (dispatched/managed task),
 ATTACHES to the session's open Case, or runs Case-less (standalone). Only a
 birth creates a flow_run — so a reused session no longer shatters into one fake
 Case per turn.
@@ -58,11 +57,6 @@ def _session(session_id):
     return types.SimpleNamespace(
         session_id=session_id, current_case_id=None, case_role=None,
     )
-
-
-@pytest.fixture(autouse=True)
-def _clear_flag(monkeypatch):
-    monkeypatch.delenv("HARNESS_FLOW_DRIVE", raising=False)
 
 
 def _patch_db(monkeypatch, db):
@@ -148,7 +142,6 @@ def test_find_open_case_blank_session_is_none(tmp_path):
 # ---------------------------------------------------------------------------
 
 def test_standalone_turn_creates_no_case(tmp_path, monkeypatch):
-    monkeypatch.setenv("HARNESS_FLOW_DRIVE", "1")
     db = _db(tmp_path)
     _patch_db(monkeypatch, db)
     orch = _orch()
@@ -160,7 +153,6 @@ def test_standalone_turn_creates_no_case(tmp_path, monkeypatch):
 
 
 def test_attach_on_open_case(tmp_path, monkeypatch):
-    monkeypatch.setenv("HARNESS_FLOW_DRIVE", "1")
     db = _db(tmp_path)
     _patch_db(monkeypatch, db)
     orch = _orch()
@@ -183,7 +175,6 @@ def test_attach_on_open_case(tmp_path, monkeypatch):
 def test_ten_turns_one_flowrun_ten_task_links_one_session_link(tmp_path, monkeypatch):
     """Headline acceptance: a Case-attached session running 10 turns yields
     exactly 1 flow_run, 10 task links, and 1 session link (not 10)."""
-    monkeypatch.setenv("HARNESS_FLOW_DRIVE", "1")
     db = _db(tmp_path)
     _patch_db(monkeypatch, db)
     orch = _orch()
@@ -203,7 +194,6 @@ def test_attach_does_not_reclose_across_turns(tmp_path, monkeypatch):
     """A turn attaching to an open Case does NOT stash _FLOW_RUN_META_KEY, so the
     per-turn terminal helper cannot auto-close the shared Case — it stays open for
     the next turn to attach (the core A36 continuity guarantee)."""
-    monkeypatch.setenv("HARNESS_FLOW_DRIVE", "1")
     db = _db(tmp_path)
     _patch_db(monkeypatch, db)
     orch = _orch()
@@ -226,7 +216,6 @@ def test_watched_job_continuation_attaches_to_open_case(tmp_path, monkeypatch):
     """A watched-job continuation on a session that already owns an open Case is
     the SAME session continuing its work — it attaches (B), never births a new
     Case nor relabels a Manager session as a 'worker' of that new Case."""
-    monkeypatch.setenv("HARNESS_FLOW_DRIVE", "1")
     db = _db(tmp_path)
     _patch_db(monkeypatch, db)
     orch = _orch()
@@ -247,7 +236,6 @@ def test_watched_job_continuation_attaches_to_open_case(tmp_path, monkeypatch):
 
 
 def test_watched_job_continuation_without_open_case_still_births(tmp_path, monkeypatch):
-    monkeypatch.setenv("HARNESS_FLOW_DRIVE", "1")
     db = _db(tmp_path)
     _patch_db(monkeypatch, db)
     orch = _orch()
@@ -265,7 +253,6 @@ def test_watched_job_continuation_without_open_case_still_births(tmp_path, monke
 # ---------------------------------------------------------------------------
 
 def test_attach_sets_durable_affiliation_once(tmp_path, monkeypatch):
-    monkeypatch.setenv("HARNESS_FLOW_DRIVE", "1")
     db = _db(tmp_path)
     _patch_db(monkeypatch, db)
     orch = _orch()
@@ -286,40 +273,6 @@ def test_attach_sets_durable_affiliation_once(tmp_path, monkeypatch):
     store.save = lambda s: (calls.__setitem__("n", calls["n"] + 1), orig_save(s))
     orch._record_flow_run_start(_turn("t-2", "sess-1"))
     assert calls["n"] == 0  # steady-state: no redundant session write
-
-
-# ---------------------------------------------------------------------------
-# OFF path — byte-identical to A19
-# ---------------------------------------------------------------------------
-
-def test_off_path_creates_dispatch_start_record(tmp_path, monkeypatch):
-    db = _db(tmp_path)  # flag unset
-    _patch_db(monkeypatch, db)
-    orch = _orch()
-
-    task = _turn("t-off", "sess-1")
-    fid = orch._record_flow_run_start(task)
-
-    rows = db.list_flow_runs(task_id="t-off")
-    assert len(rows) == 1 and rows[0]["flow_run_id"] == fid
-    assert rows[0]["current_stage"] == "dispatch_start"
-    # OFF ⇒ no admission side effects: no links/events, nothing stashed.
-    assert db.list_flow_links(flow_run_id=fid) == []
-    assert TaskOrchestrator._CASE_ID_META_KEY not in (task.metadata or {})
-    assert TaskOrchestrator._FLOW_RUN_META_KEY not in (task.metadata or {})
-
-
-def test_off_path_ignores_open_case(tmp_path, monkeypatch):
-    """With the flag OFF there is no admission at all — even an existing open Case
-    is ignored and A19's per-task dispatch_start record is written."""
-    db = _db(tmp_path)  # flag unset
-    _patch_db(monkeypatch, db)
-    orch = _orch()
-
-    db.open_case("obj", "sess-1")
-    before = len(db.list_flow_runs())
-    orch._record_flow_run_start(_turn("t-off", "sess-1"))
-    assert len(db.list_flow_runs()) == before + 1  # a new dispatch_start row
 
 
 # ---------------------------------------------------------------------------

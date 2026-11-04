@@ -274,12 +274,6 @@ _COST_DIMENSIONS: Dict[str, str] = {
 # "1"`` numeric entry rejects values <= 0 on write, so null is the ONLY way to
 # store "no cap" (a 0 must never silently mean "unlimited" on a money knob).
 RUNTIME_FLAG_DEFINITIONS: Dict[str, Dict[str, str]] = {
-    "HARNESS_FLOW_DRIVE": {
-        "default": "0",
-        "effect_scope": "live",
-        "registry_writable": "1",
-        "description": "Work Control Substrate flow_links/flow_events write path.",
-    },
     "CASE_RESPAWN_REQUIRES_APPROVAL": {
         "default": "1",
         "effect_scope": "live",
@@ -1190,18 +1184,6 @@ def transient_resume_task_id(case_id: str, paused_task_id: str, attempt: int) ->
 def cache_heartbeat_task_id(session_id: str, slot_epoch: int) -> str:
     """Deterministic lease id for one session-cache heartbeat due slot."""
     return f"cachehb:{session_id}:{int(slot_epoch)}"
-
-
-def flow_drive_enabled() -> bool:
-    """Whether the Work Control Substrate write path is active (A22/A26/A29).
-
-    Canonical read of ``HARNESS_FLOW_DRIVE`` (truthy: 1/true/yes/on); default OFF.
-    This is the SINGLE source of truth for the flag so every substrate writer
-    (orchestrator flow seams, ApprovalService approval seams) agrees byte-for-byte.
-    When OFF, no flow_links/flow_events are written ⇒ behavior is byte-identical to
-    A19. It never reads a substrate row to DRIVE execution — it only gates RECORDS.
-    """
-    return runtime_flag_enabled("HARNESS_FLOW_DRIVE")
 
 
 def manager_role_enabled() -> bool:

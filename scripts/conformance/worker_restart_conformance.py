@@ -67,7 +67,7 @@ FROZEN_STEPS = [
     Step(
         n=0, name="baseline (pre-restart)",
         trigger="Manager armed a wait-group on worker task(s)",
-        action_unit="Manager role loop (HARNESS_FLOW_DRIVE)",
+        action_unit="Manager role loop",
         effect="Manager AWAITING_INPUT/driver_live; flow has an open worker.wait_pending; node N online @ incarnation I0",
         page="—",
         evidence="flow_events worker.wait_pending without matching wait_resolved; sessions.driver_status='live'",

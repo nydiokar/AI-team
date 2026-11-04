@@ -193,8 +193,8 @@ def test_case_open_objective_oversized_rejected(client, orch):
 
 def test_instruction_threads_parent_flow_run_id(client, orch):
     """[A32] A Manager→worker dispatch passes parent_flow_run_id; it must reach
-    submit_instruction (which stamps it onto the child flow_runs row when
-    HARNESS_FLOW_DRIVE is ON). Endpoint just threads it — no gating here."""
+    submit_instruction (which stamps it onto the child flow_runs row). Endpoint
+    just threads it — no gating here."""
     r = client.post("/api/instructions", headers=_auth(),
                     json={"description": "child work", "parent_flow_run_id": "flow_parent_1"})
     assert r.status_code == 200

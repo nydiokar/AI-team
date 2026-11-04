@@ -48,11 +48,6 @@ def _result(success=True, error_class=""):
     return types.SimpleNamespace(success=success, error_class=error_class)
 
 
-@pytest.fixture(autouse=True)
-def _clear_flag(monkeypatch):
-    monkeypatch.delenv("HARNESS_FLOW_DRIVE", raising=False)
-
-
 def _patch_db(monkeypatch, db):
     import src.control.db as db_mod
     monkeypatch.setattr(db_mod, "get_db", lambda: db)
@@ -63,7 +58,6 @@ def _patch_db(monkeypatch, db):
 # ---------------------------------------------------------------------------
 
 def test_on_session_attached_link_and_event(tmp_path, monkeypatch):
-    monkeypatch.setenv("HARNESS_FLOW_DRIVE", "1")
     db = _db(tmp_path)
     _patch_db(monkeypatch, db)
     orch = _orch()
@@ -81,7 +75,6 @@ def test_on_session_attached_link_and_event(tmp_path, monkeypatch):
 
 
 def test_no_session_id_means_no_session_link(tmp_path, monkeypatch):
-    monkeypatch.setenv("HARNESS_FLOW_DRIVE", "1")
     db = _db(tmp_path)
     _patch_db(monkeypatch, db)
     orch = _orch()
@@ -108,7 +101,6 @@ def test_off_writes_no_session_link(tmp_path, monkeypatch):
 def test_terminal_success_records_finished_leaves_case_open(tmp_path, monkeypatch):
     # [A37] Task-only outcome: a completed task records `task.finished` but leaves
     # the Case status untouched (Task finished != Case completed).
-    monkeypatch.setenv("HARNESS_FLOW_DRIVE", "1")
     db = _db(tmp_path)
     _patch_db(monkeypatch, db)
     orch = _orch()
@@ -130,7 +122,6 @@ def test_terminal_success_records_finished_leaves_case_open(tmp_path, monkeypatc
 def test_terminal_failure_records_finished_leaves_case_open(tmp_path, monkeypatch):
     # [A37] A failing task does NOT auto-block the Case; it records the failure and
     # leaves the Case open for an authoritative closer/reviewer to decide.
-    monkeypatch.setenv("HARNESS_FLOW_DRIVE", "1")
     db = _db(tmp_path)
     _patch_db(monkeypatch, db)
     orch = _orch()
@@ -148,22 +139,7 @@ def test_terminal_failure_records_finished_leaves_case_open(tmp_path, monkeypatc
     assert payload["outcome"] == "failed" and payload["error_class"] == "timeout"
 
 
-def test_terminal_off_is_noop(tmp_path, monkeypatch):
-    db = _db(tmp_path)  # flag unset
-    _patch_db(monkeypatch, db)
-    orch = _orch()
-
-    fid = db.create_flow_run("t-x", "closure")
-    orch._flow_terminal_outcome(
-        _task("t-x", {TaskOrchestrator._FLOW_RUN_META_KEY: fid}), success=True,
-    )
-    # No status write, no events.
-    assert db.get_flow_run(fid)["status"] is None
-    assert db.list_flow_events(fid) == []
-
-
 def test_terminal_outcome_write_failure_does_not_raise(tmp_path, monkeypatch):
-    monkeypatch.setenv("HARNESS_FLOW_DRIVE", "1")
     db = _db(tmp_path)
     fid = db.create_flow_run("t-boom", "closure")
 
@@ -194,7 +170,6 @@ class _SpyWorkflow:
 
 
 def test_approval_request_and_resolve_link_and_events(tmp_path, monkeypatch):
-    monkeypatch.setenv("HARNESS_FLOW_DRIVE", "1")
     db = _db(tmp_path)
     fid = db.create_flow_run("t-appr", "execution")
     svc = ApprovalService(db, workflow=_SpyWorkflow())
@@ -210,7 +185,6 @@ def test_approval_request_and_resolve_link_and_events(tmp_path, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_approval_resolve_appends_resolved_event(tmp_path, monkeypatch):
-    monkeypatch.setenv("HARNESS_FLOW_DRIVE", "1")
     db = _db(tmp_path)
     fid = db.create_flow_run("t-appr", "execution")
     svc = ApprovalService(db, workflow=_SpyWorkflow())
@@ -227,7 +201,6 @@ async def test_approval_resolve_appends_resolved_event(tmp_path, monkeypatch):
 
 
 def test_approval_no_flow_is_noop(tmp_path, monkeypatch):
-    monkeypatch.setenv("HARNESS_FLOW_DRIVE", "1")
     db = _db(tmp_path)  # NO flow_run for the task
     svc = ApprovalService(db, workflow=_SpyWorkflow())
 
@@ -237,18 +210,7 @@ def test_approval_no_flow_is_noop(tmp_path, monkeypatch):
     assert db.list_flow_links(entity_type="approval", entity_id=res.reason) == []
 
 
-def test_approval_off_is_noop(tmp_path, monkeypatch):
-    db = _db(tmp_path)  # flag unset
-    fid = db.create_flow_run("t-appr", "execution")
-    svc = ApprovalService(db, workflow=_SpyWorkflow())
-
-    svc.request(action="deploy", session_id="s1", task_id="t-appr")
-    assert db.list_flow_links(flow_run_id=fid) == []
-    assert db.list_flow_events(fid) == []
-
-
 def test_approval_substrate_failure_does_not_break_gate(tmp_path, monkeypatch):
-    monkeypatch.setenv("HARNESS_FLOW_DRIVE", "1")
     db = _db(tmp_path)
     db.create_flow_run("t-appr", "execution")
 

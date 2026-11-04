@@ -178,7 +178,6 @@ def _wedge_setup(tmp_path, monkeypatch):
     orch = TaskOrchestrator.__new__(TaskOrchestrator)
     orch.events = []
     orch._emit_event = lambda name, task, data=None: orch.events.append(name)
-    orch._harness_flow_drive_enabled = lambda: True
     orch.quota_window_state = lambda provider="claude": {
         "exhausted": True, "reset_at": None, "provider": "claude", "evidence": "limit_reached"}
     return db, orch, case_id

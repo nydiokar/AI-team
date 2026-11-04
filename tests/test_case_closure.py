@@ -429,7 +429,6 @@ def test_orch_close_case_does_not_clear_moved_on_session(tmp_path, monkeypatch):
 def test_resume_reuses_same_case(tmp_path, monkeypatch):
     """A paused Case (status NULL/'blocked') is still OPEN, so a resuming turn
     re-attaches to the SAME flow_run_id — no replacement Case is minted."""
-    monkeypatch.setenv("HARNESS_FLOW_DRIVE", "1")
     db = _db(tmp_path)
     _patch_db(monkeypatch, db)
     orch = _orch()

@@ -8,7 +8,7 @@ import pytest
 
 from src.worker.agent import _execute_task
 from tests.test_turn_queue_4b import _pass, _wire
-from tests.test_turn_queue_producer1 import _flags, _no_cli_spawn, _setup, _submit
+from tests.test_turn_queue_producer1 import _no_cli_spawn, _setup, _submit
 
 
 @pytest.mark.parametrize("backend_name", ["claude", "codex", "opencode-server"])

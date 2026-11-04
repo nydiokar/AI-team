@@ -24,10 +24,7 @@ Design invariants (why this is safe for the F4 spike):
 LINEAGE (A32): POST /api/instructions now accepts an optional parent_flow_run_id.
    dispatch_worker forwards it so a child dispatched here records a parent edge in
    /api/flows (the §6 "child flow visible ... with lineage" clause). This is a
-   SHADOW record wired through the M2 substrate: it is persisted only when the
-   gateway runs with HARNESS_FLOW_DRIVE ON (it is, in the live env); with the flag
-   OFF the server no-ops the stamp and the field is silently ignored. Either way
-   nothing reads the edge to drive execution — so a Manager should confirm lineage
+   SHADOW record wired through the M2 substrate. Nothing reads the edge to drive execution — so a Manager should confirm lineage
    via /api/flows rather than assume it, and always review the child's committed
    git diff (never a self-reported summary).
 """
@@ -675,8 +672,8 @@ def _dispatch_worker(args: Dict[str, Any]) -> str:
         body["case_id"] = case_id
     if parent_flow_run_id:
         # [A32] The endpoint now accepts this and stamps it onto the child's
-        # flow_runs row via the M2 substrate — but ONLY when the gateway runs with
-        # HARNESS_FLOW_DRIVE ON (a SHADOW record; nothing reads it to drive work).
+        # flow_runs row via the M2 substrate (a SHADOW record; nothing reads it to
+        # drive work).
         # Use for a genuine child-CASE lineage edge; use case_id (above) to make the
         # worker JOIN the Manager's Case instead.
         body["parent_flow_run_id"] = parent_flow_run_id
@@ -737,8 +734,7 @@ def _dispatch_worker(args: Dict[str, Any]) -> str:
     if parent_flow_run_id:
         lines.append(
             f"parent_flow_run_id: {parent_flow_run_id} — sent as the Manager→worker "
-            f"lineage edge (recorded when the gateway runs HARNESS_FLOW_DRIVE ON; it is a "
-            f"SHADOW record — confirm via /api/flows, don't assume)."
+            f"lineage edge (a SHADOW record — confirm via /api/flows, don't assume)."
         )
     lines.append("")
     if case_id:
@@ -889,9 +885,7 @@ def _wait_for_worker(args: Dict[str, Any]) -> str:
                 f"TIMEOUT after {timeout:.0f}s ({polls} polls). "
                 f"Worker flow {where} last status={last_status!r} (still active/unresolved).{err_note} "
                 f"The worker may still be running — re-call wait_for_worker or inspect "
-                f"/api/work manually. NOTE: if the flow_run row never appears, confirm "
-                f"HARNESS_FLOW_DRIVE is ON and that a plain worker dispatch writes a flow "
-                f"row (open question for the live spike — see AGENT_31)."
+                f"/api/work manually."
             )
 
         # Sleep, but never past the deadline.
