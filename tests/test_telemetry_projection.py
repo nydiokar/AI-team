@@ -52,6 +52,42 @@ def test_context_normalization_does_not_double_count_inclusive_cache():
     ) is None
 
 
+def test_queued_request_has_no_execution_start_or_running_status():
+    start = utc_now()
+    projection = project_turn([
+        _event("turn.accepted", at=start, attributes={"task_id": "turn_1"}),
+        _event("turn.queued", at=start + timedelta(seconds=1)),
+    ])
+    turn = projection["turn"]
+    assert turn["final_status"] == "queued"
+    assert turn["started_at"] is None
+    assert turn["metrics"]["wall_time_ms"] is None
+    assert "turn_start_inferred" not in turn["data_quality"]
+
+
+def test_worker_invocation_start_excludes_queue_wait():
+    start = utc_now()
+    turn = project_turn([
+        _event("turn.accepted", at=start),
+        _event("invocation.started", at=start + timedelta(seconds=60), invocation_id="inv_1"),
+        _event("turn.completed", at=start + timedelta(seconds=65), attributes={"status": "success"}),
+    ])["turn"]
+    assert turn["final_status"] == "success"
+    assert turn["started_at"] == _event("invocation.started", at=start + timedelta(seconds=60)).model_dump(mode="json")["event_time"]
+    assert turn["metrics"]["wall_time_ms"] == 5000
+
+
+def test_terminal_never_ran_turn_has_no_execution_duration():
+    start = utc_now()
+    turn = project_turn([
+        _event("turn.accepted", at=start),
+        _event("turn.completed", at=start + timedelta(seconds=60), attributes={"status": "withdrawn"}),
+    ])["turn"]
+    assert turn["final_status"] == "withdrawn"
+    assert turn["started_at"] is None
+    assert turn["metrics"]["wall_time_ms"] is None
+
+
 def test_request_level_projection_separates_peak_from_total_work():
     start = utc_now()
     events = [

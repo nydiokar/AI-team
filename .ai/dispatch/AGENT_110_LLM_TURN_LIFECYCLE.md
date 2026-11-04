@@ -1,12 +1,12 @@
 ```yaml
 job_id: AGENT_110_LLM_TURN_LIFECYCLE
 created_at: "2026-11-04T02:11:25.550323+00:00"        # CANONICAL — set once at dispatch, never derive again
-status: ready              # ready | active | blocked | done | dead
+status: active              # ready | active | blocked | done | dead
 owner: ""
 depends_on: []
 results_ref: null             # -> DISPATCH_LOG.md section with the verdict prose
 evidence: []                  # artifact paths that PROVE it ran (checked to exist)
-updated_at: "2026-11-04T02:11:25.550345+00:00"
+updated_at: "2026-11-04T19:08:22.052139+00:00"
 ```
 
 # DISPATCH — 110 · Report queued requests separately from executing LLM turns
@@ -50,11 +50,24 @@ Job consumption semantics (A109), telemetry DB separation, unrelated cost/usage 
 ## TRAIL / EVIDENCE
 - Incident reproduction: `jturn_82a3a43f24457fee35c8a2b6` projected from accepted/queued
   events returns `running`, `started_at=2026-11-03T16:31:18.062983Z`, no execution node.
+- Projection version 2 defaults to queued, uses gateway/worker start evidence for execution
+  timestamps and leaves never-ran terminal duration unavailable. An indexed five-row
+  background repair rebuilds old projections from retained raw events, newest first;
+  process restart resumes the remainder. This includes already-withdrawn requests with
+  fabricated timestamps. Pruned raw history is preserved, not reconstructed.
+- Focused projection/store regressions pass, including persisted false-running repair and
+  exclusion of queue wait from execution duration. Existing SessionTurns renders the
+  returned status directly and uses a placeholder when start/duration is unavailable.
+- CI exposed older acceptance assertions that encoded the false-running behavior and
+  legacy-schema fixtures with divergent telemetry ancestry. Those assertions now require
+  queued/no-start evidence; index creation follows the existing merged-schema repair.
+  All 121 affected migration/reconciliation checks passed; 68 final lifecycle/migration
+  checks passed after extending repair to retained terminal history.
 
 ## Milestone
-- [ ] Issue opened.
-- [ ] Focused lifecycle regressions pass.
-- [ ] Persisted history repair and API/UI behavior verified.
+- [x] Issue opened (#273).
+- [x] Focused lifecycle regressions pass.
+- [x] Persisted history repair verified in SQLite; live API validation pending deploy.
 - [ ] PR merged and controller deployed.
 
 ## Closure

@@ -79,6 +79,37 @@ def test_completion_api_bounds_auth_failure_and_serialization_gate(api, monkeypa
     assert client.get("/jobs/completions", headers=auth).status_code == 200
 
 
+def test_result_api_ownership_bounds_gate_and_backing_failure(api, monkeypatch) -> None:
+    db, client = api
+    auth = {"Authorization": "Bearer completion-test"}
+    body = {"session_id": "sess-1", "node_id": "worker-a"}
+    _register(db, "job_read", agent=True)
+    assert client.post("/jobs/job_read/result", json=body).status_code in (401, 403)
+    assert client.post("/jobs/job_read/result", content=b"x" * 2049, headers=auth).status_code == 413
+    assert client.post("/jobs/job_read/result", content=b"{", headers=auth).status_code == 422
+    for invalid in ({**body, "session_id": "x" * 129}, {**body, "extra": "x"}):
+        assert client.post("/jobs/job_read/result", json=invalid, headers=auth).status_code == 422
+    assert client.post("/jobs/job_read/result", json={**body, "session_id": "other"}, headers=auth).status_code == 403
+    assert client.post("/jobs/missing/result", json=body, headers=auth).status_code == 404
+    running = client.post("/jobs/job_read/result", json=body, headers=auth)
+    assert running.status_code == 200 and not running.json()["consumed"]
+    slots = threading.BoundedSemaphore(1)
+    monkeypatch.setattr(task_server, "_JOB_RESULT_SLOTS", slots)
+    slots.acquire()
+    assert client.post("/jobs/job_read/result", json=body, headers=auth).status_code == 429
+    slots.release()
+    monkeypatch.setattr(task_server, "get_db", lambda: None)
+    assert client.post("/jobs/job_read/result", json=body, headers=auth).status_code == 503
+    monkeypatch.setattr(task_server, "get_db", lambda: db)
+    db.complete_job("job_read", 0, "x" * 1000000)
+    response = client.post("/jobs/job_read/result", json=body, headers=auth)
+    assert response.status_code == 200 and response.json()["consumed"]
+    assert len(response.json()["tail"]) == 1500
+    assert "command" not in response.json()
+    assert slots.acquire(blocking=False)
+    slots.release()
+
+
 @pytest.mark.asyncio
 async def test_federation_more_than_50_old_starts_and_late_transition_behind_cursor(api, tmp_path, monkeypatch) -> None:
     remote_db, api_client = api

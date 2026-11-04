@@ -187,6 +187,27 @@ class TelemetryStore:
             result.append(item)
         return result
 
+    def repair_turn_lifecycle(self, *, limit: int = 5) -> int:
+        """Incrementally repair old lifecycle projections from retained raw events.
+
+        The partial index becomes empty after repair. Restart simply resumes the
+        remaining batch; no synthetic events, provider calls or historical replay.
+        """
+        rows = self.db._conn().execute(
+            "SELECT turn_id FROM llm_turns INDEXED BY idx_llm_turns_lifecycle_repair "
+            "WHERE projection_version<2 AND events_pruned_at IS NULL "
+            "ORDER BY updated_at DESC,turn_id DESC LIMIT ?", (max(1, min(limit, 25)),),
+        ).fetchall()
+        for row in rows:
+            # A corrupt/missing raw stream must not spin forever at the head.
+            if self.rebuild_turn(str(row["turn_id"])) is None:
+                with self.db._write() as conn:
+                    conn.execute(
+                        "UPDATE llm_turns SET projection_version=2 WHERE turn_id=? AND projection_version<2",
+                        (row["turn_id"],),
+                    )
+        return len(rows)
+
     def rebuild_turn(self, turn_id: str) -> Optional[Dict[str, Any]]:
         events = self._all_events(turn_id)
         if not events:

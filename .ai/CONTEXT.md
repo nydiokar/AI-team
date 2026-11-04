@@ -74,8 +74,8 @@ Only jobs that are genuinely open. Everything merged/done is in git and the disp
 
 | Job | Packet | Depends on | Status | What it is |
 |---|---|---|---|---|
-| **A109** | `AGENT_109_WATCHED_JOB_CONSUMPTION.md` | — | ready — operator-authorized 2026-11-04, highest incident priority | Preserve detached-job wake-on-completion; consume handled results once and prevent stale follow-ups after acknowledgment. |
-| **A110** | `AGENT_110_LLM_TURN_LIFECYCLE.md` | — | ready — operator-authorized 2026-11-04 | Queued-only telemetry must not report running or invent execution start; repair persisted projections. |
+| **A109** | `AGENT_109_WATCHED_JOB_CONSUMPTION.md` | — | active — issues #272/#273, implementation verified; shipping | Preserve detached-job wake-on-completion; consume handled results once and prevent stale follow-ups after acknowledgment. Worker tool activation requires promotion; existing five-second DB lock budgets do not bound native COMMIT IO. |
+| **A110** | `AGENT_110_LLM_TURN_LIFECYCLE.md` | — | active — implementation verified; shipping with A109 | Queued-only telemetry must not report running or invent execution start; repair persisted projections. |
 | **A105** | `AGENT_105_CROSS_PROCESS_TURN_SIGNAL.md` | A104 ✅ | **ready** — Level 3, operator approval + D1 | Make the task-server's post-commit turn hint reach the gateway; scheduler, effects consumer and inbox wake all wake on that one signal (polls → safety nets). Today worker finish → Manager wake is polled (16.5 s live). |
 | **A102** | `AGENT_102_UNIFY_BACKEND_PATHWAYS.md` | — | **blocked** — S2 merged + gateway live (`7c6d01a`); worker promotion and natural S3 acceptance pending | One carrier-owned `TurnControl` and natural backend operations; shims, rollout gates and dead gateway session execution removed. Worker restart needs the operator decision and drain/ancestry checks; no paid proof turn. |
 | **A94** | `AGENT_94_SYSTEM_ONE_CORE_DELIVERY_SCORECARD.md` | — | ready (Level 3) | S1 core + decision log + replay baseline + advisory wake scorecard. Operator inputs: read-only controller DB copy, `TYPESAFE_API_KEY`. |

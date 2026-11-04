@@ -2,7 +2,7 @@
 """
 MCP server — ai-team watched jobs.
 
-Exposes a single tool:  watch_job
+Exposes watch_job, job_result and whoami.
 Claude Code (and OpenCode) load this as a subprocess via stdio transport.
 The agent calls it like any built-in tool — no bash scripts, no curl, no guessing.
 
@@ -69,9 +69,12 @@ _TOOLS = [
             "\n\n"
             "Use this whenever you are about to run a command that will take more than "
             "~30 seconds: training runs, builds, ETL jobs, data processing, deployments. "
-            "The task turn ends immediately after registration; the job runs independently "
-            "and does NOT hold the session busy or consume a task slot. By default, the "
-            "agent is notified in-session when the job finishes so it can continue. "
+            "Registration returns immediately; the job runs independently and does not "
+            "consume a task slot. Continue independent work, or return control while it runs. "
+            "By default, an unconsumed completion wakes this same session so you can continue. "
+            "Use job_result to read status/results: a terminal read acknowledges consumption "
+            "and prevents a redundant queued continuation. If you inspect a private log or "
+            "artifact directly, call job_result before proceeding to acknowledge the result. "
             "For long waits tied to a Claude SDK session, the gateway can also observe "
             "or preserve the session prompt cache while the detached job runs. "
             "\n\n"
@@ -99,7 +102,7 @@ _TOOLS = [
                 },
                 "notify_agent": {
                     "type": "boolean",
-                    "description": "Whether to submit a follow-up instruction to the same session when the job finishes. Defaults to true.",
+                    "description": "Whether an unconsumed completion wakes this same session when the job finishes. Defaults to true.",
                     "default": True,
                 },
                 "expected_runtime_sec": {
@@ -119,6 +122,23 @@ _TOOLS = [
         },
     },
     {
+        "name": "job_result",
+        "description": (
+            "Read one of your watched jobs. Running jobs return status without consuming "
+            "the future completion. A terminal result returns exit status and captured tail "
+            "and acknowledges it, preventing another unstarted continuation for the same job. "
+            "Use this when checking a job or after inspecting its private output artifacts. "
+            "Completion is based on process exit; redirected stdout can leave the tail empty. "
+            "If a continuation has already started, the request returns an explicit conflict."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {"job_id": {"type": "string", "minLength": 1, "maxLength": 128}},
+            "required": ["job_id"],
+            "additionalProperties": False,
+        },
+    },
+    {
         "name": "whoami",
         "description": (
             "Report YOUR OWN identity (read-only): your gateway session id and node, resolved "
@@ -134,23 +154,26 @@ _TOOLS = [
 # HTTP
 # ---------------------------------------------------------------------------
 
-def _post_job(payload: Dict[str, Any]) -> Dict[str, Any]:
+def _post_job(payload: Dict[str, Any], path: str = "/jobs") -> Dict[str, Any]:
     url = os.environ.get("CONTROLLER_URL", "http://127.0.0.1:9002").rstrip("/")
     token = os.environ.get("WORKER_TOKEN", "")
     if not token:
         raise RuntimeError("WORKER_TOKEN not set — cannot reach task server")
     data = json.dumps(payload).encode()
     req = urllib.request.Request(
-        f"{url}/jobs",
+        f"{url}{path}",
         data=data,
         headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
         method="POST",
     )
     try:
         with urllib.request.urlopen(req, timeout=15) as resp:
-            return json.loads(resp.read())
+            body = resp.read(65537)
+            if len(body) > 65536:
+                raise ValueError("job response too large")
+            return json.loads(body)
     except urllib.error.HTTPError as e:
-        raise RuntimeError(f"HTTP {e.code}: {e.read().decode(errors='replace')}") from e
+        raise RuntimeError(f"HTTP {e.code}: {e.read(2048).decode(errors='replace')}") from e
     except Exception as e:
         raise RuntimeError(f"Could not reach task server: {e}") from e
 
@@ -235,6 +258,7 @@ def _watch_job(args: Dict[str, Any]) -> str:
     node = os.environ.get("NODE_ID") or os.environ.get("WORKER_NODE_ID") or socket.gethostname()
     session = (
         _bounded_text(args.get("session_id"), "session_id", _MAX_SESSION_ID_CHARS, required=False)
+        or os.environ.get("AI_TEAM_SESSION_ID")
         or os.environ.get("SESSION_ID")
         or None
     )
@@ -280,7 +304,21 @@ def _watch_job(args: Dict[str, Any]) -> str:
         f"The worker will spawn it now and capture its output.\n"
         f"You can watch it in System > Jobs. When it finishes, the result is posted "
         f"to the session chat; agent follow-up runs when enabled and a session is available."
+        f"\nContinue independent work or return control. Call job_result with {job_id} "
+        f"when inspecting its result so it cannot trigger another unstarted continuation."
     )
+
+
+def _job_result(args: Dict[str, Any]) -> str:
+    job_id = _bounded_text(args.get("job_id"), "job_id", 128) or ""
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", job_id):
+        raise ValueError("invalid job_id")
+    session = os.environ.get("AI_TEAM_SESSION_ID") or os.environ.get("SESSION_ID") or ""
+    node = os.environ.get("NODE_ID") or os.environ.get("WORKER_NODE_ID") or socket.gethostname()
+    if not session:
+        raise ValueError("your session identity is not present; cannot consume a job result")
+    result = _post_job({"session_id": session, "node_id": node}, f"/jobs/{job_id}/result")
+    return json.dumps(result, ensure_ascii=False)
 
 # ---------------------------------------------------------------------------
 # MCP protocol — JSON-RPC 2.0 over stdio
@@ -317,7 +355,7 @@ def _dispatch(req: Dict[str, Any]) -> None:
         name = params.get("name", "")
         arguments = params.get("arguments", {})
 
-        impl = {"watch_job": _watch_job, "whoami": _whoami}.get(name)
+        impl = {"watch_job": _watch_job, "job_result": _job_result, "whoami": _whoami}.get(name)
         if impl is not None:
             try:
                 text = impl(arguments)

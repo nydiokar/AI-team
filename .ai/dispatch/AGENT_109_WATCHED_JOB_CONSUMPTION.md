@@ -1,12 +1,12 @@
 ```yaml
 job_id: AGENT_109_WATCHED_JOB_CONSUMPTION
 created_at: "2026-11-04T02:11:24.580839+00:00"        # CANONICAL — set once at dispatch, never derive again
-status: ready              # ready | active | blocked | done | dead
+status: active              # ready | active | blocked | done | dead
 owner: ""
 depends_on: []
 results_ref: null             # -> DISPATCH_LOG.md section with the verdict prose
 evidence: []                  # artifact paths that PROVE it ran (checked to exist)
-updated_at: "2026-11-04T02:11:24.580864+00:00"
+updated_at: "2026-11-04T19:08:21.339454+00:00"
 ```
 
 # DISPATCH — 109 · Consume watched-job results once while preserving durable wake-up
@@ -65,11 +65,27 @@ queue redesign, quota policy, paid proof turns, worker restarts without authoriz
   `task_e97d6f99`, four receipts with notification/action attempts = 1.
 - Native Horse transcript unavailable at diagnosis; do not assert how the original agent
   inspected results without further evidence.
+- Implementation: `job_result` resolves the caller from process identity; the controller
+  returns bounded status/tail/log path, consumes terminal results in the existing receipt,
+  and atomically withdraws queued/pending/claimed follow-ups. Admission checks the marker
+  in its own transaction. A started wake refuses competing consumption (409); successful
+  wake completion records consumption. Operator notices remain independent.
+- Verification: 51 focused tests passed (consumption, MCP, HTTP, lifecycle projection/store);
+  153 queue/recovery/grant/architecture/Codex-telemetry regressions passed. Additional final
+  consumption/tool checks and frontend placeholder validation are recorded at closure.
+- §7 boundary: four admitted result requests; at N=100 only four parse/execute. Bodies
+  cap at 2 KiB with a five-second read deadline; output uses 1500-char tail, 512-char label
+  and 1000-char log path. MCP reads cap at 64 KiB with 15-second socket timeout. Each DB
+  mutation uses the existing five-second writer/lock budget, off the event loop. Invalid
+  input → 413/422, foreign owner → 403, missing job → 404, saturated → 429, unavailable
+  store → 503. The shared worker token still is the trust boundary (A71).
+- DB/native-IO hard-deadline deferral: the existing managed writer bounds lock waits,
+  not filesystem stalls during COMMIT; no new hard native-IO guarantee is claimed.
 
 ## Milestone
-- [ ] Issue opened and root cause/invariants recorded.
-- [ ] Delivery and consumption tests pass across admission/start/restart seams.
-- [ ] Tool contract and grants verified.
+- [x] Issue opened and root cause/invariants recorded (#272).
+- [x] Delivery and consumption tests pass across admission/start/restart seams.
+- [x] Tool contract and grants verified.
 - [ ] PR merged, controller deployed, worker activation limitation recorded.
 
 ## Closure
