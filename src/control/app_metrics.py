@@ -12,7 +12,7 @@ disk shared with other workloads) or the network. This answers it at near-zero c
     NDJSON append per minute (page-cache write, no fsync, size-rotated).
 It deliberately never touches the DB — telemetry on the hot path is what hurt before.
 
-Disable with APP_METRICS_ENABLED=false. Linux-only (/proc); any unreadable source degrades
+Linux-only (/proc); any unreadable source degrades
 to zeros instead of raising.
 """
 
@@ -463,10 +463,8 @@ async def _run(sink: Optional[RotatingFileHandler], devno: Optional[tuple[int, i
 
 
 def start(logs_dir: str) -> None:
-    """Start the sampler on the running loop. Idempotent; a no-op when disabled."""
+    """Start the sampler on the running loop. Idempotent."""
     global _task
-    if os.getenv("APP_METRICS_ENABLED", "true").lower() != "true":
-        return
     if _task is not None and not _task.done():
         return
     devno: Optional[tuple[int, int]] = None

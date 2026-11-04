@@ -223,30 +223,12 @@ def test_reaper_cancels_closed_session_pending(tmp_path, monkeypatch):
     enqueue_pre_cutover(db, "task_r", "sess_r", None, "claude", "resume_session", {"prompt": "x"})
 
     monkeypatch.setattr(db_mod, "_db_instance", db, raising=False)
-    monkeypatch.setattr(cfg.mesh, "pending_reaper_enabled", True, raising=False)
     monkeypatch.setattr(cfg.mesh, "pending_reaper_grace_sec", GRACE, raising=False)
     monkeypatch.setattr(cfg.mesh, "pending_max_age_sec", MAX_AGE, raising=False)
 
     task_server._reap_stale_pending_once()
 
     assert db.get_task("task_r")["status"] == "cancelled"
-
-
-def test_reaper_is_a_noop_when_disabled(tmp_path, monkeypatch):
-    import src.control.db as db_mod
-    from src.control import task_server
-    from config import config as cfg
-
-    db = _db(tmp_path)
-    _seed_session(db, "sess_d", "closed")
-    enqueue_pre_cutover(db, "task_d", "sess_d", None, "claude", "resume_session", {"prompt": "x"})
-
-    monkeypatch.setattr(db_mod, "_db_instance", db, raising=False)
-    monkeypatch.setattr(cfg.mesh, "pending_reaper_enabled", False, raising=False)
-
-    task_server._reap_stale_pending_once()
-
-    assert db.get_task("task_d")["status"] == "pending"  # untouched
 
 
 # ---------------------------------------------------------------------------

@@ -11,7 +11,6 @@ from typing import List, Dict, Any, Literal, Optional
 # explicit, that file is authoritative for these keys: commented/deleted keys
 # clear stale supervisor environment values instead of silently reusing them.
 _MANAGED_ENV_KEYS = {
-    "APP_METRICS_ENABLED",
     "CLAUDE_ALLOWED_ROOT",
     "CLAUDE_BASE_CWD",
     "CLAUDE_DEFAULT_MODEL",
@@ -52,7 +51,6 @@ _MANAGED_ENV_KEYS = {
     "MESH_LOCAL_CARRIER_NODE_ID",
     "MESH_ONEOFF_QUEUE_TIMEOUT_SEC",
     "MESH_PENDING_MAX_AGE_SEC",
-    "MESH_PENDING_REAPER_ENABLED",
     "MESH_PENDING_REAPER_GRACE_SEC",
     "MESH_ROUTING_FRESHNESS_WAIT_SEC",
     "MESH_ROUTING_LIVE_STATE_MAX_AGE_SEC",
@@ -274,7 +272,6 @@ class MeshConfig:
     # pending rows that can never be claimed: a closed session, an unknown/offline
     # pinned node past the grace window, or an age-ceiling leak. 0 on a threshold
     # disables that reason; enabled=False disables the whole sweep.
-    pending_reaper_enabled: bool = True     # MESH_PENDING_REAPER_ENABLED
     pending_reaper_grace_sec: int = 1800    # MESH_PENDING_REAPER_GRACE_SEC — unknown/offline pin must persist this long
     pending_max_age_sec: int = 604800       # MESH_PENDING_MAX_AGE_SEC — absolute ceiling for any pending row (7d)
     session_reconcile_interval_sec: int = 60  # MESH_SESSION_RECONCILE_INTERVAL_SEC — 0 disables M3 loop
@@ -888,12 +885,6 @@ class Config:
             v = os.getenv("MESH_CLAIM_MAX_RUNTIME_SEC")
             if v is not None:
                 self.mesh.claim_max_runtime_sec = max(60, int(v))
-        except Exception:
-            pass
-        try:
-            v = os.getenv("MESH_PENDING_REAPER_ENABLED")
-            if v is not None:
-                self.mesh.pending_reaper_enabled = v.lower() in ("1", "true", "yes", "on")
         except Exception:
             pass
         try:

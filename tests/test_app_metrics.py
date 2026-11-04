@@ -141,16 +141,6 @@ def test_sampler_produces_ring_entry_and_ndjson(monkeypatch, tmp_path: Path):
     assert len(line) < 4000                       # one rollup line stays small
 
 
-def test_start_is_noop_when_disabled(monkeypatch, tmp_path: Path):
-    monkeypatch.setenv("APP_METRICS_ENABLED", "false")
-
-    async def go() -> None:
-        am.start(str(tmp_path))
-        assert am._task is None
-
-    asyncio.run(go())
-
-
 def test_endpoint_requires_auth_and_returns_ring(monkeypatch):
     monkeypatch.setattr(control_api, "_dashboard_token", lambda: "tok")
     from src.services.session_service import SessionService

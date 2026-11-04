@@ -58,7 +58,6 @@ FEATURE FLAGS (runtime-gated, all default OFF unless noted)
   DURABLE_RELAY_ENABLED       — gates the boot-reconcile reply (A104: an inbox read)
   HARNESS_LEVEL3_GUARD        — admission gate for level-3 harness tasks
   QUOTA_COORDINATOR_ENABLED   — observe-only quota/session-window coordinator
-  APP_METRICS_ENABLED         — host/request metrics sampler (default ON; 'false' disables)
 """
 import asyncio
 import json
