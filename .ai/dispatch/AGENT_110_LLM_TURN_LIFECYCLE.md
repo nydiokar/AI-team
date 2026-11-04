@@ -1,12 +1,12 @@
 ```yaml
 job_id: AGENT_110_LLM_TURN_LIFECYCLE
 created_at: "2026-11-04T02:11:25.550323+00:00"        # CANONICAL — set once at dispatch, never derive again
-status: active              # ready | active | blocked | done | dead
+status: done              # ready | active | blocked | done | dead
 owner: ""
 depends_on: []
-results_ref: null             # -> DISPATCH_LOG.md section with the verdict prose
-evidence: []                  # artifact paths that PROVE it ran (checked to exist)
-updated_at: "2026-11-04T19:08:22.052139+00:00"
+results_ref: DISPATCH_LOG.md#A110             # -> DISPATCH_LOG.md section with the verdict prose
+evidence: ["tests/test_telemetry_projection.py","tests/test_telemetry_store.py","tests/test_turn_queue_a84_effects.py"]                  # artifact paths that PROVE it ran (checked to exist)
+updated_at: "2026-11-04T22:48:14.972264+00:00"
 ```
 
 # DISPATCH — 110 · Report queued requests separately from executing LLM turns
@@ -68,7 +68,26 @@ Job consumption semantics (A109), telemetry DB separation, unrelated cost/usage 
 - [x] Issue opened (#273).
 - [x] Focused lifecycle regressions pass.
 - [x] Persisted history repair verified in SQLite; live API validation pending deploy.
-- [ ] PR merged and controller deployed.
+- [x] PR merged and controller deployed; live history repair completed.
 
 ## Closure
-Pending implementation.
+### LLM turn lifecycle — SHIPPED (2026-11-05)
+**What changed:** projection version 2 distinguishes queued from execution and infers
+start only from actual start evidence. The task-server's existing background flusher
+repairs retained history in five-row batches using a partial index created after legacy
+schema repair. Accepted-only and withdrawn-only histories no longer invent execution.
+
+**Verification:** PR #274 merged as `29e8225`, CI run `41909784004` green. After the first
+CI run exposed old false-running test expectations and divergent-schema fixtures, all
+121 affected checks passed; the final 68 lifecycle/migration checks also passed. A copy
+of the production DB migrated 48→49 and reproduced correct historical outcomes.
+
+**Live evidence:** both controllers healthy on `29e8225`, schema 49. Authenticated
+`GET /api/turns/{id}` for the four original `jturn_*` rows in session `a32f0cf19326`
+returns `withdrawn`, `started_at=null`, projection version 2. `task_e97d6f99` remains
+failed, with actual worker invocation start `2026-11-03T16:07:12.192491Z` rather than
+admission time. Retained projections with version <2 declined from 6140 to 0; the four
+original notices have zero phantom starts. Pruned raw history was preserved.
+
+**Deploy evidence:** same controller backup, rollback image and deployment tag as A109.
+No synthetic execution, paid proof turn or acknowledgment of historical job results.

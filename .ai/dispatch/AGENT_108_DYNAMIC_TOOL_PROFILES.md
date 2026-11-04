@@ -78,6 +78,10 @@ The tool-grant path was traced across the whole system. Accounted for here:
   the overlay is additive and cannot silently drift the seed.
 
 ## SCOPE OUT — deliberate boundaries, surfaced not buried (candidate A109)
+Numbering clarification (2026-11-05): that candidate number was never dispatched.
+The actual A109 packet now tracks watched-job consumption; role extensibility remains
+an unassigned follow-up. Historical candidate references below do not denote that job.
+
 These are adjacent to the grant path and were MAPPED, but are a distinct "role-extensibility"
 initiative, not part of making tool profiles dynamic:
 - **Codex/OpenCode role→server selection is hard-coded.** They expose ALL tools of every configured

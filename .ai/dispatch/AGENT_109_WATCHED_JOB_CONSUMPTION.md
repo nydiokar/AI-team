@@ -1,12 +1,12 @@
 ```yaml
 job_id: AGENT_109_WATCHED_JOB_CONSUMPTION
 created_at: "2026-11-04T02:11:24.580839+00:00"        # CANONICAL — set once at dispatch, never derive again
-status: active              # ready | active | blocked | done | dead
+status: done              # ready | active | blocked | done | dead
 owner: ""
 depends_on: []
-results_ref: null             # -> DISPATCH_LOG.md section with the verdict prose
-evidence: []                  # artifact paths that PROVE it ran (checked to exist)
-updated_at: "2026-11-04T19:08:21.339454+00:00"
+results_ref: DISPATCH_LOG.md#A109             # -> DISPATCH_LOG.md section with the verdict prose
+evidence: ["tests/test_watched_job_consumption.py","tests/test_job_completion_protocol.py","tests/test_mcp_jobs.py"]                  # artifact paths that PROVE it ran (checked to exist)
+updated_at: "2026-11-04T22:48:12.749425+00:00"
 ```
 
 # DISPATCH — 109 · Consume watched-job results once while preserving durable wake-up
@@ -86,7 +86,38 @@ queue redesign, quota policy, paid proof turns, worker restarts without authoriz
 - [x] Issue opened and root cause/invariants recorded (#272).
 - [x] Delivery and consumption tests pass across admission/start/restart seams.
 - [x] Tool contract and grants verified.
-- [ ] PR merged, controller deployed, worker activation limitation recorded.
+- [x] PR merged, controller deployed, worker activation verified by fresh build/incarnation reports.
 
 ## Closure
-Pending implementation.
+### Watched-job consumption — SHIPPED (2026-11-05)
+**What changed:** `scripts/mcp_jobs.py` exposes `job_result` and corrects the registration
+contract; the base tool profile grants it. `src/control/task_server.py` exposes a bounded,
+owner-checked result endpoint. `src/control/db.py` migration 49 adds consumption to the
+existing receipt, retires unstarted follow-ups atomically, fences admission and records
+successful wake consumption. The orchestrator recognizes consumed admission races.
+
+**Verification:** PR https://github.com/nydiokar/AI-team/pull/274 merged as `29e8225`;
+CI run `41909784004` passed. Focused commands and results are recorded above and in the
+PR: 51 consumption/projection/store/protocol checks, 153 queue/grant/architecture checks,
+45 final transaction checks, 121 migration/reconciliation checks, 68 final historical
+repair checks, and 9 timeline tests. These runs overlap; they are not a unique-test total.
+Direct MCP `tools/list` advertises `watch_job`, `job_result`, `whoami`.
+
+**Deployment:** gateway + task-server healthy on `29e8225`, schema 49; backup
+`/home/cifran/ai-team-data/backups/mesh-pre-29e8225-20261104T2139Z.db` passed `quick_check`
+at schema 48. Rollback image `ai-team:pre-29e8225`; production tag
+`deploy/20261104T2139Z-29e8225`. Build context contained tracked files only, preserving
+the root Compose environment and excluding unrelated untracked scripts.
+
+**Worker activation:** observed after deployment, without this task restarting workers:
+Horse build `29e8225`, incarnation `f5fb2eae4f0d4b6eb1797368eaad5759`; kanebra build
+`29e8225`, incarnation `6ee1b015088d4573b886d4944f0e6f8f`. Both were online, idle, with
+zero pooled sessions. The retired `kanebra-worker` record is offline and is not the local
+active carrier. No redundant restart was requested.
+
+**Limits / follow-through:** live missing-job POST returned structured 404 without changing
+any real job. Natural new agent consumption/wake behavior was proved in the offline
+real-DB/queue harness, not through a paid production agent turn. Direct private-file reads
+cannot establish consumption; the tool explicitly instructs the agent to acknowledge via
+`job_result`. A started continuation is not cancelled; competing consumption returns 409.
+The original four notices had already been withdrawn separately before deployment.

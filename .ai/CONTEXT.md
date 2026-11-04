@@ -1,6 +1,6 @@
 # AI-Team Gateway — Hot Context
 
-**Last Updated:** 2026-11-03
+**Last Updated:** 2026-11-05
 **Branch policy:** `main` for docs-only; `feat/<slug>` + PR + self-merge for any `src/` or config
 change. Restart the **gateway** freely when deploying merged code. Never restart a worker/node-carrier
 without surfacing it to the operator first.
@@ -74,8 +74,6 @@ Only jobs that are genuinely open. Everything merged/done is in git and the disp
 
 | Job | Packet | Depends on | Status | What it is |
 |---|---|---|---|---|
-| **A109** | `AGENT_109_WATCHED_JOB_CONSUMPTION.md` | — | active — issues #272/#273, implementation verified; shipping | Preserve detached-job wake-on-completion; consume handled results once and prevent stale follow-ups after acknowledgment. Worker tool activation requires promotion; existing five-second DB lock budgets do not bound native COMMIT IO. |
-| **A110** | `AGENT_110_LLM_TURN_LIFECYCLE.md` | — | active — implementation verified; shipping with A109 | Queued-only telemetry must not report running or invent execution start; repair persisted projections. |
 | **A105** | `AGENT_105_CROSS_PROCESS_TURN_SIGNAL.md` | A104 ✅ | **ready** — Level 3, operator approval + D1 | Make the task-server's post-commit turn hint reach the gateway; scheduler, effects consumer and inbox wake all wake on that one signal (polls → safety nets). Today worker finish → Manager wake is polled (16.5 s live). |
 | **A102** | `AGENT_102_UNIFY_BACKEND_PATHWAYS.md` | — | **blocked** — S2 merged + gateway live (`7c6d01a`); worker promotion and natural S3 acceptance pending | One carrier-owned `TurnControl` and natural backend operations; shims, rollout gates and dead gateway session execution removed. Worker restart needs the operator decision and drain/ancestry checks; no paid proof turn. |
 | **A94** | `AGENT_94_SYSTEM_ONE_CORE_DELIVERY_SCORECARD.md` | — | ready (Level 3) | S1 core + decision log + replay baseline + advisory wake scorecard. Operator inputs: read-only controller DB copy, `TYPESAFE_API_KEY`. |
@@ -95,6 +93,19 @@ Only jobs that are genuinely open. Everything merged/done is in git and the disp
 ---
 
 ## Recent shift notes
+
+**2026-11-05 — A109/A110 shipped (PR #274, live `29e8225`, schema 49).** Watched-job
+registration allows continued work or yielding; `job_result` acknowledges terminal evidence
+and atomically retires an unstarted follow-up, with admission/start race coverage. Default
+wake-on-completion and operator notices remain. Queued-only LLM telemetry has no execution
+start/duration; retained historical lifecycle repair completed (0 old projections remaining),
+including the four never-executed notices in `a32f0cf19326`. Both online workers (`Horse`,
+`kanebra`) independently report `29e8225`, fresh incarnations and zero pooled sessions;
+no worker restart was issued by this task. CI, offline race/protocol/migration tests and
+live API/schema checks pass; no paid proof turn or historical job consumption was run.
+Boundary: four result requests, 2 KiB body/five-second read deadline, bounded response and
+existing five-second DB lock budget; native filesystem COMMIT stalls remain outside that
+deadline (authenticated operator workload). Detailed evidence lives in the two packets.
 
 **2026-11-03 — A102 S2 merged + gateway live (`7c6d01a`, PR #271).** Carrier-owned `TurnControl` now drives
 the natural backend APIs; compatibility shims, rollout flags and dead gateway session
