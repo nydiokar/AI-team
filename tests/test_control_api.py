@@ -173,7 +173,6 @@ def test_registry_inventory_covers_known_boolean_flags():
         "MESH_SHADOW_WRITE",
         "QUOTA_COORDINATOR_ENABLED",
         "QUOTA_DIGEST_TELEGRAM_ENABLED",
-        "RESTART_CONTEXT_RESTORE_DISABLED",
         "REVIEW_EMITTER_ENABLED",
         "TELEMETRY_DETAILED_EVENTS",
         "TELEMETRY_ENABLED",

@@ -2073,9 +2073,7 @@ class TaskOrchestrator(ITaskOrchestrator):
             # stay pending and the operator's release resumes delivery.
             logger.debug("event=wake_skipped_operator_stop case=%s session_id=%s", case_id, recipient)
             return 0
-        restart_errored = TaskOrchestrator._is_restart_dead_session(
-            session, TaskOrchestrator._respawn_on_restart_error_enabled()
-        )
+        restart_errored = TaskOrchestrator._is_restart_dead_session(session)
         if session is None or session.status in (
             SessionStatus.CLOSED, SessionStatus.CANCELLED,
         ) or restart_errored:
@@ -4431,9 +4429,6 @@ class TaskOrchestrator(ITaskOrchestrator):
         First observation of a node seeds the baseline (no notify); only a changed
         incarnation on an already-seen node fires. Best-effort; never raises.
         """
-        from src.control.db import restart_notify_disabled
-        if restart_notify_disabled():
-            return
         db = get_db()
         if db is None:
             return
@@ -7492,43 +7487,21 @@ class TaskOrchestrator(ITaskOrchestrator):
     _RESTART_CTX_MAX_AGE_HOURS: int = 24      # skip if most-recent turn is older
 
     @staticmethod
-    def _restart_ctx_enabled() -> bool:
-        # ON by default. Set RESTART_CONTEXT_RESTORE_DISABLED=true to opt out.
-        from src.control.db import restart_context_restore_disabled
-        return not restart_context_restore_disabled()
-
-    @staticmethod
-    def _restart_lost_fork_enabled() -> bool:
-        # [A98 O1] ON by default. Set RESTART_LOST_SESSION_FORK_DISABLED=true to opt
-        # out and restore the legacy resume-into-a-corpse behaviour.
-        from src.control.db import restart_lost_session_fork_disabled
-        return not restart_lost_session_fork_disabled()
-
-    @staticmethod
-    def _respawn_on_restart_error_enabled() -> bool:
-        # [A98 O2] ON by default. Set RESPAWN_ON_RESTART_ERROR_DISABLED=true to opt
-        # out (then an ERROR+driver_lost Manager strands instead of respawning).
-        from src.control.db import respawn_on_restart_error_disabled
-        return not respawn_on_restart_error_disabled()
-
-    @staticmethod
-    def _is_restart_dead_session(session: Any, respawn_enabled: bool) -> bool:
+    def _is_restart_dead_session(session: Any) -> bool:
         """[A98 O2] True when a worker restart left this Manager session ERROR +
         driver_status='lost' — a dead session that crash-respawn should own (like
         CLOSED/CANCELLED), discriminated by driver_status='lost' so a genuine
-        non-restart ERROR is untouched. ``respawn_enabled`` gates the behaviour."""
+        non-restart ERROR is untouched."""
         return bool(
             session is not None
             and getattr(session, "status", None) == SessionStatus.ERROR
             and getattr(session, "driver_status", "") == "lost"
-            and respawn_enabled
         )
 
     async def _maybe_inject_restart_recovery_context(self, task: "Task") -> None:
         """Prepend recent completed turns when a session's driver was lost on restart.
 
         No-op unless:
-        - RESTART_CONTEXT_RESTORE_DISABLED is not set (feature is ON by default)
         - session.driver_status == 'lost' (set by node re-registration on incarnation change)
         - session.backend_session_id is non-empty (session was previously live)
         - the session has ≥1 completed turn in mesh_tasks within the age window
@@ -7538,9 +7511,6 @@ class TaskOrchestrator(ITaskOrchestrator):
         Any failure is swallowed and the original prompt is left intact.
         """
         try:
-            if not self._restart_ctx_enabled():
-                return
-
             session_id = (task.metadata or {}).get("session_id", "").strip() or None
             if not session_id:
                 return
@@ -7965,9 +7935,8 @@ class TaskOrchestrator(ITaskOrchestrator):
                 self._emit_turn_telemetry("turn.started", task, backend=backend_name)
                 # [Restart-recovery context] When a session's driver was lost on worker
                 # restart, auto-inject the last N completed turns as <prior_context> so
-                # the new Claude Code process isn't blind. No-op when
-                # RESTART_CONTEXT_RESTORE_DISABLED is set or the session is
-                # healthy — byte-identical to the prior behaviour in all normal paths.
+                # the new Claude Code process isn't blind. No-op when the
+                # session is healthy — byte-identical to the prior behaviour in all normal paths.
                 await self._maybe_inject_restart_recovery_context(task)
                 # [Manager-fork / compact-context] Inject bounded prior context BEFORE the
                 # mesh snapshot. `_mesh_enqueue_task` freezes `task.prompt` into the remote
@@ -11378,7 +11347,6 @@ Generated from user description: {description}
             and session
             and getattr(session, "driver_status", "") == "lost"
             and not getattr(session, "turn_queue_enrolled", 0)
-            and self._restart_lost_fork_enabled()
         ):
             # [A98 O1] A worker restart orphaned this session's in-memory SDK
             # driver (driver_status='lost'). It HAS a backend_session_id, so the

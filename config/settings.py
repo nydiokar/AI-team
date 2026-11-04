@@ -63,7 +63,6 @@ _MANAGED_ENV_KEYS = {
     "OPENCODE_DEFAULT_AGENT",
     "OPENCODE_DEFAULT_MODEL",
     "OPENCODE_MODE",
-    "OPENCODE_SERVER_ENABLED",
     "OPENCODE_TIMEOUT_SEC",
     "TELEGRAM_MESSAGE_BUFFER_SEC",
     "TELEGRAM_RATE_LIMIT_REQUESTS",
@@ -189,7 +188,6 @@ class OpenCodeConfig:
     mode: str = "cli"                     # "cli" | "server" — informational; see docstring
     server_host: str = "127.0.0.1"        # bind address for opencode serve
     server_port: int = 4096               # preferred port; falls back to any free port
-    server_enabled: bool = False          # legacy flag — kept for env-compat, not used in logic
 
 @dataclass
 class ValidationConfig:
@@ -676,12 +674,6 @@ class Config:
             v = os.getenv("OPENCODE_DEFAULT_AGENT")
             if v:
                 self.opencode.default_agent = v
-        except Exception:
-            pass
-        try:
-            v = os.getenv("OPENCODE_SERVER_ENABLED")
-            if v is not None:
-                self.opencode.server_enabled = v.lower() == "true"
         except Exception:
             pass
         try:

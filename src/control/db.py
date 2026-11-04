@@ -364,36 +364,6 @@ RUNTIME_FLAG_DEFINITIONS: Dict[str, Dict[str, str]] = {
         "registry_writable": "1",
         "description": "Admission backstop requiring explicit approval for Level-3 auto-picked tasks.",
     },
-    "RESTART_CONTEXT_RESTORE_DISABLED": {
-        "default": "0",
-        "effect_scope": "live",
-        "registry_writable": "1",
-        "description": "Disable bounded prior-context injection after a worker restart loses SDK state.",
-    },
-    "RESTART_LOST_SESSION_FORK_DISABLED": {
-        "default": "0",
-        "effect_scope": "live",
-        "registry_writable": "1",
-        "description": "Disable forking a restart-lost SDK session onto a FRESH subprocess (create_session) on its next task. Default (fork ON): a session whose in-memory driver was lost on a worker restart dispatches create_session (role re-boot + A54 boot-reconcile + injected prior-context) instead of resume_session, which the worker refuses into a corpse (A98 O1).",
-    },
-    "RESPAWN_ON_RESTART_ERROR_DISABLED": {
-        "default": "0",
-        "effect_scope": "live",
-        "registry_writable": "1",
-        "description": "Disable crash-respawn of a Manager that a worker restart left in ERROR + driver_status='lost'. Default (respawn ON): such a session is treated as dead (like CLOSED/CANCELLED) and the Wake-Dispatcher respawns a role-full Manager on the SAME Case instead of re-poking a corpse forever (A98 O2). Discriminated by driver_status='lost' so a genuine non-restart ERROR is untouched.",
-    },
-    "RESTART_NOTIFY_DISABLED": {
-        "default": "0",
-        "effect_scope": "live",
-        "registry_writable": "1",
-        "description": "Disable the best-effort operator notification (Web Push + Telegram) fired when a worker/node restart is detected and its sessions are marked lost/re-established. Default ON: the operator is told a restart happened and how many sessions it touched (A98 O5).",
-    },
-    "WORKER_MEMORY_WATCHDOG_DISABLED": {
-        "default": "0",
-        "effect_scope": "live",
-        "registry_writable": "1",
-        "description": "Disable the worker-daemon memory watchdog that samples its own RSS each supervisor cycle and warns (event=worker_memory_pressure) + flags memory_pressure on the heartbeat when the configured threshold is breached. Default ON (A98 O7). Threshold via env WORKER_MEMORY_WATCHDOG_PCT (default 85, percent of total RAM) or WORKER_MEMORY_WATCHDOG_MB (absolute RSS ceiling; 0 = unset).",
-    },
     "MANAGER_ROLE_ENABLED": {
         "default": "0",
         "effect_scope": "session_boot",
@@ -465,12 +435,6 @@ RUNTIME_FLAG_DEFINITIONS: Dict[str, Dict[str, str]] = {
         "effect_scope": "bootstrap",
         "registry_writable": "0",
         "description": "Mirror sessions/tasks into the mesh DB; disabling can make the registry unavailable.",
-    },
-    "OPENCODE_SERVER_ENABLED": {
-        "default": "0",
-        "effect_scope": "startup",
-        "registry_writable": "0",
-        "description": "Legacy OpenCode server mode compatibility flag.",
     },
     "TELEMETRY_ENABLED": {
         "default": "1",
@@ -1414,44 +1378,6 @@ def harness_level3_guard_enabled() -> bool:
     """Registry-over-env read of ``HARNESS_LEVEL3_GUARD``."""
     return runtime_flag_enabled("HARNESS_LEVEL3_GUARD")
 
-
-def restart_context_restore_disabled() -> bool:
-    """Registry-over-env read of ``RESTART_CONTEXT_RESTORE_DISABLED``."""
-    return runtime_flag_enabled("RESTART_CONTEXT_RESTORE_DISABLED")
-
-
-def restart_lost_session_fork_disabled() -> bool:
-    """Registry-over-env read of ``RESTART_LOST_SESSION_FORK_DISABLED`` (A98 O1).
-
-    Default OFF ⇒ the fork is ON: a restart-lost SDK session dispatches
-    ``create_session`` (fresh subprocess) on its next task instead of
-    ``resume_session`` (refused by the worker guard). Set the flag to opt out and
-    restore the legacy resume-into-a-corpse behaviour."""
-    return runtime_flag_enabled("RESTART_LOST_SESSION_FORK_DISABLED")
-
-
-def respawn_on_restart_error_disabled() -> bool:
-    """Registry-over-env read of ``RESPAWN_ON_RESTART_ERROR_DISABLED`` (A98 O2).
-
-    Default OFF ⇒ respawn is ON: a Manager left ERROR+driver_lost by a worker
-    restart is crash-respawn-eligible (treated like CLOSED/CANCELLED)."""
-    return runtime_flag_enabled("RESPAWN_ON_RESTART_ERROR_DISABLED")
-
-
-def restart_notify_disabled() -> bool:
-    """Registry-over-env read of ``RESTART_NOTIFY_DISABLED`` (A98 O5).
-
-    Default OFF ⇒ notification is ON: a detected worker/node restart notifies the
-    operator (best-effort Web Push + Telegram)."""
-    return runtime_flag_enabled("RESTART_NOTIFY_DISABLED")
-
-
-def worker_memory_watchdog_disabled() -> bool:
-    """Registry-over-env read of ``WORKER_MEMORY_WATCHDOG_DISABLED`` (A98 O7).
-
-    Default OFF ⇒ the watchdog is ON: the worker samples its RSS each supervisor
-    cycle and warns + flags heartbeat memory_pressure past the threshold."""
-    return runtime_flag_enabled("WORKER_MEMORY_WATCHDOG_DISABLED")
 
 
 def control_api_docs_enabled() -> bool:
