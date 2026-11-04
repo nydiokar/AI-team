@@ -5110,6 +5110,11 @@ class TaskOrchestrator(ITaskOrchestrator):
         job_id = str(payload["job_id"])
         trigger = f"watched:{job_id}"
         turn_id = producer_turn_id(trigger, session.session_id, 1, prefix="jturn")
+        from src.control.db import get_db
+        db = await asyncio.to_thread(get_db)
+        receipt = await asyncio.to_thread(db.get_job_completion, job_id) if db is not None else None
+        if receipt and receipt.get("consumed_at"):
+            return
         try:
             await self.submit_instruction(
                 description,
@@ -5134,6 +5139,9 @@ class TaskOrchestrator(ITaskOrchestrator):
             # its permanent identity; unreadable/absent evidence must retry.
             from src.control.db import get_db
             db = await asyncio.to_thread(get_db)
+            receipt = await asyncio.to_thread(db.get_job_completion, job_id) if db is not None else None
+            if receipt and receipt.get("consumed_at"):
+                return
             if db is not None and await asyncio.to_thread(db.get_task, turn_id) is not None:
                 return
             raise

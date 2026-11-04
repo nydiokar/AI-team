@@ -3619,6 +3619,15 @@ class MeshDB:
                                 session_id=sid, failed_task_id=parent_task_id,
                                 decision=decision.action,
                             )
+                    if turn_kind == "watched_job" and idempotency_key and idempotency_key.startswith("watched:"):
+                        consumed = conn.execute(
+                            "SELECT consumed_at FROM job_completion_effects WHERE job_id=?",
+                            (idempotency_key[len("watched:"):],),
+                        ).fetchone()
+                        if consumed is not None and consumed["consumed_at"]:
+                            raise OwnershipConflictError(
+                                "watched job result already consumed", reason="job_consumed",
+                            )
                     if idle_only and not _session_idle_for_optional_turn(conn, sid):
                         # [A82 Stage 4d] Optional automation (heartbeat) is
                         # idle-only: never queued behind (or ahead of) real
@@ -5913,7 +5922,7 @@ class MeshDB:
             with self._write() as conn:
                 row = conn.execute(
                     "SELECT id, session_id, status, queue_protocol, claim_token, cancel_token, "
-                    "flow_run_id, action FROM mesh_tasks WHERE id = ?",
+                    "flow_run_id, action, turn_kind, idempotency_key FROM mesh_tasks WHERE id = ?",
                     (task_id,),
                 ).fetchone()
                 if row is None or row["queue_protocol"] != 1:
@@ -5987,6 +5996,13 @@ class MeshDB:
                     )
                 if enrichment:
                     _apply_turn_enrichment(conn, task_id, enrichment, now)
+                if status == "completed" and row["turn_kind"] == "watched_job":
+                    # A successful watched-job continuation consumed its result.
+                    conn.execute(
+                        "UPDATE job_completion_effects SET consumed_at=COALESCE(consumed_at, ?), "
+                        "updated_at=? WHERE job_id=?",
+                        (now, now, str(row["idempotency_key"] or "").removeprefix("watched:")),
+                    )
                 if row["session_id"]:
                     conn.execute(
                         "INSERT INTO task_events (session_id, task_id, timestamp, success, "
@@ -9981,6 +9997,74 @@ class MeshDB:
         ).fetchone()
         return dict(row) if row else None
 
+    def consume_job_result(
+        self, job_id: str, session_id: str, node_id: str,
+    ) -> dict[str, JsonValue]:
+        """Read bounded evidence and consume a terminal result in one transaction.
+
+        A running job is only observed. A terminal read retires an unstarted wake
+        atomically with acknowledgment. Start and consumption serialize on the
+        same SQLite writer: an already-started wake wins and is never cancelled.
+        """
+        from .job_completion import compact_job
+
+        now = _now()
+        with self._managed_write("consume_job_result") as conn:
+            row = conn.execute(
+                "SELECT id, session_id, node_id, substr(label,1,512) AS label, "
+                "status, exit_code, substr(COALESCE(tail,''),-1500) AS tail, "
+                "substr(COALESCE(log_path,''),1,1000) AS log_path, notify, notify_agent "
+                "FROM jobs WHERE id=?", (job_id,),
+            ).fetchone()
+            if row is None:
+                raise TurnNotFoundError("job not found", job_id=job_id)
+            if row["session_id"] != session_id or row["node_id"] != node_id:
+                raise PermissionError("job is not owned by this session and node")
+            result: dict[str, JsonValue] = dict(row)
+            result["consumed"] = False
+            if row["status"] == "running":
+                return result
+            snapshot = compact_job(result)
+            wake_id = producer_turn_id(f"watched:{job_id}", session_id, 1, prefix="jturn")
+            wake = conn.execute(
+                "SELECT status, revision, started_at FROM mesh_tasks WHERE id=?", (wake_id,),
+            ).fetchone()
+            if wake is not None and (
+                wake["status"] in ("running", "recovery_required")
+                or (wake["status"] in ("queued", "pending", "claimed") and wake["started_at"] is not None)
+            ):
+                raise OwnershipConflictError(
+                    "job result is already being delivered by a running continuation",
+                    task_id=wake_id,
+                )
+            conn.execute(
+                "INSERT OR IGNORE INTO job_completion_effects "
+                "(job_id,source,payload,notification_state,action_state,updated_at) "
+                "VALUES (?,'local',?,?,'done',?)",
+                (job_id, snapshot.model_dump_json(), "pending" if snapshot.notify else "done", now),
+            )
+            conn.execute(
+                "UPDATE job_completion_effects SET consumed_at=COALESCE(consumed_at,?), "
+                "action_state='done', action_error=NULL, updated_at=? WHERE job_id=?",
+                (now, now, job_id),
+            )
+            if wake is not None and wake["status"] in ("queued", "pending", "claimed"):
+                conn.execute(
+                    "UPDATE mesh_tasks SET status='withdrawn', revision=revision+1, "
+                    "completed_at=?,updated_at=?,effects_state='telemetry',lineage_state='void', "
+                    "lineage_token=NULL,lineage_lease_until=NULL "
+                    "WHERE id=? AND status IN ('queued','pending','claimed') AND started_at IS NULL",
+                    (now, now, wake_id),
+                )
+                conn.execute(
+                    "INSERT INTO mesh_turn_revisions(task_id,revision,actor,change_kind,created_at) "
+                    "VALUES (?,?,?,'withdraw',?)",
+                    (wake_id, int(wake["revision"]) + 1, f"job_consumed:{session_id}", now),
+                )
+                _insert_watched_job_withdrawal_audit(conn, wake_id, "job_consumed", now)
+            result["consumed"] = True
+            return result
+
     def claim_job_completion(self, job_id: str) -> dict[str, JsonValue] | None:
         from .job_completion import JOB_EFFECT_LEASE_SEC
 
@@ -10022,9 +10106,12 @@ class MeshDB:
     def finish_job_effect(self, job_id: str, token: str, effect: str, state: str, error: str = "") -> bool:
         if effect not in ("notification", "action") or state not in ("pending", "done", "dead"):
             raise ValueError("invalid job effect transition")
+        state_expr: str = "CASE WHEN consumed_at IS NOT NULL THEN 'done' ELSE ? END" if effect == "action" else "?"
+        error_expr: str = "CASE WHEN consumed_at IS NOT NULL THEN NULL ELSE ? END" if effect == "action" else "?"
         with self._managed_write("finish_job_effect") as conn:
             conn.execute(
-                f"UPDATE job_completion_effects SET {effect}_state=?, {effect}_error=?, updated_at=? "
+                f"UPDATE job_completion_effects SET {effect}_state={state_expr}, "
+                f"{effect}_error={error_expr}, updated_at=? "
                 "WHERE job_id=? AND lease_token=? AND lease_until > ?",
                 (state, error[:500] or None, _now(), job_id, token, time.time()),
             )
@@ -11547,6 +11634,11 @@ def _get_migrations() -> List[tuple]:
             CREATE INDEX IF NOT EXISTS idx_sessions_pinned_updated_at
                 ON sessions(COALESCE(keep_pinned,0), updated_at DESC);
         """),  # J4: measured list/pinned shapes avoid a temporary ordering sort.
+        (49, """
+            ALTER TABLE job_completion_effects ADD COLUMN consumed_at TEXT;
+            CREATE INDEX idx_llm_turns_lifecycle_repair ON llm_turns(updated_at,turn_id)
+                WHERE projection_version<2 AND final_status='running' AND events_pruned_at IS NULL;
+        """),  # A109: consumption fences admission and retires unstarted job wakes.
     ]
 
 

@@ -77,6 +77,22 @@ def test_schema_migration_creates_telemetry_tables(tmp_path):
     assert "clock_quality" in event_columns
 
 
+def test_incremental_lifecycle_repair_corrects_persisted_false_running(tmp_path):
+    db = MeshDB(str(tmp_path / "repair.db"))
+    store = TelemetryStore(db)
+    store.insert_events([_events()[0]])
+    with db._write() as conn:
+        conn.execute(
+            "UPDATE llm_turns SET final_status='running', projection_version=1, started_at=created_at"
+        )
+    assert store.repair_turn_lifecycle(limit=1) == 1
+    turn = store.get_turn("turn_store")
+    assert turn["final_status"] == "queued"
+    assert turn["started_at"] is None
+    assert turn["metrics"]["wall_time_ms"] is None
+    assert store.repair_turn_lifecycle(limit=1) == 0
+
+
 def test_event_insert_is_idempotent_and_projection_is_queryable(tmp_path):
     db = MeshDB(str(tmp_path / "mesh.db"))
     store = TelemetryStore(db)

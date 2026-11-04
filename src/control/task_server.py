@@ -48,6 +48,7 @@ _SLOW_REQUEST_SECONDS = 1.0
 _MESH_HEALTH_SAMPLE_SECONDS = 30.0
 _JOB_COMPLETION_READ_SLOTS = threading.BoundedSemaphore(4)
 _JOBS_LIST_READ_SLOTS = threading.BoundedSemaphore(4)
+_JOB_RESULT_SLOTS = threading.BoundedSemaphore(4)
 
 # --- Deferred telemetry projection ------------------------------------------
 # Raw telemetry events insert synchronously (fast, indexed). The CPU-bound turn
@@ -117,6 +118,7 @@ async def _telemetry_projection_flusher_loop(
                 continue
             turns, sessions = _drain_projection(_TELEMETRY_PROJECT_MAX_PER_TICK)
             store = TelemetryStore(db)
+            await asyncio.to_thread(store.repair_turn_lifecycle, limit=_TELEMETRY_PROJECT_CHUNK)
             # Project in small chunks, releasing the write lock between each so a
             # control-plane heartbeat/claim can win it. The chunk runs in a worker
             # thread (holds the lock); the pause runs on the loop (lock released).
@@ -556,6 +558,12 @@ class JobDonePayload(BaseModel):
     exit_code: int
     tail: str = ""
     status: Optional[str] = None
+
+
+class JobResultPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    session_id: str = Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_-]+$")
+    node_id: str = Field(min_length=1, max_length=128)
 
 
 class ProactiveTurnPayload(BaseModel):
@@ -2078,6 +2086,50 @@ def register_job(payload: RegisterJobPayload) -> Dict[str, Any]:
         db.start_job(job_id, pid=payload.attach_pid, pgid=0, log_path=payload.log_path)
     job = db.get_job(job_id)
     return {"status": "registered", "job_id": job_id, "job": job}
+
+
+@app.post("/jobs/{job_id}/result", dependencies=[Depends(_require_auth)])
+async def consume_job_result(
+    job_id: str, request: Request,
+) -> JSONResponse:
+    """Owning agent reads evidence and acknowledges only a terminal job.
+
+    Four admitted requests, 2 KiB body, five-second body deadline and the
+    queue's five-second write-lock budget. DB work stays off the event loop.
+    """
+    from src.control.turn_queue import TurnQueueError
+
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", job_id):
+        raise HTTPException(status_code=422, detail="invalid_job_id")
+    if not _JOB_RESULT_SLOTS.acquire(blocking=False):
+        raise HTTPException(status_code=429, detail="job_result_busy")
+    try:
+        body = bytearray()
+        async with asyncio.timeout(5):
+            async for chunk in request.stream():
+                if len(body) + len(chunk) > 2048:
+                    raise HTTPException(status_code=413, detail="job_result_body_too_large")
+                body.extend(chunk)
+        try:
+            payload = JobResultPayload.model_validate_json(body)
+        except ValidationError:
+            raise HTTPException(status_code=422, detail="invalid_job_result_request") from None
+        db = await asyncio.to_thread(get_db)
+        if db is None:
+            raise HTTPException(status_code=503, detail="job_result_unavailable")
+        result = await asyncio.to_thread(db.consume_job_result, job_id, payload.session_id, payload.node_id)
+        _hint_turn_scheduler()
+        return JSONResponse(result)
+    except TimeoutError:
+        raise HTTPException(status_code=408, detail="job_result_body_timeout") from None
+    except PermissionError:
+        raise HTTPException(status_code=403, detail="job_result_not_owned") from None
+    except TurnQueueError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from None
+    except (sqlite3.Error, ValueError):
+        raise HTTPException(status_code=503, detail="job_result_unavailable") from None
+    finally:
+        _JOB_RESULT_SLOTS.release()
 
 
 @app.post("/jobs/{job_id}/start", dependencies=[Depends(_require_auth)])

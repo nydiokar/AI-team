@@ -44,6 +44,7 @@ _PROFILE_TOOLS: Dict[str, List[str]] = {
         "mcp__jobs__whoami",
         # Register a long-running detached shell job (read-only to the session).
         "mcp__jobs__watch_job",
+        "mcp__jobs__job_result",
     ],
     MANAGER_TOOL_PROFILE: [
         "mcp__manager__list_nodes",

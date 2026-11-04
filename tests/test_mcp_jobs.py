@@ -85,3 +85,39 @@ def test_watch_job_rejects_oversized_command(monkeypatch):
         assert "command is too long" in str(exc)
     else:
         raise AssertionError("expected ValueError")
+
+
+def test_job_result_resolves_caller_and_uses_bounded_id(monkeypatch):
+    import json
+    import pytest
+    from scripts import mcp_jobs
+
+    calls = []
+    monkeypatch.setenv("AI_TEAM_SESSION_ID", "current")
+    monkeypatch.setenv("SESSION_ID", "stale")
+    monkeypatch.setenv("NODE_ID", "worker-a")
+
+    def post(payload, path="/jobs"):
+        calls.append((payload, path))
+        return {"status": "done", "consumed": True}
+
+    monkeypatch.setattr(mcp_jobs, "_post_job", post)
+    assert json.loads(mcp_jobs._job_result({"job_id": "job_123"}))["consumed"]
+    assert calls == [({"session_id": "current", "node_id": "worker-a"}, "/jobs/job_123/result")]
+    with pytest.raises(ValueError):
+        mcp_jobs._job_result({"job_id": "../../other"})
+    assert len(calls) == 1
+
+
+def test_watch_job_prefers_canonical_identity_and_explains_consumption(monkeypatch):
+    from scripts import mcp_jobs
+
+    monkeypatch.setenv("AI_TEAM_SESSION_ID", "current")
+    monkeypatch.setenv("SESSION_ID", "stale")
+    calls = []
+    monkeypatch.setattr(mcp_jobs, "_post_job", lambda p: calls.append(p) or {"job_id": "job_123"})
+    text = mcp_jobs._watch_job({"command": "echo test", "label": "test"})
+    assert calls[0]["session_id"] == "current"
+    assert "job_result" in text
+    description = next(t["description"] for t in mcp_jobs._TOOLS if t["name"] == "watch_job")
+    assert "turn ends immediately" not in description

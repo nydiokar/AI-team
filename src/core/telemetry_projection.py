@@ -7,7 +7,7 @@ from typing import Any, Dict, Iterable, List, Optional
 
 from src.core.telemetry import TelemetryEvent
 
-PROJECTION_VERSION = 1
+PROJECTION_VERSION = 2
 
 
 def _as_dict(event: TelemetryEvent | Dict[str, Any]) -> Dict[str, Any]:
@@ -115,7 +115,7 @@ def project_turn(events: Iterable[TelemetryEvent | Dict[str, Any]]) -> Dict[str,
         "observed_models": sorted({e["model"] for e in ordered if e.get("model")}),
         "started_at": None,
         "ended_at": None,
-        "final_status": "running",
+        "final_status": "queued",
         "timeout_status": "none",
         "final_exit_code": None,
         "final_invocation_id": None,
@@ -402,12 +402,17 @@ def project_turn(events: Iterable[TelemetryEvent | Dict[str, Any]]) -> Dict[str,
             timeout_kinds.append(str(attrs.get("timeout_kind") or "backend_timeout"))
 
     if turn["started_at"] is None:
-        turn["started_at"] = ordered[0].get("event_time")
-        turn_flags.append("turn_start_inferred")
-    if turn["ended_at"] is None and turn["final_status"] != "running":
+        starts = [e.get("event_time") for e in ordered
+                  if e.get("event_name") in ("invocation.started", "process.spawned")]
+        if starts:
+            turn["started_at"] = starts[0]
+            turn_flags.append("turn_start_inferred")
+    if turn["final_status"] == "queued" and turn["started_at"] is not None:
+        turn["final_status"] = "running"
+    if turn["ended_at"] is None and turn["final_status"] not in ("queued", "running"):
         turn["ended_at"] = ordered[-1].get("event_time")
         turn_flags.append("turn_end_inferred")
-    if turn["final_status"] != "running" and not turn["final_invocation_id"] and invocations:
+    if turn["final_status"] not in ("queued", "running") and not turn["final_invocation_id"] and invocations:
         latest = max(
             invocations.values(),
             key=lambda row: (
