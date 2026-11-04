@@ -859,10 +859,9 @@ class TaskOrchestrator(ITaskOrchestrator):
         the disabled path a genuine zero-side-effect no-op (no DB file, no background
         task, no import cost) — byte-identical when off.
 
-        Sets self.quota_coordinator and self.quota_digest_subscriber.
+        Sets self.quota_coordinator.
         """
         self.quota_coordinator = None
-        self.quota_digest_subscriber = None
         try:
             from src.control.db import runtime_flag_enabled
             quota_enabled = runtime_flag_enabled("QUOTA_COORDINATOR_ENABLED")
@@ -873,20 +872,6 @@ class TaskOrchestrator(ITaskOrchestrator):
         try:
             from src.services.quota_window_coordinator import build_quota_coordinator_from_config
             event_handlers = []
-            try:
-                from src.control.db import runtime_flag_enabled as _flag_enabled
-                digest_enabled = _flag_enabled("QUOTA_DIGEST_TELEGRAM_ENABLED")
-            except Exception:
-                digest_enabled = bool(getattr(getattr(config, "quota", None), "digest_telegram_enabled", False))
-            if digest_enabled:
-                from src.services.quota_digest import QuotaTelegramDigestSubscriber
-                digest = QuotaTelegramDigestSubscriber(
-                    notifier=self.notifier,
-                    chat_id=config.telegram.notification_chat_id,
-                    interval_sec=getattr(config.quota, "digest_interval_sec", 3600),
-                )
-                self.quota_digest_subscriber = digest
-                event_handlers.append(digest.handle_event)
             # Observe locally ONLY when this host also executes locally (i.e. the
             # Claude harness is present). On a controller-only host
             # (GATEWAY_LOCAL_EXECUTION_ENABLED=false, the Docker controller) the

@@ -2144,7 +2144,6 @@ def build_quota_coordinator_from_config(
     lead = int(getattr(quota_cfg, "reset_probe_lead_sec", 900))
     retention = int(getattr(quota_cfg, "snapshot_retention_days", _SNAPSHOT_RETENTION_DAYS))
     event_retention = int(getattr(quota_cfg, "event_retention_days", _EVENT_RETENTION_DAYS))
-    archive_enabled = bool(getattr(quota_cfg, "archive_enabled", True))
     adapters = build_default_quota_adapters() if observe_locally else []
     return QuotaWindowCoordinator(
         store=QuotaWindowStore(db_path),
@@ -2157,7 +2156,6 @@ def build_quota_coordinator_from_config(
         snapshot_retention_days=retention,
         event_retention_days=event_retention,
         reclaim_space=reclaim_space,
-        archive_enabled=archive_enabled,
     )
 
 

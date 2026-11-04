@@ -358,8 +358,6 @@ class QuotaConfig:
     reset_probe_lead_sec: int = 900        # QUOTA_RESET_PROBE_LEAD_SEC
     claude_get_usage_timeout_sec: float = 60.0  # CLAUDE_GET_USAGE_TIMEOUT_SEC
     claude_principal_key: str = ""         # CLAUDE_QUOTA_PRINCIPAL_KEY
-    digest_telegram_enabled: bool = False  # QUOTA_DIGEST_TELEGRAM_ENABLED
-    digest_interval_sec: int = 3600        # QUOTA_DIGEST_INTERVAL_SEC
     # Window prewarming (QUOTA_PREWARM_ENABLED flag; runs around the clock by
     # design — the value of an already-ticking window only exists before work
     # starts). One activation per window at most; these are the extra bounds.
@@ -386,9 +384,8 @@ class QuotaConfig:
     # days are pruned daily. 0 disables event pruning.
     event_retention_days: int = 14          # QUOTA_EVENT_RETENTION_DAYS
     # Append-only history (A93): pruned snapshots and compacted event runs are
-    # copied to quota_archive.db (next to db_path) before deletion; a failed
-    # archive deletes nothing. Default ON — archiving only adds data.
-    archive_enabled: bool = True            # QUOTA_ARCHIVE_ENABLED
+    # always copied to quota_archive.db (next to db_path) before deletion; a
+    # failed archive deletes nothing.
 
 class Config:
     """Main configuration class"""
@@ -743,24 +740,6 @@ class Config:
             v = os.getenv("CLAUDE_QUOTA_PRINCIPAL_KEY")
             if v:
                 self.quota.claude_principal_key = v
-        except Exception:
-            pass
-        try:
-            v = os.getenv("QUOTA_ARCHIVE_ENABLED")
-            if v is not None:
-                self.quota.archive_enabled = v.lower() in ("1", "true", "yes", "on")
-        except Exception:
-            pass
-        try:
-            v = os.getenv("QUOTA_DIGEST_TELEGRAM_ENABLED")
-            if v is not None:
-                self.quota.digest_telegram_enabled = v.lower() in ("1", "true", "yes", "on")
-        except Exception:
-            pass
-        try:
-            v = os.getenv("QUOTA_DIGEST_INTERVAL_SEC")
-            if v is not None:
-                self.quota.digest_interval_sec = max(60, int(v))
         except Exception:
             pass
         # Mesh env overrides

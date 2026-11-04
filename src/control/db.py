@@ -352,12 +352,6 @@ RUNTIME_FLAG_DEFINITIONS: Dict[str, Dict[str, str]] = {
         "registry_writable": "1",
         "description": "Keep the Claude 5-hour window ticking: when telemetry shows NO open window, spend one minimal haiku turn to start one, then verify against the provider that a window actually opened. Runs around the clock on purpose — an already-running window is only worth anything before work starts. Warming runs where Claude executes: a claude-capable WORKER re-reads this registry row every cycle and starts/stops warming LIVE — flip it on/off with no restart. The ingest-only Docker controller has no local Claude and does not warm (a single-process local-execution gateway still warms in-process, at startup). The worker reads this row from the controller's registry over the task-server API (refreshed ~every 30 s), so the normal /api/flags or scripts/ops_flag.sh toggle reaches it. Bounded by QUOTA_PREWARM_MAX_PER_DAY / QUOTA_PREWARM_MIN_INTERVAL_SEC and a consecutive-failure circuit breaker.",
     },
-    "QUOTA_DIGEST_TELEGRAM_ENABLED": {
-        "default": "0",
-        "effect_scope": "startup",
-        "registry_writable": "1",
-        "description": "Temporary Telegram digest for quota coordinator observations.",
-    },
     "CLAUDE_SKIP_PERMISSIONS": {
         "default": "0",
         "effect_scope": "startup",
