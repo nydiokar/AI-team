@@ -687,7 +687,9 @@ def _accept_telemetry(env: _Env, tid: str) -> None:
         emitter_process_instance_id="gw-1", source="gateway",
         attributes={"task_id": tid, "source": "web"},
     )])
-    assert TelemetryStore(env.gw).get_turn(tid)["final_status"] == "running"
+    turn = TelemetryStore(env.gw).get_turn(tid)
+    assert turn["final_status"] == "queued"
+    assert turn["started_at"] is None
 
 
 def test_R7_cancelled_managed_turn_closes_its_telemetry_turn(tg: _Env) -> None:
@@ -728,7 +730,7 @@ def test_R7c_legacy_cancelled_row_reconcile_semantics_unchanged(tg: _Env) -> Non
     assert tg.gw.cancel_task("legacy-c", "test") is True
     out = TelemetryStore(tg.gw).reconcile(turn_id="legacy-c", since_hours=0)
     assert out["reconciled"] == []
-    assert TelemetryStore(tg.gw).get_turn("legacy-c")["final_status"] == "running"
+    assert TelemetryStore(tg.gw).get_turn("legacy-c")["final_status"] == "queued"
 
 
 # mig_probe ----------------------------------------------------------------- #

@@ -184,13 +184,14 @@ def test_migration_48_adds_indexes_to_47_and_reopens_without_row_changes(store_d
     with db._write() as conn:
         conn.execute("DROP INDEX idx_sessions_updated_at")
         conn.execute("DROP INDEX idx_sessions_pinned_updated_at")
-        conn.execute("DELETE FROM schema_version WHERE version=48")
+        conn.execute("ALTER TABLE job_completion_effects DROP COLUMN consumed_at")
+        conn.execute("DELETE FROM schema_version WHERE version>=48")
     path = str(db._path)
     db.close()
     for _ in range(2):
         reopened = MeshDB(path)
         try:
-            assert reopened._conn().execute("SELECT MAX(version) FROM schema_version").fetchone()[0] == 48
+            assert reopened._conn().execute("SELECT MAX(version) FROM schema_version").fetchone()[0] == db_module._CURRENT_VERSION
             assert reopened.get_session("preserved") == before
             indexes = {r[1] for r in reopened._conn().execute("PRAGMA index_list(sessions)")}
             assert {"idx_sessions_updated_at", "idx_sessions_pinned_updated_at"} <= indexes

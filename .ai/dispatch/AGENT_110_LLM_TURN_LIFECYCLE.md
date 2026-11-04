@@ -52,11 +52,17 @@ Job consumption semantics (A109), telemetry DB separation, unrelated cost/usage 
   events returns `running`, `started_at=2026-11-03T16:31:18.062983Z`, no execution node.
 - Projection version 2 defaults to queued, uses gateway/worker start evidence for execution
   timestamps and leaves never-ran terminal duration unavailable. An indexed five-row
-  background repair rebuilds old running projections from retained raw events; process
-  restart resumes the remainder. Pruned raw history is preserved, not reconstructed.
+  background repair rebuilds old projections from retained raw events, newest first;
+  process restart resumes the remainder. This includes already-withdrawn requests with
+  fabricated timestamps. Pruned raw history is preserved, not reconstructed.
 - Focused projection/store regressions pass, including persisted false-running repair and
   exclusion of queue wait from execution duration. Existing SessionTurns renders the
   returned status directly and uses a placeholder when start/duration is unavailable.
+- CI exposed older acceptance assertions that encoded the false-running behavior and
+  legacy-schema fixtures with divergent telemetry ancestry. Those assertions now require
+  queued/no-start evidence; index creation follows the existing merged-schema repair.
+  All 121 affected migration/reconciliation checks passed; 68 final lifecycle/migration
+  checks passed after extending repair to retained terminal history.
 
 ## Milestone
 - [x] Issue opened (#273).

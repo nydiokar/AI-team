@@ -188,15 +188,15 @@ class TelemetryStore:
         return result
 
     def repair_turn_lifecycle(self, *, limit: int = 5) -> int:
-        """Incrementally repair old running projections from retained raw events.
+        """Incrementally repair old lifecycle projections from retained raw events.
 
         The partial index becomes empty after repair. Restart simply resumes the
         remaining batch; no synthetic events, provider calls or historical replay.
         """
         rows = self.db._conn().execute(
             "SELECT turn_id FROM llm_turns INDEXED BY idx_llm_turns_lifecycle_repair "
-            "WHERE projection_version<2 AND final_status='running' AND events_pruned_at IS NULL "
-            "ORDER BY updated_at,turn_id LIMIT ?", (max(1, min(limit, 25)),),
+            "WHERE projection_version<2 AND events_pruned_at IS NULL "
+            "ORDER BY updated_at DESC,turn_id DESC LIMIT ?", (max(1, min(limit, 25)),),
         ).fetchall()
         for row in rows:
             # A corrupt/missing raw stream must not spin forever at the head.

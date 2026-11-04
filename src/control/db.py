@@ -2089,6 +2089,13 @@ class MeshDB:
                 self._run_migrations(conn)
                 self._ensure_merged_schema(conn)
                 self._ensure_substrate_columns(conn)
+                # Legacy divergent schemas gain telemetry tables in the repair
+                # above, after numbered migrations. Create their index here.
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_llm_turns_lifecycle_repair "
+                    "ON llm_turns(updated_at,turn_id) WHERE projection_version<2 "
+                    "AND events_pruned_at IS NULL"
+                )
                 # ``mesh_tasks.flow_run_id`` is deliberately added by the
                 # optional substrate-column repair after numbered migrations.
                 # Keep this index at that seam so fresh databases do not try
@@ -11636,8 +11643,6 @@ def _get_migrations() -> List[tuple]:
         """),  # J4: measured list/pinned shapes avoid a temporary ordering sort.
         (49, """
             ALTER TABLE job_completion_effects ADD COLUMN consumed_at TEXT;
-            CREATE INDEX idx_llm_turns_lifecycle_repair ON llm_turns(updated_at,turn_id)
-                WHERE projection_version<2 AND final_status='running' AND events_pruned_at IS NULL;
         """),  # A109: consumption fences admission and retires unstarted job wakes.
     ]
 
