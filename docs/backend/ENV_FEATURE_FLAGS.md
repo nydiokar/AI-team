@@ -93,7 +93,7 @@ covered the dead branch. Branch: `feat/retire-rollout-flags`.
 `WORKER_CANARY`, `WORKER_REAP_STALE_SESSIONS`, `CLAUDE_SDK_MAX_TURNS`, `CLAUDE_SDK_MAX_BUDGET_USD`.
 
 **Operator `.env` leftovers to delete after the deploy (inert, cosmetic):** `OPENCODE_SERVER_ENABLED`,
-`REVIEW_EMITTER_ENABLED`, the duplicate `HARNESS_FLOW_DRIVE=on` line.
+`REVIEW_EMITTER_ENABLED`, `WORKER_MANAGED_TURNS` (retired by A102 `f567c1a`), the duplicate `HARNESS_FLOW_DRIVE=on` line.
 
 ---
 
