@@ -32,6 +32,71 @@ their `"1"`/`"0"` rows and lax inputs unchanged. Numeric/str flags: `scripts/ops
 
 ---
 
+## Rollout-flag retirement burndown (started 2026-11-04)
+
+Goal: delete every **temporary rollout flag** whose rollout is finished, so the code has one
+path. Live values were read with `scripts/ops_flag.sh list` against the running gateway on
+2026-11-04. A flag is removed by **keeping its live path** and deleting the other branch, its
+wrapper in `src/control/db.py`, its `RUNTIME_FLAG_DEFINITIONS` entry and the tests that only
+covered the dead branch. Branch: `feat/retire-rollout-flags`.
+
+**Removal rules (read before taking a row):**
+1. **Callers first, definition last.** `runtime_flag_enabled()` raises `ValueError` on an
+   unregistered name (deliberate: fail-fast on typos). `tests/test_runtime_flag_names_registered.py`
+   statically fails if any `runtime_flag_enabled/value("X")` literal is left without a definition.
+2. **Worker-read flags wait for a worker restart.** `/control/runtime-flags` only serves rows whose
+   name is still in the controller's definitions (`src/control/task_server.py`). Once a definition is
+   deleted, a not-yet-restarted worker (Horse) stops receiving the row and falls back to its own
+   `.env`/default — `0` for most rollout flags. Only retire a worker-read flag early if its default
+   equals its live value.
+3. **Delete the OFF-path tests, don't adapt them.** Drop now-no-op `setenv("FLAG", "1")` lines.
+4. **DB rows and `.env` keys are cleaned last.** Leftover `runtime_flags` rows for retired names are
+   inert (the snapshot filters them; the admin routes 404 unknown names). Leftover `.env` keys are
+   inert too (`_MANAGED_ENV_KEYS` only *pops* managed keys that are absent from the file).
+
+| Flag | Group | Live 2026-11-04 | Action | Why | Status |
+|---|---|---|---|---|---|
+| `RESTART_CONTEXT_RESTORE_DISABLED` | kill switch | false (registry) | removed, restore-context always ON | A98-era opt-out, never used | ✅ `065040c` |
+| `RESTART_LOST_SESSION_FORK_DISABLED` | kill switch | false (registry) | removed, lost session always forks fresh | A98 O1 opt-out | ✅ `065040c` |
+| `RESPAWN_ON_RESTART_ERROR_DISABLED` | kill switch | false (registry) | removed, ERROR+lost Manager always respawn-eligible | A98 O2 opt-out | ✅ `065040c` |
+| `RESTART_NOTIFY_DISABLED` | kill switch | false (registry) | removed, restart notify always ON | A98 O5 opt-out | ✅ `065040c` |
+| `WORKER_MEMORY_WATCHDOG_DISABLED` | kill switch, worker-read | false (registry) | removed, watchdog always ON | A98 O7 opt-out; old worker falls back to default `0` = same behaviour | ✅ `065040c` |
+| `OPENCODE_SERVER_ENABLED` | dead | false (env) | removed from registry + settings | never read by any logic | ✅ `065040c` |
+| `REVIEW_EMITTER_ENABLED` | rollout | true (registry) | removed; review route + rework close gate unconditional | M3.2 proven live 2026-07-13 | ✅ `dcb69d4` |
+| `CASE_QUOTA_RESUME_ENABLED` | rollout | true (registry) | removed; quota pause always recorded (still needs `HARNESS_FLOW_DRIVE`) | default was already ON | ✅ `dcb69d4` |
+| `TRANSIENT_PROVIDER_RESUME_ENABLED` | rollout | true (registry) | removed; 529 turn leaves session AWAITING_INPUT, Case self-heals | ON live | ✅ `dcb69d4` |
+| `CACHE_HEARTBEAT_OBSERVE` | rollout | true (default) | removed; observe-only always ON | default ON | ✅ `dcb69d4` |
+| `CACHE_HEARTBEAT_CHECKPOINT_ENABLED` | rollout | true (default) | removed; checkpoint beats always ON | default ON | ✅ `dcb69d4` |
+| `SPEC_AUTHORING_ENABLED` | rollout | true (registry) | keep ON path | ~13 callers + `mcp_manager.py` help text | ⏭ next |
+| `CASE_CONTINUATION_ENABLED` | rollout | true (registry) | keep ON path | 15 callers, 17 tests, web `continuation_disabled` message, conformance text | ⏭ next |
+| `HARNESS_FLOW_DRIVE` | rollout | true (registry) | keep ON path | 5 src files, ~30 test files; also gates quota/transient pause recording | ⏭ next (largest) |
+| `APP_METRICS_ENABLED` | env kill switch | unset ⇒ true | removed; sampler always starts | settings-only, not in container env | ✅ `e37eeaa` |
+| `MESH_PENDING_REAPER_ENABLED` | env kill switch | unset ⇒ true | removed; reaper always runs | settings-only, not in container env | ✅ `e37eeaa` |
+| `QUOTA_ARCHIVE_ENABLED` | env kill switch | unset ⇒ true | keep ON path | settings-only, not in container env | ⏭ next |
+| `QUOTA_COORDINATOR_ENABLED` | rollout, worker-read | true (registry + `.env`) | keep ON path | read in `src/worker/config.py` | ⛔ after worker restart |
+| `MANAGER_ROLE_ENABLED` | rollout, worker-read | true (registry + `.env`) | keep ON path | read in `claude_driver.py` / `roles.py` on the worker | ⛔ after worker restart |
+| `MANAGER_TOOLS_ENABLED` | legacy, worker-read | true (registry + `.env`) | investigate first | "legacy process-wide grant": confirm role-scoped grants cover every session that needs `dispatch_worker` | ⛔ after worker restart + investigation |
+| `DURABLE_RELAY_ENABLED` | rollout, worker-read | **false** (registry) | decide: turn on or delete | OFF live: no wait markers, `/api/cases/{id}/waits` 404 | 🔍 investigate |
+| `HARNESS_LEVEL3_GUARD` | rollout | **false** (registry) | decide | admission backstop for Level-3 auto-picks | 🔍 investigate |
+| `MANAGER_ADVANCEMENT_GATE` | rollout | **false** (default) | decide | close_case advancement gate | 🔍 investigate |
+| `COST_ALERT_ENFORCE_ENABLED` | rollout | **false** (default) | decide | A65 enforcement surface | 🔍 investigate |
+| `TOOL_PROFILES_DYNAMIC` + `TOOL_PROFILES_OVERLAY` | rollout, worker-read | **false** / empty | decide (pair) | dynamic tool profiles never enabled | 🔍 investigate |
+| `QUOTA_DIGEST_TELEGRAM_ENABLED` | temporary | **false** (registry + `.env`) | likely delete the feature | labelled "Temporary" in its definition | 🔍 investigate |
+| `GATEWAY_LOCAL_EXECUTION_ENABLED` | architectural | false (compose) | belongs to A102 | **code default is `True`**: never drop the compose line before the code | 🧱 A102 |
+| `MESH_ENABLED` / `MESH_EMBEDDED_SERVER` / `MESH_SHADOW_WRITE` | architectural | true / false / true (env) | separate job | the pre-split single-process fallback; 22+ refs | 🧱 separate job |
+| `JOBS_READ_MODE` / `OPENCODE_MODE` / `CLAUDE_DRIVER_TYPE` | config/migration | controller / server / sdk | check other values still needed | mode selectors, not booleans | 🧱 separate job |
+
+**Kept on purpose (not rollout flags):** `CACHE_HEARTBEAT_ACTIVE` (paid-turn switch, ON via `.env`),
+`QUOTA_PREWARM_ENABLED` (live cost switch by design), `CASE_QUOTA_RESUME_AUTO`,
+`CASE_RESPAWN_REQUIRES_APPROVAL`, `CLAUDE_SKIP_PERMISSIONS`, `GUARDED_WRITE`, `CONTROL_API_ENABLED`,
+`CONTROL_API_DOCS`, `TELEMETRY_ENABLED`, `TELEMETRY_DETAILED_EVENTS`, `WORKER_ACCEPT_UNPINNED`,
+`WORKER_CANARY`, `WORKER_REAP_STALE_SESSIONS`, `CLAUDE_SDK_MAX_TURNS`, `CLAUDE_SDK_MAX_BUDGET_USD`.
+
+**Operator `.env` leftovers to delete after the deploy (inert, cosmetic):** `OPENCODE_SERVER_ENABLED`,
+`REVIEW_EMITTER_ENABLED`, the duplicate `HARNESS_FLOW_DRIVE=on` line.
+
+---
+
 ## Jobs read authority (startup setting)
 
 `JOBS_READ_MODE=controller` (default, managed) reads watched jobs exclusively from
@@ -94,9 +159,7 @@ rollout order and operator recovery are in burndown J2. No worker restart is nee
 |------|----------|---------|-----------------|-----------|
 | `HARNESS_FLOW_DRIVE` | ⚠ NO | off | M1: authoritative §11 stage writes at each harness transition. **SHADOW-only** — nothing reads the stage to drive execution; OFF ⇒ byte-identical to A19. Turning this ON right now is safe but cosmetic: it writes pretty stage labels to `flow_runs.current_stage`, which nothing reads back. | `orchestrator.py:1742` |
 | `HARNESS_LEVEL3_GUARD` | ⚠ NO | off | Level-3 admission gate on `_enqueue_task`: blocks over-scoped submits, returns clean 409. OFF ⇒ no gate, everything passes. | `orchestrator.py:2036` |
-| `RESTART_CONTEXT_RESTORE_DISABLED` | ⚠ NO | off (feature **ON** by default) | **A50** — set to `true` to disable the restart-recovery context injection. When enabled (the default), the injector prepends the last 3 completed turns as a bounded `<prior_context source="restart-recovery">` block when a session's driver was lost on a worker restart and the next task starts a fresh SDK session. Trigger: `driver_status == 'lost'` + prior completed turn ≤24h old. Caps: 3 turn pairs / 1 500 chars per reply / 4 000 chars total. See `TODO(A50-tier2)` in `orchestrator.py` for the Haiku-summariser upgrade path. | `orchestrator.py:_maybe_inject_restart_recovery_context` |
 | `CASE_CONTINUATION_ENABLED` | ✅ YES (registry-writable) | off | **M3.4/A52 — Wake-Dispatcher autonomous Case continuation.** When ON: a Manager can `arm_wait_group` over its dispatched workers and return control instead of blocking; the harness re-enters the Case with a coalesced review turn each time the group is satisfied, up to a `round_cap` backstop (default 50), then escalates. OFF ⇒ `arm_wait_group` is a silent no-op (`disabled` reason, byte-identical to pre-M3.4) and the Manager falls back to a single short `wait_for_worker`. **Activation is an operator decision — it turns on live autonomous behavior and real paid spend.** To activate: `scripts/ops_flag.sh on CASE_CONTINUATION_ENABLED` (takes effect immediately, `live` scope, no restart needed) or `PUT /api/flags/CASE_CONTINUATION_ENABLED {"value":true}` directly; confirm `HARNESS_FLOW_DRIVE`/`MANAGER_ROLE_ENABLED` are also ON (`scripts/ops_flag.sh list`); if set via `.env` instead of the registry, `pm2 restart ai-team-gateway` and confirm `curl http://127.0.0.1:9003/health`. Verify with `scripts/ops_flag.sh get CASE_CONTINUATION_ENABLED`. | `control/db.py:case_continuation_enabled` · `orchestrator.py:_continue_case_once` · `scripts/mcp_manager.py:_arm_wait_group` |
-| `TRANSIENT_PROVIDER_RESUME_ENABLED` | ✅ YES (registry-writable) | off | **Transient provider 5xx self-heal (529 Overloaded).** A Manager turn refused by an Anthropic server-side overload lands as `error_class=upstream_error` (`api_error_status >= 500`); its in-process burst retries are spent within seconds, so a multi-minute overload used to go terminal → session `ERROR` → the Case stalled (the pre-PR#97 quota hole, for transient errors). When ON: the session stays `AWAITING_INPUT` (nothing broke — the provider was overloaded), the Case is recorded as **transient-PAUSED** on the ledger (`flow.transient_paused`) with a short **escalating fixed backoff** (30/60/120/300s — a 529 carries no `resetsAt`, so restore is a timer not telemetry), and the Wake-Dispatcher AUTO-retries the **exact** failed turn once the backoff elapses (verbatim, free — no cache-rewrite cost, no operator approval; contrast the quota resume). **Bounded:** attempts counted over a 15-min rolling window; once the schedule is spent it escalates (`flow.transient_pause_exhausted`) instead of looping. Single-flight via the same `claim_task` lease as continuation/respawn/quota-resume. OFF ⇒ byte-identical (transient turn → `ERROR`, no pause, handler inert). Depends on `HARNESS_FLOW_DRIVE` + `CASE_CONTINUATION_ENABLED` (the wake path). To activate: `scripts/ops_flag.sh on TRANSIENT_PROVIDER_RESUME_ENABLED`. **Known boundary (observe first):** if the operator MANUALLY re-sends the failed instruction while a pause is open and it completes, the auto-retry can still fire once (single-flight prevents dispatcher self-duplication, not an operator race) — acceptable for a rare event under observation. | `control/db.py:transient_provider_resume_enabled` · `orchestrator.py:_record_transient_pause` · `orchestrator.py:_handle_transient_paused_case` |
 | `DURABLE_RELAY_ENABLED` | ⚠ NO | off | **M3.3 A46 — durable worker-wait relay.** `wait_for_worker` is an in-process poll, so a Manager/gateway crash mid-wait loses it. When ON: `dispatch_worker` records a durable append-only `worker.wait_pending` marker on the Case (via `POST /api/cases/{id}/waits`), and `reconcile_waits` (`POST /api/cases/{id}/waits/reconcile`) resolves each outstanding wait against the already-durable `task.finished` event (finished ⇒ append `worker.wait_resolved`; still-open ⇒ re-arm), so a resumed Manager recovers its waits from the ledger. Idempotent. OFF ⇒ no `worker.wait_*` events written, both `/waits` routes return 404 ⇒ byte-identical. Reuses the A25/A26 `flow_events` substrate — no new schema. | `control/db.py:durable_relay_enabled` · `scripts/mcp_manager.py:_reconcile_waits` |
 | `MANAGER_TOOLS_ENABLED` | ⚠ NO | off | **M3 A34** — grant a Claude session the Manager MCP tools (`mcp__manager__dispatch_worker` / `wait_for_worker`). **Double-gated:** the tools are added ONLY if this is ON **and** the `manager` server is registered in `~/.claude.json` (`scripts/setup_mcp.py --with-manager`). OFF ⇒ byte-identical even if the server is registered. This is the operator-controlled kill switch for the dispatch primitive; the tools also stay inert until the gateway is restarted to pick up the code. | `backends/claude_driver.py:_manager_tools_enabled` |
 | `MANAGER_ROLE_ENABLED` | ⚠ NO | off | **M3 A38 (Phase 3.1)** — the Manager-role path. When ON: (1) a session with `case_role=="manager"` boots via the Claude adapter with the canonical role prompt appended to the Claude Code preset (`system_prompt`); (2) the manager MCP tools are SCOPED per-session (only a manager session gets `manager_v1` = dispatch_worker/wait_for_worker/get_case/close_case), superseding the A34 process-wide `MANAGER_TOOLS_ENABLED` grant; (3) `POST /api/manager` (→ `invoke_manager`) opens one Case + boots the Manager, and `POST /api/cases/{id}/close` (→ `close_case`) is the Decision surface. OFF ⇒ no role prompt, no scoped grant, `/api/manager` refuses (409) — byte-identical to pre-A38. Still requires the `manager` server in `~/.claude.json` for the tool grant. **Depends on `HARNESS_FLOW_DRIVE` ON** for the Case machinery (per-turn attach, worker JOIN, `task.finished` timeline that `wait_for_worker` watches); with FLOW_DRIVE OFF the Manager boots but Case attach/JOIN are inert (a warning is logged). | `backends/claude_driver.py:_manager_role_enabled` · `orchestrator.py:invoke_manager` |
@@ -122,7 +185,6 @@ rollout order and operator recovery are in burndown J2. No worker restart is nee
 | `CONTROL_API_ENABLED` | ✅ YES | true | The in-process `/api/*` control surface (Web UI + read APIs, incl. `/api/flows`). | `config/settings.py:611` |
 | `TELEMETRY_ENABLED` | ✅ YES | true | LLM-turn telemetry capture. OFF ⇒ `NullTelemetrySink`. | `config/settings.py:695` |
 | `WORKER_ACCEPT_UNPINNED` | ⚠ NO | true | Whether a worker accepts tasks not pinned to it (machine_id=NULL tasks). | `worker/config.py:35` |
-| `OPENCODE_SERVER_ENABLED` | ✅ YES | false | OpenCode-server backend path. | `config/settings.py:550` |
 
 ---
 

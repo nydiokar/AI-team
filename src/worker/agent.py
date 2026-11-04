@@ -2670,15 +2670,12 @@ class WorkerAgent:
         """[A98 O7] Sample this worker process tree's RSS vs a threshold and warn
         BEFORE the OOM-killer fires (the 2026-10-07 incident had NO such trail — a
         background TRAIN + a heavy script almost certainly OOM-killed the daemon with
-        zero warning). ON by default; opt-out WORKER_MEMORY_WATCHDOG_DISABLED.
+        zero warning).
         Thresholds: WORKER_MEMORY_WATCHDOG_PCT (percent of total RAM, default 85) and
         WORKER_MEMORY_WATCHDOG_MB (absolute RSS ceiling MB; 0 = unset). Returns a
-        compact dict for the heartbeat, or None if disabled/unavailable. Never raises.
+        compact dict for the heartbeat, or None if unavailable. Never raises.
         """
         try:
-            from src.control.db import worker_memory_watchdog_disabled
-            if worker_memory_watchdog_disabled():
-                return None
             import psutil  # hard dep (constraints); guard anyway
             proc = psutil.Process()
             rss = proc.memory_info().rss

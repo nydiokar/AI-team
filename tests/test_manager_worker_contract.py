@@ -42,7 +42,6 @@ STALE_ENV_SESSION = "d9342d3315a3"
 
 @pytest.fixture()
 def world(tmp_path, monkeypatch):
-    monkeypatch.setenv("REVIEW_EMITTER_ENABLED", "1")
     db, o = _env(tmp_path, monkeypatch)
     # The dead session the stale worker env points at (closed long ago).
     db.upsert_session(Session(session_id=STALE_ENV_SESSION, backend="claude", repo_path="/tmp/repo",

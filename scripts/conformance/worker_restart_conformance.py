@@ -80,7 +80,7 @@ FROZEN_STEPS = [
         effect="in-memory SDK drivers on node N destroyed; backend conversation persists on disk (backend_session_id)",
         page="O7 early-warning (if memory-driven): event=worker_memory_pressure on heartbeat BEFORE death",
         evidence="new worker process instance; (optional) event=worker_memory_pressure in the minutes prior",
-        diagnosis_if_absent="If OOM with NO prior worker_memory_pressure ⇒ O7 watchdog off/old worker code (WORKER_MEMORY_WATCHDOG_DISABLED or worker not restarted onto A98).",
+        diagnosis_if_absent="If OOM with NO prior worker_memory_pressure ⇒ old worker code (worker not restarted onto A98).",
     ),
     Step(
         n=2, name="re-register + mark sessions lost (O3, pre-existing)",
@@ -98,7 +98,7 @@ FROZEN_STEPS = [
         effect="durable warning + best-effort Web Push + Telegram",
         page="OPERATOR: Web Push + Telegram 'Worker restarted — N, K sessions lost'",
         evidence="event=node_restart_detected node_id=N; event=node_restart_notification",
-        diagnosis_if_absent="No detect/page ⇒ FLAG RESTART_NOTIFY_DISABLED on, OR reconcile loop not running (MESH off / interval 0), OR gateway on pre-A98 image (O5 not deployed). No Push/Telegram received but event present ⇒ notifier/bot unconfigured (best-effort).",
+        diagnosis_if_absent="No detect/page ⇒ reconcile loop not running (MESH off / interval 0), OR gateway on pre-A98 image (O5 not deployed). No Push/Telegram received but event present ⇒ notifier/bot unconfigured (best-effort).",
     ),
     Step(
         n=4, name="Manager wake routes to FRESH FORK (O1)",
@@ -107,7 +107,7 @@ FROZEN_STEPS = [
         effect="fresh create_session (role re-boot + A54 boot-reconcile + <prior_context>); driver_status lost→live; SAME Case",
         page="—",
         evidence="Manager's next mesh_task action='create_session' (NOT resume_session) AND error_class!='session_lost'; event=restart_context_injected",
-        diagnosis_if_absent="action='resume_session' + error_class='session_lost' ⇒ FLAG RESTART_LOST_SESSION_FORK_DISABLED on, OR session turn-queue-enrolled (A82, scoped out), OR gateway pre-A98. This is the ORIGINAL incident behavior.",
+        diagnosis_if_absent="action='resume_session' + error_class='session_lost' ⇒ session turn-queue-enrolled (A82, scoped out), OR gateway pre-A98. This is the ORIGINAL incident behavior.",
     ),
     Step(
         n=5, name="dead-at-ERROR Manager respawns (O2 safety net)",
@@ -116,7 +116,7 @@ FROZEN_STEPS = [
         effect="auto-respawn OR case_manager_respawn approval; NEW Manager on SAME Case via get_case_brief; waits re-armed",
         page="OPERATOR: case_manager_respawn approval (if CASE_RESPAWN_REQUIRES_APPROVAL, default ON)",
         evidence="flow_event case.manager_respawned OR approval action=case_manager_respawn; (else) event=case.manager_unavailable escalation",
-        diagnosis_if_absent="Manager ERROR+lost with no respawn/approval ⇒ FLAG CASE_CONTINUATION_ENABLED off OR RESPAWN_ON_RESTART_ERROR_DISABLED on; approval raised but never actioned ⇒ OPERATOR-INACTION (wedged Case); respawn_failed ⇒ MISSING CARRIER (no placement node / worker offline).",
+        diagnosis_if_absent="Manager ERROR+lost with no respawn/approval ⇒ FLAG CASE_CONTINUATION_ENABLED off; approval raised but never actioned ⇒ OPERATOR-INACTION (wedged Case); respawn_failed ⇒ MISSING CARRIER (no placement node / worker offline).",
     ),
     Step(
         n=6, name="worker session re-established + continuation",

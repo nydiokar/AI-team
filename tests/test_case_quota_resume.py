@@ -62,11 +62,10 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def _flags(monkeypatch, *, resume="1", auto="0", ceiling=None) -> None:
+def _flags(monkeypatch, *, auto="0", ceiling=None) -> None:
     monkeypatch.setenv("HARNESS_FLOW_DRIVE", "1")
     monkeypatch.setenv("CASE_CONTINUATION_ENABLED", "1")
     monkeypatch.setenv("MANAGER_ROLE_ENABLED", "1")
-    monkeypatch.setenv("CASE_QUOTA_RESUME_ENABLED", resume)
     monkeypatch.setenv("CASE_QUOTA_RESUME_AUTO", auto)
     if ceiling is not None:
         monkeypatch.setenv("CASE_QUOTA_RESUME_AUTO_MAX_USD", str(ceiling))
@@ -471,18 +470,6 @@ def test_worker_quota_death_does_not_pause_the_case(tmp_path, monkeypatch):
     _pause(orch, db, case_id, "worker-9")
 
     assert db.case_quota_pause(case_id) is None
-
-
-def test_flag_off_records_nothing(tmp_path, monkeypatch):
-    _flags(monkeypatch, resume="0")
-    db = _mk_db(tmp_path, monkeypatch)
-    orch = _Orch(_FakeStore(_FakeSession("mgr-1")), snapshots=_spent_snapshot())
-    case_id = _case(db, "mgr-1")
-
-    _pause(orch, db, case_id, "mgr-1")
-
-    assert db.case_quota_pause(case_id) is None
-    assert asyncio.run(orch._handle_quota_paused_case(db, case_id)) is False
 
 
 def test_resume_closes_the_pause(tmp_path, monkeypatch):

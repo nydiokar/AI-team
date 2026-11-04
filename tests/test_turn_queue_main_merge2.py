@@ -79,7 +79,6 @@ def test_reaper_passes_leave_managed_turns_and_reap_legacy(tmp_path, monkeypatch
     db = _managed_world(tmp_path)
     monkeypatch.setattr(db_mod, "_db_instance", db, raising=False)
     monkeypatch.setattr(task_server, "get_db", lambda: db)
-    monkeypatch.setattr(cfg.mesh, "pending_reaper_enabled", True, raising=False)
     monkeypatch.setattr(cfg.mesh, "pending_reaper_grace_sec", GRACE, raising=False)
     monkeypatch.setattr(cfg.mesh, "pending_max_age_sec", MAX_AGE, raising=False)
     for _ in range(3):
@@ -135,7 +134,6 @@ def test_enrolled_admission_never_reaches_legacy_unknown_node_rejection(tmp_path
     w.db.requeue_turns_on_dead_carriers()
     _backdate_all(w.db, MAX_AGE + 60)
     monkeypatch.setattr(db_mod, "_db_instance", w.db, raising=False)
-    monkeypatch.setattr(cfg.mesh, "pending_reaper_enabled", True, raising=False)
     monkeypatch.setattr(cfg.mesh, "pending_reaper_grace_sec", GRACE, raising=False)
     monkeypatch.setattr(cfg.mesh, "pending_max_age_sec", MAX_AGE, raising=False)
     for _ in range(3):

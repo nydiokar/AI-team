@@ -1924,8 +1924,6 @@ def _reap_stale_pending_once() -> None:
     if db is None:
         return
     from config import config as _cfg
-    if not getattr(_cfg.mesh, "pending_reaper_enabled", True):
-        return
     grace_sec = int(getattr(_cfg.mesh, "pending_reaper_grace_sec", 1800) or 0)
     max_age_sec = int(getattr(_cfg.mesh, "pending_max_age_sec", 604800) or 0)
     stale = db.list_stale_pending_tasks(grace_sec=grace_sec, max_age_sec=max_age_sec)

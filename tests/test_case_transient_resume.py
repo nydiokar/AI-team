@@ -7,7 +7,7 @@ in-process burst retries within seconds. A multi-minute overload therefore went
 terminal → session ERROR → the Case stalled with the ONLY resume trigger being a
 wait-group satisfaction (exactly the pre-PR#97 quota hole). It never self-healed.
 
-What is asserted here (flag ``TRANSIENT_PROVIDER_RESUME_ENABLED``, default OFF):
+What is asserted here:
   * a transient death is classified honestly — session stays REUSABLE
     (AWAITING_INPUT) while the turn keeps reporting failed (no work produced);
   * OFF ⇒ byte-identical (session ERROR, no pause recorded, handler inert);
@@ -56,11 +56,9 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def _flags(monkeypatch, *, transient="1") -> None:
+def _flags(monkeypatch) -> None:
     monkeypatch.setenv("HARNESS_FLOW_DRIVE", "1")
     monkeypatch.setenv("CASE_CONTINUATION_ENABLED", "1")
-    monkeypatch.setenv("CASE_QUOTA_RESUME_ENABLED", "1")
-    monkeypatch.setenv("TRANSIENT_PROVIDER_RESUME_ENABLED", transient)
 
 
 class _FakeSession:
@@ -200,20 +198,13 @@ def test_529_classifies_as_upstream_error():
     assert TaskOrchestrator._classify_error(orch, _transient_result()) == "upstream_error"
 
 
-def test_transient_pause_keeps_session_reusable_when_flag_on(monkeypatch):
-    """Flag ON: nothing broke — the provider was overloaded — so the session
+def test_transient_pause_keeps_session_reusable(monkeypatch):
+    """Nothing broke — the provider was overloaded — so the session
     stays AWAITING_INPUT while the turn still reports failed (no work produced)."""
-    monkeypatch.setenv("TRANSIENT_PROVIDER_RESUME_ENABLED", "1")
     result = _transient_result()
     assert is_transient_provider_pause_result(result) is True
     assert _session_status_after_result(result) == SessionStatus.AWAITING_INPUT
     assert result.success is False
-
-
-def test_flag_off_transient_is_byte_identical_error(monkeypatch):
-    """Flag OFF ⇒ pre-feature behaviour: the transient turn lands in ERROR."""
-    monkeypatch.setenv("TRANSIENT_PROVIDER_RESUME_ENABLED", "0")
-    assert _session_status_after_result(_transient_result()) == SessionStatus.ERROR
 
 
 def test_agent_text_about_server_errors_is_not_a_transient_pause():
@@ -257,19 +248,6 @@ def test_manager_transient_death_pauses_the_case(tmp_path, monkeypatch):
 def _parse_ok(value):
     from src.orchestrator import _parse_iso_utc
     return _parse_iso_utc(value) is not None
-
-
-def test_flag_off_records_nothing(tmp_path, monkeypatch):
-    _flags(monkeypatch, transient="0")
-    db = _mk_db(tmp_path, monkeypatch)
-    orch = _Orch(_FakeStore(_FakeSession("mgr-1")))
-    case_id = _case(db, "mgr-1")
-
-    orch._record_transient_pause(_Task("paused-turn", case_id, "mgr-1"),
-                                 _transient_result("paused-turn"))
-
-    assert db.transient_pause(case_id) is None
-    assert _events(db, case_id, "flow.transient_paused") == []
 
 
 def test_second_transient_death_does_not_open_a_second_pause(tmp_path, monkeypatch):
@@ -433,19 +411,6 @@ def test_single_flight_lease_prevents_double_retry(tmp_path, monkeypatch):
 
     assert owned is True
     assert orch.deliveries == []  # lost the claim → no second retry
-
-
-def test_handler_inert_when_flag_off(tmp_path, monkeypatch):
-    _flags(monkeypatch, transient="0")
-    db = _mk_db(tmp_path, monkeypatch)
-    orch = _Orch(_FakeStore(_FakeSession("mgr-1")))
-    case_id = _case(db, "mgr-1")
-    _append_pause(db, case_id, "mgr-1", retry_at=_iso(_now() - timedelta(seconds=1)))
-
-    owned = asyncio.run(orch._handle_transient_paused_case(db, case_id))
-
-    assert owned is False
-    assert orch.deliveries == []
 
 
 # --------------------------------------------------------------------------- #

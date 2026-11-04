@@ -145,7 +145,7 @@ def test_managed_recovery_mark_drains_with_case_continuation_flag_off(tmp_path, 
     assert tick.calls == 1
 
 
-def _wedge_setup(tmp_path, monkeypatch, *, record_quota: bool):
+def _wedge_setup(tmp_path, monkeypatch):
     """An inbox continuation wake W (carrying the Manager's one completion
     message) fails ``usage_limit`` while the Case continuation flag is OFF; a
     human B is queued behind its pause mark. A104: W is an inbox wake — the
@@ -177,8 +177,6 @@ def _wedge_setup(tmp_path, monkeypatch, *, record_quota: bool):
     monkeypatch.setattr(db_module, "get_db", lambda: db)
     monkeypatch.setattr(db_module, "case_continuation_enabled", lambda: False)
     monkeypatch.setattr(db_module, "cache_heartbeat_active_enabled", lambda: False)
-    monkeypatch.setattr(db_module, "case_quota_resume_enabled", lambda: record_quota)
-    monkeypatch.setattr(db_module, "transient_provider_resume_enabled", lambda: False)
     orch = TaskOrchestrator.__new__(TaskOrchestrator)
     orch.events = []
     orch._emit_event = lambda name, task, data=None: orch.events.append(name)
@@ -193,24 +191,11 @@ def _returned(db):
     return (m.state, m.attempts, m.delivery_turn_id)
 
 
-def test_failed_continuation_wake_does_not_wedge_manager_with_flag_off(tmp_path, monkeypatch):
-    """[4e review F1] The real tick on a real MeshDB with the Case continuation
-    flag OFF: the failed wake's message went back to pending in its own terminal
-    txn (A104), the pause mark drains (``done``) and human B is head-selected —
-    no permanent wedge."""
-    db, orch, _case = _wedge_setup(tmp_path, monkeypatch, record_quota=False)
-    assert _returned(db)[:2] == ("pending", 1)
-    for _ in range(2):
-        asyncio.run(TaskOrchestrator._wake_dispatcher_tick_once(orch))
-    assert db.get_task("wake-w")["retry_pause_state"] == "done"
-    assert [r["id"] for r in db.select_eligible_turn_heads()] == ["human-b"]
-
-
 def test_failed_continuation_wake_records_pause_with_operator_exit_flag_off(tmp_path, monkeypatch):
     """[4e review F1] With quota-pause recording ON the drained mark becomes a
     recorded Case pause (B held by the pause, not by the mark); the existing
     operator decline releases B."""
-    db, orch, case_id = _wedge_setup(tmp_path, monkeypatch, record_quota=True)
+    db, orch, case_id = _wedge_setup(tmp_path, monkeypatch)
     asyncio.run(TaskOrchestrator._wake_dispatcher_tick_once(orch))
     assert _returned(db)[:2] == ("pending", 1)
     assert db.get_task("wake-w")["retry_pause_state"] == "done"

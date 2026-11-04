@@ -20,10 +20,9 @@ import src.orchestrator as orch_mod
 HOST = "gateway-host"
 
 
-def _orch(fork_enabled: bool) -> TaskOrchestrator:
+def _orch() -> TaskOrchestrator:
     o = TaskOrchestrator.__new__(TaskOrchestrator)
     # Pin the flag deterministically; the DB read itself is covered by db.py's registry.
-    o._restart_lost_fork_enabled = lambda: fork_enabled
     return o
 
 
@@ -54,28 +53,23 @@ def _action(orch, session):
     return action
 
 
-def test_lost_session_forks_fresh_when_enabled():
-    orch = _orch(fork_enabled=True)
+def test_lost_session_forks_fresh():
+    orch = _orch()
     assert _action(orch, _session(driver_status="lost")) == "create_session"
 
 
-def test_lost_session_resumes_when_flag_disabled():
-    orch = _orch(fork_enabled=False)
-    assert _action(orch, _session(driver_status="lost")) == "resume_session"
-
-
 def test_live_session_still_resumes():
-    orch = _orch(fork_enabled=True)
+    orch = _orch()
     assert _action(orch, _session(driver_status="live")) == "resume_session"
 
 
 def test_lost_but_enrolled_session_untouched():
     # A82 managed sessions keep their own respawn path; O1 is scoped out of them.
-    orch = _orch(fork_enabled=True)
+    orch = _orch()
     assert _action(orch, _session(driver_status="lost", enrolled=1)) == "resume_session"
 
 
 def test_lost_session_without_backend_id_still_creates():
     # No backend_session_id → the pre-existing create_session branch already fires.
-    orch = _orch(fork_enabled=True)
+    orch = _orch()
     assert _action(orch, _session(driver_status="lost", backend_session_id="")) == "create_session"
