@@ -1947,6 +1947,13 @@ class MeshDB:
                     "ON llm_turns(updated_at,turn_id) WHERE projection_version<2 "
                     "AND events_pruned_at IS NULL"
                 )
+                # Keep the v2 index for safe image rollback. v3 also repairs
+                # historical withdrawals whose raw events still say cancelled.
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_llm_turns_lifecycle_repair_v3 "
+                    "ON llm_turns(updated_at,turn_id) WHERE projection_version<3 "
+                    "AND events_pruned_at IS NULL"
+                )
                 # ``mesh_tasks.flow_run_id`` is deliberately added by the
                 # optional substrate-column repair after numbered migrations.
                 # Keep this index at that seam so fresh databases do not try
@@ -9910,7 +9917,8 @@ class MeshDB:
                 conn.execute(
                     "UPDATE mesh_tasks SET status='withdrawn', revision=revision+1, "
                     "completed_at=?,updated_at=?,effects_state='telemetry',lineage_state='void', "
-                    "lineage_token=NULL,lineage_lease_until=NULL "
+                    "lineage_token=NULL,lineage_lease_until=CASE WHEN lineage_state='pending' "
+                    "THEN lineage_lease_until ELSE NULL END "
                     "WHERE id=? AND status IN ('queued','pending','claimed') AND started_at IS NULL",
                     (now, now, wake_id),
                 )

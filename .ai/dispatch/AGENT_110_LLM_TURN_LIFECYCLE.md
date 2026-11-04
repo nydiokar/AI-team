@@ -1,12 +1,12 @@
 ```yaml
 job_id: AGENT_110_LLM_TURN_LIFECYCLE
 created_at: "2026-11-04T02:11:25.550323+00:00"        # CANONICAL — set once at dispatch, never derive again
-status: done              # ready | active | blocked | done | dead
+status: active              # ready | active | blocked | done | dead
 owner: ""
 depends_on: []
 results_ref: DISPATCH_LOG.md#A110             # -> DISPATCH_LOG.md section with the verdict prose
 evidence: ["tests/test_telemetry_projection.py","tests/test_telemetry_store.py","tests/test_turn_queue_a84_effects.py"]                  # artifact paths that PROVE it ran (checked to exist)
-updated_at: "2026-11-04T22:48:14.972264+00:00"
+updated_at: "2026-11-04T23:37:11.082961+00:00"
 ```
 
 # DISPATCH — 110 · Report queued requests separately from executing LLM turns
@@ -71,6 +71,28 @@ Job consumption semantics (A109), telemetry DB separation, unrelated cost/usage 
 - [x] PR merged and controller deployed; live history repair completed.
 
 ## Closure
+
+### Final adversarial review — reopened 2026-11-05
+F1: the version-2 history repair replayed old `cancelled` events over canonical A104
+withdrawals, resurfacing 1,560 never-executed turns in production telemetry lists/counts.
+The original four job notices were unaffected. Canonical withdrawal now wins inside the
+projection transaction; version 3 repairs version-2 history using a versioned partial index
+(v2 index retained for safe image rollback, no schema-version change).
+
+F2: a history-repair exception could discard current dirty telemetry before projection.
+The historical pass is isolated from the live batch; malformed events receive an explicit
+quality flag and cannot starve later repairs. A commit-time retention check preserves
+retained summaries if pruning wins after events were read. Logger initialization restores
+the existing per-row failure isolation paths. All three original red tests plus malformed-
+history/retention-race regressions pass. Production-copy repair and wider checks pending.
+Issue #273 reopened; operator authorized fixing all review findings.
+
+Production-copy rehearsal completed: 6,410 retained projections rebuilt, canonical
+withdrawal mismatches 1,560 → 0, malformed-history flags 0, remaining old projections 0.
+Model-request count and sums of input/output/cache-read/cache-creation tokens were exactly
+unchanged. Focused verification: 50 consumption/protocol/projection tests, 129 wider
+completion/queue/migration/retention tests, then 57 final admission/lease/race tests passed.
+
 ### LLM turn lifecycle — SHIPPED (2026-11-05)
 **What changed:** projection version 2 distinguishes queued from execution and infers
 start only from actual start evidence. The task-server's existing background flusher

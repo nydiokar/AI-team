@@ -118,7 +118,12 @@ async def _telemetry_projection_flusher_loop(
                 continue
             turns, sessions = _drain_projection(_TELEMETRY_PROJECT_MAX_PER_TICK)
             store = TelemetryStore(db)
-            await asyncio.to_thread(store.repair_turn_lifecycle, limit=_TELEMETRY_PROJECT_CHUNK)
+            try:
+                await asyncio.to_thread(store.repair_turn_lifecycle, limit=_TELEMETRY_PROJECT_CHUNK)
+            except Exception:
+                # Historical repair is independent of the already-drained live
+                # batch. A failed repair must not lose those current dirty ids.
+                logger.debug("event=telemetry_lifecycle_repair_failed", exc_info=True)
             # Project in small chunks, releasing the write lock between each so a
             # control-plane heartbeat/claim can win it. The chunk runs in a worker
             # thread (holds the lock); the pause runs on the loop (lock released).
@@ -2101,6 +2106,7 @@ async def consume_job_result(
         raise HTTPException(status_code=422, detail="invalid_job_id")
     if not _JOB_RESULT_SLOTS.acquire(blocking=False):
         raise HTTPException(status_code=429, detail="job_result_busy")
+    release_here = True
     try:
         body = bytearray()
         async with asyncio.timeout(5):
@@ -2112,12 +2118,27 @@ async def consume_job_result(
             payload = JobResultPayload.model_validate_json(body)
         except ValidationError:
             raise HTTPException(status_code=422, detail="invalid_job_result_request") from None
-        db = await asyncio.to_thread(get_db)
-        if db is None:
-            raise HTTPException(status_code=503, detail="job_result_unavailable")
-        result = await asyncio.to_thread(db.consume_job_result, job_id, payload.session_id, payload.node_id)
-        _hint_turn_scheduler()
-        return JSONResponse(result)
+
+        def consume() -> JSONResponse:
+            db = get_db()
+            if db is None:
+                raise HTTPException(status_code=503, detail="job_result_unavailable")
+            result = db.consume_job_result(job_id, payload.session_id, payload.node_id)
+            _hint_turn_scheduler()
+            return JSONResponse(result)
+
+        future = asyncio.get_running_loop().run_in_executor(None, consume)
+
+        def finished(done: asyncio.Future[JSONResponse]) -> None:
+            _JOB_RESULT_SLOTS.release()
+            if not done.cancelled():
+                done.exception()  # observe failures even if the HTTP waiter left
+
+        future.add_done_callback(finished)
+        release_here = False
+        # Match turn_admission's mutation ownership: HTTP cancellation cannot
+        # release a permit or cancel a still-running SQLite transaction.
+        return await asyncio.shield(future)
     except TimeoutError:
         raise HTTPException(status_code=408, detail="job_result_body_timeout") from None
     except PermissionError:
@@ -2127,7 +2148,8 @@ async def consume_job_result(
     except (sqlite3.Error, ValueError):
         raise HTTPException(status_code=503, detail="job_result_unavailable") from None
     finally:
-        _JOB_RESULT_SLOTS.release()
+        if release_here:
+            _JOB_RESULT_SLOTS.release()
 
 
 @app.post("/jobs/{job_id}/start", dependencies=[Depends(_require_auth)])

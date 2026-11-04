@@ -1,12 +1,12 @@
 ```yaml
 job_id: AGENT_109_WATCHED_JOB_CONSUMPTION
 created_at: "2026-11-04T02:11:24.580839+00:00"        # CANONICAL — set once at dispatch, never derive again
-status: done              # ready | active | blocked | done | dead
+status: active              # ready | active | blocked | done | dead
 owner: ""
 depends_on: []
 results_ref: DISPATCH_LOG.md#A109             # -> DISPATCH_LOG.md section with the verdict prose
 evidence: ["tests/test_watched_job_consumption.py","tests/test_job_completion_protocol.py","tests/test_mcp_jobs.py"]                  # artifact paths that PROVE it ran (checked to exist)
-updated_at: "2026-11-04T22:48:12.749425+00:00"
+updated_at: "2026-11-04T23:37:11.957998+00:00"
 ```
 
 # DISPATCH — 109 · Consume watched-job results once while preserving durable wake-up
@@ -89,6 +89,24 @@ queue redesign, quota policy, paid proof turns, worker restarts without authoriz
 - [x] PR merged, controller deployed, worker activation verified by fresh build/incarnation reports.
 
 ## Closure
+
+### Final adversarial review — reopened 2026-11-05
+The operator requested an adversarial review and correction of any demonstrated fault.
+F3: cancelling the result HTTP waiter released the four-slot gate while its SQLite thread
+continued. A deterministic blocking-thread regression reproduces this. The executor future
+now owns the permit through DB work and response serialization; cancellation is shielded,
+and detached exceptions are observed. Body limits/deadlines and start/consumption semantics
+remain unchanged. A110 carries F1/F2 history-repair corrections. Issue #272 reopened.
+
+F4: consumption cleared a still-live lineage writer lease. That allowed the existing
+Case cleanup sweep to mark the lineage voided before the writer finished. A deterministic
+admission-boundary test reproduced the lost lease. Consumption now inherits its expiry,
+matching `close_session_turns`; the withdrawn wake is fenced immediately while Case cleanup
+waits for the live writer's lease to expire.
+
+Verification in progress: three original red review tests, then five review regressions and
+50 focused protocol/projection/consumption checks green. No worker change or restart needed.
+
 ### Watched-job consumption — SHIPPED (2026-11-05)
 **What changed:** `scripts/mcp_jobs.py` exposes `job_result` and corrects the registration
 contract; the base tool profile grants it. `src/control/task_server.py` exposes a bounded,
