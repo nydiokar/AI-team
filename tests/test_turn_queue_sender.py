@@ -87,7 +87,6 @@ def _mk_orch(db: MeshDB) -> Any:
 def _mk_world(tmp_path, monkeypatch, *, node: str = "Horse", pinned: bool = True,
               register: bool = True) -> World:
     monkeypatch.setenv("HARNESS_FLOW_DRIVE", "1")
-    monkeypatch.delenv("HARNESS_LEVEL3_GUARD", raising=False)
     from src.control import turn_admission as ta
 
     # A fresh gateway process starts with a fresh shared waiting allowance.

@@ -164,7 +164,6 @@ def test_registry_inventory_covers_known_boolean_flags():
         "CONTROL_API_DOCS",
         "CONTROL_API_ENABLED",
         "HARNESS_FLOW_DRIVE",
-        "HARNESS_LEVEL3_GUARD",
         "MANAGER_ROLE_ENABLED",
         "MANAGER_TOOLS_ENABLED",
         "MESH_ENABLED",

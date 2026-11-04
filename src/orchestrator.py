@@ -54,7 +54,6 @@ FEATURE FLAGS (runtime-gated, all default OFF unless noted)
 ------------------------------------------------------------
   HARNESS_FLOW_DRIVE          — write flow_runs stage transitions (M1/M2, shadow)
   MANAGER_ROLE_ENABLED        — enable M3 Manager role boot via /api/manager
-  HARNESS_LEVEL3_GUARD        — admission gate for level-3 harness tasks
   QUOTA_COORDINATOR_ENABLED   — observe-only quota/session-window coordinator
 """
 import asyncio
@@ -672,17 +671,16 @@ def resolve_control_api_hosts(
 
 
 class HarnessAdmissionBlocked(Exception):
-    """Raised by `_enqueue_task` when the task-harness Level-3 admission gate
-    refuses a task at the queue choke point (flag on + `harness_level: 3` +
-    not `approved: true`).
+    """Raised by `_enqueue_task` when admission refuses a task at the queue
+    choke point (e.g. ``local_execution_disabled`` on a controller-only host).
 
     Raised — not returned — so no caller can mistake a blocked task for an
     accepted one (there is no `task_id` to hand back). Callers that face an
     operator (Telegram, control API) catch this and surface a clear
-    "needs operator approval" result instead of a generic error.
+    refusal result instead of a generic error.
     """
 
-    def __init__(self, task_id: str, reason: str = "harness_level3_needs_approval"):
+    def __init__(self, task_id: str, reason: str):
         self.task_id = task_id
         self.reason = reason
         super().__init__(f"task {task_id} blocked at admission: {reason}")
@@ -5792,11 +5790,8 @@ class TaskOrchestrator(ITaskOrchestrator):
 
         This is the choke point every ingestion lane passes through
         (`submit_instruction` from Telegram/Web, the `.task.md` auto-pickup path,
-        and internal runtime tasks). The task-harness Level-3 admission gate runs
-        HERE — before any queue/telemetry side-effect — so an un-approved Level-3
-        task is refused at admission on every lane, not just `.task.md`. The gate
-        is flag-gated OFF by default (`HARNESS_LEVEL3_GUARD`), so default behavior
-        is byte-identical: absent flag / absent field / level ≤ 2 ⇒ pass-through.
+        and internal runtime tasks). Admission refusals run HERE — before any
+        queue/telemetry side-effect — so a refused task is refused on every lane.
         """
         _sid = str((task.metadata or {}).get("session_id") or "").strip()
         _known = (task.metadata or {}).pop(self._TURN_ENROLLED_META_KEY, None)
@@ -5831,19 +5826,6 @@ class TaskOrchestrator(ITaskOrchestrator):
                     {"task_id": task.id, "reason": "local_execution_disabled"},
                 )
                 raise HarnessAdmissionBlocked(task.id, "local_execution_disabled")
-
-        # [Harness] Admission control (spec docs/Task_harness_workflow.md §14).
-        if not self._harness_level3_allows_autopickup(task):
-            logger.warning(
-                f"event=task_blocked reason=harness_level3_needs_approval "
-                f"task_id={task.id} source={(task.metadata or {}).get('source', 'runtime')}"
-            )
-            self._emit_event(
-                "task_blocked",
-                task,
-                {"task_id": task.id, "reason": "harness_level3_needs_approval"},
-            )
-            raise HarnessAdmissionBlocked(task.id)
 
         # [A82 Stage 4a] A session carrying the DURABLE enrollment marker takes the
         # managed admission path (commit-before-ack; no BUSY/last_task_id write,
@@ -7693,10 +7675,9 @@ class TaskOrchestrator(ITaskOrchestrator):
                 pass
             logger.info(f"event=parsed task_id={task.id} type={task.type.value} priority={task.priority.value}")
 
-            # Admission (incl. the Level-3 harness gate) now lives in
-            # `_enqueue_task` — the choke point shared by every ingestion lane. A
-            # blocked Level-3 `.task.md` raises HarnessAdmissionBlocked there; here
-            # we just release this lane's file-tracking state so an `approved: true`
+            # Admission lives in `_enqueue_task` — the choke point shared by every
+            # ingestion lane. A refused `.task.md` raises HarnessAdmissionBlocked
+            # there; here we just release this lane's file-tracking state so a
             # re-write can be picked up later. The file is left un-enqueued.
             try:
                 await self._enqueue_task(task)
@@ -7719,46 +7700,6 @@ class TaskOrchestrator(ITaskOrchestrator):
                 self._save_state()
             except Exception:
                 pass
-
-    @staticmethod
-    def _harness_level3_allows_autopickup(task: "Task") -> bool:
-        """Task-harness Level-3 admission predicate (spec §14).
-
-        The single decision function behind the admission gate in `_enqueue_task`
-        (every ingestion lane) and the `.task.md` file lane. Pure over
-        `task.metadata`, so it is trivially testable.
-
-        Returns True (allow) in every case EXCEPT: the guard flag is enabled AND
-        the task declares `harness_level: 3` AND it is not `approved: true`.
-        Level ≤ 2 and any task without a `harness_level` field are always allowed
-        — behavior is byte-identical to before when the field is absent or the
-        flag is unset.
-
-        The guard is opt-in via `HARNESS_LEVEL3_GUARD` (truthy: 1/true/yes/on).
-        The convention (a documented rule the dispatch prompt obeys) is the primary
-        control; this is the enforcement backstop for when a drafter ignores it.
-        """
-        from src.control.db import harness_level3_guard_enabled
-        if not harness_level3_guard_enabled():
-            return True  # guard off ⇒ legacy behavior
-
-        meta = getattr(task, "metadata", None) or {}
-        raw_level = meta.get("harness_level", None)
-        if raw_level is None:
-            return True  # field absent ⇒ unchanged
-
-        # Coerce level defensively (YAML may give int or str); only "3" gates.
-        try:
-            level = int(str(raw_level).strip())
-        except (TypeError, ValueError):
-            return True  # unparseable level ⇒ don't invent a block
-        if level != 3:
-            return True  # Level ≤ 2 auto-enqueues
-
-        approved = meta.get("approved", False)
-        if isinstance(approved, str):
-            approved = approved.strip().lower() in ("1", "true", "yes", "on")
-        return bool(approved)
 
     # ===========================================================================
     # WORKER LOOP

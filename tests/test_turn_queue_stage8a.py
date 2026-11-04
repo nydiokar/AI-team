@@ -641,11 +641,14 @@ def test_S8_09e_close_of_a_never_run_session_leaves_no_teardown_row_N_B(tmp_path
     assert [r[0] for r in rows] == ["worker-a"]
 
 
-def test_S8_09f_level3_blocked_invoke_abandons_the_boot(tmp_path, monkeypatch):
+def test_S8_09f_admission_blocked_invoke_abandons_the_boot(tmp_path, monkeypatch):
     db, o = _setup(tmp_path, monkeypatch)
     _wire(o)
     o._manager_role_enabled = lambda: True
-    o._harness_level3_allows_autopickup = lambda _t: False
+    async def _refused(task):
+        raise HarnessAdmissionBlocked(task.id, "local_execution_disabled")
+
+    o._enqueue_task = _refused
     with pytest.raises(HarnessAdmissionBlocked):
         asyncio.run(o.invoke_manager("ship X", repo_path="/tmp/repo", node_id="worker-a"))
     managers = [dict(r) for r in db._conn().execute(

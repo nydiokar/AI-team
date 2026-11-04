@@ -55,7 +55,7 @@ class _StubOrchestrator:
                                  parent_flow_run_id=None, **_):
         if self.block_task_id is not None:
             from src.orchestrator import HarnessAdmissionBlocked
-            raise HarnessAdmissionBlocked(self.block_task_id)
+            raise HarnessAdmissionBlocked(self.block_task_id, "local_execution_disabled")
         self.submitted.append((description, session_id, cwd, source))
         self.submit_kwargs.append({
             "target_files": target_files,
@@ -213,17 +213,17 @@ def test_instruction_unknown_session_404(client):
     assert r.status_code == 404
 
 
-# --- harness Level-3 admission block (A13) ----------------------------------
+# --- admission block (HarnessAdmissionBlocked) ------------------------------
 
 def test_blocked_oneoff_instruction_is_409_with_reason(client, orch):
-    """A one-off submit refused by the Level-3 admission gate returns a clean 409
+    """A one-off submit refused at admission returns a clean 409
     with the stable machine reason + human detail — not an opaque 500."""
     orch.block_task_id = "task_blocked_1"
     r = client.post("/api/instructions", headers=_auth(),
                     json={"description": "migrate the auth schema"})
     assert r.status_code == 409
     detail = r.json()["detail"]
-    assert detail["reason"] == "harness_level3_needs_approval"
+    assert detail["reason"] == "local_execution_disabled"
     assert detail["task_id"] == "task_blocked_1"
     assert detail["detail"]  # non-empty human copy
     # Nothing was accepted.
@@ -241,7 +241,7 @@ def test_blocked_session_instruction_reverts_busy_to_idle(client, orch, tmp_path
     r = client.post("/api/instructions", headers=_auth(),
                     json={"description": "rewrite the mesh router", "session_id": sid})
     assert r.status_code == 409
-    assert r.json()["detail"]["reason"] == "harness_level3_needs_approval"
+    assert r.json()["detail"]["reason"] == "local_execution_disabled"
     # The session is usable again, not stuck BUSY.
     s = orch.session_service.store.get(sid)
     assert s.status == SessionStatus.IDLE

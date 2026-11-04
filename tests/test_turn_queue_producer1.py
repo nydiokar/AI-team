@@ -52,7 +52,6 @@ def _no_cli_spawn(monkeypatch):
 @pytest.fixture(autouse=True)
 def _flags(monkeypatch):
     monkeypatch.delenv("HARNESS_FLOW_DRIVE", raising=False)
-    monkeypatch.delenv("HARNESS_LEVEL3_GUARD", raising=False)
 
 
 def _sess(sid="sess-1"):
@@ -132,11 +131,18 @@ def test_P1_01_enrolled_session_gets_one_durable_managed_turn(tmp_path, monkeypa
 # the A82 Stage-8b convergence cutoff: a non-enrolled session turn is now refused
 # unconditionally (LegacyExecutionRetiredError), proven by
 # test_turn_queue_stage8a.py::test_S8_11b.
+
+def _refuse_admission(monkeypatch) -> None:
+    """Make ``_enqueue_task`` refuse at its choke point, before any admission."""
+    async def _refused(self, task):
+        raise HarnessAdmissionBlocked(task.id, "local_execution_disabled")
+
+    monkeypatch.setattr(TaskOrchestrator, "_enqueue_task", _refused)
+
 # P1-03 --------------------------------------------------------------------- #
 def test_P1_03_harness_gate_refuses_before_admission(tmp_path, monkeypatch):
     db, o = _setup(tmp_path, monkeypatch)
-    monkeypatch.setattr(TaskOrchestrator, "_harness_level3_allows_autopickup",
-                        staticmethod(lambda task: False))
+    _refuse_admission(monkeypatch)
     with pytest.raises(HarnessAdmissionBlocked):
         _submit(o)
     assert _managed_rows(db) == []

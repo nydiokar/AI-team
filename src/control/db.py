@@ -310,12 +310,6 @@ RUNTIME_FLAG_DEFINITIONS: Dict[str, Dict[str, str]] = {
         "registry_writable": "1",
         "description": "A65 cost-alert enforcement: when ON, alerting surfaces the existing SDK governor ceiling (sdk_max_budget_usd) as the lever. Never a new kill mechanism.",
     },
-    "HARNESS_LEVEL3_GUARD": {
-        "default": "0",
-        "effect_scope": "live",
-        "registry_writable": "1",
-        "description": "Admission backstop requiring explicit approval for Level-3 auto-picked tasks.",
-    },
     "MANAGER_ROLE_ENABLED": {
         "default": "0",
         "effect_scope": "session_boot",
@@ -1233,12 +1227,6 @@ def manager_tools_enabled() -> bool:
     changing it does not mutate an already-running SDK session's allowed tools.
     """
     return runtime_flag_enabled("MANAGER_TOOLS_ENABLED")
-
-
-def harness_level3_guard_enabled() -> bool:
-    """Registry-over-env read of ``HARNESS_LEVEL3_GUARD``."""
-    return runtime_flag_enabled("HARNESS_LEVEL3_GUARD")
-
 
 
 def control_api_docs_enabled() -> bool:
