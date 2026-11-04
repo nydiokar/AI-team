@@ -139,18 +139,11 @@ class AlertRow(BaseModel):
     pct: float
 
 
-class AlertEnforcement(BaseModel):
-    enabled: bool
-    mechanism: str
-    governor_sdk_max_budget_usd: Optional[float] = None
-
-
 class CostAlertsOut(BaseModel):
     ok: bool
     enabled: bool
     budgets: AlertBudgets
     alerts: list[AlertRow]
-    enforcement: AlertEnforcement
 
 
 class RouteStat(BaseModel):
@@ -318,32 +311,18 @@ def build_router(orchestrator: Any, *, require_auth: Callable[..., Any]) -> APIR
 
     @router.get(
         "/api/cost/alerts",
-        responses={200: {"model": CostAlertsOut, "description": "Cost budget/burn-rate alerts and enforcement lever"}},
+        responses={200: {"model": CostAlertsOut, "description": "Cost budget/burn-rate alerts"}},
     )
     def api_cost_alerts() -> JSONResponse:
         """A65 P3 cost budget/burn-rate alerts. Billable-USD only — never raw
         token/cache-read volume. Thresholds are the env knobs
         COST_ALERT_DAILY_BUDGET_USD / COST_ALERT_SESSION_BURN_USD /
         COST_ALERT_CASE_TOTAL_USD (0 = off); an alert fires when the read-model's
-        known USD crosses a set knob. Read-only: alerts surface the existing SDK
-        governor ceiling (``sdk_max_budget_usd``) as the enforcement lever and
-        never add a new kill mechanism; enforcement stays flag-gated OFF."""
-        from src.control.db import runtime_flag_enabled
+        known USD crosses a set knob. Read-only: alerts never kill anything; the
+        spend cap is the SDK governor ceiling (``CLAUDE_SDK_MAX_BUDGET_USD``)."""
         from src.services.cost_alerts import check_cost_alerts
 
-        governor_budget: Optional[float] = None
-        try:
-            from src.control.db import sdk_governor_ceilings
-            governor_budget = sdk_governor_ceilings()["sdk_max_budget_usd"]
-        except Exception:
-            pass
-        result = check_cost_alerts(_cost_db())
-        result["enforcement"] = {
-            "enabled": runtime_flag_enabled("COST_ALERT_ENFORCE_ENABLED"),
-            "mechanism": "sdk_max_budget_usd",
-            "governor_sdk_max_budget_usd": governor_budget,
-        }
-        return JSONResponse(result)
+        return JSONResponse(check_cost_alerts(_cost_db()))
 
     # REVISIT (2026-10-05): no UI caller yet (tests only); the gateway's own per-minute
     # host/app metrics ring (app_metrics) - wire it into the System tab or drop it.

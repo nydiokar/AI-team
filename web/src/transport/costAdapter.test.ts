@@ -284,14 +284,9 @@ describe("toCostAlerts — P3 budget/burn-rate alerts", () => {
       { rule: "daily_budget", scope: "today (UTC)", value_usd: 2244.3, budget_usd: 100, pct: 2244.3 },
       { rule: "session_burn", scope: "sess-1", value_usd: 73.6, budget_usd: 50, pct: 147.2 },
     ],
-    enforcement: {
-      enabled: false,
-      mechanism: "sdk_max_budget_usd",
-      governor_sdk_max_budget_usd: null,
-    },
   };
 
-  it("maps fired alerts, budgets and the enforcement surface honestly", () => {
+  it("maps fired alerts and budgets honestly", () => {
     const out = toCostAlerts(raw);
     expect(out.enabled).toBe(true);
     expect(out.budgets).toEqual({ dailyBudgetUsd: 100, sessionBurnUsd: 0, caseTotalUsd: 0 });
@@ -303,9 +298,6 @@ describe("toCostAlerts — P3 budget/burn-rate alerts", () => {
       pct: 2244.3,
     });
     expect(out.alerts[1].rule).toBe("session_burn");
-    expect(out.enforcement.enabled).toBe(false);
-    expect(out.enforcement.mechanism).toBe("sdk_max_budget_usd");
-    expect(out.enforcement.governorSdkMaxBudgetUsd).toBeNull();
   });
 
   it("normalizes an unknown rule to daily_budget (never invents)", () => {
@@ -319,12 +311,9 @@ describe("toCostAlerts — P3 budget/burn-rate alerts", () => {
       enabled: false,
       budgets: undefined as never,
       alerts: [],
-      enforcement: undefined as never,
     });
     expect(out.enabled).toBe(false);
     expect(out.budgets).toEqual({ dailyBudgetUsd: 0, sessionBurnUsd: 0, caseTotalUsd: 0 });
     expect(out.alerts).toEqual([]);
-    expect(out.enforcement.enabled).toBe(false);
-    expect(out.enforcement.governorSdkMaxBudgetUsd).toBeNull();
   });
 });
