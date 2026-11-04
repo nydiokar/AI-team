@@ -54,7 +54,6 @@ FEATURE FLAGS (runtime-gated, all default OFF unless noted)
 ------------------------------------------------------------
   HARNESS_FLOW_DRIVE          — write flow_runs stage transitions (M1/M2, shadow)
   MANAGER_ROLE_ENABLED        — enable M3 Manager role boot via /api/manager
-  REVIEW_EMITTER_ENABLED      — emit review.* events on record_review()
   CASE_CONTINUATION_ENABLED   — wake-dispatcher autonomous continuation (M3.4)
   DURABLE_RELAY_ENABLED       — gates the boot-reconcile reply (A104: an inbox read)
   HARNESS_LEVEL3_GUARD        — admission gate for level-3 harness tasks
@@ -240,14 +239,8 @@ def _select_cache_heartbeat_prompt(beat_number: int, max_beats: int) -> str:
     """Pick a beat's prompt. When checkpoints are enabled, two beats become
     deliberate supervision checkpoints — an early awareness beat and a late
     decision beat (``max_beats - 1``) — and every other beat stays the blind
-    keep-warm ping. When disabled, every beat is the keep-warm ping (byte
-    identical to the pre-checkpoint behaviour)."""
-    from src.control.db import (
-        cache_heartbeat_awareness_beat,
-        cache_heartbeat_checkpoint_enabled,
-    )
-    if not cache_heartbeat_checkpoint_enabled():
-        return CACHE_HEARTBEAT_PROMPT
+    keep-warm ping."""
+    from src.control.db import cache_heartbeat_awareness_beat
     decision_beat = max(1, int(max_beats or 0) - 1)
     if beat_number == decision_beat:
         return CACHE_HEARTBEAT_DECISION_PROMPT
@@ -592,16 +585,9 @@ def _session_status_after_result(result: TaskResult, *, cancel_requested: bool =
     # [transient-resume] A terminal transient provider 5xx (529 Overloaded) did not
     # break the session — the provider refused the turn while overloaded — so ERROR
     # would be a lie that also strands the Case (the Wake-Dispatcher only ever wakes
-    # an AWAITING_INPUT Manager). Flag-gated so OFF ⇒ byte-identical (ERROR as
-    # before); the flag read only fires on the rare transient turn, never per
-    # result. The turn itself still reports failed — see is_transient_provider_pause_result.
+    # an AWAITING_INPUT Manager). The turn itself still reports failed — see is_transient_provider_pause_result.
     if is_transient_provider_pause_result(result):
-        try:
-            from src.control.db import transient_provider_resume_enabled
-            if transient_provider_resume_enabled():
-                return SessionStatus.AWAITING_INPUT
-        except Exception:
-            pass
+        return SessionStatus.AWAITING_INPUT
     if cancel_requested or any("cancelled" in str(error).lower() for error in (result.errors or [])):
         return SessionStatus.CANCELLED
     return SessionStatus.ERROR
@@ -2560,8 +2546,8 @@ class TaskOrchestrator(ITaskOrchestrator):
         propose bringing a Manager back.
         """
         try:
-            from src.control.db import case_quota_resume_enabled, get_db
-            if not self._harness_flow_drive_enabled() or not case_quota_resume_enabled():
+            from src.control.db import get_db
+            if not self._harness_flow_drive_enabled():
                 return
             if not is_quota_pause_result(result):
                 return
@@ -2663,8 +2649,8 @@ class TaskOrchestrator(ITaskOrchestrator):
         be silently replaced by a generic 'continue from the ledger' turn.
         """
         try:
-            from src.control.db import get_db, transient_provider_resume_enabled
-            if not self._harness_flow_drive_enabled() or not transient_provider_resume_enabled():
+            from src.control.db import get_db
+            if not self._harness_flow_drive_enabled():
                 return
             if not is_transient_provider_pause_result(result):
                 return
@@ -2875,7 +2861,7 @@ class TaskOrchestrator(ITaskOrchestrator):
         the UI panel and the ``/api/cases/{id}/resume-state`` endpoint.
         """
         from src.control.db import (
-            case_quota_resume_auto, case_quota_resume_enabled, get_db,
+            case_quota_resume_auto, get_db,
         )
         state: Dict[str, Any] = {
             "case_id": case_id, "paused": False, "pause": None,
@@ -2883,7 +2869,7 @@ class TaskOrchestrator(ITaskOrchestrator):
             "manager_session_id": None, "manager_session_status": None,
             "recommended_mode": "fresh_manager", "estimate": None,
             "pending_approval": None, "auto": case_quota_resume_auto(),
-            "enabled": case_quota_resume_enabled(),
+            "enabled": True,
             "modes": list(CASE_RESUME_MODES),
         }
         db = get_db()
@@ -2942,10 +2928,7 @@ class TaskOrchestrator(ITaskOrchestrator):
         """
         from src.control.db import (
             case_quota_resume_auto, case_quota_resume_auto_max_usd,
-            case_quota_resume_enabled,
         )
-        if not case_quota_resume_enabled():
-            return False
         pause = await asyncio.to_thread(db.case_quota_pause, case_id)
         if pause is None:
             return False
@@ -3168,10 +3151,8 @@ class TaskOrchestrator(ITaskOrchestrator):
         """
         from src.control.db import (
             CONTINUATION_MACHINE_SENTINEL, TRANSIENT_RESUME_ACTION,
-            transient_provider_resume_enabled, transient_resume_task_id,
+            transient_resume_task_id,
         )
-        if not transient_provider_resume_enabled():
-            return False
         pause = await asyncio.to_thread(db.transient_pause, case_id)
         if pause is None:
             return False

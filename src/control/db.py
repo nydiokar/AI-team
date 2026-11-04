@@ -280,12 +280,6 @@ RUNTIME_FLAG_DEFINITIONS: Dict[str, Dict[str, str]] = {
         "registry_writable": "1",
         "description": "Work Control Substrate flow_links/flow_events write path.",
     },
-    "REVIEW_EMITTER_ENABLED": {
-        "default": "0",
-        "effect_scope": "live",
-        "registry_writable": "1",
-        "description": "Manager review verdict emitter and unresolved-rework close gate.",
-    },
     "DURABLE_RELAY_ENABLED": {
         "default": "0",
         "effect_scope": "live",
@@ -310,41 +304,17 @@ RUNTIME_FLAG_DEFINITIONS: Dict[str, Dict[str, str]] = {
         "registry_writable": "1",
         "description": "Gate M3.4 crash-respawn (a dead Manager session on a satisfied Case) behind an operator approval instead of auto-spawning. Quota-caused deaths wait for confirmed-restored telemetry before even requesting approval.",
     },
-    "CASE_QUOTA_RESUME_ENABLED": {
-        "default": "1",
-        "effect_scope": "live",
-        "registry_writable": "1",
-        "description": "Record a Manager Case as quota-PAUSED when its turn dies on usage_limit, and propose a resume as soon as quota telemetry says the window reopened. OFF ⇒ no pause record, no proposal (pre-feature behaviour: the Case only ever resumes if a wait-group happens to satisfy later).",
-    },
     "CASE_QUOTA_RESUME_AUTO": {
         "default": "0",
         "effect_scope": "live",
         "registry_writable": "1",
         "description": "On quota restore, resume the paused Case immediately instead of asking the operator. Default OFF: the operator approves the resume via the session UI. When ON, the env knob CASE_QUOTA_RESUME_AUTO_MAX_USD (0 = no ceiling) still holds back any resume whose estimated cost exceeds it.",
     },
-    "TRANSIENT_PROVIDER_RESUME_ENABLED": {
-        "default": "0",
-        "effect_scope": "live",
-        "registry_writable": "1",
-        "description": "Self-heal a Manager Case whose turn died on a terminal transient provider 5xx (e.g. Anthropic 529 Overloaded, error_class=upstream_error) after in-process burst retries were exhausted. When ON: the session stays AWAITING_INPUT (not ERROR), the Case is recorded as transient-PAUSED with a short escalating fixed backoff (30/60/120/300s), and the Wake-Dispatcher auto-retries the failed turn once the backoff elapses — bounded (4 attempts per 15-min window, then flow.transient_pause_exhausted + escalate). Default OFF: a rare failure the operator wants to observe before enabling. OFF ⇒ transient turns fail as before (session ERROR), byte-identical.",
-    },
-    "CACHE_HEARTBEAT_OBSERVE": {
-        "default": "1",
-        "effect_scope": "live",
-        "registry_writable": "1",
-        "description": "Observe session-cache heartbeat candidates for durable waits/jobs without sending paid heartbeat turns. Default ON so long waits can be measured immediately.",
-    },
     "CACHE_HEARTBEAT_ACTIVE": {
         "default": "0",
         "effect_scope": "live",
         "registry_writable": "1",
         "description": "Send paid session-cache heartbeat turns for eligible observed controllers. Default OFF; switch ON to move from observe-only to acting.",
-    },
-    "CACHE_HEARTBEAT_CHECKPOINT_ENABLED": {
-        "default": "1",
-        "effect_scope": "live",
-        "registry_writable": "1",
-        "description": "Turn two of the heartbeat beats into deliberate supervision checkpoints instead of blind keep-warm pings: an early assessment beat (is the awaited work still real and on track?) and a late decision beat (continue supervising or conclude). The late beat's CONTINUE is the ONLY way the heartbeat budget renews — there is no automatic renewal. Default ON.",
     },
     "MANAGER_ADVANCEMENT_GATE": {
         "default": "0",
@@ -734,22 +704,12 @@ def sdk_governor_ceilings() -> Dict[str, Any]:
     return out
 
 
-def review_emitter_enabled() -> bool:
-    """[M3.2] Whether the review.* verdict emitter is active (slice 1).
-
-    Canonical read of ``REVIEW_EMITTER_ENABLED`` (truthy: 1/true/yes/on); default
-    OFF. Mirrors ``flow_drive_enabled()``. When OFF: the /api/cases/{id}/review route
-    returns 404 AND ``close_case`` skips the unresolved-rework gate ⇒ byte-identical
-    to pre-M3.2 behavior.
-    """
-    return runtime_flag_enabled("REVIEW_EMITTER_ENABLED")
-
 
 def manager_advancement_gate_enabled() -> bool:
     """Whether the Manager advancement close-gate is active.
 
     Canonical read of ``MANAGER_ADVANCEMENT_GATE`` (truthy: 1/true/yes/on);
-    default OFF. Mirrors ``review_emitter_enabled()``. When OFF: ``close_case``
+    default OFF. When OFF: ``close_case``
     applies no advancement check ⇒ byte-identical to the prior behaviour (a
     manager close still needs only a non-empty ``continuation_plan``). When ON:
     a ``actor='manager'`` close is refused unless the Case ledger shows the work
@@ -765,7 +725,7 @@ def durable_relay_enabled() -> bool:
     """[A46/M3.3] Whether the durable worker-wait relay is active.
 
     Canonical read of ``DURABLE_RELAY_ENABLED`` (truthy: 1/true/yes/on); default
-    OFF. Mirrors ``review_emitter_enabled()``. When OFF: ``record_worker_wait``
+    OFF. When OFF: ``record_worker_wait``
     writes no pending marker and ``reconcile_worker_waits`` no-ops ⇒ byte-identical
     to pre-A46 behavior (no ``worker.wait_*`` events are ever written, and the two
     /api/cases/{id}/waits routes return 404).
@@ -800,18 +760,6 @@ def case_respawn_requires_approval() -> bool:
     return runtime_flag_enabled("CASE_RESPAWN_REQUIRES_APPROVAL")
 
 
-def case_quota_resume_enabled() -> bool:
-    """[quota-resume] Whether a Manager Case is recorded as quota-PAUSED and gets
-    a resume proposal when the window reopens.
-
-    Canonical read of ``CASE_QUOTA_RESUME_ENABLED``; default ON — a Case silently
-    stalling until some unrelated worker finish happened to satisfy a wait-group
-    was the reported defect. OFF ⇒ no ``flow.quota_paused`` is written and the
-    quota branch of the Wake-Dispatcher tick returns immediately, byte-identical
-    to pre-feature behaviour.
-    """
-    return runtime_flag_enabled("CASE_QUOTA_RESUME_ENABLED")
-
 
 def case_quota_resume_auto() -> bool:
     """[quota-resume] Whether a restored quota resumes the paused Case WITHOUT an
@@ -838,25 +786,6 @@ def case_quota_resume_auto_max_usd() -> float:
         return 0.0
 
 
-def transient_provider_resume_enabled() -> bool:
-    """[transient-resume] Whether a Manager Case whose turn died on a terminal
-    transient provider 5xx (e.g. Anthropic 529 Overloaded ⇒ ``error_class ==
-    upstream_error``) self-heals via a short-backoff auto-retry.
-
-    Canonical read of ``TRANSIENT_PROVIDER_RESUME_ENABLED``; default OFF. When OFF
-    the session-status transient branch, ``_record_transient_pause`` and the
-    Wake-Dispatcher transient branch are all no-ops ⇒ the turn fails exactly as it
-    did before the feature (session ERROR), byte-identical. Distinct from the
-    quota seam: a 529 carries no ``resetsAt`` and reopens in seconds-to-minutes,
-    so restore is a fixed escalating backoff, not telemetry, and the retry is
-    automatic and free (no cache-rewrite cost estimate, no operator approval).
-    """
-    return runtime_flag_enabled("TRANSIENT_PROVIDER_RESUME_ENABLED")
-
-
-def cache_heartbeat_observe_enabled() -> bool:
-    """Whether heartbeat producers should record durable observe-only intent."""
-    return runtime_flag_enabled("CACHE_HEARTBEAT_OBSERVE")
 
 
 def cache_heartbeat_active_enabled() -> bool:
@@ -919,10 +848,6 @@ def cache_heartbeat_max_beats_default() -> int:
 def cache_heartbeat_hard_max_beats() -> int:
     return _env_int("CACHE_HEARTBEAT_MAX_BEATS_HARD", 15, 1)
 
-
-def cache_heartbeat_checkpoint_enabled() -> bool:
-    """Whether the two supervision checkpoints replace the dumb keep-warm beats."""
-    return runtime_flag_enabled("CACHE_HEARTBEAT_CHECKPOINT_ENABLED")
 
 
 def cache_heartbeat_awareness_beat() -> int:
@@ -7262,11 +7187,11 @@ class MeshDB:
                     f"completion_criteria not reconciled: {unresolved}"
                 )
 
-        # [M3.2] Unresolved-rework gate (flag-gated ⇒ OFF is byte-identical). The
+        # [M3.2] Unresolved-rework gate. The
         # LATEST review.* event is authoritative: if it is 'review.rework_requested'
         # it has NOT been superseded by a later accept/waive (else that later event
         # would be the latest), so the Case cannot honestly close.
-        if not force and review_emitter_enabled():
+        if not force:
             review_events = self.list_flow_events_of_types(
                 flow_run_id, sorted(_REVIEW_EVENT_TYPES), newest_first=True, limit=1,
             )
@@ -10396,8 +10321,6 @@ class MeshDB:
         ``CACHE_HEARTBEAT_ACTIVE``. Adding a second owner to an active episode
         reuses the controller and does not reset its beat count.
         """
-        if not (cache_heartbeat_observe_enabled() or cache_heartbeat_active_enabled()):
-            return None
         sid = str(session_id or "").strip()
         oid = str(owner_id or "").strip()
         if not sid or not oid:
@@ -10753,7 +10676,6 @@ class MeshDB:
             circuit = "cache_miss_rewrite"
         elif (
             "CONTINUE_SUPERVISION" in out_s
-            and cache_heartbeat_checkpoint_enabled()
             and beat_count >= max(1, max_cap - 1)
         ):
             # Deliberate renewal — the ONLY path that extends the budget. At the

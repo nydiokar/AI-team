@@ -96,7 +96,6 @@ def _auth():
     ("waived", "review.waived"),
 ])
 def test_review_route_appends_event(monkeypatch, client, db, verdict, event_type):
-    monkeypatch.setenv("REVIEW_EMITTER_ENABLED", "1")
     fid = db.open_case("obj", f"sess-{verdict}")
 
     r = client.post(
@@ -120,7 +119,6 @@ def test_review_route_tags_task_id(monkeypatch, client, db):
     # A verdict carrying task_id is TAGGED to that worker task (entity_type='task',
     # entity_id=task_id) — the consumption signal the Wake-Dispatcher reads — while
     # the payload stays the same compact {verdict, reason}.
-    monkeypatch.setenv("REVIEW_EMITTER_ENABLED", "1")
     fid = db.open_case("obj", "sess-tag")
     r = client.post(
         f"/api/cases/{fid}/review",
@@ -139,7 +137,6 @@ def test_review_route_tags_task_id(monkeypatch, client, db):
 def test_review_route_untagged_is_case_level(monkeypatch, client, db):
     # Omitting task_id records a Case-level review exactly as before — no entity tag,
     # so pre-tagging behaviour is byte-identical and the wake optimisation is inert.
-    monkeypatch.setenv("REVIEW_EMITTER_ENABLED", "1")
     fid = db.open_case("obj", "sess-notag")
     r = client.post(
         f"/api/cases/{fid}/review",
@@ -153,7 +150,6 @@ def test_review_route_untagged_is_case_level(monkeypatch, client, db):
 
 
 def test_review_route_idempotency_key_dedupes_retry(monkeypatch, client, db):
-    monkeypatch.setenv("REVIEW_EMITTER_ENABLED", "1")
     fid = db.open_case("obj", "sess-idem")
     endpoint = next(
         r.endpoint for r in iter_route_contexts(client.app.routes)
@@ -174,7 +170,6 @@ def test_review_route_idempotency_key_dedupes_retry(monkeypatch, client, db):
 
 
 def test_review_route_db_failure_is_structured_retryable(monkeypatch, db):
-    monkeypatch.setenv("REVIEW_EMITTER_ENABLED", "1")
     monkeypatch.setattr(control_api, "_dashboard_token", lambda: TOKEN)
     monkeypatch.setattr(control_api, "_db", lambda: db)
 
@@ -211,7 +206,6 @@ def test_review_route_surrogate_reason_does_not_500(monkeypatch, client, db):
     # NOT crash the response renderer into a 500. pydantic rejects the un-encodable
     # string, but the custom RequestValidationError handler renders a clean 422 with
     # the surrogate scrubbed — never a panic (§7 malformed-input service boundary).
-    monkeypatch.setenv("REVIEW_EMITTER_ENABLED", "1")
     fid = db.open_case("obj", "sess-surrogate")
     # Faithful wire shape: the MCP client json.dumps() with ensure_ascii=True, so the
     # surrogate travels as a \\udc81 escape and the server's json.loads reconstructs
@@ -229,14 +223,12 @@ def test_review_route_surrogate_reason_does_not_500(monkeypatch, client, db):
 
 
 def test_review_route_invalid_verdict_422(monkeypatch, client, db):
-    monkeypatch.setenv("REVIEW_EMITTER_ENABLED", "1")
     fid = db.open_case("obj", "sess-x")
     r = client.post(f"/api/cases/{fid}/review", json={"verdict": "bogus"}, headers=_auth())
     assert r.status_code == 422
 
 
 def test_review_route_requires_token(monkeypatch, client, db):
-    monkeypatch.setenv("REVIEW_EMITTER_ENABLED", "1")
     fid = db.open_case("obj", "sess-x")
     assert client.post(f"/api/cases/{fid}/review", json={"verdict": "accepted"}).status_code in (401, 403)
 
@@ -246,7 +238,6 @@ def test_review_route_requires_token(monkeypatch, client, db):
 # ---------------------------------------------------------------------------
 
 def test_close_blocked_by_unresolved_rework(monkeypatch, tmp_path):
-    monkeypatch.setenv("REVIEW_EMITTER_ENABLED", "1")
     db = MeshDB(str(tmp_path / "mesh.db"))
     fid = db.open_case("obj", "sess-1")
     db.append_flow_event(fid, "review.rework_requested", "manager",
@@ -256,7 +247,6 @@ def test_close_blocked_by_unresolved_rework(monkeypatch, tmp_path):
 
 
 def test_close_allowed_after_later_accept(monkeypatch, tmp_path):
-    monkeypatch.setenv("REVIEW_EMITTER_ENABLED", "1")
     db = MeshDB(str(tmp_path / "mesh.db"))
     fid = db.open_case("obj", "sess-1")
     db.append_flow_event(fid, "review.rework_requested", "manager", payload={"verdict": "rework_requested"})
@@ -265,31 +255,8 @@ def test_close_allowed_after_later_accept(monkeypatch, tmp_path):
 
 
 def test_close_allowed_after_later_waive(monkeypatch, tmp_path):
-    monkeypatch.setenv("REVIEW_EMITTER_ENABLED", "1")
     db = MeshDB(str(tmp_path / "mesh.db"))
     fid = db.open_case("obj", "sess-1")
     db.append_flow_event(fid, "review.rework_requested", "manager", payload={"verdict": "rework_requested"})
     db.append_flow_event(fid, "review.waived", "manager", payload={"verdict": "waived", "reason": "ok"})
-    assert db.close_case(fid) is True
-
-
-# ---------------------------------------------------------------------------
-# (d) flag OFF is byte-identical: route 404 + no review gate in close_case
-# ---------------------------------------------------------------------------
-
-def test_review_route_404_when_flag_off(monkeypatch, client, db):
-    monkeypatch.delenv("REVIEW_EMITTER_ENABLED", raising=False)
-    fid = db.open_case("obj", "sess-1")
-    r = client.post(f"/api/cases/{fid}/review", json={"verdict": "accepted"}, headers=_auth())
-    assert r.status_code == 404
-    # Nothing was appended.
-    assert [e for e in db.list_flow_events(fid) if e["event_type"].startswith("review.")] == []
-
-
-def test_close_ignores_review_gate_when_flag_off(monkeypatch, tmp_path):
-    monkeypatch.delenv("REVIEW_EMITTER_ENABLED", raising=False)
-    db = MeshDB(str(tmp_path / "mesh.db"))
-    fid = db.open_case("obj", "sess-1")
-    # An unresolved rework event exists, but with the flag OFF the gate is skipped.
-    db.append_flow_event(fid, "review.rework_requested", "manager", payload={"verdict": "rework_requested"})
     assert db.close_case(fid) is True

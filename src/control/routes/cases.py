@@ -362,12 +362,9 @@ def build_router(
         idempotency_key: Optional[str] = Header(default=None, alias="Idempotency-Key"),
     ) -> JSONResponse:
         """[M3.2] Record a Manager review verdict (accepted|rework_requested|waived)
-        as the canonical ``review.*`` flow_event on the Case audit trail. Gated by
-        ``REVIEW_EMITTER_ENABLED``: when OFF this route returns 404 (disabled) so
-        flag-OFF is byte-identical to pre-M3.2. Mirrors ``api_close_case``."""
-        from src.control.db import REVIEW_VERDICT_EVENT_TYPES, review_emitter_enabled
-        if not review_emitter_enabled():
-            raise HTTPException(status_code=404, detail="not_found")
+        as the canonical ``review.*`` flow_event on the Case audit trail. Mirrors
+        ``api_close_case``."""
+        from src.control.db import REVIEW_VERDICT_EVENT_TYPES
         if body.verdict not in REVIEW_VERDICT_EVENT_TYPES:
             raise HTTPException(
                 status_code=422,

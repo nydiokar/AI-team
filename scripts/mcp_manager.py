@@ -1380,8 +1380,7 @@ def _record_review(args: Dict[str, Any]) -> str:
     ``reason`` is an optional short note. Pass ``task_id`` = the worker task you just
     reviewed so the verdict is tagged to it — this also tells the harness you've
     already consumed that finish, so it won't re-wake you about it. POSTs to
-    /api/cases/{case_id}/review. A 404 means the emitter is disabled on the gateway
-    (REVIEW_EMITTER_ENABLED OFF)."""
+    /api/cases/{case_id}/review."""
     case_id = _bounded_text(args.get("case_id"), "case_id", _MAX_ID_CHARS, required=True)
     verdict = _bounded_text(args.get("verdict"), "verdict", 32, required=True)
     if verdict not in _REVIEW_VERDICTS:
@@ -1820,7 +1819,7 @@ _TOOLS = [
             "(and blocks close_case until a later accept/waive supersedes it), 'waived' records "
             "an accepted-as-is with a reason. Pass task_id = the worker task you reviewed to tag "
             "the verdict to it; this also consumes that completion in your inbox so the harness won't "
-            "wake you about an already-reviewed worker. A 404 means the emitter is disabled on the gateway."
+            "wake you about an already-reviewed worker."
         ),
         "inputSchema": {
             "type": "object",

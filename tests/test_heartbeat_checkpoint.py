@@ -43,22 +43,11 @@ def test_budget_floored_at_six_for_tiny_timeout(monkeypatch) -> None:
     assert cache_heartbeat_max_beats_default() == 6
 
 
-def test_checkpoint_flag_defaults_on() -> None:
-    assert db_mod.RUNTIME_FLAG_DEFINITIONS["CACHE_HEARTBEAT_CHECKPOINT_ENABLED"]["default"] == "1"
-
-
 # --------------------------------------------------------------------------- #
 # 2. Prompt selection
 # --------------------------------------------------------------------------- #
 
-def test_disabled_always_keep_warm(monkeypatch) -> None:
-    monkeypatch.setattr(db_mod, "cache_heartbeat_checkpoint_enabled", lambda: False)
-    for beat in (1, 6, 13, 14):
-        assert _select_cache_heartbeat_prompt(beat, 14) is CACHE_HEARTBEAT_PROMPT
-
-
 def test_enabled_selects_awareness_decision_and_keep_warm(monkeypatch) -> None:
-    monkeypatch.setattr(db_mod, "cache_heartbeat_checkpoint_enabled", lambda: True)
     monkeypatch.setattr(db_mod, "cache_heartbeat_awareness_beat", lambda: 6)
     assert _select_cache_heartbeat_prompt(6, 14) is CACHE_HEARTBEAT_AWARENESS_PROMPT
     assert _select_cache_heartbeat_prompt(13, 14) is CACHE_HEARTBEAT_DECISION_PROMPT  # max-1
@@ -69,7 +58,6 @@ def test_enabled_selects_awareness_decision_and_keep_warm(monkeypatch) -> None:
 def test_small_budget_drops_awareness_but_keeps_decision(monkeypatch) -> None:
     # max_beats=4 -> decision beat 3; awareness (6) is past the decision beat, so
     # it never fires — only the decision checkpoint remains.
-    monkeypatch.setattr(db_mod, "cache_heartbeat_checkpoint_enabled", lambda: True)
     monkeypatch.setattr(db_mod, "cache_heartbeat_awareness_beat", lambda: 6)
     assert _select_cache_heartbeat_prompt(3, 4) is CACHE_HEARTBEAT_DECISION_PROMPT
     for beat in (1, 2, 4, 6):
@@ -120,7 +108,6 @@ def _record(db: MeshDB, hb_id: str, output: str):
 def test_continue_at_decision_beat_renews_budget(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("CACHE_HEARTBEAT_ACTIVE", "1")
     monkeypatch.setenv("CACHE_HEARTBEAT_MAX_BEATS_DEFAULT", "4")  # decision beat = 3
-    monkeypatch.setattr(db_mod, "cache_heartbeat_checkpoint_enabled", lambda: True)
     db = MeshDB(str(tmp_path / "mesh.db"))
     hb_id = _armed_hb(db, beat_count=2)  # this beat -> 3 == decision beat
 
@@ -139,7 +126,6 @@ def test_continue_at_decision_beat_renews_budget(tmp_path, monkeypatch) -> None:
 def test_conclude_stops_the_controller(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("CACHE_HEARTBEAT_ACTIVE", "1")
     monkeypatch.setenv("CACHE_HEARTBEAT_MAX_BEATS_DEFAULT", "4")
-    monkeypatch.setattr(db_mod, "cache_heartbeat_checkpoint_enabled", lambda: True)
     db = MeshDB(str(tmp_path / "mesh.db"))
     hb_id = _armed_hb(db, beat_count=2)
 
@@ -152,7 +138,6 @@ def test_conclude_stops_the_controller(tmp_path, monkeypatch) -> None:
 def test_continue_below_decision_beat_does_not_renew(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("CACHE_HEARTBEAT_ACTIVE", "1")
     monkeypatch.setenv("CACHE_HEARTBEAT_MAX_BEATS_DEFAULT", "4")  # decision beat = 3
-    monkeypatch.setattr(db_mod, "cache_heartbeat_checkpoint_enabled", lambda: True)
     db = MeshDB(str(tmp_path / "mesh.db"))
     hb_id = _armed_hb(db, beat_count=0)  # this beat -> 1, well below decision beat 3
 
@@ -160,17 +145,3 @@ def test_continue_below_decision_beat_does_not_renew(tmp_path, monkeypatch) -> N
 
     assert row["status"] in ("active", "observe_only")
     assert int(row["beat_count"]) == 1  # normal increment, NOT reset
-
-
-def test_continue_does_not_renew_when_checkpoints_disabled(tmp_path, monkeypatch) -> None:
-    monkeypatch.setenv("CACHE_HEARTBEAT_ACTIVE", "1")
-    monkeypatch.setenv("CACHE_HEARTBEAT_MAX_BEATS_DEFAULT", "4")
-    monkeypatch.setattr(db_mod, "cache_heartbeat_checkpoint_enabled", lambda: False)
-    db = MeshDB(str(tmp_path / "mesh.db"))
-    hb_id = _armed_hb(db, beat_count=2)  # -> 3; would be decision beat if enabled
-
-    row = _record(db, hb_id, "CONTINUE_SUPERVISION")
-
-    # No renewal path when disabled: increments normally, stays active (3 < 4).
-    assert int(row["beat_count"]) == 3
-    assert row["status"] in ("active", "observe_only")

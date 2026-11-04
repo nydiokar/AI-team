@@ -752,7 +752,6 @@ def test_R04_stopped_enrolled_manager_is_not_woken_by_automation(tmp_path, monke
 
     monkeypatch.setenv("HARNESS_FLOW_DRIVE", "1")
     monkeypatch.setenv("CASE_CONTINUATION_ENABLED", "1")
-    monkeypatch.setenv("TRANSIENT_PROVIDER_RESUME_ENABLED", "1")
     monkeypatch.setenv("DURABLE_RELAY_ENABLED", "1")
     monkeypatch.setenv("CASE_RESPAWN_REQUIRES_APPROVAL", "0")
 

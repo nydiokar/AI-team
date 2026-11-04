@@ -81,7 +81,6 @@ def _cache_evidence(
 
 def test_observe_default_creates_one_controller_for_overlapping_owners(tmp_path, monkeypatch) -> None:
     monkeypatch.delenv("CACHE_HEARTBEAT_ACTIVE", raising=False)
-    monkeypatch.delenv("CACHE_HEARTBEAT_OBSERVE", raising=False)
     db = MeshDB(str(tmp_path / "mesh.db"))
     _cache_evidence(db)
 
