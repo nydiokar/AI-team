@@ -7,7 +7,7 @@ from typing import Any, Dict, Iterable, List, Optional
 
 from src.core.telemetry import TelemetryEvent
 
-PROJECTION_VERSION = 2
+PROJECTION_VERSION = 3
 
 
 def _as_dict(event: TelemetryEvent | Dict[str, Any]) -> Dict[str, Any]:

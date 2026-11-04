@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import socket
 from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Optional
@@ -13,7 +14,9 @@ from src.core.telemetry import (
     TelemetryEvent,
     build_event,
 )
-from src.core.telemetry_projection import project_turn
+from src.core.telemetry_projection import PROJECTION_VERSION, project_turn
+
+logger = logging.getLogger(__name__)
 
 
 def _now() -> str:
@@ -194,19 +197,40 @@ class TelemetryStore:
         remaining batch; no synthetic events, provider calls or historical replay.
         """
         rows = self.db._conn().execute(
-            "SELECT turn_id FROM llm_turns INDEXED BY idx_llm_turns_lifecycle_repair "
-            "WHERE projection_version<2 AND events_pruned_at IS NULL "
+            "SELECT turn_id FROM llm_turns INDEXED BY idx_llm_turns_lifecycle_repair_v3 "
+            "WHERE projection_version<3 AND events_pruned_at IS NULL "
             "ORDER BY updated_at DESC,turn_id DESC LIMIT ?", (max(1, min(limit, 25)),),
         ).fetchall()
         for row in rows:
-            # A corrupt/missing raw stream must not spin forever at the head.
-            if self.rebuild_turn(str(row["turn_id"])) is None:
-                with self.db._write() as conn:
-                    conn.execute(
-                        "UPDATE llm_turns SET projection_version=2 WHERE turn_id=? AND projection_version<2",
-                        (row["turn_id"],),
-                    )
+            tid = str(row["turn_id"])
+            try:
+                missing = self.rebuild_turn(tid) is None
+            except (ValueError, TypeError, KeyError, AttributeError, OverflowError):
+                self._mark_lifecycle_repair_unavailable(tid, "lifecycle_repair_invalid_events")
+                continue
+            if missing:
+                self._mark_lifecycle_repair_unavailable(tid, "lifecycle_repair_missing_events")
         return len(rows)
+
+    def _mark_lifecycle_repair_unavailable(self, turn_id: str, reason: str) -> None:
+        """Preserve an unreadable summary with explicit quality evidence, once.
+
+        Data errors cannot poison every later repair batch. Storage errors still
+        propagate for retry; pruned summaries and concurrent repairs are untouched.
+        """
+        with self.db._write() as conn:
+            row = conn.execute(
+                "SELECT data_quality_json FROM llm_turns WHERE turn_id=? "
+                "AND projection_version<3 AND events_pruned_at IS NULL", (turn_id,),
+            ).fetchone()
+            if row is None:
+                return
+            flags = self._decode_flags(row["data_quality_json"]) | {reason}
+            conn.execute(
+                "UPDATE llm_turns SET projection_version=?,data_quality_json=?,updated_at=? "
+                "WHERE turn_id=? AND projection_version<3 AND events_pruned_at IS NULL",
+                (PROJECTION_VERSION, _json(sorted(flags)), _now(), turn_id),
+            )
 
     def rebuild_turn(self, turn_id: str) -> Optional[Dict[str, Any]]:
         events = self._all_events(turn_id)
@@ -218,6 +242,25 @@ class TelemetryStore:
         now = _now()
 
         with self.db._write() as conn:
+            previous = conn.execute(
+                "SELECT events_pruned_at FROM llm_turns WHERE turn_id=?", (turn_id,),
+            ).fetchone()
+            if previous is not None and previous["events_pruned_at"]:
+                # Retention can win after _all_events read its snapshot. Never
+                # replace a retained summary/usage with a partial stale replay.
+                return None
+            canonical = conn.execute(
+                "SELECT status,started_at FROM mesh_tasks WHERE id=? AND queue_protocol=1",
+                (turn["task_id"],),
+            ).fetchone()
+            if canonical is not None and canonical["status"] == "withdrawn":
+                # A104 reclassified never-executed turns after their immutable
+                # telemetry had already recorded cancelled. The queue owns this
+                # distinction; rebuilding must not resurrect those turn counts.
+                turn["final_status"] = "withdrawn"
+                if canonical["started_at"] is None:
+                    turn["started_at"] = None
+                    turn["metrics"]["wall_time_ms"] = None
             conn.execute(
                 """
                 INSERT INTO llm_turns (
