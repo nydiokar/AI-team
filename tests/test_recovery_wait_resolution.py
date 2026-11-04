@@ -56,7 +56,6 @@ def test_reconcile_resolves_from_task_truth(tmp_path, monkeypatch):
     no ``task.finished`` and no wait marker involved."""
     from tests.inbox_seed import seed_child
 
-    monkeypatch.setenv("DURABLE_RELAY_ENABLED", "1")
     db = _db(tmp_path)
     case_id = db.open_case("obj", "mgr-1", role="manager")
     seed_child(db, case_id, "task_t", requester="mgr-1")

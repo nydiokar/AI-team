@@ -68,7 +68,6 @@ def _dispatch(db, o, cid, worker, client, op):
         kw["requester_session_id"] = STALE_ENV_SESSION
     child = _submit(o, **kw)
     if client == "legacy":
-        assert o.record_worker_wait(cid, str(child))["ok"]            # old client: POST /waits
         assert o.arm_wait_group(cid, f"g-{op}", "ANY", [str(child)])["ok"]  # old client: arm ANY
     return str(child)
 

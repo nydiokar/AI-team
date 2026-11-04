@@ -54,7 +54,6 @@ FEATURE FLAGS (runtime-gated, all default OFF unless noted)
 ------------------------------------------------------------
   HARNESS_FLOW_DRIVE          — write flow_runs stage transitions (M1/M2, shadow)
   MANAGER_ROLE_ENABLED        — enable M3 Manager role boot via /api/manager
-  DURABLE_RELAY_ENABLED       — gates the boot-reconcile reply (A104: an inbox read)
   HARNESS_LEVEL3_GUARD        — admission gate for level-3 harness tasks
   QUOTA_COORDINATOR_ENABLED   — observe-only quota/session-window coordinator
 """
@@ -3760,8 +3759,7 @@ class TaskOrchestrator(ITaskOrchestrator):
 
         ANTI-GOAL: this NEVER calls ``open_case`` and NEVER mints a new ``flow_run_id`` — it
         binds the fresh session to the passed ``case_id`` via a manager ``flow_link`` and
-        reconstructs the objective/waits from the DB (``get_case_brief`` /
-        ``boot_reconcile_case``). The objective-lock is preserved end to end.
+        reconstructs the objective/waits from the DB (``get_case_brief``). The objective-lock is preserved end to end.
         """
         # Manager respawn boots a role-full Manager session; the driver's _role_boot
         # only applies the role prompt + scoped manager tools when MANAGER_ROLE is ON.
@@ -3891,10 +3889,6 @@ class TaskOrchestrator(ITaskOrchestrator):
         except Exception as e:  # noqa: BLE001 — every step converges on re-run
             logger.warning("event=managed_respawn_failed case=%s err=%s", case_id, e)
             return False
-        try:
-            db.boot_reconcile_case(case_id, actor="manager")
-        except Exception as e:
-            logger.debug("event=respawn_reconcile_failed case=%s err=%s", case_id, e)
         from src.control.turn_scheduler import notify_turn_queue_changed
 
         notify_turn_queue_changed()  # the bound respawn turn may now activate
@@ -6131,7 +6125,6 @@ class TaskOrchestrator(ITaskOrchestrator):
     # close_case()             — guard-checked close (open children, unresolved
     #                            rework, completion_criteria all checked first)
     # record_review()          — emit review.accepted / review.rework_requested
-    # record_worker_wait()     — A104 no-op shim (the inbox records the obligation)
     # arm_wait_group()         — A104 shim: store a D2 delivery filter
     # reconcile_worker_waits() — A104 shim: what pending_for holds for the Case
     # _close_worker_session_on_case_close() — best-effort warm-worker cleanup
@@ -6535,27 +6528,6 @@ class TaskOrchestrator(ITaskOrchestrator):
             return {"ok": False, "reason": "db_unavailable"}
         return db.decompose_case(flow_run_id, spec_id, tasks, actor=actor)
 
-    def record_worker_wait(
-        self,
-        flow_run_id: str,
-        task_id: str,
-        *,
-        timeout: Optional[float] = None,
-        actor: str = "manager",
-    ) -> Dict[str, Any]:
-        """[A46 → A104 shim] Kept for un-redeployed callers; writes nothing (the
-        agent inbox records the obligation at dispatch + terminal). Returns
-        ``{"ok": True, "event_id": None}`` or ``{"ok": False, "reason": "db_unavailable"}``.
-        """
-        from src.control.db import get_db
-        db = get_db()
-        if db is None:
-            return {"ok": False, "reason": "db_unavailable"}
-        event_id = db.record_worker_wait(
-            flow_run_id, task_id, timeout=timeout, actor=actor,
-        )
-        return {"ok": True, "event_id": event_id}
-
     def arm_wait_group(
         self,
         flow_run_id: str,
@@ -6568,7 +6540,7 @@ class TaskOrchestrator(ITaskOrchestrator):
         """[M3.4] Orchestrator seam — arm a Manager wait-group over a dispatch set so
         the Wake-Dispatcher re-enters the Case when the group is satisfied.
 
-        Mirrors the ``record_worker_wait`` seam. ``condition`` ∈ {ANY, ALL, NAMED};
+        Mirrors the ``reconcile_worker_waits`` seam. ``condition`` ∈ {ANY, ALL, NAMED};
         Returns ``{"ok": True, "event_id"}`` or
         ``{"ok": False, "reason": "db_unavailable"}``.
         """
@@ -6638,22 +6610,6 @@ class TaskOrchestrator(ITaskOrchestrator):
         if brief is None:
             return {"ok": False, "reason": "case_not_found"}
         return {"ok": True, "brief": brief}
-
-    def boot_reconcile_case(
-        self,
-        flow_run_id: str,
-        *,
-        actor: str = "manager",
-    ) -> Dict[str, Any]:
-        """[A54] Orchestrator seam — the boot-time reconcile+re-arm hook
-        (:func:`db.boot_reconcile_case`) a resuming Manager fires onto an existing
-        OPEN Case. Idempotent + flag-gated in the db layer. Mirrors the
-        ``reconcile_worker_waits`` seam."""
-        from src.control.db import get_db
-        db = get_db()
-        if db is None:
-            return {"ok": False, "reason": "db_unavailable"}
-        return db.boot_reconcile_case(flow_run_id, actor=actor)
 
     def _clear_session_case_affiliation(self, session_id: str, case_id: str) -> None:
         """[A37] Clear a session's durable Case affiliation on Case close.

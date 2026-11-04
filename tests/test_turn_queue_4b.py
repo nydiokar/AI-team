@@ -751,7 +751,6 @@ def test_R04_stopped_enrolled_manager_is_not_woken_by_automation(tmp_path, monke
             return attr.__get__(self) if callable(attr) else attr
 
     monkeypatch.setenv("HARNESS_FLOW_DRIVE", "1")
-    monkeypatch.setenv("DURABLE_RELAY_ENABLED", "1")
     monkeypatch.setenv("CASE_RESPAWN_REQUIRES_APPROVAL", "0")
 
     def scenario(stop: bool):
@@ -828,7 +827,6 @@ def test_R04b_crash_respawn_approval_is_not_proposed_for_a_stopped_manager(tmp_p
             return attr.__get__(self) if callable(attr) else attr
 
     monkeypatch.setenv("HARNESS_FLOW_DRIVE", "1")
-    monkeypatch.setenv("DURABLE_RELAY_ENABLED", "1")
     db, o = _setup(tmp_path, monkeypatch)
     _wire(o)
     s = _sess()
@@ -1059,7 +1057,6 @@ def test_R11_unenrolled_case_automation_never_reads_the_hold_record(tmp_path, mo
             return attr.__get__(self) if callable(attr) else attr
 
     monkeypatch.setenv("HARNESS_FLOW_DRIVE", "1")
-    monkeypatch.setenv("DURABLE_RELAY_ENABLED", "1")
     db, o = _setup(tmp_path, monkeypatch, enroll=False)
     s = _sess()
     s.status = SS.AWAITING_INPUT
@@ -1138,7 +1135,7 @@ def test_F01_unreadable_hold_of_a_held_manager_fails_closed(tmp_path, monkeypatc
     """N1 kill: a hold read error is HELD — a stopped Manager is not treated as
     dead (no crash-respawn, no approval) — and the next healthy tick still
     holds."""
-    for k in ("HARNESS_FLOW_DRIVE", "DURABLE_RELAY_ENABLED"):
+    for k in ("HARNESS_FLOW_DRIVE",):
         monkeypatch.setenv(k, "1")
     db, o = _setup(tmp_path, monkeypatch)
     _wire(o)
@@ -1160,7 +1157,7 @@ def test_F01_unreadable_hold_of_a_held_manager_fails_closed(tmp_path, monkeypatc
 def test_F01b_unreadable_hold_is_a_skipped_tick_not_a_lost_wake(tmp_path, monkeypatch):
     """Adopted reviewer probe P1: an unheld Manager whose hold read fails once
     is skipped for that tick and woken on the next healthy one."""
-    for k in ("HARNESS_FLOW_DRIVE", "DURABLE_RELAY_ENABLED"):
+    for k in ("HARNESS_FLOW_DRIVE",):
         monkeypatch.setenv(k, "1")
     db, o = _setup(tmp_path, monkeypatch)
     _wire(o)

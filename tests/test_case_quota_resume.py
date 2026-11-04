@@ -820,7 +820,6 @@ def test_unpaused_case_still_wakes_normally(tmp_path, monkeypatch):
     and the continuation behaviour is unchanged — (A104) the Manager's finished
     request in its agent inbox is delivered as ONE wake turn."""
     _flags(monkeypatch)
-    monkeypatch.setenv("DURABLE_RELAY_ENABLED", "1")
     db = _mk_db(tmp_path, monkeypatch)
     db.upsert_session(Session(
         session_id="mgr-1", backend="claude", repo_path="/repo",

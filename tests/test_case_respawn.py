@@ -41,7 +41,6 @@ def _db(tmp_path) -> MeshDB:
 
 def _on(monkeypatch) -> None:
     monkeypatch.setenv("MANAGER_ROLE_ENABLED", "1")
-    monkeypatch.setenv("DURABLE_RELAY_ENABLED", "1")
     # These tests drive the GENUINE unconditional respawn machinery directly —
     # the approval gate in front of it (CASE_RESPAWN_REQUIRES_APPROVAL, default
     # ON) is covered separately in test_case_respawn_approval_gate.py.
@@ -334,7 +333,6 @@ def test_blocked_case_with_dead_manager_is_not_respawned(tmp_path, monkeypatch):
 # --------------------------------------------------------------------------- #
 
 def test_manager_role_off_falls_back_to_strand_escalation(tmp_path, monkeypatch):
-    monkeypatch.setenv("DURABLE_RELAY_ENABLED", "1")
     monkeypatch.delenv("MANAGER_ROLE_ENABLED", raising=False)  # role OFF
     db = _db(tmp_path)
     db.upsert_node(socket.gethostname(), "", 9001, ["claude"], 2)

@@ -418,7 +418,6 @@ def test_single_flight_lease_prevents_double_retry(tmp_path, monkeypatch):
 
 def test_paused_case_not_woken_by_a_satisfied_wait_group(tmp_path, monkeypatch):
     _flags(monkeypatch)
-    monkeypatch.setenv("DURABLE_RELAY_ENABLED", "1")
     db = _mk_db(tmp_path, monkeypatch)
     orch = _Orch(_FakeStore(_FakeSession("mgr-1")))
     case_id = _case(db, "mgr-1")

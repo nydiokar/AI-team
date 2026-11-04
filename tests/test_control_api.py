@@ -163,7 +163,6 @@ def test_registry_inventory_covers_known_boolean_flags():
         "CACHE_HEARTBEAT_ACTIVE",
         "CONTROL_API_DOCS",
         "CONTROL_API_ENABLED",
-        "DURABLE_RELAY_ENABLED",
         "HARNESS_FLOW_DRIVE",
         "HARNESS_LEVEL3_GUARD",
         "MANAGER_ROLE_ENABLED",

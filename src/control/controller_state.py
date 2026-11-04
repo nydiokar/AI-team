@@ -7,8 +7,7 @@ client here at startup. While one is installed:
   creates or migrates a ``mesh.db`` of its own (controller state lives only in
   the controller's database; see ``docs/backend/DATABASE_AUTHORITY.md``);
 * runtime-flag registry rows are resolved from the client (the controller's
-  registry over authenticated HTTP) instead of a local file;
-* controller-ledger operations (Manager boot reconcile) go through the client.
+  registry over authenticated HTTP) instead of a local file.
 
 The controller processes (gateway, task-server, local-execution gateway) never
 install a client, so their behaviour is unchanged.
@@ -17,18 +16,11 @@ from __future__ import annotations
 
 from typing import Protocol
 
-from pydantic import JsonValue
-
 
 class ControllerStateClient(Protocol):
     def runtime_flag_row(self, flag_name: str) -> dict[str, str] | None:
         """The controller's registry row for ``flag_name`` or None (no row / unknown)."""
         ...
-
-    def boot_reconcile_case(self, case_id: str) -> dict[str, JsonValue]:
-        """Run the controller-side Manager boot reconcile for ``case_id``."""
-        ...
-
 
 _active: ControllerStateClient | None = None
 

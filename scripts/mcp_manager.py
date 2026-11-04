@@ -698,12 +698,6 @@ def _dispatch_worker(args: Dict[str, Any]) -> str:
     session = result.get("session") or {}
     sess_id = session.get("session_id") if isinstance(session, dict) else None
 
-    # [A46] Durable wait relay. If the worker JOINED a Case, record a durable
-    # pending-wait marker so a Manager that crashes/restarts mid-wait can
-    # RECONCILE which workers it was still waiting on (the completion signal —
-    # task.finished — is already durable; this makes the WAIT durable too).
-    # Best-effort: a relay failure (incl. the 404 when DURABLE_RELAY_ENABLED is
-    # OFF, or an unavailable gateway) must NEVER break the dispatch itself.
     # [A104] No wait marker is recorded any more: the gateway addresses this
     # worker's completion to the requesting session's inbox by itself (the child
     # carries its requester; the completion row is written with its terminal).
@@ -920,8 +914,7 @@ def _reconcile_waits(args: Dict[str, Any]) -> str:
     result = _api_request("POST", f"/api/cases/{urllib.parse.quote(case_id)}/waits/reconcile")
     if not result.get("ok"):
         return (
-            f"reconcile_waits did NOT run on Case {case_id}: {result.get('reason')}. "
-            f"(A 'durable_relay_disabled' reason means DURABLE_RELAY_ENABLED is OFF.)"
+            f"reconcile_waits did NOT run on Case {case_id}: {result.get('reason')}."
         )
     resolved = result.get("resolved") or []
     pending = result.get("pending") or []

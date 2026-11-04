@@ -29,7 +29,6 @@ from src.control.control_api import (
     CaseSpecBody,
     CaseSpecReviewBody,
     CaseStateBody,
-    CaseWaitBody,
     CaseWaitGroupBody,
     ManagerInvokeBody,
     logger,
@@ -81,10 +80,6 @@ class ManagerInvokeOut(CommandResult):
     session_id: str
     case_id: str
     task_id: str
-
-
-class RecordWorkerWaitOut(CommandResult):
-    event_id: Optional[int] = None
 
 
 class ReconcileWorkerWaitsOut(CommandResult):
@@ -176,11 +171,6 @@ class CaseBrief(BaseModel):
 
 class CaseBriefOut(CommandResult):
     brief: CaseBrief
-
-
-class BootReconcileOut(CommandResult):
-    reconciled: ReconcileWorkerWaitsOut
-    rearmed: list[dict]
 
 
 class InterruptCaseOut(CommandResult):
@@ -398,24 +388,6 @@ def build_router(
         return JSONResponse(result)
 
     @router.post(
-        "/api/cases/{case_id}/waits",
-        responses={200: {"model": RecordWorkerWaitOut,
-                         "description": "A104 shim no-op acknowledgement (event_id is null)."}},
-    )
-    def api_record_worker_wait(case_id: str, body: CaseWaitBody) -> JSONResponse:
-        """[A46 → A104 shim, D7] An un-redeployed mcp_manager calls this after every
-        Case dispatch. Nothing is recorded any more (the agent inbox addresses the
-        completion itself); the route keeps its shape and its flag gate (404 when
-        ``DURABLE_RELAY_ENABLED`` is OFF — the old client treats that as silent)."""
-        from src.control.db import durable_relay_enabled
-        if not durable_relay_enabled():
-            raise HTTPException(status_code=404, detail="not_found")
-        result = orchestrator.record_worker_wait(
-            case_id, body.task_id, timeout=body.timeout, actor="manager",
-        )
-        return JSONResponse(result)
-
-    @router.post(
         "/api/cases/{case_id}/waits/reconcile",
         responses={200: {"model": ReconcileWorkerWaitsOut,
                          "description": "The Case's inbox: resolved (finished) + pending (running)."}},
@@ -543,23 +515,6 @@ def build_router(
         result = orchestrator.get_case_brief(case_id)
         if not result.get("ok"):
             raise HTTPException(status_code=404, detail=result.get("reason") or "case_not_found")
-        return JSONResponse(result)
-
-    @router.post(
-        "/api/cases/{case_id}/boot-reconcile",
-        responses={200: {"model": BootReconcileOut,
-                         "description": "Boot-time reconcile result + re-armed wait-groups."}},
-    )
-    def api_boot_reconcile_case(case_id: str) -> JSONResponse:
-        """[A54/M3.4 Job 2] Boot-time reconstruction hook — reconcile outstanding
-        worker waits AND re-arm live wait-groups from the ledger (idempotent). Gated
-        by ``DURABLE_RELAY_ENABLED`` (404 when OFF ⇒ byte-identical no-op, exactly
-        like the /waits/reconcile route). The write itself is also flag-gated in the
-        db layer (defence in depth)."""
-        from src.control.db import durable_relay_enabled
-        if not durable_relay_enabled():
-            raise HTTPException(status_code=404, detail="not_found")
-        result = orchestrator.boot_reconcile_case(case_id, actor="manager")
         return JSONResponse(result)
 
     @router.post(

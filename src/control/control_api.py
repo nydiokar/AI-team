@@ -573,15 +573,6 @@ class CaseReviewBody(BaseModel):
     task_id: Optional[str] = Field(default=None, max_length=_ID_STR_MAX)
 
 
-class CaseWaitBody(BaseModel):
-    """[A46/M3.3] Record a durable pending-wait marker for a dispatched worker so a
-    resumed Manager can reconcile its outstanding waits from the ledger. ``task_id``
-    is the dispatched worker's task; ``timeout`` is the optional wait bound (seconds),
-    carried so a re-armed wait keeps the original deadline shape."""
-    task_id: str
-    timeout: Optional[float] = None
-
-
 class CaseWaitGroupBody(BaseModel):
     """[M3.4] Arm a Manager wait-GROUP over a dispatch set so the Wake-Dispatcher
     re-enters the Case when it is satisfied. ``wait_group_id`` names the group;

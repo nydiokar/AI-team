@@ -38,10 +38,6 @@ class _StubOrchestrator:
         return {"ok": True, "reason": None, "resolved": [{"task_id": "t1", "outcome": "success"}],
                 "pending": [{"task_id": "t2"}]}
 
-    def boot_reconcile_case(self, case_id, *, actor="manager"):
-        self.reconcile_calls.append((case_id, actor))
-        return {"ok": True, "reconciled": {"resolved": []}, "rearmed": []}
-
     async def sweep_orphaned_cases(self, *, limit=200, dry_run=False, reason="manager_session_unavailable", close_terminal_orphans=True):
         self.sweep_calls.append({"limit": limit, "dry_run": dry_run, "reason": reason, "close_terminal_orphans": close_terminal_orphans})
         return {"ok": True, "dry_run": dry_run, "scanned": limit, "candidates": [], "cleaned": []}
@@ -98,27 +94,6 @@ def test_brief_404_for_unknown_case(client, monkeypatch, orch):
     orch._brief_ok = False
     r = client.get("/api/cases/nope/brief", headers=_auth())
     assert r.status_code == 404
-
-
-# --- A54 boot-reconcile route (flag-gated like /waits/reconcile) ------------
-
-def test_boot_reconcile_requires_auth(client):
-    assert client.post("/api/cases/c1/boot-reconcile").status_code in (401, 403)
-
-
-def test_boot_reconcile_404_when_relay_off(client, monkeypatch, orch):
-    monkeypatch.delenv("DURABLE_RELAY_ENABLED", raising=False)
-    r = client.post("/api/cases/c1/boot-reconcile", headers=_auth())
-    assert r.status_code == 404
-    assert orch.reconcile_calls == []  # never reached the seam
-
-
-def test_boot_reconcile_delegates_when_relay_on(client, monkeypatch, orch):
-    monkeypatch.setenv("DURABLE_RELAY_ENABLED", "1")
-    r = client.post("/api/cases/c1/boot-reconcile", headers=_auth())
-    assert r.status_code == 200
-    assert r.json()["ok"] is True
-    assert orch.reconcile_calls == [("c1", "manager")]
 
 
 def test_condition_normalized_to_upper(client, monkeypatch, orch):
@@ -277,9 +252,8 @@ def test_case_state_unknown_case_404(monkeypatch):
 
 
 def test_waits_reconcile_is_an_ungated_inbox_read(client, monkeypatch):
-    """[A104 D5] reconcile_waits reads pending_for and writes nothing, so it is no
-    longer hidden behind DURABLE_RELAY_ENABLED (OFF in production)."""
-    monkeypatch.setenv("DURABLE_RELAY_ENABLED", "0")
+    """[A104 D5] reconcile_waits reads pending_for and writes nothing, so it is
+    not flag-gated."""
     r = client.post("/api/cases/c1/waits/reconcile", headers=_auth())
     assert r.status_code == 200
     assert r.json()["resolved"] == [{"task_id": "t1", "outcome": "success"}]

@@ -145,9 +145,6 @@ def test_worker_snapshot_seam_end_to_end(monkeypatch):
         def runtime_flag_row(self, flag_name):
             return rows.get(flag_name)
 
-        def boot_reconcile_case(self, case_id):
-            return {}
-
     controller_state.install(_FakeSnapshot())
     try:
         assert "mcp__manager__snap_tool" in tps.profile_tool_names("manager_v1")

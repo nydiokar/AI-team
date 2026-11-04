@@ -14,18 +14,16 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import re
 import time
 from collections.abc import Callable
 from typing import Protocol
 from urllib.error import HTTPError
 
-from pydantic import BaseModel, ConfigDict, Field, JsonValue, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 logger = logging.getLogger(__name__)
 
 _FLAGS_PATH = "/control/runtime-flags"
-_CASE_ID_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
 _REQUEST_TIMEOUT_SEC = 5
 
 
@@ -98,16 +96,6 @@ class RemoteControllerState:
         if row is None:
             return None
         return {"flag_name": row.flag_name, "value": row.value, "set_at": row.set_at}
-
-    def boot_reconcile_case(self, case_id: str) -> dict[str, JsonValue]:
-        if not _CASE_ID_RE.match(case_id or ""):
-            return {"ok": False, "reason": "invalid_case_id"}
-        result = self._http.post(
-            f"/control/cases/{case_id}/boot-reconcile", None, _REQUEST_TIMEOUT_SEC,
-        )
-        if not isinstance(result, dict):
-            return {"ok": False, "reason": "malformed_response"}
-        return result
 
     def refresh(self) -> bool:
         """Fetch the controller's flag snapshot once. True on success; on any

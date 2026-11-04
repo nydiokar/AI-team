@@ -280,12 +280,6 @@ RUNTIME_FLAG_DEFINITIONS: Dict[str, Dict[str, str]] = {
         "registry_writable": "1",
         "description": "Work Control Substrate flow_links/flow_events write path.",
     },
-    "DURABLE_RELAY_ENABLED": {
-        "default": "0",
-        "effect_scope": "live",
-        "registry_writable": "1",
-        "description": "Durable worker wait markers and wait reconciliation routes.",
-    },
     "CASE_RESPAWN_REQUIRES_APPROVAL": {
         "default": "1",
         "effect_scope": "live",
@@ -701,20 +695,6 @@ def manager_advancement_gate_enabled() -> bool:
     decision rather than a momentum default on a single accepted worker.
     """
     return runtime_flag_enabled("MANAGER_ADVANCEMENT_GATE")
-
-
-def durable_relay_enabled() -> bool:
-    """[A46/M3.3] Whether the durable worker-wait relay is active.
-
-    Canonical read of ``DURABLE_RELAY_ENABLED`` (truthy: 1/true/yes/on); default
-    OFF. When OFF: ``record_worker_wait``
-    writes no pending marker and ``reconcile_worker_waits`` no-ops ⇒ byte-identical
-    to pre-A46 behavior (no ``worker.wait_*`` events are ever written, and the two
-    /api/cases/{id}/waits routes return 404).
-    """
-    return runtime_flag_enabled("DURABLE_RELAY_ENABLED")
-
-
 
 
 def case_respawn_requires_approval() -> bool:
@@ -7660,23 +7640,6 @@ class MeshDB:
     # — reusing the existing flow_events substrate, no new schema.
     # ------------------------------------------------------------------
 
-    def record_worker_wait(
-        self,
-        flow_run_id: str,
-        task_id: str,
-        *,
-        timeout: Optional[float] = None,
-        actor: str = "manager",
-    ) -> Optional[int]:
-        """[A46 → A104 shim] Formerly appended a per-task ``worker.wait_pending``
-        ledger marker. The agent inbox now records the obligation by itself (the
-        child's requester is stamped at dispatch; its completion row is written in
-        the terminal txn), so nothing needs recording here. Kept — signature and
-        200 response — because an un-redeployed ``mcp_manager`` calls
-        ``POST /api/cases/{id}/waits`` after every Case dispatch (A104 D7).
-        Returns None (no marker written)."""
-        return None
-
     def reconcile_worker_waits(
         self,
         flow_run_id: str,
@@ -8712,10 +8675,8 @@ class MeshDB:
     # [A54 / M3.4 Job 2] Durable Case reconstruction. A Manager that lost its
     # in-process context (compaction, restart, respawn) must be able to pick a
     # Case back up knowing everything that matters from the DB ALONE, in ONE
-    # bounded read, and re-establish its outstanding waits/groups. get_case_brief
-    # is that single read; boot_reconcile_case is the idempotent re-arm hook the
-    # role-boot path fires. Both are pure reads over the existing substrate plus
-    # the already-idempotent A46/M3.4 writers — no new table, no new column.
+    # bounded read. get_case_brief is that single read (the agent inbox holds the
+    # outstanding waits durably by itself) — no new table, no new column.
     # ------------------------------------------------------------------
 
     def get_case_brief(self, case_id: str) -> Optional[Dict[str, Any]]:
@@ -8809,24 +8770,6 @@ class MeshDB:
             "ready_waits": ready,
             "wait_groups": wait_groups,
         }
-
-    def boot_reconcile_case(
-        self,
-        case_id: str,
-        *,
-        actor: str = "manager",
-    ) -> Dict[str, Any]:
-        """[A54 → A104 shim, D7 frozen shape] A Manager booting onto an OPEN Case
-        used to re-derive its obligations from the ledger and re-arm its groups.
-        The inbox is durable by itself (messages and filters survive restarts), so
-        nothing is re-armed; the reply reports what ``pending_for`` holds for the
-        Case, in the shape an un-redeployed worker reads (``ok`` / ``reason`` /
-        ``reconciled.resolved`` / ``rearmed``). Still gated on the durable-relay
-        flag exactly like before (the worker pre-gates on the same flag row)."""
-        if not durable_relay_enabled():
-            return {"ok": False, "reason": "durable_relay_disabled"}
-        reconciled = self.reconcile_worker_waits(case_id, actor=actor)
-        return {"ok": True, "reconciled": reconciled, "rearmed": []}
 
     def create_approval(
         self,

@@ -24,7 +24,7 @@ AUTH = {"Authorization": f"Bearer {TOKEN}"}
 
 # Flags these tests assert on; a developer .env (loaded into os.environ by config)
 # must not leak into the env → default fallback under test.
-_ASSERTED_FLAGS = ("QUOTA_PREWARM_ENABLED", "MANAGER_ROLE_ENABLED", "MANAGER_TOOLS_ENABLED", "DURABLE_RELAY_ENABLED")
+_ASSERTED_FLAGS = ("QUOTA_PREWARM_ENABLED", "MANAGER_ROLE_ENABLED", "MANAGER_TOOLS_ENABLED")
 
 
 @pytest.fixture(autouse=True)
@@ -136,31 +136,6 @@ def test_runtime_flags_route_503_without_db(client: TestClient, monkeypatch: pyt
     assert client.get("/control/runtime-flags", headers=AUTH).status_code == 503
 
 
-def test_boot_reconcile_route_guards(client: TestClient) -> None:
-    db = db_mod.get_db()
-    assert db is not None
-    unknown = client.post("/control/cases/case_unknown/boot-reconcile", headers=AUTH)
-    assert unknown.status_code == 200 and unknown.json() == {"ok": False, "reason": "unknown_case"}
-
-    case_id = db.open_case("objective", "sess_a88")
-    off = client.post(f"/control/cases/{case_id}/boot-reconcile", headers=AUTH).json()
-    assert off == {"ok": False, "reason": "durable_relay_disabled"}
-
-    db.set_runtime_flag("DURABLE_RELAY_ENABLED", True)
-    on = client.post(f"/control/cases/{case_id}/boot-reconcile", headers=AUTH).json()
-    assert on["ok"] is True
-
-    db.update_flow_run(case_id, status="closed")
-    closed = client.post(f"/control/cases/{case_id}/boot-reconcile", headers=AUTH).json()
-    assert closed == {"ok": False, "reason": "case_closed"}
-
-
-def test_boot_reconcile_route_rejects_bad_ids(client: TestClient) -> None:
-    assert client.post("/control/cases/bad%20id/boot-reconcile", headers=AUTH).status_code == 422
-    assert client.post(f"/control/cases/{'x' * 200}/boot-reconcile", headers=AUTH).status_code == 422
-    assert client.post("/control/cases/case_x/boot-reconcile").status_code in (401, 403)
-
-
 # --- worker client -----------------------------------------------------------
 
 
@@ -231,16 +206,6 @@ def test_client_logs_missing_route_loudly(caplog: pytest.LogCaptureFixture) -> N
     assert caplog.text.count("event=controller_state_route_missing") == 1  # once per episode
 
 
-def test_client_boot_reconcile_posts_and_validates_id() -> None:
-    http = _FakeHTTP()
-    http.post_response = {"ok": True, "rearmed": []}
-    remote = RemoteControllerState(http)
-    assert remote.boot_reconcile_case("case_abc") == {"ok": True, "rearmed": []}
-    assert http.post_calls[0][0] == "/control/cases/case_abc/boot-reconcile"
-    assert remote.boot_reconcile_case("../etc") == {"ok": False, "reason": "invalid_case_id"}
-    assert len(http.post_calls) == 1
-
-
 def test_telemetry_sink_has_no_local_mirror_with_client(tmp_path: Path) -> None:
     from config import config
     from src.control.telemetry_sink import (
@@ -261,57 +226,6 @@ def test_telemetry_sink_has_no_local_mirror_with_client(tmp_path: Path) -> None:
 
 
 # --- Manager boot reconcile routing -------------------------------------------
-
-
-def _manager_session(case_id: str) -> object:
-    from types import SimpleNamespace
-
-    from src.core.roles import MANAGER_ROLE_ID
-
-    return SimpleNamespace(case_role=MANAGER_ROLE_ID, current_case_id=case_id, session_id="s1")
-
-
-def test_worker_hosted_manager_reconciles_via_controller(tmp_path: Path) -> None:
-    from config import config
-    from src.backends.claude_driver import ClaudeSDKClientDriver
-
-    http = _FakeHTTP()
-    http.get_responses.append(_snapshot("r1", DURABLE_RELAY_ENABLED="1"))
-    http.post_response = {"ok": True, "reconciled": {"resolved": 0}, "rearmed": []}
-    remote = RemoteControllerState(http)
-    remote.refresh()
-    config.mesh.db_path = str(tmp_path / "worker" / "mesh.db")
-    db_mod._db_instance = None
-    controller_state.install(remote)
-
-    driver = ClaudeSDKClientDriver.__new__(ClaudeSDKClientDriver)
-    driver._boot_reconcile_manager_case(_manager_session("case_abc"))  # type: ignore[arg-type]
-
-    assert [c[0] for c in http.post_calls] == ["/control/cases/case_abc/boot-reconcile"]
-    assert not (tmp_path / "worker").exists()
-
-
-def test_controller_hosted_manager_reconciles_locally() -> None:
-    from src.backends.claude_driver import ClaudeSDKClientDriver
-
-    db = db_mod.get_db()
-    assert db is not None
-    db.set_runtime_flag("DURABLE_RELAY_ENABLED", True)
-    case_id = db.open_case("objective", "sess_local")
-    calls: list[str] = []
-    original = type(db).boot_reconcile_case
-
-    def _spy(self: object, cid: str, *, actor: str = "manager") -> dict[str, object]:
-        calls.append(cid)
-        return original(self, cid, actor=actor)  # type: ignore[arg-type]
-
-    type(db).boot_reconcile_case = _spy  # type: ignore[method-assign]
-    try:
-        driver = ClaudeSDKClientDriver.__new__(ClaudeSDKClientDriver)
-        driver._boot_reconcile_manager_case(_manager_session(case_id))  # type: ignore[arg-type]
-    finally:
-        type(db).boot_reconcile_case = original  # type: ignore[method-assign]
-    assert calls == [case_id]
 
 
 def test_worker_install_fetches_once_and_tolerates_outage(tmp_path: Path) -> None:
