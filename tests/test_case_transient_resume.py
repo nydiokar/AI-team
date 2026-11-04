@@ -58,7 +58,6 @@ def _now() -> datetime:
 
 def _flags(monkeypatch) -> None:
     monkeypatch.setenv("HARNESS_FLOW_DRIVE", "1")
-    monkeypatch.setenv("CASE_CONTINUATION_ENABLED", "1")
 
 
 class _FakeSession:

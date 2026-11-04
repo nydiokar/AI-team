@@ -11,8 +11,7 @@ tick never double-respawns.
 
 These tests drive the GENUINE ``TaskOrchestrator._do_respawn_manager_for_case`` /
 ``_continue_case_once`` against a real ``MeshDB`` with a duck-typed ``self`` — no
-paid CLI, no live backend. Flags ``CASE_CONTINUATION_ENABLED`` +
-``MANAGER_ROLE_ENABLED`` gate the respawn.
+paid CLI, no live backend. Flag ``MANAGER_ROLE_ENABLED`` gates the respawn.
 
 A104: "satisfied" now means the dead Manager has a deliverable agent-inbox
 message (a child it requested finished — ``tests/inbox_seed``); the tick reaches
@@ -41,7 +40,6 @@ def _db(tmp_path) -> MeshDB:
 
 
 def _on(monkeypatch) -> None:
-    monkeypatch.setenv("CASE_CONTINUATION_ENABLED", "1")
     monkeypatch.setenv("MANAGER_ROLE_ENABLED", "1")
     monkeypatch.setenv("DURABLE_RELAY_ENABLED", "1")
     # These tests drive the GENUINE unconditional respawn machinery directly —
@@ -336,7 +334,6 @@ def test_blocked_case_with_dead_manager_is_not_respawned(tmp_path, monkeypatch):
 # --------------------------------------------------------------------------- #
 
 def test_manager_role_off_falls_back_to_strand_escalation(tmp_path, monkeypatch):
-    monkeypatch.setenv("CASE_CONTINUATION_ENABLED", "1")
     monkeypatch.setenv("DURABLE_RELAY_ENABLED", "1")
     monkeypatch.delenv("MANAGER_ROLE_ENABLED", raising=False)  # role OFF
     db = _db(tmp_path)

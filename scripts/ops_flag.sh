@@ -39,7 +39,7 @@ Usage:
 Notes:
   - "startup"-scoped flags (e.g. QUOTA_COORDINATOR_ENABLED) need
     'pm2 restart ai-team-gateway' after on/off/unset to actually take effect.
-  - "live"-scoped flags (e.g. CASE_CONTINUATION_ENABLED) apply immediately.
+  - "live"-scoped flags (e.g. CACHE_HEARTBEAT_ACTIVE) apply immediately.
   - Token is reused automatically from \$DASHBOARD_TOKEN or the repo's .env —
     nothing to configure.
   - SOURCE column meaning (fallback order, highest wins):
@@ -52,9 +52,9 @@ Examples:
   $SELF list
   $SELF list --writable
   $SELF explain
-  $SELF explain CASE_CONTINUATION_ENABLED QUOTA_COORDINATOR_ENABLED
-  $SELF get CASE_CONTINUATION_ENABLED
-  $SELF on  CASE_CONTINUATION_ENABLED
+  $SELF explain CACHE_HEARTBEAT_ACTIVE QUOTA_COORDINATOR_ENABLED
+  $SELF get CACHE_HEARTBEAT_ACTIVE
+  $SELF on  CACHE_HEARTBEAT_ACTIVE
   $SELF off QUOTA_COORDINATOR_ENABLED && pm2 restart ai-team-gateway
   $SELF set CLAUDE_SDK_MAX_TURNS 40
   $SELF set CLAUDE_SDK_MAX_BUDGET_USD null

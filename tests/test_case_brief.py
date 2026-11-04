@@ -32,10 +32,6 @@ def _relay_on(monkeypatch) -> None:
     monkeypatch.setenv("DURABLE_RELAY_ENABLED", "1")
 
 
-def _cont_on(monkeypatch) -> None:
-    monkeypatch.setenv("CASE_CONTINUATION_ENABLED", "1")
-
-
 def _events(db: MeshDB, case_id: str, event_type: str) -> list:
     return [e for e in db.list_flow_events(case_id) if e["event_type"] == event_type]
 
@@ -72,7 +68,6 @@ def _seed_full_case(db: MeshDB) -> str:
 
 def test_brief_returns_full_state_from_db_alone(tmp_path, monkeypatch):
     _relay_on(monkeypatch)
-    _cont_on(monkeypatch)
     db = _db(tmp_path)
     case_id = _seed_full_case(db)
 
@@ -125,7 +120,6 @@ def test_brief_bounded_query_set_no_per_worker_fanout(tmp_path, monkeypatch):
     the number of workers (no N+1). Compare a 2-worker Case to a 12-worker Case and
     assert the SQL execute count is identical."""
     _relay_on(monkeypatch)
-    _cont_on(monkeypatch)
 
     def _count_executes(n_workers: int) -> int:
         db = _db(tmp_path / f"w{n_workers}")
@@ -156,7 +150,6 @@ def test_brief_bounded_query_set_no_per_worker_fanout(tmp_path, monkeypatch):
 
 def test_boot_reconcile_reconciles_and_rearms_idempotently(tmp_path, monkeypatch):
     _relay_on(monkeypatch)
-    _cont_on(monkeypatch)
     db = _db(tmp_path)
     case_id = _seed_full_case(db)
 
@@ -190,7 +183,6 @@ def test_brief_is_read_only_regardless_of_flags(tmp_path, monkeypatch):
     and after, whether the flags are ON or OFF."""
     # Flags OFF for the read path.
     monkeypatch.delenv("DURABLE_RELAY_ENABLED", raising=False)
-    monkeypatch.delenv("CASE_CONTINUATION_ENABLED", raising=False)
     db = _db(tmp_path)
     case_id = db.open_case("obj", "sess", role="manager", round_cap=5)
     seed_finished_child(db, case_id, "task_1", requester="sess")

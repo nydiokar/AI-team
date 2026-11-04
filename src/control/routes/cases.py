@@ -449,13 +449,8 @@ def build_router(
     )
     def api_arm_wait_group(case_id: str, body: CaseWaitGroupBody) -> JSONResponse:
         """[M3.4] Arm a Manager wait-group so the Wake-Dispatcher autonomously
-        re-enters this Case when the group is satisfied. Gated by
-        ``CASE_CONTINUATION_ENABLED`` (404 when OFF ⇒ byte-identical). Rejects a
-        malformed condition (422) and bounds the member list (413) up front — the
-        write itself is also flag-gated in the db layer (defence in depth)."""
-        from src.control.db import case_continuation_enabled
-        if not case_continuation_enabled():
-            raise HTTPException(status_code=404, detail="not_found")
+        re-enters this Case when the group is satisfied. Rejects a malformed
+        condition (422) and bounds the member list (413) up front."""
         cond = (body.condition or "ANY").upper()
         if cond not in ("ANY", "ALL", "NAMED"):
             raise HTTPException(
@@ -672,7 +667,6 @@ def build_router(
                 "case_not_found": 404, "db_unavailable": 503,
                 "no_manager_link": 409, "manager_busy": 409,
                 "resume_in_flight": 409, "case_terminal": 409,
-                "continuation_disabled": 409,
             }.get(str(result.get("reason") or ""), 500)
             raise HTTPException(status_code=code, detail=result)
         return JSONResponse(result)

@@ -67,7 +67,7 @@ def test_migrate_leaves_null_governor_unpinned_and_round_trips_values(gateway, m
     # Env as seen by the (in-process) gateway: a budget cap, NO turn cap, a bool
     # from env; the str overlay stays at its "" default.
     monkeypatch.setenv("CLAUDE_SDK_MAX_BUDGET_USD", "2.5")
-    monkeypatch.setenv("CASE_CONTINUATION_ENABLED", "1")
+    monkeypatch.setenv("CACHE_HEARTBEAT_ACTIVE", "1")
 
     run = _ops_flag(gateway, "migrate")
     assert run.returncode == 0, run.stdout + run.stderr
@@ -76,7 +76,7 @@ def test_migrate_leaves_null_governor_unpinned_and_round_trips_values(gateway, m
     assert db.get_runtime_flag("CLAUDE_SDK_MAX_TURNS") is None  # null ⇒ never pinned
     assert "left unpinned" in run.stdout and "CLAUDE_SDK_MAX_TURNS" in run.stdout
     assert db.get_runtime_flag("CLAUDE_SDK_MAX_BUDGET_USD")["value"] == "2.5"
-    assert db.get_runtime_flag("CASE_CONTINUATION_ENABLED")["value"] == "1"
+    assert db.get_runtime_flag("CACHE_HEARTBEAT_ACTIVE")["value"] == "1"
     assert db.get_runtime_flag("TOOL_PROFILES_OVERLAY")["value"] == ""
 
     # The point of not pinning: a cap set in env later still takes effect.

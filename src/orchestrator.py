@@ -30,7 +30,7 @@ SECTIONS (in source order)
   1.  Result parsing & text extraction       (static helpers)
   2.  Backend resolution                     (_resolve_task_backend)
   3.  Startup recovery                       (restart scan, stale-session heal)
-  4.  Wake dispatcher / case continuation    (M3.4, flag CASE_CONTINUATION_ENABLED)
+  4.  Wake dispatcher / case continuation    (M3.4)
   5.  Stale-busy reconciler + reattach       (M3 mesh, flag MESH_ENABLED)
   6.  Job completion poller                  (T3 watched-jobs, flag MESH_ENABLED)
   7.  Lifecycle — start / stop               (embedded servers, worker pool)
@@ -54,7 +54,6 @@ FEATURE FLAGS (runtime-gated, all default OFF unless noted)
 ------------------------------------------------------------
   HARNESS_FLOW_DRIVE          — write flow_runs stage transitions (M1/M2, shadow)
   MANAGER_ROLE_ENABLED        — enable M3 Manager role boot via /api/manager
-  CASE_CONTINUATION_ENABLED   — wake-dispatcher autonomous continuation (M3.4)
   DURABLE_RELAY_ENABLED       — gates the boot-reconcile reply (A104: an inbox read)
   HARNESS_LEVEL3_GUARD        — admission gate for level-3 harness tasks
   QUOTA_COORDINATOR_ENABLED   — observe-only quota/session-window coordinator
@@ -701,7 +700,7 @@ class TaskOrchestrator(ITaskOrchestrator):
     - Drive the M3 Manager/Worker automation loop: role-boot a Manager session,
       dispatch workers, gate on review.* verdicts, close on criteria met.
     - Run the M3.4 Wake-Dispatcher: autonomous case continuation without operator
-      pokes (CASE_CONTINUATION_ENABLED flag; default OFF).
+      pokes.
     - Persist artifacts (mesh_tasks DB canonical; results/*.json fallback),
       maintain artifact index, emit structured events and LLM-turn telemetry.
     - Own the embedded task server (mesh) and embedded control API (Web UI).
@@ -1454,8 +1453,6 @@ class TaskOrchestrator(ITaskOrchestrator):
 
     # ===========================================================================
     # WAKE DISPATCHER — AUTONOMOUS CASE CONTINUATION  (M3.4 → A104 agent inbox)
-    # Flag: CASE_CONTINUATION_ENABLED (default OFF ⇒ loop never starts).
-    #
     # A finished child's completion is a message in the REQUESTER's agent inbox
     # (written in the child's terminal txn). Each tick delivers every recipient's
     # ready messages as ONE coalesced wake turn (claimed pending → delivered in the
@@ -1474,19 +1471,9 @@ class TaskOrchestrator(ITaskOrchestrator):
 
     def _start_wake_dispatcher(self) -> None:
         """Start the periodic Wake-Dispatcher loop (mirrors the stale-busy
-        reconciler). No-op unless mesh routing is active AND the continuation flag
-        is ON — so with the flag OFF this is byte-identical to no loop at all."""
-        from src.control.db import (
-            cache_heartbeat_active_enabled, case_continuation_enabled, get_db,
-        )
+        reconciler). No-op unless mesh routing is active."""
         interval = int(getattr(config.mesh, "case_continuation_tick_interval_sec", 30) or 0)
-        db = get_db() if config.mesh.enabled else None
-        managed_present = db is not None and db.any_session_enrolled() is not False
-        if (
-            not config.mesh.enabled
-            or interval <= 0
-            or not (case_continuation_enabled() or cache_heartbeat_active_enabled() or managed_present)
-        ):
+        if not config.mesh.enabled or interval <= 0:
             return
         if self._wake_dispatcher_task and not self._wake_dispatcher_task.done():
             return
@@ -1509,9 +1496,8 @@ class TaskOrchestrator(ITaskOrchestrator):
 
     async def _wake_dispatcher_tick_once(self) -> int:
         """One Wake-Dispatcher pass over every open Case. Returns the number of
-        proactive wake turns delivered this tick. Flag-gated (OFF ⇒ 0)."""
-        from src.control.db import cache_heartbeat_active_enabled, case_continuation_enabled, get_db
-        continuation_enabled = case_continuation_enabled()
+        proactive wake turns delivered this tick."""
+        from src.control.db import cache_heartbeat_active_enabled, get_db
         heartbeat_active = cache_heartbeat_active_enabled()
         try:
             db = get_db()
@@ -1541,47 +1527,44 @@ class TaskOrchestrator(ITaskOrchestrator):
                 await self._alert_dead_messages(db)
             except Exception as e:
                 logger.warning("event=inbox_settle_or_alert_failed err=%s", e)
-        if not continuation_enabled and not heartbeat_active:
-            return 0
-        if continuation_enabled:
-            # [A104] Driven by the agent inbox: the work list is the (recipient,
-            # Case) pairs holding a deliverable message — an index-served read,
-            # not a scan of every open Case's event log. Quota state is computed
-            # at most once per provider per tick (read by the pause handlers).
-            self._quota_tick_cache = {}
-            # The pause handlers are TIME-based (a quota window reopening, a
-            # transient backoff elapsing) and drive resume/proposal by themselves,
-            # so they still run for every open, non-blocked Case each tick —
-            # whether or not its inbox holds anything (pre-A104 order: blocked →
-            # quota → transient). A paused Case is not delivered to this tick.
-            paused: set = set()
-            for case in await asyncio.to_thread(db.list_open_cases):
-                cid = str(case.get("flow_run_id") or "")
-                if not cid or str(case.get("status") or "").strip().lower() == "blocked":
-                    continue
-                try:
-                    if (await self._handle_quota_paused_case(db, cid)
-                            or await self._handle_transient_paused_case(db, cid)):
-                        paused.add(cid)
-                    else:
-                        # D4: a wake stranded on a replaced seat is withdrawn and
-                        # the messages follow the rebind (read-only when idle).
-                        await asyncio.to_thread(db.inbox_follow_case_rebind, cid)
-                except Exception as e:
-                    logger.debug("event=case_pause_check_failed case=%s err=%s", cid, e)
-            pairs = await asyncio.to_thread(db.inbox_ready_recipients)
-            for recipient, case_id in pairs:
-                if case_id and case_id in paused:
-                    continue
-                try:
-                    delivered += await self._deliver_inbox(
-                        db, recipient, case_id, pauses_checked=True,
-                    )
-                except Exception as e:
-                    logger.warning(
-                        "event=inbox_delivery_failed recipient=%s case=%s err=%s",
-                        recipient, case_id, e,
-                    )
+        # [A104] Driven by the agent inbox: the work list is the (recipient,
+        # Case) pairs holding a deliverable message — an index-served read,
+        # not a scan of every open Case's event log. Quota state is computed
+        # at most once per provider per tick (read by the pause handlers).
+        self._quota_tick_cache = {}
+        # The pause handlers are TIME-based (a quota window reopening, a
+        # transient backoff elapsing) and drive resume/proposal by themselves,
+        # so they still run for every open, non-blocked Case each tick —
+        # whether or not its inbox holds anything (pre-A104 order: blocked →
+        # quota → transient). A paused Case is not delivered to this tick.
+        paused: set = set()
+        for case in await asyncio.to_thread(db.list_open_cases):
+            cid = str(case.get("flow_run_id") or "")
+            if not cid or str(case.get("status") or "").strip().lower() == "blocked":
+                continue
+            try:
+                if (await self._handle_quota_paused_case(db, cid)
+                        or await self._handle_transient_paused_case(db, cid)):
+                    paused.add(cid)
+                else:
+                    # D4: a wake stranded on a replaced seat is withdrawn and
+                    # the messages follow the rebind (read-only when idle).
+                    await asyncio.to_thread(db.inbox_follow_case_rebind, cid)
+            except Exception as e:
+                logger.debug("event=case_pause_check_failed case=%s err=%s", cid, e)
+        pairs = await asyncio.to_thread(db.inbox_ready_recipients)
+        for recipient, case_id in pairs:
+            if case_id and case_id in paused:
+                continue
+            try:
+                delivered += await self._deliver_inbox(
+                    db, recipient, case_id, pauses_checked=True,
+                )
+            except Exception as e:
+                logger.warning(
+                    "event=inbox_delivery_failed recipient=%s case=%s err=%s",
+                    recipient, case_id, e,
+                )
         if heartbeat_active:
             try:
                 delivered += await self._process_due_cache_heartbeats(db)
@@ -3420,7 +3403,7 @@ class TaskOrchestrator(ITaskOrchestrator):
         whole seam exists to remove.
 
         Returns ``{ok, reason, mode, case_id, session_id}``. ``reason`` codes:
-        ``case_not_found`` / ``case_terminal`` / ``continuation_disabled`` /
+        ``case_not_found`` / ``case_terminal`` /
         ``manager_busy`` / ``resume_in_flight`` / ``no_manager_link`` /
         ``respawn_failed`` / ``deliver_failed`` / ``db_unavailable`` /
         ``pause_not_bound`` (an enrolled in-place resume naming a task other than
@@ -3428,7 +3411,7 @@ class TaskOrchestrator(ITaskOrchestrator):
         """
         from src.control.db import (
             CONTINUATION_MACHINE_SENTINEL, QUOTA_RESUME_ACTION,
-            case_continuation_enabled, get_db, quota_resume_task_id,
+            get_db, quota_resume_task_id,
         )
         out: Dict[str, Any] = {
             "ok": False, "reason": "", "case_id": case_id,
@@ -3444,12 +3427,6 @@ class TaskOrchestrator(ITaskOrchestrator):
             return out
         if str(row.get("status") or "").strip().lower() in ("closed", "cancelled"):
             out["reason"] = "case_terminal"
-            return out
-        if not case_continuation_enabled():
-            # Without the continuation substrate a resumed Manager has no wake
-            # path at all — resuming would produce one orphan turn. Refuse
-            # visibly instead.
-            out["reason"] = "continuation_disabled"
             return out
 
         # LEASE KEY. A resume of a PAUSE is keyed on the paused task — one pause,
@@ -3703,16 +3680,16 @@ class TaskOrchestrator(ITaskOrchestrator):
         longer exhausted, THEN asks. A non-quota death (or no task to classify)
         asks immediately. Any failure in this gate FAILS OPEN to the unconditional
         respawn — a bug here must never regress below pre-gate behavior."""
-        from src.control.db import case_continuation_enabled, case_respawn_requires_approval
+        from src.control.db import case_respawn_requires_approval
         if not case_respawn_requires_approval():
             return await self._do_respawn_manager_for_case(db, case_id, generation, dead_session_id)
         # Mirror _do_respawn_manager_for_case's own defensive re-gate BEFORE ever
         # asking the operator: an approval the eventual respawn would refuse
-        # anyway (continuation off, or a naked tool-less Manager with role off)
+        # anyway (a naked tool-less Manager with role off)
         # is worse than no approval — it would sit "approved" with nothing
         # happening. Let these fall straight through to strand-escalation, same
         # as pre-gate behavior.
-        if not case_continuation_enabled() or not self._manager_role_enabled():
+        if not self._manager_role_enabled():
             return False
 
         action = "case_manager_respawn"
@@ -3801,11 +3778,6 @@ class TaskOrchestrator(ITaskOrchestrator):
         reconstructs the objective/waits from the DB (``get_case_brief`` /
         ``boot_reconcile_case``). The objective-lock is preserved end to end.
         """
-        from src.control.db import case_continuation_enabled
-        # Defensive re-gate (this path is only reached with continuation ON, but keep
-        # the respawn itself explicitly flag-guarded so it can never fire otherwise).
-        if not case_continuation_enabled():
-            return False
         # Manager respawn boots a role-full Manager session; the driver's _role_boot
         # only applies the role prompt + scoped manager tools when MANAGER_ROLE is ON.
         # Without it a "respawn" would be a naked session with no dispatch tools — worse
@@ -6612,8 +6584,7 @@ class TaskOrchestrator(ITaskOrchestrator):
         the Wake-Dispatcher re-enters the Case when the group is satisfied.
 
         Mirrors the ``record_worker_wait`` seam. ``condition`` ∈ {ANY, ALL, NAMED};
-        the write is flag-gated in the db layer (``CASE_CONTINUATION_ENABLED`` OFF ⇒
-        ``event_id`` None, nothing written). Returns ``{"ok": True, "event_id"}`` or
+        Returns ``{"ok": True, "event_id"}`` or
         ``{"ok": False, "reason": "db_unavailable"}``.
         """
         from src.control.db import get_db

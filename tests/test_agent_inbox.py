@@ -45,7 +45,6 @@ def _fresh_allowance(monkeypatch):
 
 def _env(tmp_path, monkeypatch):
     monkeypatch.setenv("HARNESS_FLOW_DRIVE", "1")
-    monkeypatch.setenv("CASE_CONTINUATION_ENABLED", "1")
     db, o = _setup(tmp_path, monkeypatch)
     _wire(o)
     s = o.session_store.get("sess-1")

@@ -24,7 +24,6 @@ def _db(tmp_path) -> MeshDB:
 
 
 def test_max_flow_event_ids_is_batched_and_correct(tmp_path, monkeypatch):
-    monkeypatch.setenv("CASE_CONTINUATION_ENABLED", "1")
     db = _db(tmp_path)
     c1 = _open_case(db, session_id="s1")
     c2 = _open_case(db, session_id="s2")

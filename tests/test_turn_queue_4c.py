@@ -42,7 +42,6 @@ def _fresh_allowance(monkeypatch):
 def _env(tmp_path, monkeypatch, *, status=SS.AWAITING_INPUT, enroll=True):
     # set here (after the imported autouse `_flags`, which clears the drive flag)
     monkeypatch.setenv("HARNESS_FLOW_DRIVE", "1")
-    monkeypatch.setenv("CASE_CONTINUATION_ENABLED", "1")
     db, o = _setup(tmp_path, monkeypatch, enroll=enroll)
     _wire(o)
     s = _sess()

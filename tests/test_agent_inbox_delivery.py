@@ -32,7 +32,6 @@ def _fresh_allowance(monkeypatch):
 
 def _env(tmp_path, monkeypatch):
     monkeypatch.setenv("HARNESS_FLOW_DRIVE", "1")
-    monkeypatch.setenv("CASE_CONTINUATION_ENABLED", "1")
     monkeypatch.setenv("CASE_RESPAWN_REQUIRES_APPROVAL", "0")
     db, o = _setup(tmp_path, monkeypatch)
     _wire(o)

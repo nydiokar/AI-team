@@ -948,8 +948,7 @@ def _arm_wait_group(args: Dict[str, Any]) -> str:
     reaches your inbox and wakes you once — nothing needs arming. Use this only to
     hold a parallel batch together: ``ALL`` (or NAMED) delivers the members'
     completions in ONE wake when the last one finishes. ``ANY`` is the default
-    behaviour (each completion as it lands). A 404/disabled reason means
-    CASE_CONTINUATION_ENABLED is OFF on the gateway."""
+    behaviour (each completion as it lands)."""
     case_id = _bounded_text(args.get("case_id"), "case_id", _MAX_ID_CHARS, required=True)
     group_id = _bounded_text(args.get("wait_group_id"), "wait_group_id", _MAX_ID_CHARS, required=True)
     condition = (_bounded_text(args.get("condition"), "condition", 16, required=False) or "ANY").upper()
@@ -963,8 +962,7 @@ def _arm_wait_group(args: Dict[str, Any]) -> str:
     result = _api_request("POST", f"/api/cases/{urllib.parse.quote(case_id)}/wait-group", body)
     if not result.get("ok"):
         return (
-            f"arm_wait_group did NOT arm on Case {case_id}: {result.get('reason')}. "
-            "(A 404/disabled reason means CASE_CONTINUATION_ENABLED is OFF on the gateway.)"
+            f"arm_wait_group did NOT arm on Case {case_id}: {result.get('reason')}."
         )
     if condition == "ANY":
         return (
@@ -1876,8 +1874,7 @@ _TOOLS = [
             "OPTIONAL delivery filter. You do NOT need this to be woken: every worker completion "
             "already lands in your inbox and wakes you once. Use condition ALL (or NAMED) only to "
             "hold a parallel batch so its completions arrive together in ONE wake when the last "
-            "member finishes. ANY is the default behaviour. A 404/disabled reason means "
-            "CASE_CONTINUATION_ENABLED is OFF on the gateway."
+            "member finishes. ANY is the default behaviour."
         ),
         "inputSchema": {
             "type": "object",

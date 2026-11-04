@@ -111,15 +111,15 @@ def test_every_bool_flag_renders_byte_identically(monkeypatch, env):
 def test_bool_registry_rows_stay_one_zero_and_lax_inputs_unchanged(client):
     db = db_mod.get_db()
     for value, stored in ((True, "1"), (False, "0"), (1, "1"), (0, "0"), ("true", "1"), ("off", "0")):
-        r = _put(client, "CASE_CONTINUATION_ENABLED", value)
+        r = _put(client, "CACHE_HEARTBEAT_ACTIVE", value)
         assert r.status_code == 200, r.text
-        assert db.get_runtime_flag("CASE_CONTINUATION_ENABLED")["value"] == stored
+        assert db.get_runtime_flag("CACHE_HEARTBEAT_ACTIVE")["value"] == stored
         assert r.json()["flag"]["raw_value"] == stored
         assert r.json()["flag"]["value"] is (stored == "1")
     for bad in (2, "maybe", None, 1.5):
-        r = _put(client, "CASE_CONTINUATION_ENABLED", bad)
+        r = _put(client, "CACHE_HEARTBEAT_ACTIVE", bad)
         assert r.status_code == 422, (bad, r.text)
-    assert client.put("/api/flags/CASE_CONTINUATION_ENABLED", headers=_auth(), json={}).status_code == 422
+    assert client.put("/api/flags/CACHE_HEARTBEAT_ACTIVE", headers=_auth(), json={}).status_code == 422
 
 
 # --- the governor knobs through /api/flags ------------------------------------

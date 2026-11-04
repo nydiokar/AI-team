@@ -93,16 +93,16 @@ def test_no_worker_token_only_dashboard_accepted(monkeypatch, orch):
 # --- runtime flags -----------------------------------------------------------
 
 def test_flags_endpoint_lists_env_fallback(client, monkeypatch):
-    monkeypatch.setenv("CASE_CONTINUATION_ENABLED", "1")
+    monkeypatch.setenv("CACHE_HEARTBEAT_ACTIVE", "1")
 
     r = client.get("/api/flags", headers=_auth())
 
     assert r.status_code == 200
     flags = {f["flag_name"]: f for f in r.json()["flags"]}
-    assert flags["CASE_CONTINUATION_ENABLED"]["value"] is True
-    assert flags["CASE_CONTINUATION_ENABLED"]["source"] == "env"
-    assert flags["CASE_CONTINUATION_ENABLED"]["effect_scope"] == "live"
-    assert flags["CASE_CONTINUATION_ENABLED"]["registry_writable"] is True
+    assert flags["CACHE_HEARTBEAT_ACTIVE"]["value"] is True
+    assert flags["CACHE_HEARTBEAT_ACTIVE"]["source"] == "env"
+    assert flags["CACHE_HEARTBEAT_ACTIVE"]["effect_scope"] == "live"
+    assert flags["CACHE_HEARTBEAT_ACTIVE"]["registry_writable"] is True
     assert flags["QUOTA_COORDINATOR_ENABLED"]["effect_scope"] == "startup"
     assert flags["CONTROL_API_ENABLED"]["value"] is True
     assert flags["CONTROL_API_ENABLED"]["registry_writable"] is False
@@ -112,10 +112,10 @@ def test_flags_endpoint_lists_env_fallback(client, monkeypatch):
 
 
 def test_flags_put_overrides_env_and_delete_restores_fallback(client, monkeypatch):
-    monkeypatch.setenv("CASE_CONTINUATION_ENABLED", "1")
+    monkeypatch.setenv("CACHE_HEARTBEAT_ACTIVE", "1")
 
     put = client.put(
-        "/api/flags/CASE_CONTINUATION_ENABLED",
+        "/api/flags/CACHE_HEARTBEAT_ACTIVE",
         headers=_auth(),
         json={"value": False, "set_by": "test"},
     )
@@ -125,11 +125,11 @@ def test_flags_put_overrides_env_and_delete_restores_fallback(client, monkeypatc
     assert put.json()["flag"]["registry"]["set_by"] == "test"
 
     listed = client.get("/api/flags", headers=_auth()).json()["flags"]
-    case_flag = next(f for f in listed if f["flag_name"] == "CASE_CONTINUATION_ENABLED")
+    case_flag = next(f for f in listed if f["flag_name"] == "CACHE_HEARTBEAT_ACTIVE")
     assert case_flag["value"] is False
     assert case_flag["source"] == "registry"
 
-    delete = client.delete("/api/flags/CASE_CONTINUATION_ENABLED", headers=_auth())
+    delete = client.delete("/api/flags/CACHE_HEARTBEAT_ACTIVE", headers=_auth())
     assert delete.status_code == 200
     assert delete.json()["deleted"] is True
     assert delete.json()["flag"]["value"] is True
@@ -160,7 +160,7 @@ def test_registry_inventory_covers_known_boolean_flags():
     from src.control.db import RUNTIME_FLAG_DEFINITIONS
 
     expected = {
-        "CASE_CONTINUATION_ENABLED",
+        "CACHE_HEARTBEAT_ACTIVE",
         "CONTROL_API_DOCS",
         "CONTROL_API_ENABLED",
         "DURABLE_RELAY_ENABLED",

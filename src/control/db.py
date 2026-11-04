@@ -286,12 +286,6 @@ RUNTIME_FLAG_DEFINITIONS: Dict[str, Dict[str, str]] = {
         "registry_writable": "1",
         "description": "Durable worker wait markers and wait reconciliation routes.",
     },
-    "CASE_CONTINUATION_ENABLED": {
-        "default": "0",
-        "effect_scope": "live",
-        "registry_writable": "1",
-        "description": "Wake-Dispatcher autonomous Case continuation.",
-    },
     "CASE_RESPAWN_REQUIRES_APPROVAL": {
         "default": "1",
         "effect_scope": "live",
@@ -725,18 +719,6 @@ def durable_relay_enabled() -> bool:
     /api/cases/{id}/waits routes return 404).
     """
     return runtime_flag_enabled("DURABLE_RELAY_ENABLED")
-
-
-def case_continuation_enabled() -> bool:
-    """[M3.4] Whether autonomous Case continuation (the Wake-Dispatcher) is active.
-
-    Canonical read of ``CASE_CONTINUATION_ENABLED`` (truthy: 1/true/yes/on);
-    default OFF. Mirrors ``durable_relay_enabled()``. When OFF: ``arm_wait_group``
-    writes nothing and the orchestrator Wake-Dispatcher tick is a no-op ⇒ no
-    ``cont:*`` rows are enqueued and no proactive wake turns are delivered ⇒
-    byte-identical to pre-M3.4 behavior.
-    """
-    return runtime_flag_enabled("CASE_CONTINUATION_ENABLED")
 
 
 
@@ -7738,11 +7720,7 @@ class MeshDB:
         the inbox default (each completion is delivered as it lands) and stores
         nothing that holds. Not a ledger: one ``inbox.filter_armed`` audit event.
 
-        Idempotent per (case, wait_group_id) (an upsert). Flag-gated by
-        ``case_continuation_enabled()`` like before (OFF ⇒ None, nothing written).
-        Returns the audit event id."""
-        if not case_continuation_enabled():
-            return None
+        Idempotent per (case, wait_group_id) (an upsert). Returns the audit event id."""
         cond = str(condition or "ANY").upper()
         cond = "ALL" if cond in ("ALL", "NAMED") else "ANY"
         members = [str(m) for m in (member_task_ids or []) if m]

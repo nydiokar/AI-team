@@ -129,7 +129,6 @@ def test_managed_recovery_mark_drains_with_case_continuation_flag_off(tmp_path, 
     db = MeshDB(str(tmp_path / "mesh.db"))
     _session(db, "manager")
     monkeypatch.setattr(db_module, "get_db", lambda: db)
-    monkeypatch.setattr(db_module, "case_continuation_enabled", lambda: False)
     monkeypatch.setattr(db_module, "cache_heartbeat_active_enabled", lambda: False)
 
     class _Tick:
@@ -175,7 +174,6 @@ def _wedge_setup(tmp_path, monkeypatch):
     db.enqueue_turn("human-b", "manager", body="B", turn_source="human", flow_run_id=case_id)
 
     monkeypatch.setattr(db_module, "get_db", lambda: db)
-    monkeypatch.setattr(db_module, "case_continuation_enabled", lambda: False)
     monkeypatch.setattr(db_module, "cache_heartbeat_active_enabled", lambda: False)
     orch = TaskOrchestrator.__new__(TaskOrchestrator)
     orch.events = []

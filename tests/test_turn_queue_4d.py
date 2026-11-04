@@ -664,7 +664,6 @@ def test_RW04b_wake_tick_with_heartbeats_off_finalizes(tmp_path, monkeypatch):
     tok = _run(db, turn)
     db.complete_turn(turn, tok, {"success": True, "output": "ok"})
     monkeypatch.setenv("CACHE_HEARTBEAT_ACTIVE", "0")
-    monkeypatch.setenv("CASE_CONTINUATION_ENABLED", "1")
     o._continuation_skip_cache = {}
     asyncio.run(o._wake_dispatcher_tick_once())
     assert _lease(db)["status"] == "completed"

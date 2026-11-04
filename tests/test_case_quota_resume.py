@@ -64,7 +64,6 @@ def _now() -> datetime:
 
 def _flags(monkeypatch, *, auto="0", ceiling=None) -> None:
     monkeypatch.setenv("HARNESS_FLOW_DRIVE", "1")
-    monkeypatch.setenv("CASE_CONTINUATION_ENABLED", "1")
     monkeypatch.setenv("MANAGER_ROLE_ENABLED", "1")
     monkeypatch.setenv("CASE_QUOTA_RESUME_AUTO", auto)
     if ceiling is not None:

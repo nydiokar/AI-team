@@ -10,7 +10,7 @@ scheduling.
 
 These tests exercise the whole contract from ``docs/AUTONOMOUS_CASE_CONTINUATION_
 DESIGN.md`` §8 with a real ``MeshDB`` and a duck-typed orchestrator ``self`` — no
-paid CLI, no live backend. Flag ``CASE_CONTINUATION_ENABLED`` gates every write.
+paid CLI, no live backend.
 
 [A104] The wait-group ledger / ``cont:`` token / watermark machinery is replaced
 by the agent inbox: a finished REQUESTED child writes one message addressed to
@@ -44,7 +44,6 @@ def _db(tmp_path) -> MeshDB:
 
 
 def _on(monkeypatch) -> None:
-    monkeypatch.setenv("CASE_CONTINUATION_ENABLED", "1")
     # This file asserts the dead-session RESPAWN branch itself, so the operator
     # approval gate in front of it stays OFF here (covered in test_case_respawn.py).
     monkeypatch.setenv("CASE_RESPAWN_REQUIRES_APPROVAL", "0")
@@ -256,25 +255,6 @@ def _open_case(db, session_id="mgr-sess", round_cap=None):
     crit = None if round_cap is None else f'{{"round_cap": {round_cap}}}'
     return db.open_case("obj", session_id, role="manager", completion_criteria=crit)
 
-
-# --------------------------------------------------------------------------- #
-# Flag gating — OFF is byte-identical                                          #
-# --------------------------------------------------------------------------- #
-
-def test_arm_wait_group_noop_when_flag_off(tmp_path, monkeypatch):
-    monkeypatch.delenv("CASE_CONTINUATION_ENABLED", raising=False)
-    db = _db(tmp_path)
-    fid = _open_case(db)
-    assert db.arm_wait_group(fid, "g1", "ANY", ["t1"]) is None
-    assert _events(db, fid, "worker.wait_pending") == []
-
-
-def test_tick_noop_when_flag_off(tmp_path, monkeypatch):
-    monkeypatch.delenv("CASE_CONTINUATION_ENABLED", raising=False)
-    db = _db(tmp_path)
-    orch = _FakeOrch(_FakeStore(_FakeSession("mgr-sess")))
-    # Even with a satisfied-looking ledger, the flag gate means the tick is inert.
-    assert asyncio.run(TaskOrchestrator._wake_dispatcher_tick_once(orch)) == 0
 
 
 # --------------------------------------------------------------------------- #
