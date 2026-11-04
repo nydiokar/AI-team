@@ -6507,8 +6507,7 @@ class TaskOrchestrator(ITaskOrchestrator):
         metadata: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """[A56/M4] Orchestrator seam — publish a durable artifact onto a Case
-        (:func:`db.publish_artifact`). Mirrors the ``record_review`` seam. Flag-gated
-        in the db layer (``SPEC_AUTHORING_ENABLED`` OFF ⇒ nothing written). Returns
+        (:func:`db.publish_artifact`). Mirrors the ``record_review`` seam. Returns
         the db layer's ``{"ok", ...}`` (or ``{"ok": False, "reason": "db_unavailable"}``)."""
         from src.control.db import get_db
         db = get_db()

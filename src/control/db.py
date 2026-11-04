@@ -292,12 +292,6 @@ RUNTIME_FLAG_DEFINITIONS: Dict[str, Dict[str, str]] = {
         "registry_writable": "1",
         "description": "Wake-Dispatcher autonomous Case continuation.",
     },
-    "SPEC_AUTHORING_ENABLED": {
-        "default": "0",
-        "effect_scope": "live",
-        "registry_writable": "1",
-        "description": "M4 spec-authoring stage, scored spec-review gate, publish_artifact, and the decomposer.",
-    },
     "CASE_RESPAWN_REQUIRES_APPROVAL": {
         "default": "1",
         "effect_scope": "live",
@@ -858,20 +852,6 @@ def cache_heartbeat_awareness_beat() -> int:
 
 def cache_heartbeat_min_cache_tokens() -> int:
     return _env_int("CACHE_HEARTBEAT_MIN_CACHE_TOKENS", 100_000, 0)
-
-
-def spec_authoring_enabled() -> bool:
-    """[A56/M4] Whether the spec-authoring stage + scored review gate + decomposer
-    are active.
-
-    Canonical read of ``SPEC_AUTHORING_ENABLED`` (truthy: 1/true/yes/on); default
-    OFF. Mirrors ``case_continuation_enabled()``. When OFF: ``publish_artifact``,
-    ``publish_spec``, ``record_spec_review`` and ``decompose_case`` all write
-    nothing and return a disabled marker, and their /api routes return 404 ⇒
-    byte-identical to pre-M4 behaviour (no ``artifact.*``/``spec.*``/``case.decomposed``
-    events are ever written and no ``task_attached`` links are created).
-    """
-    return runtime_flag_enabled("SPEC_AUTHORING_ENABLED")
 
 
 # [A56/M4] R1 — the scored spec-review rubric. Six dimensions, each scored 0–2 by a
@@ -7421,9 +7401,7 @@ class MeshDB:
     # ``task_attached`` flow_links ON THE SAME CASE with dependency edges on
     # ``metadata_json`` — a task-DAG as DATA. It creates ZERO new ``flow_runs``: the
     # orphan-flow_run scatter is the exact failure mode M2.5 exists to prevent (§0.2
-    # anti-goal). All four methods are flag-gated by ``spec_authoring_enabled()`` ⇒
-    # OFF is byte-identical (no ``artifact.*``/``spec.*``/``case.decomposed`` events,
-    # no ``task_attached`` links). This layer RECORDS + gates; nothing here is read to
+    # anti-goal). This layer RECORDS + gates; nothing here is read to
     # DRIVE execution (the Manager dispatches from the DAG in order — A56 delivers the
     # DAG as data; the parallel executor is the out-of-scope A57 spike).
     # ------------------------------------------------------------------
@@ -7443,14 +7421,10 @@ class MeshDB:
         + an ``artifact.published`` event (evidence, not a second ledger).
 
         Idempotent via the flow_links unique index (repeat call reuses the link).
-        Flag-gated: with ``SPEC_AUTHORING_ENABLED`` OFF this writes NOTHING and
-        returns ``{"ok": False, "reason": "spec_authoring_disabled"}``. Returns
-        ``{"ok": True, "link_id", "event_id", "artifact_id"}`` on a publish.
+        Returns ``{"ok": True, "link_id", "event_id", "artifact_id"}`` on a publish.
         ``metadata`` is JSON-encoded verbatim (kind/title/uri are folded in for the
         link record); db.py does not interpret it.
         """
-        if not spec_authoring_enabled():
-            return {"ok": False, "reason": "spec_authoring_disabled"}
         link_meta: Dict[str, Any] = {"kind": kind}
         if title is not None:
             link_meta["title"] = title
@@ -7488,16 +7462,13 @@ class MeshDB:
         The spec is stored as an ``artifact`` flow_link carrying the (bounded) body
         on ``metadata_json`` so the Case is self-describing from the DB alone. This
         writes the SPEC; it does NOT grade it (that is :func:`record_spec_review`, a
-        separate seat) — the author never approves its own spec. Flag-gated: OFF ⇒
-        ``{"ok": False, "reason": "spec_authoring_disabled"}``, nothing written.
+        separate seat) — the author never approves its own spec.
         """
-        if not spec_authoring_enabled():
-            return {"ok": False, "reason": "spec_authoring_disabled"}
         result = self.publish_artifact(
             flow_run_id, spec_id, kind="spec", title=title, actor=actor,
             metadata={"body": spec_body},
         )
-        # publish_artifact re-checked the flag; if it wrote, name the authoring step.
+        # If publish_artifact wrote, name the authoring step.
         if result.get("ok"):
             result["event_id"] = self.append_flow_event(
                 flow_run_id, "spec.authored", actor,
@@ -7527,11 +7498,8 @@ class MeshDB:
         a pass. ``reviewer`` should differ from the spec's author (the SEAT is
         separate); the db records whoever the API/orchestrator seam passes. The
         resulting ``review.accepted`` / ``review.rework_requested`` event is what
-        :func:`decompose_case` gates on. Flag-gated: OFF ⇒ nothing written,
-        ``{"ok": False, "reason": "spec_authoring_disabled"}``.
+        :func:`decompose_case` gates on.
         """
-        if not spec_authoring_enabled():
-            return {"ok": False, "reason": "spec_authoring_disabled"}
         graded = _score_spec_review(scores)
         review_event_type = REVIEW_VERDICT_EVENT_TYPES[graded["verdict"]]
         # The full score-card as durable evidence (its own event so the audit trail
@@ -7610,7 +7578,6 @@ class MeshDB:
         exact shape M2.5 exists to enforce (orphan flow_runs are the anti-goal).
 
         HARD GATES (each writes nothing and returns a structured refusal):
-          * flag OFF ⇒ ``spec_authoring_disabled``;
           * the spec was never scored, or its latest score did NOT pass ⇒
             ``spec_not_approved`` (the scored-review gate is a REAL block, not a warning);
           * duplicate/empty ``task_key`` ⇒ ``invalid_task_keys``;
@@ -7623,9 +7590,6 @@ class MeshDB:
         appends one ``case.decomposed`` event. Idempotent per (case, task_key, role)
         via the flow_links unique index.
         """
-        if not spec_authoring_enabled():
-            return {"ok": False, "reason": "spec_authoring_disabled"}
-
         review = self.latest_spec_review(flow_run_id, spec_id)
         if review is None or not review.get("passed"):
             return {

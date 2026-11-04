@@ -1445,8 +1445,7 @@ def _publish_spec(args: Dict[str, Any]) -> str:
     draft_packet contract: real_objective vs literal_request vs interpreted_task +
     forced assumptions/drift_risks). It is recorded as an ``artifact`` link + a
     ``spec.authored`` event. This does NOT grade the spec — a SEPARATE reviewer seat
-    scores it (record_spec_review). A 404/disabled reason means SPEC_AUTHORING_ENABLED
-    is OFF on the gateway."""
+    scores it (record_spec_review)."""
     case_id = _bounded_text(args.get("case_id"), "case_id", _MAX_ID_CHARS, required=True)
     spec_id = _bounded_text(args.get("spec_id"), "spec_id", _MAX_ID_CHARS, required=True)
     body_text = _bounded_text(args.get("body"), "body", _MAX_OBJECTIVE_CHARS, required=True)
@@ -1455,8 +1454,7 @@ def _publish_spec(args: Dict[str, Any]) -> str:
     result = _api_request("POST", f"/api/cases/{urllib.parse.quote(case_id)}/spec", body)
     if not result.get("ok"):
         return (
-            f"publish_spec did NOT record on Case {case_id}: {result.get('reason')}. "
-            "(A 404/disabled reason means SPEC_AUTHORING_ENABLED is OFF on the gateway.)"
+            f"publish_spec did NOT record on Case {case_id}: {result.get('reason')}."
         )
     return (
         f"Authored spec {spec_id!r} on Case {case_id} (durable artifact + spec.authored "
@@ -1466,8 +1464,7 @@ def _publish_spec(args: Dict[str, Any]) -> str:
 
 def _publish_artifact(args: Dict[str, Any]) -> str:
     """[A56/M4] Publish an arbitrary durable artifact (kind/title/uri) onto your Case
-    as evidence (an ``artifact`` link + ``artifact.published`` event). A 404/disabled
-    reason means SPEC_AUTHORING_ENABLED is OFF on the gateway."""
+    as evidence (an ``artifact`` link + ``artifact.published`` event)."""
     case_id = _bounded_text(args.get("case_id"), "case_id", _MAX_ID_CHARS, required=True)
     artifact_id = _bounded_text(args.get("artifact_id"), "artifact_id", _MAX_ID_CHARS, required=True)
     kind = _bounded_text(args.get("kind"), "kind", 64, required=False) or "artifact"
@@ -1477,8 +1474,7 @@ def _publish_artifact(args: Dict[str, Any]) -> str:
     result = _api_request("POST", f"/api/cases/{urllib.parse.quote(case_id)}/artifacts", body)
     if not result.get("ok"):
         return (
-            f"publish_artifact did NOT record on Case {case_id}: {result.get('reason')}. "
-            "(A 404/disabled reason means SPEC_AUTHORING_ENABLED is OFF on the gateway.)"
+            f"publish_artifact did NOT record on Case {case_id}: {result.get('reason')}."
         )
     return f"Published artifact {artifact_id!r} (kind={kind}) on Case {case_id}."
 
@@ -1489,8 +1485,7 @@ def _record_spec_review(args: Dict[str, Any]) -> str:
     six dimensions (objective_clarity, scope_boundaries, decomposability,
     acceptance_testability, dependency_correctness, risks_and_assumptions) to 0–2.
     The verdict is COMPUTED (≥8/12 AND no zero on objective_clarity or decomposability),
-    not taken on your word: a below-threshold or critical-zero score BLOCKS decomposition.
-    A 404/disabled reason means SPEC_AUTHORING_ENABLED is OFF on the gateway."""
+    not taken on your word: a below-threshold or critical-zero score BLOCKS decomposition."""
     case_id = _bounded_text(args.get("case_id"), "case_id", _MAX_ID_CHARS, required=True)
     spec_id = _bounded_text(args.get("spec_id"), "spec_id", _MAX_ID_CHARS, required=True)
     reason = _bounded_text(args.get("reason"), "reason", _MAX_OBJECTIVE_CHARS, required=False)
@@ -1505,8 +1500,7 @@ def _record_spec_review(args: Dict[str, Any]) -> str:
     result = _api_request("POST", f"/api/cases/{urllib.parse.quote(case_id)}/spec-review", body)
     if not result.get("ok"):
         return (
-            f"record_spec_review did NOT record on Case {case_id}: {result.get('reason')}. "
-            "(A 404/disabled reason means SPEC_AUTHORING_ENABLED is OFF on the gateway.)"
+            f"record_spec_review did NOT record on Case {case_id}: {result.get('reason')}."
         )
     verdict = result.get("verdict")
     gate = "UNLOCKS decomposition" if result.get("passed") else "BLOCKS decomposition (fix the spec + re-score)"
@@ -1524,7 +1518,7 @@ def _decompose_case(args: Dict[str, Any]) -> str:
     task is ``{task_key, objective, depends_on: [task_key,...], ...hints}``. REFUSED
     (structured reason) unless the spec's latest scored review PASSED, and unless the
     DAG is acyclic + every depends_on names a known task_key. Creates ZERO new
-    flow_runs. A 404/disabled reason means SPEC_AUTHORING_ENABLED is OFF."""
+    flow_runs."""
     case_id = _bounded_text(args.get("case_id"), "case_id", _MAX_ID_CHARS, required=True)
     spec_id = _bounded_text(args.get("spec_id"), "spec_id", _MAX_ID_CHARS, required=True)
     tasks = args.get("tasks")
@@ -1542,7 +1536,7 @@ def _decompose_case(args: Dict[str, Any]) -> str:
         return (
             f"decompose_case REFUSED on Case {case_id}: {e}. "
             "(spec_not_approved => get a passing spec-review first; cyclic_dependencies => break the "
-            "cycle; unknown_dependency/invalid_task_keys => fix the DAG; a 404 => SPEC_AUTHORING_ENABLED OFF.)"
+            "cycle; unknown_dependency/invalid_task_keys => fix the DAG.)"
         )
     order = result.get("order") or []
     return (
@@ -1903,8 +1897,7 @@ _TOOLS = [
             "intent, do NOT dive straight into dispatch: author a spec (reuse the draft_packet "
             "contract — real_objective vs literal_request vs interpreted_task + forced "
             "assumptions/drift_risks), recorded as a durable artifact + spec.authored event. "
-            "This does NOT grade the spec; a SEPARATE reviewer scores it (record_spec_review). "
-            "A 404/disabled reason means SPEC_AUTHORING_ENABLED is OFF."
+            "This does NOT grade the spec; a SEPARATE reviewer scores it (record_spec_review)."
         ),
         "inputSchema": {
             "type": "object",
@@ -1921,8 +1914,7 @@ _TOOLS = [
         "name": "publish_artifact",
         "description": (
             "Publish an arbitrary durable artifact (kind/title/uri) onto your Case as evidence "
-            "(artifact link + artifact.published event). A 404/disabled reason means "
-            "SPEC_AUTHORING_ENABLED is OFF."
+            "(artifact link + artifact.published event)."
         ),
         "inputSchema": {
             "type": "object",
@@ -1944,7 +1936,7 @@ _TOOLS = [
             "scope_boundaries, decomposability, acceptance_testability, dependency_correctness, "
             "risks_and_assumptions) each to 0-2. The verdict is COMPUTED (>=8/12 AND no zero on "
             "objective_clarity or decomposability): a below-threshold or critical-zero score "
-            "BLOCKS decomposition. A 404/disabled reason means SPEC_AUTHORING_ENABLED is OFF."
+            "BLOCKS decomposition."
         ),
         "inputSchema": {
             "type": "object",
@@ -1970,8 +1962,7 @@ _TOOLS = [
             "anti-goal M2.5 exists to prevent). Each task is {task_key, objective, depends_on: "
             "[task_key,...], ...hints}. REFUSED unless the spec's latest scored review PASSED and "
             "the DAG is acyclic + every depends_on names a known task_key. Creates ZERO new "
-            "flow_runs. Dispatch the returned topological order in sequence. A 404/disabled reason "
-            "means SPEC_AUTHORING_ENABLED is OFF."
+            "flow_runs. Dispatch the returned topological order in sequence."
         ),
         "inputSchema": {
             "type": "object",

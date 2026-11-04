@@ -484,11 +484,7 @@ def build_router(
     )
     def api_publish_artifact(case_id: str, body: CasePublishArtifactBody) -> JSONResponse:
         """[A56/M4] Publish a durable artifact onto a Case (``artifact`` flow_link +
-        ``artifact.published`` event). Gated by ``SPEC_AUTHORING_ENABLED`` (404 when
-        OFF ⇒ byte-identical). The write is also flag-gated in the db layer."""
-        from src.control.db import spec_authoring_enabled
-        if not spec_authoring_enabled():
-            raise HTTPException(status_code=404, detail="not_found")
+        ``artifact.published`` event)."""
         result = orchestrator.publish_artifact(
             case_id, body.artifact_id, kind=body.kind, title=body.title,
             uri=body.uri, actor="manager", metadata=body.metadata,
@@ -501,11 +497,7 @@ def build_router(
                          "description": "The authored spec link + event."}},
     )
     def api_publish_spec(case_id: str, body: CaseSpecBody) -> JSONResponse:
-        """[A56/M4] Author a spec onto a Case as durable evidence (``spec.authored``).
-        Gated by ``SPEC_AUTHORING_ENABLED`` (404 when OFF ⇒ byte-identical)."""
-        from src.control.db import spec_authoring_enabled
-        if not spec_authoring_enabled():
-            raise HTTPException(status_code=404, detail="not_found")
+        """[A56/M4] Author a spec onto a Case as durable evidence (``spec.authored``)."""
         result = orchestrator.publish_spec(
             case_id, body.spec_id, body.body, title=body.title, actor="manager",
         )
@@ -519,11 +511,7 @@ def build_router(
     def api_record_spec_review(case_id: str, body: CaseSpecReviewBody) -> JSONResponse:
         """[A56/M4] Score a spec against R1 by a SEPARATE plan-reviewer seat; the
         verdict (accepted|rework_requested) is computed from the scores, not trusted.
-        Records ``spec.review_scored`` + the canonical ``review.*`` event. Gated by
-        ``SPEC_AUTHORING_ENABLED`` (404 when OFF ⇒ byte-identical)."""
-        from src.control.db import spec_authoring_enabled
-        if not spec_authoring_enabled():
-            raise HTTPException(status_code=404, detail="not_found")
+        Records ``spec.review_scored`` + the canonical ``review.*`` event."""
         result = orchestrator.record_spec_review(
             case_id, body.spec_id, body.scores, reviewer=body.reviewer, reason=body.reason,
         )
@@ -537,11 +525,7 @@ def build_router(
     def api_decompose_case(case_id: str, body: CaseDecomposeBody) -> JSONResponse:
         """[A56/M4] Expand an APPROVED objective into a task-DAG of N ``task_attached``
         links on ONE Case (no orphan flow_runs). REFUSES (422 with a structured reason)
-        unless the spec's latest scored review PASSED and the DAG is acyclic/well-formed.
-        Gated by ``SPEC_AUTHORING_ENABLED`` (404 when OFF ⇒ byte-identical)."""
-        from src.control.db import spec_authoring_enabled
-        if not spec_authoring_enabled():
-            raise HTTPException(status_code=404, detail="not_found")
+        unless the spec's latest scored review PASSED and the DAG is acyclic/well-formed."""
         result = orchestrator.decompose_case(
             case_id, body.spec_id, body.tasks, actor="manager",
         )
