@@ -1462,17 +1462,21 @@ class TaskOrchestrator(ITaskOrchestrator):
         )
 
     async def _wake_dispatcher_loop(self, interval_sec: int) -> None:
+        from src.control.turn_scheduler import subscribe_turn_changes
+
         logger.info("event=wake_dispatcher_started interval=%ds", interval_sec)
-        try:
-            while self.running:
-                try:
-                    await self._wake_dispatcher_tick_once()
-                except Exception as e:
-                    logger.debug("event=wake_dispatcher_tick_failed err=%s", e)
-                await asyncio.sleep(interval_sec)
-        except asyncio.CancelledError:
-            logger.info("event=wake_dispatcher_stopped")
-            raise
+        with subscribe_turn_changes() as changes:
+            try:
+                while self.running:
+                    changes.clear()
+                    try:
+                        await self._wake_dispatcher_tick_once()
+                    except Exception as e:
+                        logger.debug("event=wake_dispatcher_tick_failed err=%s", e)
+                    await changes.wait(interval_sec)
+            except asyncio.CancelledError:
+                logger.info("event=wake_dispatcher_stopped")
+                raise
 
     async def _wake_dispatcher_tick_once(self) -> int:
         """One Wake-Dispatcher pass over every open Case. Returns the number of
@@ -10671,7 +10675,7 @@ Generated from user description: {description}
         """[A84] Start the gateway-side consumer of managed-turn completions.
         The completion commits in the task-server process (another process in
         production), so the consumer discovers it through the DB on the
-        scheduler's fallback cadence — never through an in-process hint."""
+        shared turn signal, with a polling backstop for lost hints."""
         from src.control.db import get_db
         from src.control.turn_scheduler import FALLBACK_INTERVAL_SEC
 
@@ -10765,22 +10769,27 @@ Generated from user description: {description}
         pass (incl. the first), so rows left behind by a later unenroll still
         drain. Errors are contained; the loop never dies on a bad pass."""
         from src.control.db import get_db
+        from src.control.turn_scheduler import notify_turn_queue_changed, subscribe_turn_changes
 
-        passes = 0
-        while getattr(self, "running", False):
-            try:
-                db = get_db()
-                if db is not None and (
-                    passes % MANAGED_EFFECTS_IDLE_SWEEP_EVERY == 0
-                    or db.any_session_enrolled() is not False
-                ):
-                    await self._drain_managed_turn_effects_once(db)
-            except asyncio.CancelledError:
-                raise
-            except Exception as e:  # noqa: BLE001 — next pass retries
-                logger.warning("event=managed_effects_pass_failed err=%s", e)
-            passes += 1
-            await asyncio.sleep(interval_sec)
+        with subscribe_turn_changes() as changes:
+            passes = 0
+            signaled = False
+            while getattr(self, "running", False):
+                changes.clear()
+                try:
+                    db = get_db()
+                    if db is not None and (
+                        signaled or passes % MANAGED_EFFECTS_IDLE_SWEEP_EVERY == 0
+                        or db.any_session_enrolled() is not False
+                    ):
+                        if await self._drain_managed_turn_effects_once(db):
+                            notify_turn_queue_changed()
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:  # noqa: BLE001 — next pass retries
+                    logger.warning("event=managed_effects_pass_failed err=%s", e)
+                passes += 1
+                signaled = await changes.wait(interval_sec)
 
     async def _drain_managed_turn_effects_once(self, db: Any) -> int:
         """[A84] Drain up to ``MANAGED_EFFECTS_BATCH`` terminal managed turns

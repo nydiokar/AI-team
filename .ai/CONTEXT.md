@@ -74,7 +74,7 @@ Only jobs that are genuinely open. Everything merged/done is in git and the disp
 
 | Job | Packet | Depends on | Status | What it is |
 |---|---|---|---|---|
-| **A105** | `AGENT_105_CROSS_PROCESS_TURN_SIGNAL.md` | A104 ✅ | **ready** — Level 3, operator approval + D1 | Make the task-server's post-commit turn hint reach the gateway; scheduler, effects consumer and inbox wake all wake on that one signal (polls → safety nets). Today worker finish → Manager wake is polled (16.5 s live). |
+| **A105** | `AGENT_105_CROSS_PROCESS_TURN_SIGNAL.md` | A104 ✅ | **active** — HTTP transport authorized 2026-11-05; implementation/review underway | Make the task-server's post-commit turn hint reach the gateway; scheduler, effects consumer and inbox wake all wake on that one signal (polls → safety nets). Today worker finish → Manager wake is polled (16.5 s live). |
 | **A102** | `AGENT_102_UNIFY_BACKEND_PATHWAYS.md` | — | **blocked** — S2 merged + gateway live (`7c6d01a`); worker promotion and natural S3 acceptance pending | One carrier-owned `TurnControl` and natural backend operations; shims, rollout gates and dead gateway session execution removed. Worker restart needs the operator decision and drain/ancestry checks; no paid proof turn. |
 | **A94** | `AGENT_94_SYSTEM_ONE_CORE_DELIVERY_SCORECARD.md` | — | ready (Level 3) | S1 core + decision log + replay baseline + advisory wake scorecard. Operator inputs: read-only controller DB copy, `TYPESAFE_API_KEY`. |
 | **A95** | `AGENT_95_SYSTEM_ONE_DISPATCH_PREFLIGHT.md` | A94 | ready after A94 (Level 3) | Soft pre-flight on `dispatch_worker` (Manager can override). |
@@ -93,6 +93,16 @@ Only jobs that are genuinely open. Everything merged/done is in git and the disp
 ---
 
 ## Recent shift notes
+
+**2026-11-06 — A105 cross-process turn signal in delivery.** Shared subscriptions
+wake scheduler/effects/inbox; a single coalesced task-server HTTP sender keeps
+polling as recovery. Endpoint: four empty-body readers, 1s read deadline; sender
+at most ten sends/s, one pending hint, 2s socket/cleanup budget, 1KiB status line.
+Native DNS execution follows asyncio resolver lifecycle and can outlive its
+cancelled waiter; retain internal Docker/trusted-operator DNS assumptions until
+native resolver limits are sized. No new hard DB/native IO/slow-response-client
+deadline is claimed for existing consumer passes. Natural completion latency and
+24h production observation remain open; no paid proof turn or worker restart.
 
 **2026-11-05 — A109/A110 final adversarial corrections shipped (PR #276, live `fd8b501`,
 schema 49; initial delivery #274).** Consumed results still retire unstarted wakes; default

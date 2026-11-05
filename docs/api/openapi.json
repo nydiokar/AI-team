@@ -9,6 +9,39 @@
     }
   },
   "paths": {
+    "/internal/turn-signal": {
+      "post": {
+        "summary": "Turn Signal",
+        "operationId": "turn_signal_internal_turn_signal_post",
+        "responses": {
+          "202": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": {
+                    "type": "boolean"
+                  },
+                  "type": "object",
+                  "title": "Response Turn Signal Internal Turn Signal Post"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "tags": [
+          "Monitoring"
+        ]
+      }
+    },
     "/health": {
       "get": {
         "summary": "Health",

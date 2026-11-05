@@ -358,3 +358,18 @@ then remove them from `.env`:
 `RUNTIME_FLAG_DEFINITIONS` in the same change. If it is safe for DB overrides, mark it
 `registry_writable=true` and route code through a canonical reader; otherwise mark it read-only
 with an honest `effect_scope`.
+
+### Cross-process turn signal (A105)
+
+`GATEWAY_TURN_SIGNAL_URL` is task-server topology configuration, set by Compose to
+`http://gateway:${DASHBOARD_PORT:-9003}/internal/turn-signal`. It is not a runtime
+flag. Outside split deployments it defaults empty; embedded producers use the
+same in-process signal directly. The bodyless POST uses the existing `WORKER_TOKEN`
+(the control API already accepts it), carries no state, and never waits on the
+carrier request path. One lifespan-owned sender coalesces bursts, keeps at most
+one pending hint and sends at most ten requests/second. Async network IO and
+connection cleanup share a two-second budget; there are no redirects, proxies
+or response-body reads. Unavailable transport falls back to existing DB polls.
+The endpoint admits four empty-body readers with a one-second read deadline;
+nonempty/chunked garbage is rejected. Subscribers independently re-read the DB.
+No worker restart, migration or new credential is needed.
