@@ -42,6 +42,51 @@ def _auth(token=TOKEN):
     return {"Authorization": f"Bearer {token}"}
 
 
+@pytest.mark.parametrize("active,totals,state", [
+    (True, {}, "pending"), (False, {}, "unavailable"),
+    (True, {"input": 10, "output": 2}, "partial"),
+    (False, {"input": 0, "output": 0}, "recorded"),
+])
+def test_session_usage_distinguishes_unknown_from_recorded_zero(client, monkeypatch, active, totals, state):
+    from contextlib import nullcontext
+    from types import SimpleNamespace
+
+    db = SimpleNamespace(
+        read_snapshot=nullcontext,
+        get_session_token_totals=lambda ids: {"usage-session": totals} if totals else {},
+        live_task_sessions=lambda ids: {"usage-session"} if active else set(),
+    )
+    monkeypatch.setattr(control_api, "_db", lambda: db)
+    response = client.get("/api/sessions/usage-session/usage", headers=_auth())
+    assert response.status_code == 200
+    assert response.json()["usage_state"] == state
+    assert response.json()["tokens"]["total"] == sum(totals.values())
+    if state in ("pending", "unavailable"):
+        assert response.json()["cost"]["known"] is False
+
+
+def test_session_usage_db_failure_is_not_zero_spend(client, monkeypatch):
+    monkeypatch.setattr(control_api, "_db", lambda: None)
+    response = client.get("/api/sessions/usage-session/usage", headers=_auth())
+    assert response.status_code == 503
+
+
+def test_session_usage_bounds_path_identity(client):
+    assert client.get(f"/api/sessions/{'x' * 129}/usage", headers=_auth()).status_code == 422
+
+
+def test_session_usage_limits_concurrent_reads(client, monkeypatch):
+    from src.control.routes.sessions import _USAGE_READ_SLOTS
+
+    for _ in range(4):
+        assert _USAGE_READ_SLOTS.acquire(blocking=False)
+    try:
+        assert client.get("/api/sessions/s/usage", headers=_auth()).status_code == 429
+    finally:
+        for _ in range(4):
+            _USAGE_READ_SLOTS.release()
+
+
 # --- auth -------------------------------------------------------------------
 
 def test_health_is_open(client):

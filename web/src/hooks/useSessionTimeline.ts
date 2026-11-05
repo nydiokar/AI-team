@@ -71,6 +71,17 @@ export function useSessionTimeline(
     // 1 — real conversation turns. Each task is one exchange.
     const seenInstructions = new Set<string>();
     for (const t of turns) {
+      if (t.kind === "system_notice") {
+        items.push({
+          kind: "notice", at: t.timestamp,
+          notice: {
+            id: t.task_id, sessionId, taskId: t.task_id, kind: "watched_job",
+            text: t.result, timestamp: t.timestamp,
+            severity: t.success ? "success" : "warning",
+          },
+        });
+        continue;
+      }
       // [A82 Stage 6] The queue card owns a managed request (by durable id)
       // until there is a finished exchange; a starting/working prompt is shown
       // on its card, never twice. (Waiting/withdrawn prompts never reach the

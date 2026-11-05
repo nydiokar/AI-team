@@ -155,6 +155,41 @@ def _emit_autonomous(sess: _SDKSession, fake: _FakeClient, *msgs) -> None:
     sess._loop.call_soon_threadsafe(lambda: [fake.q.put_nowait(m) for m in msgs])
 
 
+def test_usage_is_delivered_before_result_and_only_to_echoed_owner():
+    from concurrent.futures import ThreadPoolExecutor
+
+    fake = _FakeClient()
+    assistant = _assistant("private response")
+    assistant.usage = {"input_tokens": 100, "output_tokens": 8}
+    fake.replies["work"] = [assistant]
+    sess = _start_fake_session(fake)
+    seen = []
+    usage_arrived = threading.Event()
+
+    def usage_cb(usage, message_id):
+        seen.append((usage, message_id))
+        usage_arrived.set()
+
+    try:
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(sess.send, "work", turn=turn_control("usage-turn"), usage_cb=usage_cb)
+            try:
+                assert usage_arrived.wait(3)
+                assert seen == [({"input_tokens": 100, "output_tokens": 8}, "m")]
+                assert not future.done(), "usage must arrive before the turn returns"
+            finally:
+                _emit_autonomous(sess, fake, _result("finished"))
+            assert future.result(timeout=3).output == "finished"
+        # No owned turn: these counters must not leak into the previous one.
+        _emit_autonomous(sess, fake, assistant, _result("autonomous"))
+        settled = threading.Event()
+        sess._loop.call_soon_threadsafe(settled.set)
+        assert settled.wait(3)
+        assert len(seen) == 1
+    finally:
+        sess.close()
+
+
 def test_reply_is_not_one_turn_behind_after_a_background_continuation():
     fake = _FakeClient()
     fake.replies["continue the work"] = [

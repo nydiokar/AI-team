@@ -200,7 +200,8 @@ export function useSessionUsage(sessionId: string | undefined) {
     enabled: Boolean(token) && Boolean(sessionId),
     refetchInterval: POLL_MS,
     refetchOnReconnect: true,
-    placeholderData: (prev) => prev,
+    placeholderData: (prev, prevQuery) =>
+      prevQuery?.queryKey[1] === sessionId ? prev : undefined,
   });
 }
 

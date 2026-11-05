@@ -39,6 +39,33 @@ def test_consumed_before_poll_remains_consumed_after_restart(tmp_path, monkeypat
     assert db.get_job_completion("job_result")["consumed_at"]
 
 
+def test_consumed_job_is_one_system_notice_and_not_completed_chat(tmp_path, monkeypatch):
+    from src.control import db as db_module, transcript
+    from src.control.session_timeline import build_session_timeline
+
+    db, orch = _env(tmp_path, monkeypatch)
+    _process(orch, _terminal(db))
+    monkeypatch.setattr(db_module, "_db_instance", db)
+    before = transcript.get_transcript(tmp_path, tmp_path, "sess-1")
+    assert len(before) == 1
+    assert before[0]["kind"] == "system_notice"
+    assert before[0]["task_id"] == "job_result"
+    assert before[0]["instruction"] == ""
+
+    db.consume_job_result("job_result", "sess-1", "worker-a")
+    after = transcript.get_transcript(tmp_path, tmp_path, "sess-1")
+    assert len(after) == 1
+    assert after[0]["task_id"] == before[0]["task_id"]
+    assert "Result consumed" in after[0]["result"]
+    assert "withdrawn" not in after[0]["result"]
+    assert db.get_session_turns("sess-1") == []
+    assert db.get_session_turns_tail("sess-1") == []  # no fake restart context
+    activity = build_session_timeline(db=db, telemetry_store=None, session_id="sess-1")
+    assert [(item.kind, item.job_id) for item in activity.items] == [("job_state", "job_result")]
+    # Internal audit remains durable, including for already-existing records.
+    assert db.get_task("job_result")["action"] == "watched_job"
+
+
 @pytest.mark.parametrize("phase", ["queued", "pending", "claimed"])
 def test_consumption_fences_every_unstarted_phase(tmp_path, monkeypatch, phase):
     db, orch = _env(tmp_path, monkeypatch)

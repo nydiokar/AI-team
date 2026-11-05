@@ -237,11 +237,17 @@ def _turns_from_db(session_id: str, limit: int) -> Optional[List[Dict[str, Any]]
         if db is None:
             return None
         rows = db.get_session_turns(session_id, limit=limit)
+        notices = db.session_job_notices(session_id, limit=limit)
     except Exception as e:
         logger.debug("transcript_db_read_failed session_id=%s err=%s", session_id, e)
         return None
 
-    if not rows:
+    if not rows and not notices:
+        # An enrolled session with only waiting/withdrawn requests has an empty
+        # conversation. Do not resurrect audit messages through file fallback.
+        session = db.get_session(session_id)
+        if session and session.get("turn_queue_enrolled"):
+            return []
         return None
     # Rows created before prompt-at-enqueue was added can still be in flight. The
     # session snapshot holds the exact current prompt, keyed by last_task_id; use
@@ -326,10 +332,24 @@ def _turns_from_db(session_id: str, limit: int) -> Optional[List[Dict[str, Any]]
             # [A82 Stage 6] ledger status, so the UI can tell an in-flight
             # exchange from a finished one and dedupe it against queue cards.
             "status": status,
-            "instruction": instruction,
+            "instruction": "" if r.get("turn_kind") == "watched_job" else instruction,
             "result": result,
             "file_count": len(files) if isinstance(files, (list, tuple)) else 0,
             "usage": usage,
+        })
+
+    for notice in notices:
+        text = f"Watched job {notice['label'] or notice['id']} {notice['status']}."
+        if notice.get("exit_code") is not None:
+            text += f" Exit code: {notice['exit_code']}."
+        if notice.get("consumed_at"):
+            text += " Result consumed; no pending continuation."
+        timestamp = notice.get("finished_at") or ""
+        turns.append({
+            "task_id": notice["id"], "kind": "system_notice",
+            "timestamp": timestamp, "started_at": timestamp, "completed_at": timestamp,
+            "success": notice["status"] == "done", "instruction": "", "result": text,
+            "status": notice["status"], "file_count": 0, "usage": None,
         })
 
     # Conversation order = when each turn STARTED (the user sent it), never when it

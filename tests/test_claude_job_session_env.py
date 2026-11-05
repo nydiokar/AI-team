@@ -15,19 +15,21 @@ from src.core.turn_liveness import turn_control
 class _CapturingDriver:
     def __init__(self) -> None:
         self.envs: list[dict] = []
+        self.sinks: list[object | None] = []
 
     def driver_type(self) -> str:
         return "sdk"
 
-    def _capture(self, proc_env: dict) -> ExecutionResult:
+    def _capture(self, proc_env: dict, telemetry_sink: object | None) -> ExecutionResult:
         self.envs.append(dict(proc_env))
+        self.sinks.append(telemetry_sink)
         return ExecutionResult(success=True, output="ok", errors=[])
 
-    def start_session(self, session, message, *, turn=None, model=None, telemetry_context=None, proc_env=None) -> ExecutionResult:
-        return self._capture(proc_env or {})
+    def start_session(self, session, message, *, turn=None, model=None, telemetry_context=None, telemetry_sink=None, proc_env=None) -> ExecutionResult:
+        return self._capture(proc_env or {}, telemetry_sink)
 
-    def send_turn(self, session, message, *, turn=None, model=None, telemetry_context=None, proc_env=None) -> ExecutionResult:
-        return self._capture(proc_env or {})
+    def send_turn(self, session, message, *, turn=None, model=None, telemetry_context=None, telemetry_sink=None, proc_env=None) -> ExecutionResult:
+        return self._capture(proc_env or {}, telemetry_sink)
 
 
 def _backend(monkeypatch) -> tuple[ClaudeCodeBackend, _CapturingDriver]:
@@ -50,8 +52,10 @@ def _session(backend_session_id: str | None) -> Session:
 
 def test_create_session_exports_gateway_session_id(monkeypatch) -> None:
     backend, driver = _backend(monkeypatch)
-    backend.create_session(_session(None), turn=turn_control("env-create"))
+    sink = object()
+    backend.create_session(_session(None), turn=turn_control("env-create"), telemetry_sink=sink)
     assert driver.envs[0]["SESSION_ID"] == "5725a4bf260c"
+    assert driver.sinks == [sink]
 
 
 def test_resume_session_exports_gateway_not_backend_session_id(monkeypatch) -> None:

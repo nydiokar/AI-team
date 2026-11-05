@@ -151,6 +151,9 @@ def build_session_timeline(
         # user-facing session timeline.
         if task_id.startswith("inspect_"):
             continue
+        # Job state already represents these internal delivery/audit rows.
+        if task.get("action") == "watched_job" or task.get("turn_kind") == "watched_job":
+            continue
         node_id: str = str(task.get("claimed_by") or task.get("machine_id") or "")
         derived = derive_task_execution_state(
             task,
@@ -250,6 +253,7 @@ def build_session_timeline(
                 summary=f"Job {job.get('label') or job_id} {derived_job.state}",
                 detail={
                     "label": job.get("label"),
+                    "reason": "Result consumed; no pending continuation." if job.get("consumed_at") else None,
                     "exit_code": job.get("exit_code"),
                     "tail": _text(job.get("tail"))[:500] or None,
                 },
