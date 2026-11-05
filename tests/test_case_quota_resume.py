@@ -63,9 +63,6 @@ def _now() -> datetime:
 
 
 def _flags(monkeypatch, *, auto="0", ceiling=None) -> None:
-    monkeypatch.setenv("HARNESS_FLOW_DRIVE", "1")
-    monkeypatch.setenv("CASE_CONTINUATION_ENABLED", "1")
-    monkeypatch.setenv("MANAGER_ROLE_ENABLED", "1")
     monkeypatch.setenv("CASE_QUOTA_RESUME_AUTO", auto)
     if ceiling is not None:
         monkeypatch.setenv("CASE_QUOTA_RESUME_AUTO_MAX_USD", str(ceiling))
@@ -194,12 +191,6 @@ class _Orch:
     # -- real implementations ------------------------------------------------
     def _emit_event(self, name, _t=None, payload=None):
         self.emitted.append((name, payload or {}))
-
-    def _harness_flow_drive_enabled(self):
-        return TaskOrchestrator._harness_flow_drive_enabled()
-
-    def _manager_role_enabled(self):
-        return TaskOrchestrator._manager_role_enabled(self)
 
     def _short_failure_reason(self, result):
         return TaskOrchestrator._short_failure_reason(result)
@@ -821,7 +812,6 @@ def test_unpaused_case_still_wakes_normally(tmp_path, monkeypatch):
     and the continuation behaviour is unchanged — (A104) the Manager's finished
     request in its agent inbox is delivered as ONE wake turn."""
     _flags(monkeypatch)
-    monkeypatch.setenv("DURABLE_RELAY_ENABLED", "1")
     db = _mk_db(tmp_path, monkeypatch)
     db.upsert_session(Session(
         session_id="mgr-1", backend="claude", repo_path="/repo",

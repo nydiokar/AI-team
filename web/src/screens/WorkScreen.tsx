@@ -4,7 +4,7 @@
  * It is not a workflow editor; the only write here is the operator maintenance
  * cleanup for stale Cases whose Manager session is gone/inactive.
  *
- * When the substrate is empty (HARNESS_FLOW_DRIVE off / no cases yet) it says so
+ * When the substrate is empty (no cases yet) it says so
  * plainly rather than inventing rows.
  */
 import { useMemo, useState } from "react";

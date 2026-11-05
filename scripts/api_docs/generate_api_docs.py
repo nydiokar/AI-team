@@ -264,7 +264,6 @@ REASON_DOC: dict[str, str] = {
     "no_repo_path": "The upload requires a repository path and none was provided.",
     "dangerous_extension": "The upload was rejected because its file extension is disallowed.",
     "file_too_large": "The uploaded file (or body) exceeds the configured size cap.",
-    "harness_level3_needs_approval": "This is a Level-3 task and needs operator approval before it can run (HARNESS_LEVEL3_GUARD is armed). Retrying will not help.",
 }
 
 # HTTP-layer errors that are not reason-coded in _REASON_STATUS.

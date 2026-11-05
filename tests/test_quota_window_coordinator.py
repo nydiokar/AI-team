@@ -22,7 +22,6 @@ from src.services.quota_window_coordinator import (
     build_default_quota_adapters,
     utc_iso,
 )
-from src.services.quota_digest import QuotaTelegramDigestSubscriber
 
 
 def _store(tmp_path):
@@ -859,37 +858,6 @@ async def test_read_status_marks_anchored_current_window_as_preautomation_candid
     assert state["window_known"] is True
     assert state["automation_ready"] is False
     assert state["blockers"] == ["active_session_state_unknown"]
-
-@pytest.mark.asyncio
-async def test_quota_digest_subscriber_aggregates_and_uses_notifier():
-    class FakeNotifier:
-        def __init__(self) -> None:
-            self.messages = []
-
-        async def notify_quota_digest(self, message, *, chat_id=None):
-            self.messages.append((message, chat_id))
-
-    notifier = FakeNotifier()
-    digest = QuotaTelegramDigestSubscriber(notifier=notifier, chat_id=123, interval_sec=60)
-
-    digest.handle_event(
-        "quota.observed",
-        {
-            "provider": "claude",
-            "bucket_id": "five_hour",
-            "used_percent": 40.0,
-            "reset_at": "2026-07-29T13:00:00Z",
-            "telemetry_quality": "authoritative",
-        },
-    )
-    await asyncio.sleep(0)
-
-    assert notifier.messages
-    message, chat_id = notifier.messages[0]
-    assert chat_id == 123
-    assert "claude/five_hour" in message
-    assert "Claude tokens spent by observer: 0" in message
-
 
 # ---------------------------------------------------------------------------
 # A78 — quota telemetry truthfulness

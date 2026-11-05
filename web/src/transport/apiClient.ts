@@ -1084,8 +1084,8 @@ export const api = {
     );
   },
 
-  /** GET /api/cost/alerts — budget/burn-rate alerts (billable-USD only) plus the
-   *  enforcement surface. Read-only; fires only when a budget knob is set. */
+  /** GET /api/cost/alerts — budget/burn-rate alerts (billable-USD only).
+   *  Read-only; fires only when a budget knob is set. */
   async costAlerts(token: string, signal?: AbortSignal): Promise<RawCostAlertsResponse> {
     return get<RawCostAlertsResponse>(`/api/cost/alerts`, token, costReadSignal(signal));
   },

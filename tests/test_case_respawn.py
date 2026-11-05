@@ -11,8 +11,7 @@ tick never double-respawns.
 
 These tests drive the GENUINE ``TaskOrchestrator._do_respawn_manager_for_case`` /
 ``_continue_case_once`` against a real ``MeshDB`` with a duck-typed ``self`` — no
-paid CLI, no live backend. Flags ``CASE_CONTINUATION_ENABLED`` +
-``MANAGER_ROLE_ENABLED`` gate the respawn.
+paid CLI, no live backend.
 
 A104: "satisfied" now means the dead Manager has a deliverable agent-inbox
 message (a child it requested finished — ``tests/inbox_seed``); the tick reaches
@@ -41,9 +40,6 @@ def _db(tmp_path) -> MeshDB:
 
 
 def _on(monkeypatch) -> None:
-    monkeypatch.setenv("CASE_CONTINUATION_ENABLED", "1")
-    monkeypatch.setenv("MANAGER_ROLE_ENABLED", "1")
-    monkeypatch.setenv("DURABLE_RELAY_ENABLED", "1")
     # These tests drive the GENUINE unconditional respawn machinery directly —
     # the approval gate in front of it (CASE_RESPAWN_REQUIRES_APPROVAL, default
     # ON) is covered separately in test_case_respawn_approval_gate.py.
@@ -141,9 +137,6 @@ class _FakeOrch:
 
     def _emit_event(self, name, _a, payload):
         self.emitted.append((name, payload))
-
-    def _manager_role_enabled(self):
-        return TaskOrchestrator._manager_role_enabled(self)
 
     def _render_wake_turn(self, case_id, presented):
         return TaskOrchestrator._render_wake_turn(self, case_id, presented)
@@ -329,32 +322,3 @@ def test_blocked_case_with_dead_manager_is_not_respawned(tmp_path, monkeypatch):
     assert orch.deliveries == []
     # the message is HELD (not killed) while the Case is blocked.
     assert [r["task_id"] for r in db.reconcile_worker_waits(case_id)["resolved"]] == ["t1"]
-
-
-# --------------------------------------------------------------------------- #
-# Guard — MANAGER_ROLE off ⇒ no naked respawn, strand escalation instead       #
-# --------------------------------------------------------------------------- #
-
-def test_manager_role_off_falls_back_to_strand_escalation(tmp_path, monkeypatch):
-    monkeypatch.setenv("CASE_CONTINUATION_ENABLED", "1")
-    monkeypatch.setenv("DURABLE_RELAY_ENABLED", "1")
-    monkeypatch.delenv("MANAGER_ROLE_ENABLED", raising=False)  # role OFF
-    db = _db(tmp_path)
-    db.upsert_node(socket.gethostname(), "", 9001, ["claude"], 2)
-    case_id, dead_sid = _open_case_with_dead_manager(db)
-    db.arm_wait_group(case_id, "g1", "ALL", ["t1"])
-    _finished(db, case_id, "t1", dead_sid)
-
-    store = _FakeStore()
-    svc = _FakeSessionService(store)
-    orch = _FakeOrch(store, svc)
-    assert _continue(orch, db, case_id) == 0
-    # no respawn (would be a naked, tool-less Manager) — escalate the strand instead
-    assert svc.created == []
-    assert _events(db, case_id, "case.manager_respawned") == []
-    assert len(_events(db, case_id, "case.manager_unavailable")) == 1
-    assert len(orch.notifier.errors) == 1
-    # [A104] the strand is terminal for the message: dead(recipient_gone), not
-    # retried every tick.
-    assert db.pending_for(dead_sid, case_id=case_id).messages == []
-

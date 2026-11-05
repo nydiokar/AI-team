@@ -170,11 +170,6 @@ export function toCostAlerts(raw: RawCostAlertsResponse): CostAlerts {
       budgetUsd: a.budget_usd ?? 0,
       pct: a.pct ?? 0,
     })),
-    enforcement: {
-      enabled: Boolean(raw.enforcement?.enabled),
-      mechanism: raw.enforcement?.mechanism ?? "sdk_max_budget_usd",
-      governorSdkMaxBudgetUsd: raw.enforcement?.governor_sdk_max_budget_usd ?? null,
-    },
   };
 }
 

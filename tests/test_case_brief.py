@@ -10,10 +10,7 @@ outstanding waits/groups. These tests exercise the whole contract against a real
 
   * ``get_case_brief`` returns EVERY field from the seeded ledger alone.
   * it is a BOUNDED single query set (no per-worker fanout).
-  * ``boot_reconcile_case`` reports the Case's pending inbox state IDEMPOTENTLY
-    (A104: the inbox and its filters are durable by themselves — nothing is
-    re-armed and a double-boot writes nothing).
-  * flag OFF ⇒ byte-identical: the brief is read-only; the boot hook no-ops.
+  * the brief is read-only.
 
 A104: workers / waits are seeded through the agent inbox (a requested child +
 its terminal txn — ``tests/inbox_seed``), not ``worker.wait_*``/``task.finished``
@@ -26,14 +23,6 @@ from tests.inbox_seed import seed_child, seed_finished_child
 
 def _db(tmp_path) -> MeshDB:
     return MeshDB(str(tmp_path / "mesh.db"))
-
-
-def _relay_on(monkeypatch) -> None:
-    monkeypatch.setenv("DURABLE_RELAY_ENABLED", "1")
-
-
-def _cont_on(monkeypatch) -> None:
-    monkeypatch.setenv("CASE_CONTINUATION_ENABLED", "1")
 
 
 def _events(db: MeshDB, case_id: str, event_type: str) -> list:
@@ -71,8 +60,6 @@ def _seed_full_case(db: MeshDB) -> str:
 
 
 def test_brief_returns_full_state_from_db_alone(tmp_path, monkeypatch):
-    _relay_on(monkeypatch)
-    _cont_on(monkeypatch)
     db = _db(tmp_path)
     case_id = _seed_full_case(db)
 
@@ -124,8 +111,6 @@ def test_brief_bounded_query_set_no_per_worker_fanout(tmp_path, monkeypatch):
     """The brief must be a BOUNDED read set — its per-query count must NOT grow with
     the number of workers (no N+1). Compare a 2-worker Case to a 12-worker Case and
     assert the SQL execute count is identical."""
-    _relay_on(monkeypatch)
-    _cont_on(monkeypatch)
 
     def _count_executes(n_workers: int) -> int:
         db = _db(tmp_path / f"w{n_workers}")
@@ -154,43 +139,13 @@ def test_brief_bounded_query_set_no_per_worker_fanout(tmp_path, monkeypatch):
 # Acceptance 2 — boot reconcile: reconcile waits + re-arm groups, idempotent    #
 # --------------------------------------------------------------------------- #
 
-def test_boot_reconcile_reconciles_and_rearms_idempotently(tmp_path, monkeypatch):
-    _relay_on(monkeypatch)
-    _cont_on(monkeypatch)
-    db = _db(tmp_path)
-    case_id = _seed_full_case(db)
-
-    # Pre: task_done finished with its completion unconsumed; filter armed once.
-    assert len(_filters(db, case_id, "batch-1")) == 1
-    before_events = db.list_flow_events(case_id)
-
-    # First boot: reports what pending_for holds; the durable filter needs no re-arm.
-    r1 = db.boot_reconcile_case(case_id)
-    assert r1["ok"] is True
-    assert [x["task_id"] for x in r1["reconciled"]["resolved"]] == ["task_done"]
-    assert [x["task_id"] for x in r1["reconciled"]["pending"]] == ["task_live"]
-    assert r1["rearmed"] == []
-
-    # Second boot (double-boot): idempotent — same report, nothing written.
-    r2 = db.boot_reconcile_case(case_id)
-    assert r2 == r1
-    assert db.list_flow_events(case_id) == before_events
-    assert _events(db, case_id, "worker.wait_resolved") == []
-    assert _events(db, case_id, "worker.wait_pending") == []
-    # Exactly one filter ever — a double-boot did NOT create a second group.
-    assert len(_filters(db, case_id, "batch-1")) == 1
-
-
 # --------------------------------------------------------------------------- #
 # Acceptance 3/6 — flag OFF ⇒ byte-identical                                    #
 # --------------------------------------------------------------------------- #
 
-def test_brief_is_read_only_regardless_of_flags(tmp_path, monkeypatch):
+def test_brief_is_read_only(tmp_path, monkeypatch):
     """The brief writes NOTHING — the event/link ledger is byte-identical before
-    and after, whether the flags are ON or OFF."""
-    # Flags OFF for the read path.
-    monkeypatch.delenv("DURABLE_RELAY_ENABLED", raising=False)
-    monkeypatch.delenv("CASE_CONTINUATION_ENABLED", raising=False)
+    and after."""
     db = _db(tmp_path)
     case_id = db.open_case("obj", "sess", role="manager", round_cap=5)
     seed_finished_child(db, case_id, "task_1", requester="sess")
@@ -202,14 +157,3 @@ def test_brief_is_read_only_regardless_of_flags(tmp_path, monkeypatch):
     assert db.list_flow_events(case_id) == before_events  # zero writes
     assert db.list_flow_links(flow_run_id=case_id) == before_links
 
-
-def test_boot_reconcile_noop_when_relay_off(tmp_path, monkeypatch):
-    monkeypatch.delenv("DURABLE_RELAY_ENABLED", raising=False)
-    db = _db(tmp_path)
-    case_id = db.open_case("obj", "sess", role="manager")
-    seed_finished_child(db, case_id, "task_1", requester="sess")
-
-    before = db.list_flow_events(case_id)
-    result = db.boot_reconcile_case(case_id)
-    assert result == {"ok": False, "reason": "durable_relay_disabled"}
-    assert db.list_flow_events(case_id) == before  # byte-identical: no writes

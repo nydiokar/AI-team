@@ -38,7 +38,8 @@ Goal: delete every **temporary rollout flag** whose rollout is finished, so the 
 path. Live values were read with `scripts/ops_flag.sh list` against the running gateway on
 2026-11-04. A flag is removed by **keeping its live path** and deleting the other branch, its
 wrapper in `src/control/db.py`, its `RUNTIME_FLAG_DEFINITIONS` entry and the tests that only
-covered the dead branch. Branch: `feat/retire-rollout-flags`.
+covered the dead branch. Branches: `feat/retire-rollout-flags` (batch 1, PR #275),
+`feat/retire-rollout-flags-2` (batch 2).
 
 **Removal rules (read before taking a row):**
 1. **Callers first, definition last.** `runtime_flag_enabled()` raises `ValueError` on an
@@ -67,21 +68,21 @@ covered the dead branch. Branch: `feat/retire-rollout-flags`.
 | `TRANSIENT_PROVIDER_RESUME_ENABLED` | rollout | true (registry) | removed; 529 turn leaves session AWAITING_INPUT, Case self-heals | ON live | ✅ `dcb69d4` |
 | `CACHE_HEARTBEAT_OBSERVE` | rollout | true (default) | removed; observe-only always ON | default ON | ✅ `dcb69d4` |
 | `CACHE_HEARTBEAT_CHECKPOINT_ENABLED` | rollout | true (default) | removed; checkpoint beats always ON | default ON | ✅ `dcb69d4` |
-| `SPEC_AUTHORING_ENABLED` | rollout | true (registry) | keep ON path | ~13 callers + `mcp_manager.py` help text | ⏭ next |
-| `CASE_CONTINUATION_ENABLED` | rollout | true (registry) | keep ON path | 15 callers, 17 tests, web `continuation_disabled` message, conformance text | ⏭ next |
-| `HARNESS_FLOW_DRIVE` | rollout | true (registry) | keep ON path | 5 src files, ~30 test files; also gates quota/transient pause recording | ⏭ next (largest) |
+| `SPEC_AUTHORING_ENABLED` | rollout | true (registry) | removed; spec/review/decompose routes + db writes unconditional | ON live; Manager spec→score→DAG workflow | ✅ `92cc1bf` |
+| `CASE_CONTINUATION_ENABLED` | rollout | true (registry) | removed; Wake-Dispatcher starts whenever mesh is on, wait-group route + resume always available | ON live; web `continuation_disabled` copy dropped | ✅ `f89dccc` |
+| `HARNESS_FLOW_DRIVE` | rollout | true (registry) | removed; Case admission, lineage, stage + event writes, approval links, quota/transient pause recording unconditional | ON live; legacy `dispatch_start`/`queued` path deleted | ✅ `1853edc` |
 | `APP_METRICS_ENABLED` | env kill switch | unset ⇒ true | removed; sampler always starts | settings-only, not in container env | ✅ `e37eeaa` |
 | `MESH_PENDING_REAPER_ENABLED` | env kill switch | unset ⇒ true | removed; reaper always runs | settings-only, not in container env | ✅ `e37eeaa` |
-| `QUOTA_ARCHIVE_ENABLED` | env kill switch | unset ⇒ true | keep ON path | settings-only, not in container env | ⏭ next |
-| `QUOTA_COORDINATOR_ENABLED` | rollout, worker-read | true (registry + `.env`) | keep ON path | read in `src/worker/config.py` | ⛔ after worker restart |
-| `MANAGER_ROLE_ENABLED` | rollout, worker-read | true (registry + `.env`) | keep ON path | read in `claude_driver.py` / `roles.py` on the worker | ⛔ after worker restart |
-| `MANAGER_TOOLS_ENABLED` | legacy, worker-read | true (registry + `.env`) | investigate first | "legacy process-wide grant": confirm role-scoped grants cover every session that needs `dispatch_worker` | ⛔ after worker restart + investigation |
-| `DURABLE_RELAY_ENABLED` | rollout, worker-read | **false** (registry) | decide: turn on or delete | OFF live: no wait markers, `/api/cases/{id}/waits` 404 | 🔍 investigate |
-| `HARNESS_LEVEL3_GUARD` | rollout | **false** (registry) | decide | admission backstop for Level-3 auto-picks | 🔍 investigate |
-| `MANAGER_ADVANCEMENT_GATE` | rollout | **false** (default) | decide | close_case advancement gate | 🔍 investigate |
-| `COST_ALERT_ENFORCE_ENABLED` | rollout | **false** (default) | decide | A65 enforcement surface | 🔍 investigate |
-| `TOOL_PROFILES_DYNAMIC` + `TOOL_PROFILES_OVERLAY` | rollout, worker-read | **false** / empty | decide (pair) | dynamic tool profiles never enabled | 🔍 investigate |
-| `QUOTA_DIGEST_TELEGRAM_ENABLED` | temporary | **false** (registry + `.env`) | likely delete the feature | labelled "Temporary" in its definition | 🔍 investigate |
+| `QUOTA_ARCHIVE_ENABLED` | env kill switch | unset ⇒ true | removed; pruned quota history always archived to `quota_archive.db` | settings-only, not in container env | ✅ `abeb3e4` |
+| `QUOTA_COORDINATOR_ENABLED` | rollout, startup + worker env | true (registry + `.env`) | **deferred** | two blockers: (1) `src/worker/config.py` reads it from the WORKER's `.env` as the default for quota observation — only `kanebra` has it (19,756 ingests, Horse 0), so dropping the read would silently start observation on Horse; set `WORKER_QUOTA_OBSERVE=1` on kanebra first. (2) 15 test modules build `TaskOrchestrator()`; with no gate each would create `state/quota_windows.db` under the cwd — isolate `config.quota.db_path` in `tests/conftest.py` first | ⏭ deferred |
+| `MANAGER_ROLE_ENABLED` | rollout, worker-read | true (registry + `.env`) | removed; role boot, scoped grants, `/api/manager`, `POST /api/cases` and Manager respawn unconditional | ON live; needs both workers restarted onto this code (an old worker falls back to its `.env`) | ✅ `1ad136c` |
+| `MANAGER_TOOLS_ENABLED` | legacy, worker-read | true (registry + `.env`) | removed with the legacy process-wide 2-tool grant | the grant was only reachable with `MANAGER_ROLE_ENABLED` OFF; role-less sessions now never get manager tools | ✅ `1ad136c` |
+| `DURABLE_RELAY_ENABLED` | rollout, worker-read | **false** (registry, set 2026-08-03) | removed with its A104 shims: `POST /api/cases/{id}/waits`, `/api/cases/{id}/boot-reconcile`, `/control/cases/{id}/boot-reconcile`, driver boot hook | dead since A104 (agent inbox owns waits); removal = the live OFF behaviour (routes 404, hook no-op) | ✅ `a2e70db` |
+| `HARNESS_LEVEL3_GUARD` | rollout | **false** (registry) | removed with the Level-3 predicate + `harness_level3_needs_approval` reason | nothing in `src`/`scripts` sets `harness_level`; `HarnessAdmissionBlocked` stays for `local_execution_disabled` | ✅ `3bf0317` |
+| `MANAGER_ADVANCEMENT_GATE` | rollout | **false** (default) | kept OFF, operator decision | the only OFF flag with real behaviour: refuses a Manager `close_case` without ≥2 dispatches / a rework verdict / a ≥40-char `exhaustion_attestation` | 🔍 operator |
+| `COST_ALERT_ENFORCE_ENABLED` | rollout | **false** (default) | removed with the `enforcement` field of `/api/cost/alerts` + the banner line | placebo: no enforcement existed; the real cap is `CLAUDE_SDK_MAX_BUDGET_USD` | ✅ `c4ca62b` |
+| `TOOL_PROFILES_DYNAMIC` + `TOOL_PROFILES_OVERLAY` | feature, worker-read | **false** / empty | kept as is | a real feature (edit role tool lists without a redeploy); no-op until an overlay is written. Candidate later: drop the DYNAMIC switch, keep OVERLAY | ⏸ kept |
+| `QUOTA_DIGEST_TELEGRAM_ENABLED` | temporary | **false** (registry + `.env`) | feature deleted (`src/services/quota_digest.py`, `notify_quota_digest`, `QUOTA_DIGEST_INTERVAL_SEC`) | self-labelled temporary, never ON | ✅ `abeb3e4` |
 | `GATEWAY_LOCAL_EXECUTION_ENABLED` | architectural | false (compose) | belongs to A102 | **code default is `True`**: never drop the compose line before the code | 🧱 A102 |
 | `MESH_ENABLED` / `MESH_EMBEDDED_SERVER` / `MESH_SHADOW_WRITE` | architectural | true / false / true (env) | separate job | the pre-split single-process fallback; 22+ refs | 🧱 separate job |
 | `JOBS_READ_MODE` / `OPENCODE_MODE` / `CLAUDE_DRIVER_TYPE` | config/migration | controller / server / sdk | check other values still needed | mode selectors, not booleans | 🧱 separate job |
@@ -93,7 +94,11 @@ covered the dead branch. Branch: `feat/retire-rollout-flags`.
 `WORKER_CANARY`, `WORKER_REAP_STALE_SESSIONS`, `CLAUDE_SDK_MAX_TURNS`, `CLAUDE_SDK_MAX_BUDGET_USD`.
 
 **Operator `.env` leftovers to delete after the deploy (inert, cosmetic):** `OPENCODE_SERVER_ENABLED`,
-`REVIEW_EMITTER_ENABLED`, `WORKER_MANAGED_TURNS` (retired by A102 `f567c1a`), the duplicate `HARNESS_FLOW_DRIVE=on` line.
+`REVIEW_EMITTER_ENABLED`, `WORKER_MANAGED_TURNS` (retired by A102 `f567c1a`); after batch 2:
+`CASE_CONTINUATION_ENABLED`, both `HARNESS_FLOW_DRIVE` lines, `QUOTA_DIGEST_TELEGRAM_ENABLED`,
+`QUOTA_DIGEST_INTERVAL_SEC`. `MANAGER_ROLE_ENABLED` / `MANAGER_TOOLS_ENABLED` only **after both workers
+run batch-2 code** (an older worker still falls back to them). **Keep** `QUOTA_COORDINATOR_ENABLED` (still
+read by the worker) and `CACHE_HEARTBEAT_ACTIVE` (the only thing turning paid heartbeats ON).
 
 ---
 
@@ -157,12 +162,6 @@ rollout order and operator recovery are in burndown J2. No worker restart is nee
 
 | Flag | Managed? | Default | What it turns on | Code seam |
 |------|----------|---------|-----------------|-----------|
-| `HARNESS_FLOW_DRIVE` | ⚠ NO | off | M1: authoritative §11 stage writes at each harness transition. **SHADOW-only** — nothing reads the stage to drive execution; OFF ⇒ byte-identical to A19. Turning this ON right now is safe but cosmetic: it writes pretty stage labels to `flow_runs.current_stage`, which nothing reads back. | `orchestrator.py:1742` |
-| `HARNESS_LEVEL3_GUARD` | ⚠ NO | off | Level-3 admission gate on `_enqueue_task`: blocks over-scoped submits, returns clean 409. OFF ⇒ no gate, everything passes. | `orchestrator.py:2036` |
-| `CASE_CONTINUATION_ENABLED` | ✅ YES (registry-writable) | off | **M3.4/A52 — Wake-Dispatcher autonomous Case continuation.** When ON: a Manager can `arm_wait_group` over its dispatched workers and return control instead of blocking; the harness re-enters the Case with a coalesced review turn each time the group is satisfied, up to a `round_cap` backstop (default 50), then escalates. OFF ⇒ `arm_wait_group` is a silent no-op (`disabled` reason, byte-identical to pre-M3.4) and the Manager falls back to a single short `wait_for_worker`. **Activation is an operator decision — it turns on live autonomous behavior and real paid spend.** To activate: `scripts/ops_flag.sh on CASE_CONTINUATION_ENABLED` (takes effect immediately, `live` scope, no restart needed) or `PUT /api/flags/CASE_CONTINUATION_ENABLED {"value":true}` directly; confirm `HARNESS_FLOW_DRIVE`/`MANAGER_ROLE_ENABLED` are also ON (`scripts/ops_flag.sh list`); if set via `.env` instead of the registry, `pm2 restart ai-team-gateway` and confirm `curl http://127.0.0.1:9003/health`. Verify with `scripts/ops_flag.sh get CASE_CONTINUATION_ENABLED`. | `control/db.py:case_continuation_enabled` · `orchestrator.py:_continue_case_once` · `scripts/mcp_manager.py:_arm_wait_group` |
-| `DURABLE_RELAY_ENABLED` | ⚠ NO | off | **M3.3 A46 — durable worker-wait relay.** `wait_for_worker` is an in-process poll, so a Manager/gateway crash mid-wait loses it. When ON: `dispatch_worker` records a durable append-only `worker.wait_pending` marker on the Case (via `POST /api/cases/{id}/waits`), and `reconcile_waits` (`POST /api/cases/{id}/waits/reconcile`) resolves each outstanding wait against the already-durable `task.finished` event (finished ⇒ append `worker.wait_resolved`; still-open ⇒ re-arm), so a resumed Manager recovers its waits from the ledger. Idempotent. OFF ⇒ no `worker.wait_*` events written, both `/waits` routes return 404 ⇒ byte-identical. Reuses the A25/A26 `flow_events` substrate — no new schema. | `control/db.py:durable_relay_enabled` · `scripts/mcp_manager.py:_reconcile_waits` |
-| `MANAGER_TOOLS_ENABLED` | ⚠ NO | off | **M3 A34** — grant a Claude session the Manager MCP tools (`mcp__manager__dispatch_worker` / `wait_for_worker`). **Double-gated:** the tools are added ONLY if this is ON **and** the `manager` server is registered in `~/.claude.json` (`scripts/setup_mcp.py --with-manager`). OFF ⇒ byte-identical even if the server is registered. This is the operator-controlled kill switch for the dispatch primitive; the tools also stay inert until the gateway is restarted to pick up the code. | `backends/claude_driver.py:_manager_tools_enabled` |
-| `MANAGER_ROLE_ENABLED` | ⚠ NO | off | **M3 A38 (Phase 3.1)** — the Manager-role path. When ON: (1) a session with `case_role=="manager"` boots via the Claude adapter with the canonical role prompt appended to the Claude Code preset (`system_prompt`); (2) the manager MCP tools are SCOPED per-session (only a manager session gets `manager_v1` = dispatch_worker/wait_for_worker/get_case/close_case), superseding the A34 process-wide `MANAGER_TOOLS_ENABLED` grant; (3) `POST /api/manager` (→ `invoke_manager`) opens one Case + boots the Manager, and `POST /api/cases/{id}/close` (→ `close_case`) is the Decision surface. OFF ⇒ no role prompt, no scoped grant, `/api/manager` refuses (409) — byte-identical to pre-A38. Still requires the `manager` server in `~/.claude.json` for the tool grant. **Depends on `HARNESS_FLOW_DRIVE` ON** for the Case machinery (per-turn attach, worker JOIN, `task.finished` timeline that `wait_for_worker` watches); with FLOW_DRIVE OFF the Manager boots but Case attach/JOIN are inert (a warning is logged). | `backends/claude_driver.py:_manager_role_enabled` · `orchestrator.py:invoke_manager` |
 | `MESH_AFFINITY_OFFLINE_GRACE_SEC` | ⚠ NO | 0 (= off) | A18b: when a session's pinned node goes offline, hold it in `PAUSED_PINNED_NODE_OFFLINE` and poll liveness instead of hard-failing. `0` ⇒ byte-identical A11 behavior (hard-fail). | `config/settings.py:635` |
 | `MESH_AFFINITY_OFFLINE_POLL_INTERVAL_SEC` | ⚠ NO | (settings default) | Companion to above: how often to probe the offline node. Meaningless unless `MESH_AFFINITY_OFFLINE_GRACE_SEC > 0`. | `config/settings.py:641` |
 | `MESH_EMBEDDED_SERVER` | ✅ YES | false | Run the mesh task server embedded in the gateway process vs. standalone. | `config/settings.py:593` |
@@ -170,7 +169,6 @@ rollout order and operator recovery are in burndown J2. No worker restart is nee
 | `GUARDED_WRITE` | ✅ YES | false | Stored in `config.system.guarded_write`. **Currently only surfaces as metadata** in the result artifact's `security.guarded_write` field (`orchestrator.py:3299`). It does not actually guard or block any file write at the code level today. Vestigial — was presumably planned to enforce something but the enforcement was never wired. | `config/settings.py:445`, `orchestrator.py:3299` |
 | `CLAUDE_SKIP_PERMISSIONS` | ✅ YES | false | Appends `--dangerously-skip-permissions` to the Claude CLI. **Security-relevant** — leave OFF unless you know why. | `config/settings.py:307` |
 | `CONTROL_API_DOCS` | ⚠ NO | false | Exposes the control-API OpenAPI/Swagger docs route. Keep OFF on tailnet-facing binds. | `control_api.py:203` |
-| `COST_ALERT_ENFORCE_ENABLED` | ⚠ NO | off | **A65 — Cost-alert enforcement seam.** When ON, `/api/cost/alerts` surfaces the existing `sdk_max_budget_usd` governor ceiling; it never creates a second kill path. Alert evaluation itself is read-only and is enabled by any positive `COST_ALERT_*_USD` threshold. | `control/routes/cost.py:api_cost_alerts` · `control/db.py:RUNTIME_FLAG_DEFINITIONS` |
 | `TOOL_PROFILES_DYNAMIC` | ✅ YES (registry-writable) | off | **A108 — controller-authoritative dynamic tool profiles.** When ON, a Claude session's tool grant resolves through the `TOOL_PROFILES_OVERLAY` value layered over the static seed map, instead of the static map alone. Read at SESSION BOOT via the A88 controller snapshot (memory-only, no boot I/O), so a change reaches the next session with **no worker restart** (and, riding the registry, no redeploy). OFF ⇒ the static map is used, byte-identical to A107. Claude-only: Codex/OpenCode gate per server and already pick up a new tool on a configured server with no change. Activate: `scripts/ops_flag.sh on TOOL_PROFILES_DYNAMIC`, then set `TOOL_PROFILES_OVERLAY`. | `backends/tool_profile_source.py` · `backends/claude_driver.py:_session_allowed_tools` |
 | `TOOL_PROFILES_OVERLAY` | ✅ YES (registry-writable) | "" (empty) | **A108 — the overlay JSON** honored only when `TOOL_PROFILES_DYNAMIC` is ON. Shape: `{"profiles": {"<profile>": ["mcp__srv__tool", …]}, "role_profiles": {"<role>": "<profile>"}}`. Per-profile replacement layered over the static seed; validated + size-bounded on read. ANY malformation (bad JSON, unknown top key, bad tool name, role → unknown profile, oversized) is rejected whole → static map (fail-closed, least-privilege). An unmapped role always resolves to `worker_v1` regardless of the overlay. Set: `PUT /api/flags/TOOL_PROFILES_OVERLAY {"value":"<json>"}`. | `backends/tool_profile_source.py:_parse_overlay` |
 
@@ -255,8 +253,6 @@ rollout order and operator recovery are in burndown J2. No worker restart is nee
 | `CLAUDE_GET_USAGE_TIMEOUT_SEC` | ✅ YES | 60.0 | Timeout for the canonical Claude quota read: a Python Agent SDK control request with subtype `get_usage`. This is server-backed subscription quota telemetry, not token estimation or status-line parsing. | `config/settings.py`, `quota_window_coordinator.py`, `claude_usage_control.py` |
 | `CLAUDE_STATUS_LINE_JSON_PATH` | ⚠ NO | `state/claude_statusline_latest.json` | **Not a quota knob.** Output path for the terminal status-line capture script, read via `os.getenv` by the script itself (it is a Claude Code `statusLine` command, not gateway code). The quota coordinator does not read this file — `get_usage` is the only quota source. | `scripts/claude_statusline_capture.py` |
 | `CLAUDE_QUOTA_PRINCIPAL_KEY` | ✅ YES | "" | Operator-provided stable account label used only to derive `principal_hash`. | `config/settings.py`, `quota_window_coordinator.py` |
-| `QUOTA_DIGEST_TELEGRAM_ENABLED` | ✅ YES | false | Temporary Telegram digest subscriber for quota observations; separate from the coordinator. | `orchestrator.py`, `quota_digest.py` |
-| `QUOTA_DIGEST_INTERVAL_SEC` | ✅ YES | 3600 | Minimum digest aggregation interval after the first state-change message. | `config/settings.py`, `quota_digest.py` |
 | `QUOTA_PREWARM_ENABLED` | ✅ YES | false | **The only path in the gateway that spends without a user asking.** When telemetry shows NO open 5-hour window, spend one minimal `haiku` turn to start one, then re-observe to VERIFY a window actually opened. Requires `QUOTA_COORDINATOR_ENABLED` (reads/activates through its adapter). Deliberately has **no quiet hours** — see the deviation note below. | `orchestrator.py`, `quota_window_prewarmer.py` |
 | `QUOTA_PREWARM_MODEL` | ✅ YES | `haiku` | Model for the activation turn. Cheapest tier on purpose, and it keeps the opus/fable weekly-scoped buckets out of it. | `config/settings.py`, `quota_window_coordinator.py` |
 | `QUOTA_PREWARM_MIN_INTERVAL_SEC` | ✅ YES | 3600 | Floor between two activations, independent of what telemetry says. | `config/settings.py`, `quota_window_prewarmer.py` |
@@ -265,7 +261,6 @@ rollout order and operator recovery are in burndown J2. No worker restart is nee
 | `QUOTA_PREWARM_MAX_ACTIVATION_PERCENT` | ✅ YES | 2.0 | Spec §13 cost gate: max `used_percent` the activation itself may consume, measured as the provider's own delta across it. Two breaches open the circuit. | `config/settings.py`, `quota_window_prewarmer.py` |
 | `QUOTA_SNAPSHOT_RETENTION_DAYS` | ✅ YES | 14 | Bounded history (A78 §4): redundant confirmation snapshots older than this are pruned daily; the FIRST sighting of each window boundary is always kept (it is the anchored-window evidence). `0` disables pruning (keep everything forever). | `config/settings.py`, `quota_window_coordinator.py` |
 | `QUOTA_EVENT_RETENTION_DAYS` | ✅ YES | 14 | Bounded `coordinator_events` (A93): diagnostic events older than this are pruned in the same daily pass as snapshots, on the controller and the worker. Nothing in code reads the table back. `0` disables event pruning. | `config/settings.py`, `quota_window_coordinator.py` |
-| `QUOTA_ARCHIVE_ENABLED` | ✅ YES | `true` | A93 history archive: before each retention batch is deleted, it is copied to `quota_archive.db` next to `QUOTA_DB_PATH` (snapshots at full fidelity; events compacted into `event_runs`). If archiving fails, nothing is deleted and the pass retries. The archive is never pruned. `false` = prune without archiving. | `config/settings.py`, `quota_window_coordinator.py` |
 
 **Spec conformance.** The full record — what was built, what diverges, and why — lives in
 `docs/SESSION_WINDOW_WARMING_SPEC.md` §19 (that document owns this design). The headline divergence:
@@ -334,7 +329,6 @@ Honest assessment — these either do nothing yet, or are dead in the current de
 
 | Flag | Why it's pointless right now |
 |------|------------------------------|
-| `HARNESS_FLOW_DRIVE` | Enables SHADOW writes to `current_stage`. Nothing reads that column to drive execution (by design — M1 safety). Setting it ON writes prettier labels to a DB column. Zero operational effect on task outcomes. **Will matter when M3 wires the Manager role.** |
 | `GUARDED_WRITE` | Does not guard any file write at the code level. Only sets `security.guarded_write: true` in the result artifact JSON metadata. The enforcement was never wired. |
 | `TELEMETRY_OTLP_ENDPOINT` | Stored in config, never consumed. No OTLP exporter exists in the codebase yet. Reserved for a future path. |
 | `WORKER_CANARY` | Disables the worker's polling loop. With one worker and no staged-rollout infrastructure, this just creates a worker that connects and then does nothing. |
@@ -352,9 +346,6 @@ then remove them from `.env`:
 
 | Key | Impact if stale in supervisor env |
 |-----|----------------------------------|
-| `HARNESS_FLOW_DRIVE` | Could leave stage writes ON after you remove it from `.env` |
-| `HARNESS_LEVEL3_GUARD` | Could leave the admission gate ON/OFF unexpectedly |
-| `MANAGER_TOOLS_ENABLED` | Could leave the Manager dispatch tools granted to sessions after removal from `.env` (still also requires the `~/.claude.json` `manager` server) |
 | `CONTROL_API_DOCS` | Could expose OpenAPI docs unintentionally |
 | `TG_REPLY_MAX_CHARS` | Message truncation stuck at old value |
 | `MESH_AFFINITY_OFFLINE_GRACE_SEC` | A18b grace mode stuck on |

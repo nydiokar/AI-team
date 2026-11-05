@@ -135,17 +135,8 @@ export interface CostBudgetKnobs {
   caseTotalUsd: number;
 }
 
-/** Enforcement never adds a new kill mechanism — it surfaces the existing SDK
- *  governor ceiling and stays flag-gated OFF by default. */
-export interface CostEnforcement {
-  enabled: boolean;
-  mechanism: string;
-  governorSdkMaxBudgetUsd: number | null;
-}
-
 export interface CostAlerts {
   enabled: boolean;
   budgets: CostBudgetKnobs;
   alerts: CostAlert[];
-  enforcement: CostEnforcement;
 }

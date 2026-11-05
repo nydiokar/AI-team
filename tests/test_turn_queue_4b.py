@@ -20,7 +20,7 @@ from src.core.interfaces import ExecutionResult, SessionStatus
 from src.orchestrator import TaskOrchestrator
 from tests.inbox_seed import seed_finished_child
 from tests.test_turn_queue_producer1 import (  # noqa: F401
-    _client, _flags, _managed_rows, _no_cli_spawn, _setup, _submit, _sess,
+    _client, _managed_rows, _no_cli_spawn, _setup, _submit, _sess,
 )
 
 PAST = (datetime.now(tz=timezone.utc) - timedelta(seconds=1)).isoformat()
@@ -433,7 +433,6 @@ def test_L02_close_voids_a_withdrawn_birth_child_case(tmp_path, monkeypatch):
     """Stage-6 precondition (4a carry) implemented for close: a withdrawn turn's
     born child Case is closed cancelled, its affiliation cleared, the parent is
     closable, and the voided dispatch is not counted by the advancement gate."""
-    monkeypatch.setenv("HARNESS_FLOW_DRIVE", "1")
     monkeypatch.setenv("MANAGER_ADVANCEMENT_GATE", "1")
     db, o = _setup(tmp_path, monkeypatch)
     _wire(o)
@@ -467,7 +466,6 @@ def test_L03_pending_lineage_with_live_writer_is_voided_after_its_lease(tmp_path
     """A lineage writer that crashed mid-birth still holds its lease at close:
     the void waits for the lease (the writer could still be mid-write), then the
     scheduler sweep voids it — convergent, each event once."""
-    monkeypatch.setenv("HARNESS_FLOW_DRIVE", "1")
     db, o = _setup(tmp_path, monkeypatch)
     _wire(o)
     parent = db.open_case(objective="p", session_id="mgr-x", role="manager")
@@ -508,7 +506,6 @@ def test_L03_pending_lineage_with_live_writer_is_voided_after_its_lease(tmp_path
 
 
 def test_L03b_void_crash_midway_rerun_converges(tmp_path, monkeypatch):
-    monkeypatch.setenv("HARNESS_FLOW_DRIVE", "1")
     db, o = _setup(tmp_path, monkeypatch)
     _wire(o)
     parent = db.open_case(objective="p", session_id="mgr-x", role="manager")
@@ -530,7 +527,6 @@ def test_L03b_void_crash_midway_rerun_converges(tmp_path, monkeypatch):
 def test_L04_close_keeps_join_membership_like_legacy(tmp_path, monkeypatch):
     """Join/attach lineage of a withdrawn turn is left as written (legacy close
     parity: close never clears a Case membership/affiliation)."""
-    monkeypatch.setenv("HARNESS_FLOW_DRIVE", "1")
     db, o = _setup(tmp_path, monkeypatch)
     _wire(o)
     case_id = db.open_case(objective="obj", session_id="mgr-x", role="manager")
@@ -640,7 +636,6 @@ def test_L05_admission_and_activation_refused_inside_the_close_window(tmp_path, 
 
 
 def test_L02b_void_clears_affiliation_even_if_case_close_did_not(tmp_path, monkeypatch):
-    monkeypatch.setenv("HARNESS_FLOW_DRIVE", "1")
     db, o = _setup(tmp_path, monkeypatch)
     _wire(o)
     parent = db.open_case(objective="p", session_id="mgr-x", role="manager")
@@ -664,7 +659,6 @@ def test_S01_unfinished_void_keeps_a_bounded_idle_wake():
 # --------------------------------------------------------------------------- #
 def test_R01_void_never_wipes_a_newer_case_affiliation(tmp_path, monkeypatch):
     """M3 kill: the strict clear is conditional on the voided child Case."""
-    monkeypatch.setenv("HARNESS_FLOW_DRIVE", "1")
     db, o = _setup(tmp_path, monkeypatch)
     _wire(o)
     parent = db.open_case(objective="p", session_id="mgr-x", role="manager")
@@ -750,9 +744,6 @@ def test_R04_stopped_enrolled_manager_is_not_woken_by_automation(tmp_path, monke
             attr = getattr(TaskOrchestrator, name)
             return attr.__get__(self) if callable(attr) else attr
 
-    monkeypatch.setenv("HARNESS_FLOW_DRIVE", "1")
-    monkeypatch.setenv("CASE_CONTINUATION_ENABLED", "1")
-    monkeypatch.setenv("DURABLE_RELAY_ENABLED", "1")
     monkeypatch.setenv("CASE_RESPAWN_REQUIRES_APPROVAL", "0")
 
     def scenario(stop: bool):
@@ -828,9 +819,6 @@ def test_R04b_crash_respawn_approval_is_not_proposed_for_a_stopped_manager(tmp_p
             attr = getattr(TaskOrchestrator, name)
             return attr.__get__(self) if callable(attr) else attr
 
-    monkeypatch.setenv("HARNESS_FLOW_DRIVE", "1")
-    monkeypatch.setenv("CASE_CONTINUATION_ENABLED", "1")
-    monkeypatch.setenv("DURABLE_RELAY_ENABLED", "1")
     db, o = _setup(tmp_path, monkeypatch)
     _wire(o)
     s = _sess()
@@ -1060,9 +1048,6 @@ def test_R11_unenrolled_case_automation_never_reads_the_hold_record(tmp_path, mo
             attr = getattr(TaskOrchestrator, name)
             return attr.__get__(self) if callable(attr) else attr
 
-    monkeypatch.setenv("HARNESS_FLOW_DRIVE", "1")
-    monkeypatch.setenv("CASE_CONTINUATION_ENABLED", "1")
-    monkeypatch.setenv("DURABLE_RELAY_ENABLED", "1")
     db, o = _setup(tmp_path, monkeypatch, enroll=False)
     s = _sess()
     s.status = SS.AWAITING_INPUT
@@ -1141,8 +1126,6 @@ def test_F01_unreadable_hold_of_a_held_manager_fails_closed(tmp_path, monkeypatc
     """N1 kill: a hold read error is HELD — a stopped Manager is not treated as
     dead (no crash-respawn, no approval) — and the next healthy tick still
     holds."""
-    for k in ("HARNESS_FLOW_DRIVE", "CASE_CONTINUATION_ENABLED", "DURABLE_RELAY_ENABLED"):
-        monkeypatch.setenv(k, "1")
     db, o = _setup(tmp_path, monkeypatch)
     _wire(o)
     cid = _manager_case(db, o)
@@ -1163,8 +1146,6 @@ def test_F01_unreadable_hold_of_a_held_manager_fails_closed(tmp_path, monkeypatc
 def test_F01b_unreadable_hold_is_a_skipped_tick_not_a_lost_wake(tmp_path, monkeypatch):
     """Adopted reviewer probe P1: an unheld Manager whose hold read fails once
     is skipped for that tick and woken on the next healthy one."""
-    for k in ("HARNESS_FLOW_DRIVE", "CASE_CONTINUATION_ENABLED", "DURABLE_RELAY_ENABLED"):
-        monkeypatch.setenv(k, "1")
     db, o = _setup(tmp_path, monkeypatch)
     _wire(o)
     cid = _manager_case(db, o)

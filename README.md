@@ -119,15 +119,15 @@ Full process and API map: [`docs/backend/ARCHITECTURE.md`](docs/backend/ARCHITEC
 
 ## Feature flags
 
-Behaviour-changing work lands behind flags with a byte-identical-when-off contract.
-The main ones:
+Behaviour-changing work lands behind flags with a byte-identical-when-off contract; a
+flag is retired once its rollout is finished (the Manager role, Case continuation and
+the Work substrate are now always on). The main live switches:
 
 | Flag | Effect |
 |---|---|
 | `MESH_ENABLED` | Route tasks to remote worker nodes |
-| `MANAGER_ROLE_ENABLED` | Manager role, `/api/manager`, Case decision surface |
-| `CASE_CONTINUATION_ENABLED` | Autonomous Case continuation — incurs real spend; explicit operator decision |
-| `HARNESS_FLOW_DRIVE` | Authoritative Case writes; required for Case attach and worker JOIN |
+| `CACHE_HEARTBEAT_ACTIVE` | Paid session-cache heartbeat turns (observe-only when off) |
+| `QUOTA_PREWARM_ENABLED` | Spend one minimal turn to open a quota window — real spend; explicit operator decision |
 
 Full inventory: [`docs/backend/ENV_FEATURE_FLAGS.md`](docs/backend/ENV_FEATURE_FLAGS.md).
 

@@ -16,7 +16,7 @@ from src.control.db import MeshDB
 
 from tests.test_agent_inbox_delivery import _fresh_allowance  # noqa: F401 — autouse fixture
 from tests.test_case_continuation import _open_case, _finished
-from tests.test_turn_queue_producer1 import _flags, _no_cli_spawn  # noqa: F401
+from tests.test_turn_queue_producer1 import _no_cli_spawn  # noqa: F401
 
 
 def _db(tmp_path) -> MeshDB:
@@ -24,7 +24,6 @@ def _db(tmp_path) -> MeshDB:
 
 
 def test_max_flow_event_ids_is_batched_and_correct(tmp_path, monkeypatch):
-    monkeypatch.setenv("CASE_CONTINUATION_ENABLED", "1")
     db = _db(tmp_path)
     c1 = _open_case(db, session_id="s1")
     c2 = _open_case(db, session_id="s2")

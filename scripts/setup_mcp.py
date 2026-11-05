@@ -39,10 +39,9 @@ def _manager_script_path() -> Path:
 
 def _register_claude_manager(script: Path) -> None:
     """[M3 A34] OPT-IN: register the ai-team 'manager' MCP server in Claude Code's
-    user config (~/.claude.json). Only runs with `--with-manager`. Gives a session
-    the dispatch_worker / wait_for_worker tools — but the gateway ALSO requires
-    MANAGER_TOOLS_ENABLED=1 in its env before those tools are actually granted
-    (see claude_driver._manager_tools_enabled), so registering here alone is inert."""
+    user config (~/.claude.json). Only runs with `--with-manager`. A Manager-role
+    session is granted the manager tools only when this server is configured
+    (see claude_driver._session_allowed_tools)."""
     cfg_path = Path.home() / ".claude.json"
     existing: dict = {}
     if cfg_path.exists():
@@ -189,8 +188,6 @@ def main() -> None:
     print("Tool available as:  mcp__jobs__watch_job")
     if with_manager:
         print("Manager tools:      mcp__manager__dispatch_worker, mcp__manager__wait_for_worker")
-        print("  ⚠️  Also set MANAGER_TOOLS_ENABLED=1 in the gateway env — the tools stay")
-        print("      inert until that flag is on (see docs/backend/ENV_FEATURE_FLAGS.md).")
     print()
     print("Backends load MCP automatically from their configs.")
     print("If a gateway worker was already running, restart it to pick up changes.")

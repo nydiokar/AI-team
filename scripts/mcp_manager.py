@@ -24,10 +24,7 @@ Design invariants (why this is safe for the F4 spike):
 LINEAGE (A32): POST /api/instructions now accepts an optional parent_flow_run_id.
    dispatch_worker forwards it so a child dispatched here records a parent edge in
    /api/flows (the §6 "child flow visible ... with lineage" clause). This is a
-   SHADOW record wired through the M2 substrate: it is persisted only when the
-   gateway runs with HARNESS_FLOW_DRIVE ON (it is, in the live env); with the flag
-   OFF the server no-ops the stamp and the field is silently ignored. Either way
-   nothing reads the edge to drive execution — so a Manager should confirm lineage
+   SHADOW record wired through the M2 substrate. Nothing reads the edge to drive execution — so a Manager should confirm lineage
    via /api/flows rather than assume it, and always review the child's committed
    git diff (never a self-reported summary).
 """
@@ -675,8 +672,8 @@ def _dispatch_worker(args: Dict[str, Any]) -> str:
         body["case_id"] = case_id
     if parent_flow_run_id:
         # [A32] The endpoint now accepts this and stamps it onto the child's
-        # flow_runs row via the M2 substrate — but ONLY when the gateway runs with
-        # HARNESS_FLOW_DRIVE ON (a SHADOW record; nothing reads it to drive work).
+        # flow_runs row via the M2 substrate (a SHADOW record; nothing reads it to
+        # drive work).
         # Use for a genuine child-CASE lineage edge; use case_id (above) to make the
         # worker JOIN the Manager's Case instead.
         body["parent_flow_run_id"] = parent_flow_run_id
@@ -698,12 +695,6 @@ def _dispatch_worker(args: Dict[str, Any]) -> str:
     session = result.get("session") or {}
     sess_id = session.get("session_id") if isinstance(session, dict) else None
 
-    # [A46] Durable wait relay. If the worker JOINED a Case, record a durable
-    # pending-wait marker so a Manager that crashes/restarts mid-wait can
-    # RECONCILE which workers it was still waiting on (the completion signal —
-    # task.finished — is already durable; this makes the WAIT durable too).
-    # Best-effort: a relay failure (incl. the 404 when DURABLE_RELAY_ENABLED is
-    # OFF, or an unavailable gateway) must NEVER break the dispatch itself.
     # [A104] No wait marker is recorded any more: the gateway addresses this
     # worker's completion to the requesting session's inbox by itself (the child
     # carries its requester; the completion row is written with its terminal).
@@ -743,8 +734,7 @@ def _dispatch_worker(args: Dict[str, Any]) -> str:
     if parent_flow_run_id:
         lines.append(
             f"parent_flow_run_id: {parent_flow_run_id} — sent as the Manager→worker "
-            f"lineage edge (recorded when the gateway runs HARNESS_FLOW_DRIVE ON; it is a "
-            f"SHADOW record — confirm via /api/flows, don't assume)."
+            f"lineage edge (a SHADOW record — confirm via /api/flows, don't assume)."
         )
     lines.append("")
     if case_id:
@@ -895,9 +885,7 @@ def _wait_for_worker(args: Dict[str, Any]) -> str:
                 f"TIMEOUT after {timeout:.0f}s ({polls} polls). "
                 f"Worker flow {where} last status={last_status!r} (still active/unresolved).{err_note} "
                 f"The worker may still be running — re-call wait_for_worker or inspect "
-                f"/api/work manually. NOTE: if the flow_run row never appears, confirm "
-                f"HARNESS_FLOW_DRIVE is ON and that a plain worker dispatch writes a flow "
-                f"row (open question for the live spike — see AGENT_31)."
+                f"/api/work manually."
             )
 
         # Sleep, but never past the deadline.
@@ -920,8 +908,7 @@ def _reconcile_waits(args: Dict[str, Any]) -> str:
     result = _api_request("POST", f"/api/cases/{urllib.parse.quote(case_id)}/waits/reconcile")
     if not result.get("ok"):
         return (
-            f"reconcile_waits did NOT run on Case {case_id}: {result.get('reason')}. "
-            f"(A 'durable_relay_disabled' reason means DURABLE_RELAY_ENABLED is OFF.)"
+            f"reconcile_waits did NOT run on Case {case_id}: {result.get('reason')}."
         )
     resolved = result.get("resolved") or []
     pending = result.get("pending") or []
@@ -948,8 +935,7 @@ def _arm_wait_group(args: Dict[str, Any]) -> str:
     reaches your inbox and wakes you once — nothing needs arming. Use this only to
     hold a parallel batch together: ``ALL`` (or NAMED) delivers the members'
     completions in ONE wake when the last one finishes. ``ANY`` is the default
-    behaviour (each completion as it lands). A 404/disabled reason means
-    CASE_CONTINUATION_ENABLED is OFF on the gateway."""
+    behaviour (each completion as it lands)."""
     case_id = _bounded_text(args.get("case_id"), "case_id", _MAX_ID_CHARS, required=True)
     group_id = _bounded_text(args.get("wait_group_id"), "wait_group_id", _MAX_ID_CHARS, required=True)
     condition = (_bounded_text(args.get("condition"), "condition", 16, required=False) or "ANY").upper()
@@ -963,8 +949,7 @@ def _arm_wait_group(args: Dict[str, Any]) -> str:
     result = _api_request("POST", f"/api/cases/{urllib.parse.quote(case_id)}/wait-group", body)
     if not result.get("ok"):
         return (
-            f"arm_wait_group did NOT arm on Case {case_id}: {result.get('reason')}. "
-            "(A 404/disabled reason means CASE_CONTINUATION_ENABLED is OFF on the gateway.)"
+            f"arm_wait_group did NOT arm on Case {case_id}: {result.get('reason')}."
         )
     if condition == "ANY":
         return (
@@ -1445,8 +1430,7 @@ def _publish_spec(args: Dict[str, Any]) -> str:
     draft_packet contract: real_objective vs literal_request vs interpreted_task +
     forced assumptions/drift_risks). It is recorded as an ``artifact`` link + a
     ``spec.authored`` event. This does NOT grade the spec — a SEPARATE reviewer seat
-    scores it (record_spec_review). A 404/disabled reason means SPEC_AUTHORING_ENABLED
-    is OFF on the gateway."""
+    scores it (record_spec_review)."""
     case_id = _bounded_text(args.get("case_id"), "case_id", _MAX_ID_CHARS, required=True)
     spec_id = _bounded_text(args.get("spec_id"), "spec_id", _MAX_ID_CHARS, required=True)
     body_text = _bounded_text(args.get("body"), "body", _MAX_OBJECTIVE_CHARS, required=True)
@@ -1455,8 +1439,7 @@ def _publish_spec(args: Dict[str, Any]) -> str:
     result = _api_request("POST", f"/api/cases/{urllib.parse.quote(case_id)}/spec", body)
     if not result.get("ok"):
         return (
-            f"publish_spec did NOT record on Case {case_id}: {result.get('reason')}. "
-            "(A 404/disabled reason means SPEC_AUTHORING_ENABLED is OFF on the gateway.)"
+            f"publish_spec did NOT record on Case {case_id}: {result.get('reason')}."
         )
     return (
         f"Authored spec {spec_id!r} on Case {case_id} (durable artifact + spec.authored "
@@ -1466,8 +1449,7 @@ def _publish_spec(args: Dict[str, Any]) -> str:
 
 def _publish_artifact(args: Dict[str, Any]) -> str:
     """[A56/M4] Publish an arbitrary durable artifact (kind/title/uri) onto your Case
-    as evidence (an ``artifact`` link + ``artifact.published`` event). A 404/disabled
-    reason means SPEC_AUTHORING_ENABLED is OFF on the gateway."""
+    as evidence (an ``artifact`` link + ``artifact.published`` event)."""
     case_id = _bounded_text(args.get("case_id"), "case_id", _MAX_ID_CHARS, required=True)
     artifact_id = _bounded_text(args.get("artifact_id"), "artifact_id", _MAX_ID_CHARS, required=True)
     kind = _bounded_text(args.get("kind"), "kind", 64, required=False) or "artifact"
@@ -1477,8 +1459,7 @@ def _publish_artifact(args: Dict[str, Any]) -> str:
     result = _api_request("POST", f"/api/cases/{urllib.parse.quote(case_id)}/artifacts", body)
     if not result.get("ok"):
         return (
-            f"publish_artifact did NOT record on Case {case_id}: {result.get('reason')}. "
-            "(A 404/disabled reason means SPEC_AUTHORING_ENABLED is OFF on the gateway.)"
+            f"publish_artifact did NOT record on Case {case_id}: {result.get('reason')}."
         )
     return f"Published artifact {artifact_id!r} (kind={kind}) on Case {case_id}."
 
@@ -1489,8 +1470,7 @@ def _record_spec_review(args: Dict[str, Any]) -> str:
     six dimensions (objective_clarity, scope_boundaries, decomposability,
     acceptance_testability, dependency_correctness, risks_and_assumptions) to 0–2.
     The verdict is COMPUTED (≥8/12 AND no zero on objective_clarity or decomposability),
-    not taken on your word: a below-threshold or critical-zero score BLOCKS decomposition.
-    A 404/disabled reason means SPEC_AUTHORING_ENABLED is OFF on the gateway."""
+    not taken on your word: a below-threshold or critical-zero score BLOCKS decomposition."""
     case_id = _bounded_text(args.get("case_id"), "case_id", _MAX_ID_CHARS, required=True)
     spec_id = _bounded_text(args.get("spec_id"), "spec_id", _MAX_ID_CHARS, required=True)
     reason = _bounded_text(args.get("reason"), "reason", _MAX_OBJECTIVE_CHARS, required=False)
@@ -1505,8 +1485,7 @@ def _record_spec_review(args: Dict[str, Any]) -> str:
     result = _api_request("POST", f"/api/cases/{urllib.parse.quote(case_id)}/spec-review", body)
     if not result.get("ok"):
         return (
-            f"record_spec_review did NOT record on Case {case_id}: {result.get('reason')}. "
-            "(A 404/disabled reason means SPEC_AUTHORING_ENABLED is OFF on the gateway.)"
+            f"record_spec_review did NOT record on Case {case_id}: {result.get('reason')}."
         )
     verdict = result.get("verdict")
     gate = "UNLOCKS decomposition" if result.get("passed") else "BLOCKS decomposition (fix the spec + re-score)"
@@ -1524,7 +1503,7 @@ def _decompose_case(args: Dict[str, Any]) -> str:
     task is ``{task_key, objective, depends_on: [task_key,...], ...hints}``. REFUSED
     (structured reason) unless the spec's latest scored review PASSED, and unless the
     DAG is acyclic + every depends_on names a known task_key. Creates ZERO new
-    flow_runs. A 404/disabled reason means SPEC_AUTHORING_ENABLED is OFF."""
+    flow_runs."""
     case_id = _bounded_text(args.get("case_id"), "case_id", _MAX_ID_CHARS, required=True)
     spec_id = _bounded_text(args.get("spec_id"), "spec_id", _MAX_ID_CHARS, required=True)
     tasks = args.get("tasks")
@@ -1542,7 +1521,7 @@ def _decompose_case(args: Dict[str, Any]) -> str:
         return (
             f"decompose_case REFUSED on Case {case_id}: {e}. "
             "(spec_not_approved => get a passing spec-review first; cyclic_dependencies => break the "
-            "cycle; unknown_dependency/invalid_task_keys => fix the DAG; a 404 => SPEC_AUTHORING_ENABLED OFF.)"
+            "cycle; unknown_dependency/invalid_task_keys => fix the DAG.)"
         )
     order = result.get("order") or []
     return (
@@ -1648,7 +1627,7 @@ _TOOLS = [
                 "files": {"type": "array", "items": {"type": "string"}, "description": "Target files to focus the worker on (optional)."},
                 "case_id": {"type": "string", "description": "The Manager's OWN Case id. Pass it to make the worker JOIN this Case (member task, shared membership) instead of spawning a child Case — the M3.1 default. Worker completion leaves the Case OPEN."},
                 "node_id": {"type": "string", "description": "Node to pin the NEW worker session to: the worker boots on THIS node and cwd is resolved on ITS filesystem, so pin the node that actually holds the repo (e.g. a node worker so the session survives a gateway restart). Pass the node's EXACT registered node_id — use `list_nodes` to discover valid online carriers (the OS hostname is NOT the carrier id). SHORTCUT: pass 'local' (or 'here'/'this'/'self') to auto-resolve the registered carrier for the node you are on — no need to hand-pass the mesh id. If you pass an id that is not an online managed-capable carrier, the error now LISTS the valid online carriers for your backend. OMIT ONLY if the repo lives on the gateway host itself: omitting routes the worker to the gateway host (__local__ — NOT the Manager's own node), where the gateway validates cwd against its own allowed_root and rejects a missing/outside path up front with invalid_repo_path. (A pinned remote node skips that up-front check — a bad cwd there surfaces at the worker's first turn instead.)"},
-                "role": {"type": "string", "description": "Set to 'worker' to boot the NEW worker session with the canonical Worker role (worker.md identity + worker tools), gated by MANAGER_ROLE_ENABLED. Omit for a legacy tier-0 worker. Only applies when a new session is opened (with cwd); it cannot retro-stamp a reused session_id."},
+                "role": {"type": "string", "description": "Set to 'worker' to boot the NEW worker session with the canonical Worker role (worker.md identity + worker tools). Omit for a legacy tier-0 worker. Only applies when a new session is opened (with cwd); it cannot retro-stamp a reused session_id."},
                 "model": {"type": "string", "description": "REQUIRED when opening a NEW worker session (cwd with no session_id): explicitly choose the task-fit boot model. Use 'haiku' for narrow/easy-to-verify work, 'sonnet' for most bounded implementation and fixes, and 'opus' for architecture, high-risk, security-sensitive, or ambiguous work. The choice is sent only to session creation. Ignored when a session_id is reused because that worker keeps its boot model."},
                 "parent_flow_run_id": {"type": "string", "description": "Use ONLY for a genuine child-CASE lineage edge (child→parent in /api/flows). To keep the worker inside the Manager's Case, use case_id instead."},
             },
@@ -1882,8 +1861,7 @@ _TOOLS = [
             "OPTIONAL delivery filter. You do NOT need this to be woken: every worker completion "
             "already lands in your inbox and wakes you once. Use condition ALL (or NAMED) only to "
             "hold a parallel batch so its completions arrive together in ONE wake when the last "
-            "member finishes. ANY is the default behaviour. A 404/disabled reason means "
-            "CASE_CONTINUATION_ENABLED is OFF on the gateway."
+            "member finishes. ANY is the default behaviour."
         ),
         "inputSchema": {
             "type": "object",
@@ -1903,8 +1881,7 @@ _TOOLS = [
             "intent, do NOT dive straight into dispatch: author a spec (reuse the draft_packet "
             "contract — real_objective vs literal_request vs interpreted_task + forced "
             "assumptions/drift_risks), recorded as a durable artifact + spec.authored event. "
-            "This does NOT grade the spec; a SEPARATE reviewer scores it (record_spec_review). "
-            "A 404/disabled reason means SPEC_AUTHORING_ENABLED is OFF."
+            "This does NOT grade the spec; a SEPARATE reviewer scores it (record_spec_review)."
         ),
         "inputSchema": {
             "type": "object",
@@ -1921,8 +1898,7 @@ _TOOLS = [
         "name": "publish_artifact",
         "description": (
             "Publish an arbitrary durable artifact (kind/title/uri) onto your Case as evidence "
-            "(artifact link + artifact.published event). A 404/disabled reason means "
-            "SPEC_AUTHORING_ENABLED is OFF."
+            "(artifact link + artifact.published event)."
         ),
         "inputSchema": {
             "type": "object",
@@ -1944,7 +1920,7 @@ _TOOLS = [
             "scope_boundaries, decomposability, acceptance_testability, dependency_correctness, "
             "risks_and_assumptions) each to 0-2. The verdict is COMPUTED (>=8/12 AND no zero on "
             "objective_clarity or decomposability): a below-threshold or critical-zero score "
-            "BLOCKS decomposition. A 404/disabled reason means SPEC_AUTHORING_ENABLED is OFF."
+            "BLOCKS decomposition."
         ),
         "inputSchema": {
             "type": "object",
@@ -1970,8 +1946,7 @@ _TOOLS = [
             "anti-goal M2.5 exists to prevent). Each task is {task_key, objective, depends_on: "
             "[task_key,...], ...hints}. REFUSED unless the spec's latest scored review PASSED and "
             "the DAG is acyclic + every depends_on names a known task_key. Creates ZERO new "
-            "flow_runs. Dispatch the returned topological order in sequence. A 404/disabled reason "
-            "means SPEC_AUTHORING_ENABLED is OFF."
+            "flow_runs. Dispatch the returned topological order in sequence."
         ),
         "inputSchema": {
             "type": "object",

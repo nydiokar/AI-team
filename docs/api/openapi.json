@@ -134,38 +134,10 @@
       "get": {
         "summary": "Nodes",
         "operationId": "api_nodes_api_nodes_get",
-        "responses": {
-          "200": {
-            "description": "Live mesh execution nodes.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/NodesOut"
-                }
-              }
-            }
-          },
-          "401": {
-            "$ref": "#/components/responses/Unauthorized"
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        },
         "security": [
           {
             "HTTPBearer": []
           }
-        ],
-        "tags": [
-          "Monitoring"
         ],
         "parameters": [
           {
@@ -178,6 +150,626 @@
               "title": "Activity"
             }
           }
+        ],
+        "responses": {
+          "200": {
+            "description": "Live mesh execution nodes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NodesOut"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        },
+        "tags": [
+          "Monitoring"
+        ]
+      }
+    },
+    "/api/nodes/{node_id}/backend-auth/{backend}/status": {
+      "get": {
+        "summary": "Backend Auth Status",
+        "operationId": "backend_auth_status_api_nodes__node_id__backend_auth__backend__status_get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "node_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Node Id"
+            }
+          },
+          {
+            "name": "backend",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Backend"
+            }
+          },
+          {
+            "name": "refresh",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false,
+              "title": "Refresh"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Backend Auth Status Api Nodes  Node Id  Backend Auth  Backend  Status Get",
+                  "$ref": "#/components/schemas/ClaudeAuthOut"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        },
+        "tags": [
+          "Monitoring"
+        ]
+      }
+    },
+    "/api/nodes/{node_id}/backend-auth/{backend}/start": {
+      "post": {
+        "summary": "Backend Auth Start",
+        "operationId": "backend_auth_start_api_nodes__node_id__backend_auth__backend__start_post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "node_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Node Id"
+            }
+          },
+          {
+            "name": "backend",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Backend"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Backend Auth Start Api Nodes  Node Id  Backend Auth  Backend  Start Post",
+                  "$ref": "#/components/schemas/ClaudeAuthOut"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        },
+        "tags": [
+          "Monitoring"
+        ]
+      }
+    },
+    "/api/nodes/{node_id}/backend-auth/{backend}/poll": {
+      "post": {
+        "summary": "Backend Auth Poll",
+        "operationId": "backend_auth_poll_api_nodes__node_id__backend_auth__backend__poll_post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "node_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Node Id"
+            }
+          },
+          {
+            "name": "backend",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Backend"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ClaudeAuthInput"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Backend Auth Poll Api Nodes  Node Id  Backend Auth  Backend  Poll Post",
+                  "$ref": "#/components/schemas/ClaudeAuthOut"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        },
+        "tags": [
+          "Monitoring"
+        ]
+      }
+    },
+    "/api/nodes/{node_id}/backend-auth/{backend}/input": {
+      "post": {
+        "summary": "Backend Auth Input",
+        "operationId": "backend_auth_input_api_nodes__node_id__backend_auth__backend__input_post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "node_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Node Id"
+            }
+          },
+          {
+            "name": "backend",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Backend"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ClaudeAuthInput"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Backend Auth Input Api Nodes  Node Id  Backend Auth  Backend  Input Post",
+                  "$ref": "#/components/schemas/ClaudeAuthOut"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        },
+        "tags": [
+          "Monitoring"
+        ]
+      }
+    },
+    "/api/nodes/{node_id}/backend-auth/{backend}/cancel": {
+      "post": {
+        "summary": "Backend Auth Cancel",
+        "operationId": "backend_auth_cancel_api_nodes__node_id__backend_auth__backend__cancel_post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "node_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Node Id"
+            }
+          },
+          {
+            "name": "backend",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Backend"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ClaudeAuthInput"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Backend Auth Cancel Api Nodes  Node Id  Backend Auth  Backend  Cancel Post",
+                  "$ref": "#/components/schemas/ClaudeAuthOut"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        },
+        "tags": [
+          "Monitoring"
+        ]
+      }
+    },
+    "/api/nodes/{node_id}/claude-auth/start": {
+      "post": {
+        "summary": "Claude Auth Start",
+        "operationId": "claude_auth_start_api_nodes__node_id__claude_auth_start_post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "node_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Node Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Claude Auth Start Api Nodes  Node Id  Claude Auth Start Post",
+                  "$ref": "#/components/schemas/ClaudeAuthOut"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        },
+        "tags": [
+          "Monitoring"
+        ]
+      }
+    },
+    "/api/nodes/{node_id}/claude-auth/poll": {
+      "post": {
+        "summary": "Claude Auth Poll",
+        "operationId": "claude_auth_poll_api_nodes__node_id__claude_auth_poll_post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "node_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Node Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ClaudeAuthInput"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Claude Auth Poll Api Nodes  Node Id  Claude Auth Poll Post",
+                  "$ref": "#/components/schemas/ClaudeAuthOut"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        },
+        "tags": [
+          "Monitoring"
+        ]
+      }
+    },
+    "/api/nodes/{node_id}/claude-auth/input": {
+      "post": {
+        "summary": "Claude Auth Input",
+        "operationId": "claude_auth_input_api_nodes__node_id__claude_auth_input_post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "node_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Node Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ClaudeAuthInput"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Claude Auth Input Api Nodes  Node Id  Claude Auth Input Post",
+                  "$ref": "#/components/schemas/ClaudeAuthOut"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        },
+        "tags": [
+          "Monitoring"
+        ]
+      }
+    },
+    "/api/nodes/{node_id}/claude-auth/cancel": {
+      "post": {
+        "summary": "Claude Auth Cancel",
+        "operationId": "claude_auth_cancel_api_nodes__node_id__claude_auth_cancel_post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "node_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Node Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ClaudeAuthInput"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Claude Auth Cancel Api Nodes  Node Id  Claude Auth Cancel Post",
+                  "$ref": "#/components/schemas/ClaudeAuthOut"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        },
+        "tags": [
+          "Monitoring"
         ]
       }
     },
@@ -970,7 +1562,7 @@
         ],
         "responses": {
           "200": {
-            "description": "Watched jobs: running + recent.",
+            "description": "Watched jobs: running + recent (all statuses).",
             "content": {
               "application/json": {
                 "schema": {
@@ -978,6 +1570,12 @@
                 }
               }
             }
+          },
+          "429": {
+            "description": "Concurrent jobs-read limit reached (jobs_busy)."
+          },
+          "503": {
+            "description": "Selected jobs authority unavailable (jobs_unavailable)."
           },
           "422": {
             "description": "Validation Error",
@@ -1533,7 +2131,7 @@
     "/api/sessions/{session_id}/turn-requests/enroll": {
       "post": {
         "summary": "Enroll Turn Queue",
-        "description": "[A82 Stage 7] Operator enrollment onto the managed turn queue (design\n\u00a710 step 6). Default-OFF flag ``TURN_QUEUE_ENROLLMENT_ENABLED``; typed\nrefusal (409 + reason) for a busy / closed session, legacy work, or a\ncarrier without managed capability; 503 without the canonical DB.",
+        "description": "[A82 Stage 7] Operator enrollment onto the managed turn queue (design\n\u00a710 step 6). Enrollment is permanent after the cutover; typed\nrefusal (409 + reason) for a busy / closed session, legacy work, or a\ncarrier without managed capability; 503 without the canonical DB.",
         "operationId": "api_enroll_turn_queue_api_sessions__session_id__turn_requests_enroll_post",
         "security": [
           {
@@ -2245,7 +2843,7 @@
         ],
         "responses": {
           "200": {
-            "description": "Known sessions, most-recent first.",
+            "description": "Known sessions, most-recent first. read_state marks JSON fallback or skipped malformed rows; these do not establish a current complete inventory.",
             "content": {
               "application/json": {
                 "schema": {
@@ -2253,6 +2851,12 @@
                 }
               }
             }
+          },
+          "429": {
+            "description": "Concurrent sessions-read limit reached (sessions_busy)."
+          },
+          "503": {
+            "description": "Session read unavailable (sessions_unavailable)."
           },
           "422": {
             "description": "Validation Error",
@@ -3535,13 +4139,52 @@
         "summary": "Work Session Affiliations",
         "description": "Authoritative session\u2192case affiliation index over the WHOLE substrate.\n\nOne JOIN (flow_links entity_type='session' \u2192 flow_runs) \u2014 no per-case\nfanout, no cap \u2014 so a session linked to a case anywhere in the backlog is\nresolved, never a false Standalone (milestone authority rule 7). Registered\nBEFORE ``/api/work/{flow_run_id}`` so the literal path is never captured as\na flow id. Empty ``affiliations`` when the substrate has no session links.",
         "operationId": "api_work_session_affiliations_api_work_affiliations_sessions_get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "format",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "enum": [
+                "legacy",
+                "compact"
+              ],
+              "type": "string",
+              "default": "legacy",
+              "title": "Format"
+            }
+          }
+        ],
         "responses": {
           "200": {
-            "description": "Session\u2192case affiliation index over the whole substrate.",
+            "description": "Whole-substrate index. Default legacy carries objective_lock; format=compact carries case_title only. Both formats return 503 when unavailable and 429 at admission capacity.",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/SessionAffiliationsOut"
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/SessionAffiliationsOut"
+                    },
+                    {
+                      "$ref": "#/components/schemas/CompactSessionAffiliationsOut"
+                    }
+                  ],
+                  "title": "Response 200 Api Work Session Affiliations Api Work Affiliations Sessions Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
                 }
               }
             }
@@ -3550,11 +4193,6 @@
             "$ref": "#/components/responses/Unauthorized"
           }
         },
-        "security": [
-          {
-            "HTTPBearer": []
-          }
-        ],
         "tags": [
           "Work"
         ]
@@ -3779,7 +4417,7 @@
     "/api/manager": {
       "post": {
         "summary": "Manager",
-        "description": "[A38] Invoke a Manager: create a Case-owning session, open one Case, and\ndeliver the objective as its first assignment. Refuses with 409 when the\nManager-role path is disabled (MANAGER_ROLE_ENABLED OFF \u21d2 new surface inert).\nTranslates the Level-3 admission block to a clean 409, like /api/instructions.",
+        "description": "[A38] Invoke a Manager: create a Case-owning session, open one Case, and\ndeliver the objective as its first assignment. Translates an admission block\nto a clean 409, like /api/instructions.",
         "operationId": "api_manager_api_manager_post",
         "security": [
           {
@@ -3847,7 +4485,7 @@
     "/api/cases": {
       "post": {
         "summary": "Open Case",
-        "description": "[M3.3] Open a NEW Case on an existing Manager session \u2014 the seam that lets\na single persistent Manager session run many Cases (open \u2192 dispatch \u2192 review \u2192\nclose \u2192 open the next) without spawning a fresh session each time. Gated by\n``MANAGER_ROLE_ENABLED`` (409 when OFF \u21d2 surface inert). Returns\n``{ok, case_id}``; 404 for an unknown session, 400 on a Case-birth failure.",
+        "description": "[M3.3] Open a NEW Case on an existing Manager session \u2014 the seam that lets\na single persistent Manager session run many Cases (open \u2192 dispatch \u2192 review \u2192\nclose \u2192 open the next) without spawning a fresh session each time. Returns\n``{ok, case_id}``; 404 for an unknown session, 400 on a Case-birth failure.",
         "operationId": "api_open_case_api_cases_post",
         "requestBody": {
           "content": {
@@ -3958,7 +4596,7 @@
     "/api/cases/{case_id}/review": {
       "post": {
         "summary": "Record Review",
-        "description": "[M3.2] Record a Manager review verdict (accepted|rework_requested|waived)\nas the canonical ``review.*`` flow_event on the Case audit trail. Gated by\n``REVIEW_EMITTER_ENABLED``: when OFF this route returns 404 (disabled) so\nflag-OFF is byte-identical to pre-M3.2. Mirrors ``api_close_case``.",
+        "description": "[M3.2] Record a Manager review verdict (accepted|rework_requested|waived)\nas the canonical ``review.*`` flow_event on the Case audit trail. Mirrors\n``api_close_case``.",
         "operationId": "api_record_review_api_cases__case_id__review_post",
         "security": [
           {
@@ -4009,67 +4647,6 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/RecordReviewOut"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          },
-          "401": {
-            "$ref": "#/components/responses/Unauthorized"
-          }
-        },
-        "tags": [
-          "Cases"
-        ]
-      }
-    },
-    "/api/cases/{case_id}/waits": {
-      "post": {
-        "summary": "Record Worker Wait",
-        "description": "[A46 \u2192 A104 shim, D7] An un-redeployed mcp_manager calls this after every\nCase dispatch. Nothing is recorded any more (the agent inbox addresses the\ncompletion itself); the route keeps its shape and its flag gate (404 when\n``DURABLE_RELAY_ENABLED`` is OFF \u2014 the old client treats that as silent).",
-        "operationId": "api_record_worker_wait_api_cases__case_id__waits_post",
-        "security": [
-          {
-            "HTTPBearer": []
-          }
-        ],
-        "parameters": [
-          {
-            "name": "case_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Case Id"
-            }
-          }
-        ],
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/CaseWaitBody"
-              }
-            }
-          }
-        },
-        "responses": {
-          "200": {
-            "description": "A104 shim no-op acknowledgement (event_id is null).",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/RecordWorkerWaitOut"
                 }
               }
             }
@@ -4200,7 +4777,7 @@
     "/api/cases/{case_id}/wait-group": {
       "post": {
         "summary": "Arm Wait Group",
-        "description": "[M3.4] Arm a Manager wait-group so the Wake-Dispatcher autonomously\nre-enters this Case when the group is satisfied. Gated by\n``CASE_CONTINUATION_ENABLED`` (404 when OFF \u21d2 byte-identical). Rejects a\nmalformed condition (422) and bounds the member list (413) up front \u2014 the\nwrite itself is also flag-gated in the db layer (defence in depth).",
+        "description": "[M3.4] Arm a Manager wait-group so the Wake-Dispatcher autonomously\nre-enters this Case when the group is satisfied. Rejects a malformed\ncondition (422) and bounds the member list (413) up front.",
         "operationId": "api_arm_wait_group_api_cases__case_id__wait_group_post",
         "security": [
           {
@@ -4261,7 +4838,7 @@
     "/api/cases/{case_id}/artifacts": {
       "post": {
         "summary": "Publish Artifact",
-        "description": "[A56/M4] Publish a durable artifact onto a Case (``artifact`` flow_link +\n``artifact.published`` event). Gated by ``SPEC_AUTHORING_ENABLED`` (404 when\nOFF \u21d2 byte-identical). The write is also flag-gated in the db layer.",
+        "description": "[A56/M4] Publish a durable artifact onto a Case (``artifact`` flow_link +\n``artifact.published`` event).",
         "operationId": "api_publish_artifact_api_cases__case_id__artifacts_post",
         "security": [
           {
@@ -4322,7 +4899,7 @@
     "/api/cases/{case_id}/spec": {
       "post": {
         "summary": "Publish Spec",
-        "description": "[A56/M4] Author a spec onto a Case as durable evidence (``spec.authored``).\nGated by ``SPEC_AUTHORING_ENABLED`` (404 when OFF \u21d2 byte-identical).",
+        "description": "[A56/M4] Author a spec onto a Case as durable evidence (``spec.authored``).",
         "operationId": "api_publish_spec_api_cases__case_id__spec_post",
         "security": [
           {
@@ -4383,7 +4960,7 @@
     "/api/cases/{case_id}/spec-review": {
       "post": {
         "summary": "Record Spec Review",
-        "description": "[A56/M4] Score a spec against R1 by a SEPARATE plan-reviewer seat; the\nverdict (accepted|rework_requested) is computed from the scores, not trusted.\nRecords ``spec.review_scored`` + the canonical ``review.*`` event. Gated by\n``SPEC_AUTHORING_ENABLED`` (404 when OFF \u21d2 byte-identical).",
+        "description": "[A56/M4] Score a spec against R1 by a SEPARATE plan-reviewer seat; the\nverdict (accepted|rework_requested) is computed from the scores, not trusted.\nRecords ``spec.review_scored`` + the canonical ``review.*`` event.",
         "operationId": "api_record_spec_review_api_cases__case_id__spec_review_post",
         "security": [
           {
@@ -4444,7 +5021,7 @@
     "/api/cases/{case_id}/decompose": {
       "post": {
         "summary": "Decompose Case",
-        "description": "[A56/M4] Expand an APPROVED objective into a task-DAG of N ``task_attached``\nlinks on ONE Case (no orphan flow_runs). REFUSES (422 with a structured reason)\nunless the spec's latest scored review PASSED and the DAG is acyclic/well-formed.\nGated by ``SPEC_AUTHORING_ENABLED`` (404 when OFF \u21d2 byte-identical).",
+        "description": "[A56/M4] Expand an APPROVED objective into a task-DAG of N ``task_attached``\nlinks on ONE Case (no orphan flow_runs). REFUSES (422 with a structured reason)\nunless the spec's latest scored review PASSED and the DAG is acyclic/well-formed.",
         "operationId": "api_decompose_case_api_cases__case_id__decompose_post",
         "security": [
           {
@@ -4530,57 +5107,6 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/CaseBriefOut"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          },
-          "401": {
-            "$ref": "#/components/responses/Unauthorized"
-          }
-        },
-        "tags": [
-          "Cases"
-        ]
-      }
-    },
-    "/api/cases/{case_id}/boot-reconcile": {
-      "post": {
-        "summary": "Boot Reconcile Case",
-        "description": "[A54/M3.4 Job 2] Boot-time reconstruction hook \u2014 reconcile outstanding\nworker waits AND re-arm live wait-groups from the ledger (idempotent). Gated\nby ``DURABLE_RELAY_ENABLED`` (404 when OFF \u21d2 byte-identical no-op, exactly\nlike the /waits/reconcile route). The write itself is also flag-gated in the\ndb layer (defence in depth).",
-        "operationId": "api_boot_reconcile_case_api_cases__case_id__boot_reconcile_post",
-        "security": [
-          {
-            "HTTPBearer": []
-          }
-        ],
-        "parameters": [
-          {
-            "name": "case_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Case Id"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Boot-time reconcile result + re-armed wait-groups.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/BootReconcileOut"
                 }
               }
             }
@@ -5323,11 +5849,11 @@
     "/api/cost/alerts": {
       "get": {
         "summary": "Cost Alerts",
-        "description": "A65 P3 cost budget/burn-rate alerts. Billable-USD only \u2014 never raw\ntoken/cache-read volume. Thresholds are the env knobs\nCOST_ALERT_DAILY_BUDGET_USD / COST_ALERT_SESSION_BURN_USD /\nCOST_ALERT_CASE_TOTAL_USD (0 = off); an alert fires when the read-model's\nknown USD crosses a set knob. Read-only: alerts surface the existing SDK\ngovernor ceiling (``sdk_max_budget_usd``) as the enforcement lever and\nnever add a new kill mechanism; enforcement stays flag-gated OFF.",
+        "description": "A65 P3 cost budget/burn-rate alerts. Billable-USD only \u2014 never raw\ntoken/cache-read volume. Thresholds are the env knobs\nCOST_ALERT_DAILY_BUDGET_USD / COST_ALERT_SESSION_BURN_USD /\nCOST_ALERT_CASE_TOTAL_USD (0 = off); an alert fires when the read-model's\nknown USD crosses a set knob. Read-only: alerts never kill anything; the\nspend cap is the SDK governor ceiling (``CLAUDE_SDK_MAX_BUDGET_USD``).",
         "operationId": "api_cost_alerts_api_cost_alerts_get",
         "responses": {
           "200": {
-            "description": "Cost budget/burn-rate alerts and enforcement lever",
+            "description": "Cost budget/burn-rate alerts",
             "content": {
               "application/json": {
                 "schema": {
@@ -5587,35 +6113,6 @@
           "case_total_usd"
         ],
         "title": "AlertBudgets"
-      },
-      "AlertEnforcement": {
-        "properties": {
-          "enabled": {
-            "type": "boolean",
-            "title": "Enabled"
-          },
-          "mechanism": {
-            "type": "string",
-            "title": "Mechanism"
-          },
-          "governor_sdk_max_budget_usd": {
-            "anyOf": [
-              {
-                "type": "number"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Governor Sdk Max Budget Usd"
-          }
-        },
-        "type": "object",
-        "required": [
-          "enabled",
-          "mechanism"
-        ],
-        "title": "AlertEnforcement"
       },
       "AlertRow": {
         "properties": {
@@ -6068,43 +6565,6 @@
           "file"
         ],
         "title": "Body_api_upload_file_api_sessions__session_id__upload_post"
-      },
-      "BootReconcileOut": {
-        "properties": {
-          "ok": {
-            "type": "boolean",
-            "title": "Ok"
-          },
-          "reason": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Reason"
-          },
-          "reconciled": {
-            "$ref": "#/components/schemas/ReconcileWorkerWaitsOut"
-          },
-          "rearmed": {
-            "items": {
-              "additionalProperties": true,
-              "type": "object"
-            },
-            "type": "array",
-            "title": "Rearmed"
-          }
-        },
-        "type": "object",
-        "required": [
-          "ok",
-          "reconciled",
-          "rearmed"
-        ],
-        "title": "BootReconcileOut"
       },
       "BuildOut": {
         "properties": {
@@ -7387,31 +7847,6 @@
         ],
         "title": "CaseUsageOut"
       },
-      "CaseWaitBody": {
-        "properties": {
-          "task_id": {
-            "type": "string",
-            "title": "Task Id"
-          },
-          "timeout": {
-            "anyOf": [
-              {
-                "type": "number"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Timeout"
-          }
-        },
-        "type": "object",
-        "required": [
-          "task_id"
-        ],
-        "title": "CaseWaitBody",
-        "description": "[A46/M3.3] Record a durable pending-wait marker for a dispatched worker so a\nresumed Manager can reconcile its outstanding waits from the ledger. ``task_id``\nis the dispatched worker's task; ``timeout`` is the optional wait bound (seconds),\ncarried so a re-armed wait keeps the original deadline shape."
-      },
       "CaseWaitGroupBody": {
         "properties": {
           "wait_group_id": {
@@ -7438,6 +7873,182 @@
         ],
         "title": "CaseWaitGroupBody",
         "description": "[M3.4] Arm a Manager wait-GROUP over a dispatch set so the Wake-Dispatcher\nre-enters the Case when it is satisfied. ``wait_group_id`` names the group;\n``condition`` \u2208 ANY|ALL|NAMED; ``member_task_ids`` are the group's dispatched\nworker tasks. A single-worker default is ANY over one member."
+      },
+      "ClaudeAuthInput": {
+        "properties": {
+          "login_id": {
+            "type": "string",
+            "maxLength": 32,
+            "minLength": 32,
+            "pattern": "^[0-9a-f]{32}$",
+            "title": "Login Id"
+          },
+          "input": {
+            "type": "string",
+            "maxLength": 4096,
+            "title": "Input",
+            "default": ""
+          },
+          "offset": {
+            "type": "integer",
+            "maximum": 2147483647.0,
+            "minimum": 0.0,
+            "title": "Offset",
+            "default": 0
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "login_id"
+        ],
+        "title": "ClaudeAuthInput"
+      },
+      "ClaudeAuthOut": {
+        "properties": {
+          "backend": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Backend"
+          },
+          "state": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "State"
+          },
+          "checked_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Checked At"
+          },
+          "login_verified_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Login Verified At"
+          },
+          "input_supported": {
+            "type": "boolean",
+            "title": "Input Supported",
+            "default": false
+          },
+          "login_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Login Id"
+          },
+          "status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Status"
+          },
+          "active": {
+            "type": "boolean",
+            "title": "Active",
+            "default": false
+          },
+          "output": {
+            "type": "string",
+            "title": "Output",
+            "default": ""
+          },
+          "offset": {
+            "type": "integer",
+            "title": "Offset",
+            "default": 0
+          },
+          "done": {
+            "type": "boolean",
+            "title": "Done",
+            "default": false
+          },
+          "authenticated": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Authenticated"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "exit_code": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Exit Code"
+          },
+          "truncated": {
+            "type": "boolean",
+            "title": "Truncated",
+            "default": false
+          },
+          "ok": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ok"
+          }
+        },
+        "type": "object",
+        "title": "ClaudeAuthOut"
       },
       "CloseCaseOut": {
         "properties": {
@@ -7544,6 +8155,80 @@
         ],
         "title": "CompactOut"
       },
+      "CompactSessionAffiliation": {
+        "properties": {
+          "session_id": {
+            "type": "string",
+            "title": "Session Id"
+          },
+          "flow_run_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Flow Run Id"
+          },
+          "role": {
+            "type": "string",
+            "enum": [
+              "manager",
+              "worker",
+              "reviewer",
+              "evidence",
+              "session"
+            ],
+            "title": "Role"
+          },
+          "case_status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Case Status"
+          },
+          "case_title": {
+            "type": "string",
+            "title": "Case Title",
+            "description": "caseTitle equivalent, at most 120 UTF-16 units; no raw objective"
+          }
+        },
+        "type": "object",
+        "required": [
+          "session_id",
+          "role",
+          "case_title"
+        ],
+        "title": "CompactSessionAffiliation"
+      },
+      "CompactSessionAffiliationsOut": {
+        "properties": {
+          "affiliations": {
+            "items": {
+              "$ref": "#/components/schemas/CompactSessionAffiliation"
+            },
+            "type": "array",
+            "title": "Affiliations"
+          },
+          "total": {
+            "type": "integer",
+            "title": "Total"
+          }
+        },
+        "type": "object",
+        "required": [
+          "affiliations",
+          "total"
+        ],
+        "title": "CompactSessionAffiliationsOut"
+      },
       "CostAlertsOut": {
         "properties": {
           "ok": {
@@ -7563,9 +8248,6 @@
             },
             "type": "array",
             "title": "Alerts"
-          },
-          "enforcement": {
-            "$ref": "#/components/schemas/AlertEnforcement"
           }
         },
         "type": "object",
@@ -7573,8 +8255,7 @@
           "ok",
           "enabled",
           "budgets",
-          "alerts",
-          "enforcement"
+          "alerts"
         ],
         "title": "CostAlertsOut"
       },
@@ -8032,12 +8713,32 @@
             "title": "Flag Name"
           },
           "value": {
-            "type": "boolean",
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "integer"
+              },
+              {
+                "type": "number"
+              },
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
             "title": "Value"
           },
           "raw_value": {
             "type": "string",
             "title": "Raw Value"
+          },
+          "value_type": {
+            "type": "string",
+            "title": "Value Type"
           },
           "source": {
             "type": "string",
@@ -8084,6 +8785,7 @@
           "flag_name",
           "value",
           "raw_value",
+          "value_type",
           "source",
           "effect_scope",
           "registry_writable",
@@ -10086,41 +10788,6 @@
         ],
         "title": "RecordSpecReviewOut"
       },
-      "RecordWorkerWaitOut": {
-        "properties": {
-          "ok": {
-            "type": "boolean",
-            "title": "Ok"
-          },
-          "reason": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Reason"
-          },
-          "event_id": {
-            "anyOf": [
-              {
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Event Id"
-          }
-        },
-        "type": "object",
-        "required": [
-          "ok"
-        ],
-        "title": "RecordWorkerWaitOut"
-      },
       "ReviewSummary": {
         "properties": {
           "verdict": {
@@ -10533,7 +11200,23 @@
       "RuntimeFlagBody": {
         "properties": {
           "value": {
-            "type": "boolean",
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "integer"
+              },
+              {
+                "type": "number"
+              },
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
             "title": "Value"
           },
           "set_by": {
@@ -10669,6 +11352,17 @@
             },
             "type": "array",
             "title": "Sessions"
+          },
+          "read_state": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Read State"
           }
         },
         "type": "object",

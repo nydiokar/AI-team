@@ -60,8 +60,6 @@ def _no_cli_spawn(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(claude_driver._SDKSession, "start", _boom, raising=False)
     monkeypatch.setattr(asyncio, "create_subprocess_exec", _boom)
-    monkeypatch.delenv("HARNESS_FLOW_DRIVE", raising=False)
-    monkeypatch.delenv("HARNESS_LEVEL3_GUARD", raising=False)
     monkeypatch.setattr(ta, "ALLOWANCE", ta.SharedWaitingAllowance())
 
 
@@ -441,7 +439,6 @@ def test_E08b_recovery_resolution_runs_effects_once(tg: _Env) -> None:
 
 # E09 ----------------------------------------------------------------------- #
 def test_E09_case_child_gets_exactly_one_task_finished(tg: _Env, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("HARNESS_FLOW_DRIVE", "1")
     case_id = tg.gw.create_flow_run("a84-root", "queued")
     tid = tg.run_turn("case work", "op-k")
     tg.gw._conn().execute("UPDATE mesh_tasks SET flow_run_id = ? WHERE id = ?", (case_id, tid))

@@ -73,6 +73,4 @@ sequential dispatch.
   table, column, or lane.
 - **No bespoke executor.** Deliver the DAG as data + order; the parallel executor is
   the A57 spike (scope-out).
-- **Flag-gated.** Gated by `SPEC_AUTHORING_ENABLED` (OFF ⇒ the tool returns a disabled
-  marker, the route 404s ⇒ byte-identical to pre-M4).
 - **No paid CLI.** Decomposition is text over the already-approved spec.

@@ -82,9 +82,6 @@ class _Counting(_FakeBackend):
 
 
 def _env(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> tuple[MeshDB, Any, str]:
-    monkeypatch.setenv("HARNESS_FLOW_DRIVE", "1")
-    monkeypatch.setenv("CASE_CONTINUATION_ENABLED", "1")
-    monkeypatch.setenv("MANAGER_ROLE_ENABLED", "1")
     db = MeshDB(str(tmp_path / "mesh.db"))
     monkeypatch.setattr(db_mod, "get_db", lambda: db)
     monkeypatch.setattr(ts_server, "get_db", lambda: db)

@@ -56,11 +56,6 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def _flags(monkeypatch) -> None:
-    monkeypatch.setenv("HARNESS_FLOW_DRIVE", "1")
-    monkeypatch.setenv("CASE_CONTINUATION_ENABLED", "1")
-
-
 class _FakeSession:
     def __init__(self, sid, status=SessionStatus.AWAITING_INPUT, backend="claude",
                  repo="/repo", machine_id="__local__", model="opus"):
@@ -103,9 +98,6 @@ class _Orch:
 
     def _emit_event(self, name, _t=None, payload=None):
         self.emitted.append((name, payload or {}))
-
-    def _harness_flow_drive_enabled(self):
-        return TaskOrchestrator._harness_flow_drive_enabled()
 
     def _short_failure_reason(self, result):
         return TaskOrchestrator._short_failure_reason(result)
@@ -225,7 +217,6 @@ def test_agent_text_about_server_errors_is_not_a_transient_pause():
 # --------------------------------------------------------------------------- #
 
 def test_manager_transient_death_pauses_the_case(tmp_path, monkeypatch):
-    _flags(monkeypatch)
     db = _mk_db(tmp_path, monkeypatch)
     orch = _Orch(_FakeStore(_FakeSession("mgr-1")))
     case_id = _case(db, "mgr-1")
@@ -251,7 +242,6 @@ def _parse_ok(value):
 
 
 def test_second_transient_death_does_not_open_a_second_pause(tmp_path, monkeypatch):
-    _flags(monkeypatch)
     db = _mk_db(tmp_path, monkeypatch)
     orch = _Orch(_FakeStore(_FakeSession("mgr-1")))
     case_id = _case(db, "mgr-1")
@@ -266,7 +256,6 @@ def test_second_transient_death_does_not_open_a_second_pause(tmp_path, monkeypat
 def test_worker_transient_death_does_not_pause_the_case(tmp_path, monkeypatch):
     """The failing session is not this Case's Manager — a worker 5xx is the
     worker's own retry problem."""
-    _flags(monkeypatch)
     db = _mk_db(tmp_path, monkeypatch)
     orch = _Orch(_FakeStore(_FakeSession("mgr-1"), _FakeSession("wkr-9")))
     case_id = _case(db, "mgr-1")
@@ -279,7 +268,6 @@ def test_worker_transient_death_does_not_pause_the_case(tmp_path, monkeypatch):
 def test_escalating_backoff_then_bounded_exhaustion(tmp_path, monkeypatch):
     """Each consecutive pause in the window escalates the backoff; once the
     schedule is spent the Case escalates instead of pausing again."""
-    _flags(monkeypatch)
     db = _mk_db(tmp_path, monkeypatch)
     orch = _Orch(_FakeStore(_FakeSession("mgr-1")))
     case_id = _case(db, "mgr-1")
@@ -310,7 +298,6 @@ def test_escalating_backoff_then_bounded_exhaustion(tmp_path, monkeypatch):
 # --------------------------------------------------------------------------- #
 
 def test_backoff_not_elapsed_holds_without_retrying(tmp_path, monkeypatch):
-    _flags(monkeypatch)
     db = _mk_db(tmp_path, monkeypatch)
     orch = _Orch(_FakeStore(_FakeSession("mgr-1")))
     case_id = _case(db, "mgr-1")
@@ -323,7 +310,6 @@ def test_backoff_not_elapsed_holds_without_retrying(tmp_path, monkeypatch):
 
 
 def test_backoff_elapsed_retries_the_exact_turn(tmp_path, monkeypatch):
-    _flags(monkeypatch)
     db = _mk_db(tmp_path, monkeypatch)
     orch = _Orch(_FakeStore(_FakeSession("mgr-1")))
     case_id = _case(db, "mgr-1")
@@ -344,7 +330,6 @@ def test_backoff_elapsed_retries_the_exact_turn(tmp_path, monkeypatch):
 
 
 def test_truncated_prompt_falls_back_to_generic_retry(tmp_path, monkeypatch):
-    _flags(monkeypatch)
     db = _mk_db(tmp_path, monkeypatch)
     orch = _Orch(_FakeStore(_FakeSession("mgr-1")))
     case_id = _case(db, "mgr-1", objective="rebuild the index")
@@ -362,7 +347,6 @@ def test_truncated_prompt_falls_back_to_generic_retry(tmp_path, monkeypatch):
 def test_dead_session_closes_the_pause_and_hands_back(tmp_path, monkeypatch):
     """The session that 529'd is gone — don't retry into a corpse; close the pause
     and let the dead-manager/respawn path own it."""
-    _flags(monkeypatch)
     db = _mk_db(tmp_path, monkeypatch)
     orch = _Orch(_FakeStore())  # mgr-1 is gone
     case_id = _case(db, "mgr-1")
@@ -378,7 +362,6 @@ def test_dead_session_closes_the_pause_and_hands_back(tmp_path, monkeypatch):
 
 
 def test_busy_manager_holds_without_double_driving(tmp_path, monkeypatch):
-    _flags(monkeypatch)
     db = _mk_db(tmp_path, monkeypatch)
     orch = _Orch(_FakeStore(_FakeSession("mgr-1", status=SessionStatus.BUSY)))
     case_id = _case(db, "mgr-1")
@@ -394,7 +377,6 @@ def test_busy_manager_holds_without_double_driving(tmp_path, monkeypatch):
 def test_single_flight_lease_prevents_double_retry(tmp_path, monkeypatch):
     """A concurrent tick that already claimed the retry row makes this one a
     no-op delivery (owns the tick, delivers nothing)."""
-    _flags(monkeypatch)
     db = _mk_db(tmp_path, monkeypatch)
     orch = _Orch(_FakeStore(_FakeSession("mgr-1")))
     case_id = _case(db, "mgr-1")
@@ -418,8 +400,6 @@ def test_single_flight_lease_prevents_double_retry(tmp_path, monkeypatch):
 # --------------------------------------------------------------------------- #
 
 def test_paused_case_not_woken_by_a_satisfied_wait_group(tmp_path, monkeypatch):
-    _flags(monkeypatch)
-    monkeypatch.setenv("DURABLE_RELAY_ENABLED", "1")
     db = _mk_db(tmp_path, monkeypatch)
     orch = _Orch(_FakeStore(_FakeSession("mgr-1")))
     case_id = _case(db, "mgr-1")

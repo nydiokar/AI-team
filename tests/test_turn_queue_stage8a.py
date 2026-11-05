@@ -49,7 +49,7 @@ from src.core.interfaces import Session, SessionStatus
 from src.orchestrator import HarnessAdmissionBlocked, TaskOrchestrator
 from tests.test_turn_queue_4b import _pass, _run, _wire
 from tests.test_turn_queue_producer1 import (  # noqa: F401  (autouse fixtures)
-    NOW, _flags, _managed_rows, _no_cli_spawn, _register_carrier, _sess, _setup, _submit,
+    NOW, _managed_rows, _no_cli_spawn, _register_carrier, _sess, _setup, _submit,
 )
 
 LEGACY_ACTIONS = ("create_session", "resume_session", "compact_session")
@@ -140,7 +140,6 @@ def test_S8_01_every_creation_surface_is_born_managed(tmp_path, monkeypatch, sur
 def test_S8_01b_api_manager_invoke_is_born_managed(tmp_path, monkeypatch):
     db, o = _setup(tmp_path, monkeypatch)
     _wire(o)
-    o._manager_role_enabled = lambda: True
     res = asyncio.run(o.invoke_manager("ship X", repo_path="/tmp/repo", node_id="worker-a"))
     assert res["ok"] is True, res
     assert _marker(db, res["session_id"]) == 1
@@ -622,7 +621,6 @@ def test_S8_09d_codex_close_keeps_a_held_or_forgotten_thread_loaded_N_A(monkeypa
 def test_S8_09e_close_of_a_never_run_session_leaves_no_teardown_row_N_B(tmp_path, monkeypatch):
     db, o = _setup(tmp_path, monkeypatch)
     _wire(o)
-    o._manager_role_enabled = lambda: True
     db._conn().execute("DELETE FROM nodes")  # the pinned node is unknown: refused invoke
     db._conn().commit()
     with pytest.raises(tq.CarrierUnavailableError):
@@ -641,11 +639,13 @@ def test_S8_09e_close_of_a_never_run_session_leaves_no_teardown_row_N_B(tmp_path
     assert [r[0] for r in rows] == ["worker-a"]
 
 
-def test_S8_09f_level3_blocked_invoke_abandons_the_boot(tmp_path, monkeypatch):
+def test_S8_09f_admission_blocked_invoke_abandons_the_boot(tmp_path, monkeypatch):
     db, o = _setup(tmp_path, monkeypatch)
     _wire(o)
-    o._manager_role_enabled = lambda: True
-    o._harness_level3_allows_autopickup = lambda _t: False
+    async def _refused(task):
+        raise HarnessAdmissionBlocked(task.id, "local_execution_disabled")
+
+    o._enqueue_task = _refused
     with pytest.raises(HarnessAdmissionBlocked):
         asyncio.run(o.invoke_manager("ship X", repo_path="/tmp/repo", node_id="worker-a"))
     managers = [dict(r) for r in db._conn().execute(

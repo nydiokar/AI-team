@@ -274,30 +274,6 @@ _COST_DIMENSIONS: Dict[str, str] = {
 # "1"`` numeric entry rejects values <= 0 on write, so null is the ONLY way to
 # store "no cap" (a 0 must never silently mean "unlimited" on a money knob).
 RUNTIME_FLAG_DEFINITIONS: Dict[str, Dict[str, str]] = {
-    "HARNESS_FLOW_DRIVE": {
-        "default": "0",
-        "effect_scope": "live",
-        "registry_writable": "1",
-        "description": "Work Control Substrate flow_links/flow_events write path.",
-    },
-    "DURABLE_RELAY_ENABLED": {
-        "default": "0",
-        "effect_scope": "live",
-        "registry_writable": "1",
-        "description": "Durable worker wait markers and wait reconciliation routes.",
-    },
-    "CASE_CONTINUATION_ENABLED": {
-        "default": "0",
-        "effect_scope": "live",
-        "registry_writable": "1",
-        "description": "Wake-Dispatcher autonomous Case continuation.",
-    },
-    "SPEC_AUTHORING_ENABLED": {
-        "default": "0",
-        "effect_scope": "live",
-        "registry_writable": "1",
-        "description": "M4 spec-authoring stage, scored spec-review gate, publish_artifact, and the decomposer.",
-    },
     "CASE_RESPAWN_REQUIRES_APPROVAL": {
         "default": "1",
         "effect_scope": "live",
@@ -322,30 +298,6 @@ RUNTIME_FLAG_DEFINITIONS: Dict[str, Dict[str, str]] = {
         "registry_writable": "1",
         "description": "Refuse a Manager close_case unless the Case ledger proves the work was advanced (a second dispatch or a rework verdict) OR an explicit exhaustion_attestation is recorded. Turns 'judge contribution + continue the work' from prose into an enforced close gate.",
     },
-    "COST_ALERT_ENFORCE_ENABLED": {
-        "default": "0",
-        "effect_scope": "live",
-        "registry_writable": "1",
-        "description": "A65 cost-alert enforcement: when ON, alerting surfaces the existing SDK governor ceiling (sdk_max_budget_usd) as the lever. Never a new kill mechanism.",
-    },
-    "HARNESS_LEVEL3_GUARD": {
-        "default": "0",
-        "effect_scope": "live",
-        "registry_writable": "1",
-        "description": "Admission backstop requiring explicit approval for Level-3 auto-picked tasks.",
-    },
-    "MANAGER_ROLE_ENABLED": {
-        "default": "0",
-        "effect_scope": "session_boot",
-        "registry_writable": "1",
-        "description": "Manager role path, role prompt, and scoped Manager tool grants for new sessions.",
-    },
-    "MANAGER_TOOLS_ENABLED": {
-        "default": "0",
-        "effect_scope": "session_boot",
-        "registry_writable": "1",
-        "description": "Legacy process-wide Manager MCP tool grant for new Claude sessions.",
-    },
     "CONTROL_API_DOCS": {
         "default": "0",
         "effect_scope": "startup",
@@ -363,12 +315,6 @@ RUNTIME_FLAG_DEFINITIONS: Dict[str, Dict[str, str]] = {
         "effect_scope": "live",
         "registry_writable": "1",
         "description": "Keep the Claude 5-hour window ticking: when telemetry shows NO open window, spend one minimal haiku turn to start one, then verify against the provider that a window actually opened. Runs around the clock on purpose — an already-running window is only worth anything before work starts. Warming runs where Claude executes: a claude-capable WORKER re-reads this registry row every cycle and starts/stops warming LIVE — flip it on/off with no restart. The ingest-only Docker controller has no local Claude and does not warm (a single-process local-execution gateway still warms in-process, at startup). The worker reads this row from the controller's registry over the task-server API (refreshed ~every 30 s), so the normal /api/flags or scripts/ops_flag.sh toggle reaches it. Bounded by QUOTA_PREWARM_MAX_PER_DAY / QUOTA_PREWARM_MIN_INTERVAL_SEC and a consecutive-failure circuit breaker.",
-    },
-    "QUOTA_DIGEST_TELEGRAM_ENABLED": {
-        "default": "0",
-        "effect_scope": "startup",
-        "registry_writable": "1",
-        "description": "Temporary Telegram digest for quota coordinator observations.",
     },
     "CLAUDE_SKIP_PERMISSIONS": {
         "default": "0",
@@ -721,32 +667,6 @@ def manager_advancement_gate_enabled() -> bool:
     return runtime_flag_enabled("MANAGER_ADVANCEMENT_GATE")
 
 
-def durable_relay_enabled() -> bool:
-    """[A46/M3.3] Whether the durable worker-wait relay is active.
-
-    Canonical read of ``DURABLE_RELAY_ENABLED`` (truthy: 1/true/yes/on); default
-    OFF. When OFF: ``record_worker_wait``
-    writes no pending marker and ``reconcile_worker_waits`` no-ops ⇒ byte-identical
-    to pre-A46 behavior (no ``worker.wait_*`` events are ever written, and the two
-    /api/cases/{id}/waits routes return 404).
-    """
-    return runtime_flag_enabled("DURABLE_RELAY_ENABLED")
-
-
-def case_continuation_enabled() -> bool:
-    """[M3.4] Whether autonomous Case continuation (the Wake-Dispatcher) is active.
-
-    Canonical read of ``CASE_CONTINUATION_ENABLED`` (truthy: 1/true/yes/on);
-    default OFF. Mirrors ``durable_relay_enabled()``. When OFF: ``arm_wait_group``
-    writes nothing and the orchestrator Wake-Dispatcher tick is a no-op ⇒ no
-    ``cont:*`` rows are enqueued and no proactive wake turns are delivered ⇒
-    byte-identical to pre-M3.4 behavior.
-    """
-    return runtime_flag_enabled("CASE_CONTINUATION_ENABLED")
-
-
-
-
 def case_respawn_requires_approval() -> bool:
     """[Case-respawn approval gate] Whether M3.4 crash-respawn requires an
     operator-resolved approval before spawning a fresh Manager session.
@@ -858,20 +778,6 @@ def cache_heartbeat_awareness_beat() -> int:
 
 def cache_heartbeat_min_cache_tokens() -> int:
     return _env_int("CACHE_HEARTBEAT_MIN_CACHE_TOKENS", 100_000, 0)
-
-
-def spec_authoring_enabled() -> bool:
-    """[A56/M4] Whether the spec-authoring stage + scored review gate + decomposer
-    are active.
-
-    Canonical read of ``SPEC_AUTHORING_ENABLED`` (truthy: 1/true/yes/on); default
-    OFF. Mirrors ``case_continuation_enabled()``. When OFF: ``publish_artifact``,
-    ``publish_spec``, ``record_spec_review`` and ``decompose_case`` all write
-    nothing and return a disabled marker, and their /api routes return 404 ⇒
-    byte-identical to pre-M4 behaviour (no ``artifact.*``/``spec.*``/``case.decomposed``
-    events are ever written and no ``task_attached`` links are created).
-    """
-    return runtime_flag_enabled("SPEC_AUTHORING_ENABLED")
 
 
 # [A56/M4] R1 — the scored spec-review rubric. Six dimensions, each scored 0–2 by a
@@ -1266,43 +1172,6 @@ def transient_resume_task_id(case_id: str, paused_task_id: str, attempt: int) ->
 def cache_heartbeat_task_id(session_id: str, slot_epoch: int) -> str:
     """Deterministic lease id for one session-cache heartbeat due slot."""
     return f"cachehb:{session_id}:{int(slot_epoch)}"
-
-
-def flow_drive_enabled() -> bool:
-    """Whether the Work Control Substrate write path is active (A22/A26/A29).
-
-    Canonical read of ``HARNESS_FLOW_DRIVE`` (truthy: 1/true/yes/on); default OFF.
-    This is the SINGLE source of truth for the flag so every substrate writer
-    (orchestrator flow seams, ApprovalService approval seams) agrees byte-for-byte.
-    When OFF, no flow_links/flow_events are written ⇒ behavior is byte-identical to
-    A19. It never reads a substrate row to DRIVE execution — it only gates RECORDS.
-    """
-    return runtime_flag_enabled("HARNESS_FLOW_DRIVE")
-
-
-def manager_role_enabled() -> bool:
-    """Registry-over-env read of ``MANAGER_ROLE_ENABLED``.
-
-    The API gate observes this immediately. Role prompts and scoped MCP grants
-    are session-boot decisions, so existing sessions do not gain/lose tools until
-    their next boot.
-    """
-    return runtime_flag_enabled("MANAGER_ROLE_ENABLED")
-
-
-def manager_tools_enabled() -> bool:
-    """Registry-over-env read of ``MANAGER_TOOLS_ENABLED``.
-
-    This controls the legacy Claude Manager MCP tool grant when a session boots;
-    changing it does not mutate an already-running SDK session's allowed tools.
-    """
-    return runtime_flag_enabled("MANAGER_TOOLS_ENABLED")
-
-
-def harness_level3_guard_enabled() -> bool:
-    """Registry-over-env read of ``HARNESS_LEVEL3_GUARD``."""
-    return runtime_flag_enabled("HARNESS_LEVEL3_GUARD")
-
 
 
 def control_api_docs_enabled() -> bool:
@@ -7428,9 +7297,7 @@ class MeshDB:
     # ``task_attached`` flow_links ON THE SAME CASE with dependency edges on
     # ``metadata_json`` — a task-DAG as DATA. It creates ZERO new ``flow_runs``: the
     # orphan-flow_run scatter is the exact failure mode M2.5 exists to prevent (§0.2
-    # anti-goal). All four methods are flag-gated by ``spec_authoring_enabled()`` ⇒
-    # OFF is byte-identical (no ``artifact.*``/``spec.*``/``case.decomposed`` events,
-    # no ``task_attached`` links). This layer RECORDS + gates; nothing here is read to
+    # anti-goal). This layer RECORDS + gates; nothing here is read to
     # DRIVE execution (the Manager dispatches from the DAG in order — A56 delivers the
     # DAG as data; the parallel executor is the out-of-scope A57 spike).
     # ------------------------------------------------------------------
@@ -7450,14 +7317,10 @@ class MeshDB:
         + an ``artifact.published`` event (evidence, not a second ledger).
 
         Idempotent via the flow_links unique index (repeat call reuses the link).
-        Flag-gated: with ``SPEC_AUTHORING_ENABLED`` OFF this writes NOTHING and
-        returns ``{"ok": False, "reason": "spec_authoring_disabled"}``. Returns
-        ``{"ok": True, "link_id", "event_id", "artifact_id"}`` on a publish.
+        Returns ``{"ok": True, "link_id", "event_id", "artifact_id"}`` on a publish.
         ``metadata`` is JSON-encoded verbatim (kind/title/uri are folded in for the
         link record); db.py does not interpret it.
         """
-        if not spec_authoring_enabled():
-            return {"ok": False, "reason": "spec_authoring_disabled"}
         link_meta: Dict[str, Any] = {"kind": kind}
         if title is not None:
             link_meta["title"] = title
@@ -7495,16 +7358,13 @@ class MeshDB:
         The spec is stored as an ``artifact`` flow_link carrying the (bounded) body
         on ``metadata_json`` so the Case is self-describing from the DB alone. This
         writes the SPEC; it does NOT grade it (that is :func:`record_spec_review`, a
-        separate seat) — the author never approves its own spec. Flag-gated: OFF ⇒
-        ``{"ok": False, "reason": "spec_authoring_disabled"}``, nothing written.
+        separate seat) — the author never approves its own spec.
         """
-        if not spec_authoring_enabled():
-            return {"ok": False, "reason": "spec_authoring_disabled"}
         result = self.publish_artifact(
             flow_run_id, spec_id, kind="spec", title=title, actor=actor,
             metadata={"body": spec_body},
         )
-        # publish_artifact re-checked the flag; if it wrote, name the authoring step.
+        # If publish_artifact wrote, name the authoring step.
         if result.get("ok"):
             result["event_id"] = self.append_flow_event(
                 flow_run_id, "spec.authored", actor,
@@ -7534,11 +7394,8 @@ class MeshDB:
         a pass. ``reviewer`` should differ from the spec's author (the SEAT is
         separate); the db records whoever the API/orchestrator seam passes. The
         resulting ``review.accepted`` / ``review.rework_requested`` event is what
-        :func:`decompose_case` gates on. Flag-gated: OFF ⇒ nothing written,
-        ``{"ok": False, "reason": "spec_authoring_disabled"}``.
+        :func:`decompose_case` gates on.
         """
-        if not spec_authoring_enabled():
-            return {"ok": False, "reason": "spec_authoring_disabled"}
         graded = _score_spec_review(scores)
         review_event_type = REVIEW_VERDICT_EVENT_TYPES[graded["verdict"]]
         # The full score-card as durable evidence (its own event so the audit trail
@@ -7617,7 +7474,6 @@ class MeshDB:
         exact shape M2.5 exists to enforce (orphan flow_runs are the anti-goal).
 
         HARD GATES (each writes nothing and returns a structured refusal):
-          * flag OFF ⇒ ``spec_authoring_disabled``;
           * the spec was never scored, or its latest score did NOT pass ⇒
             ``spec_not_approved`` (the scored-review gate is a REAL block, not a warning);
           * duplicate/empty ``task_key`` ⇒ ``invalid_task_keys``;
@@ -7630,9 +7486,6 @@ class MeshDB:
         appends one ``case.decomposed`` event. Idempotent per (case, task_key, role)
         via the flow_links unique index.
         """
-        if not spec_authoring_enabled():
-            return {"ok": False, "reason": "spec_authoring_disabled"}
-
         review = self.latest_spec_review(flow_run_id, spec_id)
         if review is None or not review.get("passed"):
             return {
@@ -7727,23 +7580,6 @@ class MeshDB:
     # — reusing the existing flow_events substrate, no new schema.
     # ------------------------------------------------------------------
 
-    def record_worker_wait(
-        self,
-        flow_run_id: str,
-        task_id: str,
-        *,
-        timeout: Optional[float] = None,
-        actor: str = "manager",
-    ) -> Optional[int]:
-        """[A46 → A104 shim] Formerly appended a per-task ``worker.wait_pending``
-        ledger marker. The agent inbox now records the obligation by itself (the
-        child's requester is stamped at dispatch; its completion row is written in
-        the terminal txn), so nothing needs recording here. Kept — signature and
-        200 response — because an un-redeployed ``mcp_manager`` calls
-        ``POST /api/cases/{id}/waits`` after every Case dispatch (A104 D7).
-        Returns None (no marker written)."""
-        return None
-
     def reconcile_worker_waits(
         self,
         flow_run_id: str,
@@ -7781,11 +7617,7 @@ class MeshDB:
         the inbox default (each completion is delivered as it lands) and stores
         nothing that holds. Not a ledger: one ``inbox.filter_armed`` audit event.
 
-        Idempotent per (case, wait_group_id) (an upsert). Flag-gated by
-        ``case_continuation_enabled()`` like before (OFF ⇒ None, nothing written).
-        Returns the audit event id."""
-        if not case_continuation_enabled():
-            return None
+        Idempotent per (case, wait_group_id) (an upsert). Returns the audit event id."""
         cond = str(condition or "ANY").upper()
         cond = "ALL" if cond in ("ALL", "NAMED") else "ANY"
         members = [str(m) for m in (member_task_ids or []) if m]
@@ -8783,10 +8615,8 @@ class MeshDB:
     # [A54 / M3.4 Job 2] Durable Case reconstruction. A Manager that lost its
     # in-process context (compaction, restart, respawn) must be able to pick a
     # Case back up knowing everything that matters from the DB ALONE, in ONE
-    # bounded read, and re-establish its outstanding waits/groups. get_case_brief
-    # is that single read; boot_reconcile_case is the idempotent re-arm hook the
-    # role-boot path fires. Both are pure reads over the existing substrate plus
-    # the already-idempotent A46/M3.4 writers — no new table, no new column.
+    # bounded read. get_case_brief is that single read (the agent inbox holds the
+    # outstanding waits durably by itself) — no new table, no new column.
     # ------------------------------------------------------------------
 
     def get_case_brief(self, case_id: str) -> Optional[Dict[str, Any]]:
@@ -8880,24 +8710,6 @@ class MeshDB:
             "ready_waits": ready,
             "wait_groups": wait_groups,
         }
-
-    def boot_reconcile_case(
-        self,
-        case_id: str,
-        *,
-        actor: str = "manager",
-    ) -> Dict[str, Any]:
-        """[A54 → A104 shim, D7 frozen shape] A Manager booting onto an OPEN Case
-        used to re-derive its obligations from the ledger and re-arm its groups.
-        The inbox is durable by itself (messages and filters survive restarts), so
-        nothing is re-armed; the reply reports what ``pending_for`` holds for the
-        Case, in the shape an un-redeployed worker reads (``ok`` / ``reason`` /
-        ``reconciled.resolved`` / ``rearmed``). Still gated on the durable-relay
-        flag exactly like before (the worker pre-gates on the same flag row)."""
-        if not durable_relay_enabled():
-            return {"ok": False, "reason": "durable_relay_disabled"}
-        reconciled = self.reconcile_worker_waits(case_id, actor=actor)
-        return {"ok": True, "reconciled": reconciled, "rearmed": []}
 
     def create_approval(
         self,

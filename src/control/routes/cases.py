@@ -29,7 +29,6 @@ from src.control.control_api import (
     CaseSpecBody,
     CaseSpecReviewBody,
     CaseStateBody,
-    CaseWaitBody,
     CaseWaitGroupBody,
     ManagerInvokeBody,
     logger,
@@ -81,10 +80,6 @@ class ManagerInvokeOut(CommandResult):
     session_id: str
     case_id: str
     task_id: str
-
-
-class RecordWorkerWaitOut(CommandResult):
-    event_id: Optional[int] = None
 
 
 class ReconcileWorkerWaitsOut(CommandResult):
@@ -178,11 +173,6 @@ class CaseBriefOut(CommandResult):
     brief: CaseBrief
 
 
-class BootReconcileOut(CommandResult):
-    reconciled: ReconcileWorkerWaitsOut
-    rearmed: list[dict]
-
-
 class InterruptCaseOut(CommandResult):
     cancelled_tasks: list[str]
     already: bool
@@ -263,9 +253,8 @@ def build_router(
         idempotency_key: Optional[str] = Header(default=None, alias="Idempotency-Key"),
     ) -> JSONResponse:
         """[A38] Invoke a Manager: create a Case-owning session, open one Case, and
-        deliver the objective as its first assignment. Refuses with 409 when the
-        Manager-role path is disabled (MANAGER_ROLE_ENABLED OFF ⇒ new surface inert).
-        Translates the Level-3 admission block to a clean 409, like /api/instructions."""
+        deliver the objective as its first assignment. Translates an admission block
+        to a clean 409, like /api/instructions."""
         from src.control.turn_queue import TurnQueueError
         from src.orchestrator import HarnessAdmissionBlocked
 
@@ -296,8 +285,7 @@ def build_router(
 
             if not result.get("ok"):
                 reason = result.get("reason") or "manager_invoke_failed"
-                status = 409 if reason == "manager_role_disabled" else _REASON_STATUS.get(reason, 400)
-                raise HTTPException(status_code=status, detail={"ok": False, "reason": reason})
+                raise HTTPException(status_code=_REASON_STATUS.get(reason, 400), detail={"ok": False, "reason": reason})
 
             idem_put("manager", idempotency_key, result)
             return JSONResponse(result)
@@ -309,11 +297,8 @@ def build_router(
     def api_open_case(body: CaseOpenBody) -> JSONResponse:
         """[M3.3] Open a NEW Case on an existing Manager session — the seam that lets
         a single persistent Manager session run many Cases (open → dispatch → review →
-        close → open the next) without spawning a fresh session each time. Gated by
-        ``MANAGER_ROLE_ENABLED`` (409 when OFF ⇒ surface inert). Returns
+        close → open the next) without spawning a fresh session each time. Returns
         ``{ok, case_id}``; 404 for an unknown session, 400 on a Case-birth failure."""
-        if not orchestrator._manager_role_enabled():
-            raise HTTPException(status_code=409, detail={"ok": False, "reason": "manager_role_disabled"})
         session = orchestrator.session_service.store.get(body.session_id)
         if session is None:
             raise HTTPException(status_code=404, detail={"ok": False, "reason": "session_not_found"})
@@ -398,24 +383,6 @@ def build_router(
         return JSONResponse(result)
 
     @router.post(
-        "/api/cases/{case_id}/waits",
-        responses={200: {"model": RecordWorkerWaitOut,
-                         "description": "A104 shim no-op acknowledgement (event_id is null)."}},
-    )
-    def api_record_worker_wait(case_id: str, body: CaseWaitBody) -> JSONResponse:
-        """[A46 → A104 shim, D7] An un-redeployed mcp_manager calls this after every
-        Case dispatch. Nothing is recorded any more (the agent inbox addresses the
-        completion itself); the route keeps its shape and its flag gate (404 when
-        ``DURABLE_RELAY_ENABLED`` is OFF — the old client treats that as silent)."""
-        from src.control.db import durable_relay_enabled
-        if not durable_relay_enabled():
-            raise HTTPException(status_code=404, detail="not_found")
-        result = orchestrator.record_worker_wait(
-            case_id, body.task_id, timeout=body.timeout, actor="manager",
-        )
-        return JSONResponse(result)
-
-    @router.post(
         "/api/cases/{case_id}/waits/reconcile",
         responses={200: {"model": ReconcileWorkerWaitsOut,
                          "description": "The Case's inbox: resolved (finished) + pending (running)."}},
@@ -449,13 +416,8 @@ def build_router(
     )
     def api_arm_wait_group(case_id: str, body: CaseWaitGroupBody) -> JSONResponse:
         """[M3.4] Arm a Manager wait-group so the Wake-Dispatcher autonomously
-        re-enters this Case when the group is satisfied. Gated by
-        ``CASE_CONTINUATION_ENABLED`` (404 when OFF ⇒ byte-identical). Rejects a
-        malformed condition (422) and bounds the member list (413) up front — the
-        write itself is also flag-gated in the db layer (defence in depth)."""
-        from src.control.db import case_continuation_enabled
-        if not case_continuation_enabled():
-            raise HTTPException(status_code=404, detail="not_found")
+        re-enters this Case when the group is satisfied. Rejects a malformed
+        condition (422) and bounds the member list (413) up front."""
         cond = (body.condition or "ANY").upper()
         if cond not in ("ANY", "ALL", "NAMED"):
             raise HTTPException(
@@ -484,11 +446,7 @@ def build_router(
     )
     def api_publish_artifact(case_id: str, body: CasePublishArtifactBody) -> JSONResponse:
         """[A56/M4] Publish a durable artifact onto a Case (``artifact`` flow_link +
-        ``artifact.published`` event). Gated by ``SPEC_AUTHORING_ENABLED`` (404 when
-        OFF ⇒ byte-identical). The write is also flag-gated in the db layer."""
-        from src.control.db import spec_authoring_enabled
-        if not spec_authoring_enabled():
-            raise HTTPException(status_code=404, detail="not_found")
+        ``artifact.published`` event)."""
         result = orchestrator.publish_artifact(
             case_id, body.artifact_id, kind=body.kind, title=body.title,
             uri=body.uri, actor="manager", metadata=body.metadata,
@@ -501,11 +459,7 @@ def build_router(
                          "description": "The authored spec link + event."}},
     )
     def api_publish_spec(case_id: str, body: CaseSpecBody) -> JSONResponse:
-        """[A56/M4] Author a spec onto a Case as durable evidence (``spec.authored``).
-        Gated by ``SPEC_AUTHORING_ENABLED`` (404 when OFF ⇒ byte-identical)."""
-        from src.control.db import spec_authoring_enabled
-        if not spec_authoring_enabled():
-            raise HTTPException(status_code=404, detail="not_found")
+        """[A56/M4] Author a spec onto a Case as durable evidence (``spec.authored``)."""
         result = orchestrator.publish_spec(
             case_id, body.spec_id, body.body, title=body.title, actor="manager",
         )
@@ -519,11 +473,7 @@ def build_router(
     def api_record_spec_review(case_id: str, body: CaseSpecReviewBody) -> JSONResponse:
         """[A56/M4] Score a spec against R1 by a SEPARATE plan-reviewer seat; the
         verdict (accepted|rework_requested) is computed from the scores, not trusted.
-        Records ``spec.review_scored`` + the canonical ``review.*`` event. Gated by
-        ``SPEC_AUTHORING_ENABLED`` (404 when OFF ⇒ byte-identical)."""
-        from src.control.db import spec_authoring_enabled
-        if not spec_authoring_enabled():
-            raise HTTPException(status_code=404, detail="not_found")
+        Records ``spec.review_scored`` + the canonical ``review.*`` event."""
         result = orchestrator.record_spec_review(
             case_id, body.spec_id, body.scores, reviewer=body.reviewer, reason=body.reason,
         )
@@ -537,11 +487,7 @@ def build_router(
     def api_decompose_case(case_id: str, body: CaseDecomposeBody) -> JSONResponse:
         """[A56/M4] Expand an APPROVED objective into a task-DAG of N ``task_attached``
         links on ONE Case (no orphan flow_runs). REFUSES (422 with a structured reason)
-        unless the spec's latest scored review PASSED and the DAG is acyclic/well-formed.
-        Gated by ``SPEC_AUTHORING_ENABLED`` (404 when OFF ⇒ byte-identical)."""
-        from src.control.db import spec_authoring_enabled
-        if not spec_authoring_enabled():
-            raise HTTPException(status_code=404, detail="not_found")
+        unless the spec's latest scored review PASSED and the DAG is acyclic/well-formed."""
         result = orchestrator.decompose_case(
             case_id, body.spec_id, body.tasks, actor="manager",
         )
@@ -564,23 +510,6 @@ def build_router(
         result = orchestrator.get_case_brief(case_id)
         if not result.get("ok"):
             raise HTTPException(status_code=404, detail=result.get("reason") or "case_not_found")
-        return JSONResponse(result)
-
-    @router.post(
-        "/api/cases/{case_id}/boot-reconcile",
-        responses={200: {"model": BootReconcileOut,
-                         "description": "Boot-time reconcile result + re-armed wait-groups."}},
-    )
-    def api_boot_reconcile_case(case_id: str) -> JSONResponse:
-        """[A54/M3.4 Job 2] Boot-time reconstruction hook — reconcile outstanding
-        worker waits AND re-arm live wait-groups from the ledger (idempotent). Gated
-        by ``DURABLE_RELAY_ENABLED`` (404 when OFF ⇒ byte-identical no-op, exactly
-        like the /waits/reconcile route). The write itself is also flag-gated in the
-        db layer (defence in depth)."""
-        from src.control.db import durable_relay_enabled
-        if not durable_relay_enabled():
-            raise HTTPException(status_code=404, detail="not_found")
-        result = orchestrator.boot_reconcile_case(case_id, actor="manager")
         return JSONResponse(result)
 
     @router.post(
@@ -688,7 +617,6 @@ def build_router(
                 "case_not_found": 404, "db_unavailable": 503,
                 "no_manager_link": 409, "manager_busy": 409,
                 "resume_in_flight": 409, "case_terminal": 409,
-                "continuation_disabled": 409,
             }.get(str(result.get("reason") or ""), 500)
             raise HTTPException(status_code=code, detail=result)
         return JSONResponse(result)

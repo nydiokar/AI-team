@@ -32,7 +32,7 @@ from tests.test_agent_inbox_delivery import (  # noqa: F401
     _add_session, _complete, _drive, _env, _fresh_allowance, _rows, _tick, _wakes,
 )
 from tests.test_turn_queue_4b import _pass, _run
-from tests.test_turn_queue_producer1 import NOW, _flags, _no_cli_spawn, _submit  # noqa: F401
+from tests.test_turn_queue_producer1 import NOW, _no_cli_spawn, _submit  # noqa: F401
 
 LEGACY_WAKE_HEAD = "[continuation] Worker completion(s) are ready for your review on this Case ({cid}). " \
                    "Finished since your last turn: {tids}."
@@ -68,7 +68,6 @@ def _dispatch(db, o, cid, worker, client, op):
         kw["requester_session_id"] = STALE_ENV_SESSION
     child = _submit(o, **kw)
     if client == "legacy":
-        assert o.record_worker_wait(cid, str(child))["ok"]            # old client: POST /waits
         assert o.arm_wait_group(cid, f"g-{op}", "ANY", [str(child)])["ok"]  # old client: arm ANY
     return str(child)
 

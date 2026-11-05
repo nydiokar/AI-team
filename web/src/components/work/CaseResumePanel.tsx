@@ -84,7 +84,6 @@ const REASON_COPY: Record<string, string> = {
   manager_busy: "The Manager is mid-turn — it is not stuck, so nothing to resume.",
   case_terminal: "This Case is closed.",
   no_manager_link: "This Case has no Manager session linked.",
-  continuation_disabled: "Case continuation is disabled (CASE_CONTINUATION_ENABLED).",
   respawn_failed: "Could not spawn a fresh Manager — check node placement.",
   deliver_failed: "The resume turn could not be delivered.",
 };

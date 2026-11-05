@@ -45,7 +45,7 @@ from src.control.db import MeshDB
 from src.core.interfaces import Session, SessionStatus
 from tests.test_turn_queue_4b import _wire
 from tests.test_turn_queue_producer1 import (  # noqa: F401
-    NOW, _flags, _no_cli_spawn, _register_carrier,
+    NOW, _no_cli_spawn, _register_carrier,
 )
 
 pytestmark = pytest.mark.skipif(

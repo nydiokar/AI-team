@@ -1,6 +1,6 @@
 # Control API — Error Catalog
 
-_Generated 2026-10-13 by `scripts/api_docs/generate_api_docs.py` from `_REASON_STATUS` in `src/control/control_api.py`. Do not edit by hand._
+_Generated 2026-11-05 by `scripts/api_docs/generate_api_docs.py` from `_REASON_STATUS` in `src/control/control_api.py`. Do not edit by hand._
 
 Failed requests return a stable envelope:
 
@@ -25,7 +25,6 @@ The server owns the `reason` code; the client owns how it is worded for users. M
 | 404 | `not_found` | The target resource (e.g. an approval) does not exist. |
 | 404 | `session_not_found` | No session exists with that id. |
 | 409 | `already_resolved` | The approval/decision has already been resolved. |
-| 409 | `harness_level3_needs_approval` | This is a Level-3 task and needs operator approval before it can run (HARNESS_LEVEL3_GUARD is armed). Retrying will not help. |
 | 409 | `not_closed` | The operation requires a different session state (e.g. the session is not closed). |
 | 410 | `backend_retired` | The backend has been permanently removed (e.g. the OpenCode CLI). Use `opencode-server` instead. |
 | 413 | `file_too_large` | The uploaded file (or body) exceeds the configured size cap. |

@@ -44,7 +44,7 @@ def controller(tmp_path: Path) -> Iterator[tuple[str, Path]]:
         f"MESH_TASK_SERVER_PORT={port}\nMESH_BIND_HOST=127.0.0.1\nMESH_TAILSCALE_IP=\n"
         f"MESH_DB_PATH={db_path}\nMESH_SHADOW_WRITE=true\nWORKER_TOKEN={TOKEN}\n"
         # Pin the flags asserted below so a developer .env cannot leak in.
-        "QUOTA_PREWARM_ENABLED=0\nDURABLE_RELAY_ENABLED=0\nMANAGER_ROLE_ENABLED=0\n"
+        "QUOTA_PREWARM_ENABLED=0\nTOOL_PROFILES_DYNAMIC=0\n"
     )
     env = dict(os.environ, AI_TEAM_ENV_FILE=str(env_file), AI_TEAM_TEST_MODE="1")
     stderr_path = root / "server.stderr"
@@ -81,7 +81,7 @@ def controller(tmp_path: Path) -> Iterator[tuple[str, Path]]:
 def worker_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
     from config import config
 
-    for name in ("QUOTA_PREWARM_ENABLED", "MANAGER_ROLE_ENABLED", "DURABLE_RELAY_ENABLED"):
+    for name in ("QUOTA_PREWARM_ENABLED", "TOOL_PROFILES_DYNAMIC"):
         monkeypatch.delenv(name, raising=False)  # the worker's env fallback must not see a dev .env
     root = tmp_path / "worker"
     config.mesh.db_path = str(root / "state" / "mesh.db")
@@ -104,12 +104,6 @@ def test_worker_reads_controller_state_across_processes(controller: tuple[str, P
         assert remote.refresh() is True  # one refresh interval later
         assert db_mod.runtime_flag_enabled("QUOTA_PREWARM_ENABLED") is True
 
-        # Manager boot reconcile lands in the controller ledger, not the worker's.
-        assert remote.boot_reconcile_case("case_missing") == {"ok": False, "reason": "unknown_case"}
-        case_id = operator_db.open_case("objective", "sess_proc")
-        operator_db.set_runtime_flag("DURABLE_RELAY_ENABLED", True)
-        assert remote.boot_reconcile_case(case_id)["ok"] is True
-
         # Wrong credential is refused and does not clobber the last-known-good snapshot.
         intruder = RemoteControllerState(_HTTP(base, "wrong"))
         assert intruder.refresh() is False
@@ -128,7 +122,7 @@ def test_worker_keeps_last_known_good_when_controller_dies(controller: tuple[str
     base, controller_db_path = controller
     operator_db = MeshDB(str(controller_db_path))
     try:
-        operator_db.set_runtime_flag("MANAGER_ROLE_ENABLED", True)
+        operator_db.set_runtime_flag("TOOL_PROFILES_DYNAMIC", True)
     finally:
         operator_db.close()
     remote = RemoteControllerState(_HTTP(base, TOKEN))
@@ -137,5 +131,5 @@ def test_worker_keeps_last_known_good_when_controller_dies(controller: tuple[str
 
     dead = RemoteControllerState(_HTTP("http://127.0.0.1:1", TOKEN))  # nothing listens
     assert dead.refresh() is False
-    assert db_mod.runtime_flag_enabled("MANAGER_ROLE_ENABLED") is True
+    assert db_mod.runtime_flag_enabled("TOOL_PROFILES_DYNAMIC") is True
     assert not worker_root.exists()

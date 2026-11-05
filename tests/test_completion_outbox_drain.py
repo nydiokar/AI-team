@@ -33,7 +33,7 @@ from tests.test_agent_inbox_delivery import (  # noqa: F401 — autouse fixtures
     _add_session, _drive, _env, _fresh_allowance, _tick, _wakes,
 )
 from tests.test_case_continuation import _reviewed
-from tests.test_turn_queue_producer1 import _flags, _no_cli_spawn  # noqa: F401
+from tests.test_turn_queue_producer1 import _no_cli_spawn  # noqa: F401
 
 
 def _open_case(db: MeshDB, session_id="sess-1") -> str:

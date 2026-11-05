@@ -12,7 +12,7 @@ from src.control import turn_admission as ta
 from src.control import turn_queue as tq
 from src.control import turn_scheduler as ts
 from tests.test_turn_queue_producer1 import (  # noqa: F401
-    _flags, _managed_rows, _no_cli_spawn, _setup, _submit, _sess,
+    _managed_rows, _no_cli_spawn, _setup, _submit, _sess,
 )
 
 PAST = (datetime.now(tz=timezone.utc) - timedelta(seconds=1)).isoformat()
@@ -36,7 +36,6 @@ def _snapshot(db, case_ids, tid):
 
 # 1a — a DB failure inside _record_flow_run_start (swallowed) -------------- #
 def test_1a_join_lineage_db_error_must_not_finalize_caseless(tmp_path, monkeypatch):
-    monkeypatch.setenv("HARNESS_FLOW_DRIVE", "1")
     db, o = _setup(tmp_path, monkeypatch)
     case_id = db.open_case(objective="obj", session_id="mgr-x", role="manager")
     real = db.get_flow_run
@@ -66,7 +65,6 @@ def test_1a_join_lineage_db_error_must_not_finalize_caseless(tmp_path, monkeypat
 
 
 def test_1a_birth_lineage_db_error_must_not_finalize_caseless(tmp_path, monkeypatch):
-    monkeypatch.setenv("HARNESS_FLOW_DRIVE", "1")
     db, o = _setup(tmp_path, monkeypatch)
     # rework 3: the managed birth is `get_or_create_task_flow_run` (convergent).
     real = db.get_or_create_task_flow_run
@@ -97,7 +95,6 @@ def _crash_on_event(o, monkeypatch, event_type):
 
 
 def test_1b_join_partial_crash_recovery_equals_live(tmp_path, monkeypatch):
-    monkeypatch.setenv("HARNESS_FLOW_DRIVE", "1")
     # Control: clean live run.
     (tmp_path / "a").mkdir(); (tmp_path / "b").mkdir()
     db, o = _setup(tmp_path / "a", monkeypatch)
@@ -123,7 +120,6 @@ def test_1b_join_partial_crash_recovery_equals_live(tmp_path, monkeypatch):
 
 
 def test_1b_birth_partial_crash_recovery_equals_live(tmp_path, monkeypatch):
-    monkeypatch.setenv("HARNESS_FLOW_DRIVE", "1")
     (tmp_path / "a").mkdir(); (tmp_path / "b").mkdir()
     db, o = _setup(tmp_path / "a", monkeypatch)
     parent = db.open_case(objective="p", session_id="mgr-x", role="manager")
@@ -148,7 +144,6 @@ def test_1b_birth_partial_crash_recovery_equals_live(tmp_path, monkeypatch):
 
 # 1c — live writer stalled past its lease BEFORE writing; recovery races ---- #
 def test_1c_stalled_live_writer_births_second_case(tmp_path, monkeypatch):
-    monkeypatch.setenv("HARNESS_FLOW_DRIVE", "1")
     db, o = _setup(tmp_path, monkeypatch)
     parent = db.open_case(objective="p", session_id="mgr-x", role="manager")
     real = db.existing_task_lineage
@@ -177,7 +172,6 @@ def test_1c_stalled_live_writer_births_second_case(tmp_path, monkeypatch):
 
 # 1d — withdraw during the lineage-pending window ------------------------- #
 def test_1d_withdraw_during_lineage_window(tmp_path, monkeypatch):
-    monkeypatch.setenv("HARNESS_FLOW_DRIVE", "1")
     db, o = _setup(tmp_path, monkeypatch)
     o._LINEAGE_REPLAY_WAIT_SEC = 0.2
     case_id = db.open_case(objective="obj", session_id="mgr-x", role="manager")
@@ -209,7 +203,6 @@ def test_1d_withdraw_during_lineage_window(tmp_path, monkeypatch):
 
 # 2 — requeue on dead carrier keeps lineage metadata for re-preparation ---- #
 def test_2_requeue_then_reactivate_keeps_case_meta(tmp_path, monkeypatch):
-    monkeypatch.setenv("HARNESS_FLOW_DRIVE", "1")
     db, o = _setup(tmp_path, monkeypatch)
     case_id = db.open_case(objective="obj", session_id="mgr-x", role="manager")
     tid = _submit(o, join_case_id=case_id, operation_id="q1", source="runtime")
@@ -234,7 +227,6 @@ def test_2_requeue_then_reactivate_keeps_case_meta(tmp_path, monkeypatch):
 # 2b — carrier dies AFTER activation with nothing else queued: does anything
 # ever run the requeue? (scheduler sleeps "until a hint" when waiting == 0)
 def test_2b_idle_fleet_pending_on_dead_carrier_is_requeued(tmp_path, monkeypatch):
-    monkeypatch.setenv("HARNESS_FLOW_DRIVE", "1")
     db, o = _setup(tmp_path, monkeypatch)
     tid = _submit(o, operation_id="d1", source="runtime")
 
@@ -334,7 +326,6 @@ def test_managed_lineage_is_exactly_the_recorded_procedure(tmp_path, monkeypatch
     affiliation). [A82 Stage 8b] The legacy session-execution path this used to
     be compared against was deleted at the convergence cutoff; the managed
     lineage is now asserted directly against the frozen expectation."""
-    monkeypatch.setenv("HARNESS_FLOW_DRIVE", "1")
 
     def run(sub, enroll):
         (tmp_path / sub).mkdir()
@@ -375,7 +366,6 @@ def _crash_before_finalize(db, monkeypatch):
 
 
 def test_full_rerun_after_crash_before_finalize_writes_each_event_once(tmp_path, monkeypatch):
-    monkeypatch.setenv("HARNESS_FLOW_DRIVE", "1")
     db, o = _setup(tmp_path, monkeypatch)
     parent = db.open_case(objective="p", session_id="mgr-x", role="manager")
     real = _crash_before_finalize(db, monkeypatch)
@@ -392,7 +382,6 @@ def test_full_rerun_after_crash_before_finalize_writes_each_event_once(tmp_path,
 
 
 def test_strict_link_failure_raises_and_stays_pending(tmp_path, monkeypatch):
-    monkeypatch.setenv("HARNESS_FLOW_DRIVE", "1")
     db, o = _setup(tmp_path, monkeypatch)
     case_id = db.open_case(objective="obj", session_id="mgr-x", role="manager")
     monkeypatch.setattr(db, "create_flow_link",
@@ -409,7 +398,6 @@ def test_recovery_reuses_the_durable_decision(tmp_path, monkeypatch):
     recovery. Recovery keeps THAT membership (never re-decides to run
     Case-less) but must not re-affiliate the session to the closed Case nor
     write any event after `flow.closed` (A87 round-4 MAJOR 1)."""
-    monkeypatch.setenv("HARNESS_FLOW_DRIVE", "1")
     db, o = _setup(tmp_path, monkeypatch)
     own = db.open_case(objective="own", session_id="sess-1", role="manager")
     real = _crash_before_finalize(db, monkeypatch)
@@ -432,7 +420,6 @@ def test_P2_recovery_after_real_close_does_not_reaffiliate(tmp_path, monkeypatch
     """A87 round-4 probe P2, adopted: join writer wrote the task link, then
     `task.attached` failed (503); the Manager closes the Case via the real seam;
     recovery must not re-affiliate the session nor append after `flow.closed`."""
-    monkeypatch.setenv("HARNESS_FLOW_DRIVE", "1")
     db, o = _setup(tmp_path, monkeypatch)
     case_id = db.open_case(objective="obj", session_id="mgr-x", role="manager")
     real = db.append_flow_event_once
@@ -456,7 +443,6 @@ def test_P2_recovery_after_real_close_does_not_reaffiliate(tmp_path, monkeypatch
 
 @pytest.mark.parametrize("shape", ["join", "attach"])
 def test_full_rerun_writes_each_event_once_member_shapes(tmp_path, monkeypatch, shape):
-    monkeypatch.setenv("HARNESS_FLOW_DRIVE", "1")
     db, o = _setup(tmp_path, monkeypatch)
     if shape == "join":
         case_id = db.open_case(objective="obj", session_id="mgr-x", role="manager")

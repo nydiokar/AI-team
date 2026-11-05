@@ -7,8 +7,6 @@ A104 replaced that ledger with the agent inbox — the child's requester is stam
 at dispatch and its completion row is written in the child's terminal txn — so the
 obligation is durable without any marker.
 
-  * ``record_worker_wait`` is a no-op shim (returns None, writes no event) whatever
-    the flag.
   * ``reconcile_worker_waits`` is a READ-ONLY view over ``pending_for``: ``resolved``
     = finished children whose completion is still unconsumed, ``pending`` = requested
     children still running. Re-runs are identical (nothing is written); a tagged
@@ -23,33 +21,15 @@ def _db(tmp_path) -> MeshDB:
     return MeshDB(str(tmp_path / "mesh.db"))
 
 
-def _on(monkeypatch) -> None:
-    monkeypatch.setenv("DURABLE_RELAY_ENABLED", "1")
-
-
-def _off(monkeypatch) -> None:
-    monkeypatch.delenv("DURABLE_RELAY_ENABLED", raising=False)
-
-
 def _events(db: MeshDB, case_id: str, event_type: str) -> list:
     return [e for e in db.list_flow_events(case_id) if e["event_type"] == event_type]
 
 
-# --- flag gating: OFF is byte-identical -------------------------------------
+# --- reconcile --------------------------------------------------------------
 
-def test_record_worker_wait_noop_when_flag_off(tmp_path, monkeypatch):
-    _off(monkeypatch)
-    db = _db(tmp_path)
-    fid = db.open_case("obj", "sess-1")
-    assert db.record_worker_wait(fid, "task_1") is None
-    assert _events(db, fid, "worker.wait_pending") == []
-
-
-def test_reconcile_disabled_when_flag_off(tmp_path, monkeypatch):
-    """A104: reconcile is a read-only view over the inbox, no longer flag-gated —
-    flag OFF still reports the Case truth and writes nothing. (Only
-    ``boot_reconcile_case`` stays gated on DURABLE_RELAY_ENABLED.)"""
-    _off(monkeypatch)
+def test_reconcile_reports_case_truth_read_only(tmp_path, monkeypatch):
+    """A104: reconcile is a read-only view over the inbox — it reports the Case
+    truth and writes nothing."""
     db = _db(tmp_path)
     fid = db.open_case("obj", "sess-1")
     seed_finished_child(db, fid, "task_done", requester="sess-1")
@@ -61,24 +41,7 @@ def test_reconcile_disabled_when_flag_off(tmp_path, monkeypatch):
     assert db.reconcile_worker_waits("no-such-case")["ok"] is False
 
 
-# --- record_worker_wait -----------------------------------------------------
-
-def test_record_worker_wait_writes_pending_marker(tmp_path, monkeypatch):
-    """A104 shim: even flag ON, no ``worker.wait_pending`` marker is written —
-    the inbox records the obligation from the requester stamp. Repeat calls
-    stay no-ops (the old per-task idempotency has nothing left to dedupe)."""
-    _on(monkeypatch)
-    db = _db(tmp_path)
-    fid = db.open_case("obj", "sess-1")
-    assert db.record_worker_wait(fid, "task_1", timeout=120.0) is None
-    assert db.record_worker_wait(fid, "task_1") is None
-    assert _events(db, fid, "worker.wait_pending") == []
-
-
-# --- reconcile --------------------------------------------------------------
-
 def test_reconcile_resolves_finished_and_keeps_open(tmp_path, monkeypatch):
-    _on(monkeypatch)
     db = _db(tmp_path)
     fid = db.open_case("obj", "sess-1")
     seed_finished_child(db, fid, "task_done", requester="sess-1")
@@ -97,7 +60,6 @@ def test_reconcile_resolves_finished_and_keeps_open(tmp_path, monkeypatch):
 def test_reconcile_idempotent_across_reruns(tmp_path, monkeypatch):
     """Reconcile never consumes: re-runs return the same unconsumed completion
     (crash-during-reconcile safe by construction). A tagged review consumes it."""
-    _on(monkeypatch)
     db = _db(tmp_path)
     fid = db.open_case("obj", "sess-1")
     seed_finished_child(db, fid, "task_done", requester="sess-1")
@@ -112,7 +74,6 @@ def test_reconcile_idempotent_across_reruns(tmp_path, monkeypatch):
 
 
 def test_reconcile_carries_failed_outcome(tmp_path, monkeypatch):
-    _on(monkeypatch)
     db = _db(tmp_path)
     fid = db.open_case("obj", "sess-1")
     seed_finished_child(db, fid, "task_fail", requester="sess-1", status="failed")
@@ -123,7 +84,6 @@ def test_reconcile_carries_failed_outcome(tmp_path, monkeypatch):
 def test_record_after_resolve_starts_a_fresh_wait(tmp_path, monkeypatch):
     """Once a completion is consumed (tagged review), a later dispatch of a new
     task is a fresh, independent outstanding request."""
-    _on(monkeypatch)
     db = _db(tmp_path)
     fid = db.open_case("obj", "sess-1")
     seed_finished_child(db, fid, "task_a", requester="sess-1")

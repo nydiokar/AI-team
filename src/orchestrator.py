@@ -30,7 +30,7 @@ SECTIONS (in source order)
   1.  Result parsing & text extraction       (static helpers)
   2.  Backend resolution                     (_resolve_task_backend)
   3.  Startup recovery                       (restart scan, stale-session heal)
-  4.  Wake dispatcher / case continuation    (M3.4, flag CASE_CONTINUATION_ENABLED)
+  4.  Wake dispatcher / case continuation    (M3.4)
   5.  Stale-busy reconciler + reattach       (M3 mesh, flag MESH_ENABLED)
   6.  Job completion poller                  (T3 watched-jobs, flag MESH_ENABLED)
   7.  Lifecycle — start / stop               (embedded servers, worker pool)
@@ -52,11 +52,6 @@ SECTIONS (in source order)
 
 FEATURE FLAGS (runtime-gated, all default OFF unless noted)
 ------------------------------------------------------------
-  HARNESS_FLOW_DRIVE          — write flow_runs stage transitions (M1/M2, shadow)
-  MANAGER_ROLE_ENABLED        — enable M3 Manager role boot via /api/manager
-  CASE_CONTINUATION_ENABLED   — wake-dispatcher autonomous continuation (M3.4)
-  DURABLE_RELAY_ENABLED       — gates the boot-reconcile reply (A104: an inbox read)
-  HARNESS_LEVEL3_GUARD        — admission gate for level-3 harness tasks
   QUOTA_COORDINATOR_ENABLED   — observe-only quota/session-window coordinator
 """
 import asyncio
@@ -674,17 +669,16 @@ def resolve_control_api_hosts(
 
 
 class HarnessAdmissionBlocked(Exception):
-    """Raised by `_enqueue_task` when the task-harness Level-3 admission gate
-    refuses a task at the queue choke point (flag on + `harness_level: 3` +
-    not `approved: true`).
+    """Raised by `_enqueue_task` when admission refuses a task at the queue
+    choke point (e.g. ``local_execution_disabled`` on a controller-only host).
 
     Raised — not returned — so no caller can mistake a blocked task for an
     accepted one (there is no `task_id` to hand back). Callers that face an
     operator (Telegram, control API) catch this and surface a clear
-    "needs operator approval" result instead of a generic error.
+    refusal result instead of a generic error.
     """
 
-    def __init__(self, task_id: str, reason: str = "harness_level3_needs_approval"):
+    def __init__(self, task_id: str, reason: str):
         self.task_id = task_id
         self.reason = reason
         super().__init__(f"task {task_id} blocked at admission: {reason}")
@@ -701,7 +695,7 @@ class TaskOrchestrator(ITaskOrchestrator):
     - Drive the M3 Manager/Worker automation loop: role-boot a Manager session,
       dispatch workers, gate on review.* verdicts, close on criteria met.
     - Run the M3.4 Wake-Dispatcher: autonomous case continuation without operator
-      pokes (CASE_CONTINUATION_ENABLED flag; default OFF).
+      pokes.
     - Persist artifacts (mesh_tasks DB canonical; results/*.json fallback),
       maintain artifact index, emit structured events and LLM-turn telemetry.
     - Own the embedded task server (mesh) and embedded control API (Web UI).
@@ -860,10 +854,9 @@ class TaskOrchestrator(ITaskOrchestrator):
         the disabled path a genuine zero-side-effect no-op (no DB file, no background
         task, no import cost) — byte-identical when off.
 
-        Sets self.quota_coordinator and self.quota_digest_subscriber.
+        Sets self.quota_coordinator.
         """
         self.quota_coordinator = None
-        self.quota_digest_subscriber = None
         try:
             from src.control.db import runtime_flag_enabled
             quota_enabled = runtime_flag_enabled("QUOTA_COORDINATOR_ENABLED")
@@ -874,20 +867,6 @@ class TaskOrchestrator(ITaskOrchestrator):
         try:
             from src.services.quota_window_coordinator import build_quota_coordinator_from_config
             event_handlers = []
-            try:
-                from src.control.db import runtime_flag_enabled as _flag_enabled
-                digest_enabled = _flag_enabled("QUOTA_DIGEST_TELEGRAM_ENABLED")
-            except Exception:
-                digest_enabled = bool(getattr(getattr(config, "quota", None), "digest_telegram_enabled", False))
-            if digest_enabled:
-                from src.services.quota_digest import QuotaTelegramDigestSubscriber
-                digest = QuotaTelegramDigestSubscriber(
-                    notifier=self.notifier,
-                    chat_id=config.telegram.notification_chat_id,
-                    interval_sec=getattr(config.quota, "digest_interval_sec", 3600),
-                )
-                self.quota_digest_subscriber = digest
-                event_handlers.append(digest.handle_event)
             # Observe locally ONLY when this host also executes locally (i.e. the
             # Claude harness is present). On a controller-only host
             # (GATEWAY_LOCAL_EXECUTION_ENABLED=false, the Docker controller) the
@@ -1454,8 +1433,6 @@ class TaskOrchestrator(ITaskOrchestrator):
 
     # ===========================================================================
     # WAKE DISPATCHER — AUTONOMOUS CASE CONTINUATION  (M3.4 → A104 agent inbox)
-    # Flag: CASE_CONTINUATION_ENABLED (default OFF ⇒ loop never starts).
-    #
     # A finished child's completion is a message in the REQUESTER's agent inbox
     # (written in the child's terminal txn). Each tick delivers every recipient's
     # ready messages as ONE coalesced wake turn (claimed pending → delivered in the
@@ -1474,19 +1451,9 @@ class TaskOrchestrator(ITaskOrchestrator):
 
     def _start_wake_dispatcher(self) -> None:
         """Start the periodic Wake-Dispatcher loop (mirrors the stale-busy
-        reconciler). No-op unless mesh routing is active AND the continuation flag
-        is ON — so with the flag OFF this is byte-identical to no loop at all."""
-        from src.control.db import (
-            cache_heartbeat_active_enabled, case_continuation_enabled, get_db,
-        )
+        reconciler). No-op unless mesh routing is active."""
         interval = int(getattr(config.mesh, "case_continuation_tick_interval_sec", 30) or 0)
-        db = get_db() if config.mesh.enabled else None
-        managed_present = db is not None and db.any_session_enrolled() is not False
-        if (
-            not config.mesh.enabled
-            or interval <= 0
-            or not (case_continuation_enabled() or cache_heartbeat_active_enabled() or managed_present)
-        ):
+        if not config.mesh.enabled or interval <= 0:
             return
         if self._wake_dispatcher_task and not self._wake_dispatcher_task.done():
             return
@@ -1509,9 +1476,8 @@ class TaskOrchestrator(ITaskOrchestrator):
 
     async def _wake_dispatcher_tick_once(self) -> int:
         """One Wake-Dispatcher pass over every open Case. Returns the number of
-        proactive wake turns delivered this tick. Flag-gated (OFF ⇒ 0)."""
-        from src.control.db import cache_heartbeat_active_enabled, case_continuation_enabled, get_db
-        continuation_enabled = case_continuation_enabled()
+        proactive wake turns delivered this tick."""
+        from src.control.db import cache_heartbeat_active_enabled, get_db
         heartbeat_active = cache_heartbeat_active_enabled()
         try:
             db = get_db()
@@ -1541,47 +1507,44 @@ class TaskOrchestrator(ITaskOrchestrator):
                 await self._alert_dead_messages(db)
             except Exception as e:
                 logger.warning("event=inbox_settle_or_alert_failed err=%s", e)
-        if not continuation_enabled and not heartbeat_active:
-            return 0
-        if continuation_enabled:
-            # [A104] Driven by the agent inbox: the work list is the (recipient,
-            # Case) pairs holding a deliverable message — an index-served read,
-            # not a scan of every open Case's event log. Quota state is computed
-            # at most once per provider per tick (read by the pause handlers).
-            self._quota_tick_cache = {}
-            # The pause handlers are TIME-based (a quota window reopening, a
-            # transient backoff elapsing) and drive resume/proposal by themselves,
-            # so they still run for every open, non-blocked Case each tick —
-            # whether or not its inbox holds anything (pre-A104 order: blocked →
-            # quota → transient). A paused Case is not delivered to this tick.
-            paused: set = set()
-            for case in await asyncio.to_thread(db.list_open_cases):
-                cid = str(case.get("flow_run_id") or "")
-                if not cid or str(case.get("status") or "").strip().lower() == "blocked":
-                    continue
-                try:
-                    if (await self._handle_quota_paused_case(db, cid)
-                            or await self._handle_transient_paused_case(db, cid)):
-                        paused.add(cid)
-                    else:
-                        # D4: a wake stranded on a replaced seat is withdrawn and
-                        # the messages follow the rebind (read-only when idle).
-                        await asyncio.to_thread(db.inbox_follow_case_rebind, cid)
-                except Exception as e:
-                    logger.debug("event=case_pause_check_failed case=%s err=%s", cid, e)
-            pairs = await asyncio.to_thread(db.inbox_ready_recipients)
-            for recipient, case_id in pairs:
-                if case_id and case_id in paused:
-                    continue
-                try:
-                    delivered += await self._deliver_inbox(
-                        db, recipient, case_id, pauses_checked=True,
-                    )
-                except Exception as e:
-                    logger.warning(
-                        "event=inbox_delivery_failed recipient=%s case=%s err=%s",
-                        recipient, case_id, e,
-                    )
+        # [A104] Driven by the agent inbox: the work list is the (recipient,
+        # Case) pairs holding a deliverable message — an index-served read,
+        # not a scan of every open Case's event log. Quota state is computed
+        # at most once per provider per tick (read by the pause handlers).
+        self._quota_tick_cache = {}
+        # The pause handlers are TIME-based (a quota window reopening, a
+        # transient backoff elapsing) and drive resume/proposal by themselves,
+        # so they still run for every open, non-blocked Case each tick —
+        # whether or not its inbox holds anything (pre-A104 order: blocked →
+        # quota → transient). A paused Case is not delivered to this tick.
+        paused: set = set()
+        for case in await asyncio.to_thread(db.list_open_cases):
+            cid = str(case.get("flow_run_id") or "")
+            if not cid or str(case.get("status") or "").strip().lower() == "blocked":
+                continue
+            try:
+                if (await self._handle_quota_paused_case(db, cid)
+                        or await self._handle_transient_paused_case(db, cid)):
+                    paused.add(cid)
+                else:
+                    # D4: a wake stranded on a replaced seat is withdrawn and
+                    # the messages follow the rebind (read-only when idle).
+                    await asyncio.to_thread(db.inbox_follow_case_rebind, cid)
+            except Exception as e:
+                logger.debug("event=case_pause_check_failed case=%s err=%s", cid, e)
+        pairs = await asyncio.to_thread(db.inbox_ready_recipients)
+        for recipient, case_id in pairs:
+            if case_id and case_id in paused:
+                continue
+            try:
+                delivered += await self._deliver_inbox(
+                    db, recipient, case_id, pauses_checked=True,
+                )
+            except Exception as e:
+                logger.warning(
+                    "event=inbox_delivery_failed recipient=%s case=%s err=%s",
+                    recipient, case_id, e,
+                )
         if heartbeat_active:
             try:
                 delivered += await self._process_due_cache_heartbeats(db)
@@ -2546,8 +2509,6 @@ class TaskOrchestrator(ITaskOrchestrator):
         """
         try:
             from src.control.db import get_db
-            if not self._harness_flow_drive_enabled():
-                return
             if not is_quota_pause_result(result):
                 return
             meta = getattr(task, "metadata", None) or {}
@@ -2649,8 +2610,6 @@ class TaskOrchestrator(ITaskOrchestrator):
         """
         try:
             from src.control.db import get_db
-            if not self._harness_flow_drive_enabled():
-                return
             if not is_transient_provider_pause_result(result):
                 return
             meta = getattr(task, "metadata", None) or {}
@@ -3420,7 +3379,7 @@ class TaskOrchestrator(ITaskOrchestrator):
         whole seam exists to remove.
 
         Returns ``{ok, reason, mode, case_id, session_id}``. ``reason`` codes:
-        ``case_not_found`` / ``case_terminal`` / ``continuation_disabled`` /
+        ``case_not_found`` / ``case_terminal`` /
         ``manager_busy`` / ``resume_in_flight`` / ``no_manager_link`` /
         ``respawn_failed`` / ``deliver_failed`` / ``db_unavailable`` /
         ``pause_not_bound`` (an enrolled in-place resume naming a task other than
@@ -3428,7 +3387,7 @@ class TaskOrchestrator(ITaskOrchestrator):
         """
         from src.control.db import (
             CONTINUATION_MACHINE_SENTINEL, QUOTA_RESUME_ACTION,
-            case_continuation_enabled, get_db, quota_resume_task_id,
+            get_db, quota_resume_task_id,
         )
         out: Dict[str, Any] = {
             "ok": False, "reason": "", "case_id": case_id,
@@ -3444,12 +3403,6 @@ class TaskOrchestrator(ITaskOrchestrator):
             return out
         if str(row.get("status") or "").strip().lower() in ("closed", "cancelled"):
             out["reason"] = "case_terminal"
-            return out
-        if not case_continuation_enabled():
-            # Without the continuation substrate a resumed Manager has no wake
-            # path at all — resuming would produce one orphan turn. Refuse
-            # visibly instead.
-            out["reason"] = "continuation_disabled"
             return out
 
         # LEASE KEY. A resume of a PAUSE is keyed on the paused task — one pause,
@@ -3703,18 +3656,9 @@ class TaskOrchestrator(ITaskOrchestrator):
         longer exhausted, THEN asks. A non-quota death (or no task to classify)
         asks immediately. Any failure in this gate FAILS OPEN to the unconditional
         respawn — a bug here must never regress below pre-gate behavior."""
-        from src.control.db import case_continuation_enabled, case_respawn_requires_approval
+        from src.control.db import case_respawn_requires_approval
         if not case_respawn_requires_approval():
             return await self._do_respawn_manager_for_case(db, case_id, generation, dead_session_id)
-        # Mirror _do_respawn_manager_for_case's own defensive re-gate BEFORE ever
-        # asking the operator: an approval the eventual respawn would refuse
-        # anyway (continuation off, or a naked tool-less Manager with role off)
-        # is worse than no approval — it would sit "approved" with nothing
-        # happening. Let these fall straight through to strand-escalation, same
-        # as pre-gate behavior.
-        if not case_continuation_enabled() or not self._manager_role_enabled():
-            return False
-
         action = "case_manager_respawn"
         try:
             self._ensure_approval_service(db)
@@ -3798,21 +3742,8 @@ class TaskOrchestrator(ITaskOrchestrator):
 
         ANTI-GOAL: this NEVER calls ``open_case`` and NEVER mints a new ``flow_run_id`` — it
         binds the fresh session to the passed ``case_id`` via a manager ``flow_link`` and
-        reconstructs the objective/waits from the DB (``get_case_brief`` /
-        ``boot_reconcile_case``). The objective-lock is preserved end to end.
+        reconstructs the objective/waits from the DB (``get_case_brief``). The objective-lock is preserved end to end.
         """
-        from src.control.db import case_continuation_enabled
-        # Defensive re-gate (this path is only reached with continuation ON, but keep
-        # the respawn itself explicitly flag-guarded so it can never fire otherwise).
-        if not case_continuation_enabled():
-            return False
-        # Manager respawn boots a role-full Manager session; the driver's _role_boot
-        # only applies the role prompt + scoped manager tools when MANAGER_ROLE is ON.
-        # Without it a "respawn" would be a naked session with no dispatch tools — worse
-        # than the visible strand. Surface via the escalation path instead.
-        if not self._manager_role_enabled():
-            return False
-
         # Reconstruct the Case from the DB ALONE (A54). A None brief means the Case is
         # unknown/unreadable — not respawnable; let the caller escalate.
         brief = db.get_case_brief(case_id)
@@ -3934,10 +3865,6 @@ class TaskOrchestrator(ITaskOrchestrator):
         except Exception as e:  # noqa: BLE001 — every step converges on re-run
             logger.warning("event=managed_respawn_failed case=%s err=%s", case_id, e)
             return False
-        try:
-            db.boot_reconcile_case(case_id, actor="manager")
-        except Exception as e:
-            logger.debug("event=respawn_reconcile_failed case=%s err=%s", case_id, e)
         from src.control.turn_scheduler import notify_turn_queue_changed
 
         notify_turn_queue_changed()  # the bound respawn turn may now activate
@@ -5776,9 +5703,8 @@ class TaskOrchestrator(ITaskOrchestrator):
     # TASK CREATION & ENQUEUE
     # _make_task()    — build an in-memory Task object (does NOT enqueue).
     # _enqueue_task() — admission gate + queue push; raises HarnessAdmissionBlocked
-    #                   if the level-3 guard is ON and the task is unapproved.
-    #                   Also records the flow_run row (M1) and stamps dispatch
-    #                   lineage (M2) when HARNESS_FLOW_DRIVE is ON.
+    #                   when admission refuses the task. Also records the
+    #                   flow_run row (M1) and stamps dispatch lineage (M2).
     # ===========================================================================
 
     def _make_task(
@@ -5841,11 +5767,8 @@ class TaskOrchestrator(ITaskOrchestrator):
 
         This is the choke point every ingestion lane passes through
         (`submit_instruction` from Telegram/Web, the `.task.md` auto-pickup path,
-        and internal runtime tasks). The task-harness Level-3 admission gate runs
-        HERE — before any queue/telemetry side-effect — so an un-approved Level-3
-        task is refused at admission on every lane, not just `.task.md`. The gate
-        is flag-gated OFF by default (`HARNESS_LEVEL3_GUARD`), so default behavior
-        is byte-identical: absent flag / absent field / level ≤ 2 ⇒ pass-through.
+        and internal runtime tasks). Admission refusals run HERE — before any
+        queue/telemetry side-effect — so a refused task is refused on every lane.
         """
         _sid = str((task.metadata or {}).get("session_id") or "").strip()
         _known = (task.metadata or {}).pop(self._TURN_ENROLLED_META_KEY, None)
@@ -5880,19 +5803,6 @@ class TaskOrchestrator(ITaskOrchestrator):
                     {"task_id": task.id, "reason": "local_execution_disabled"},
                 )
                 raise HarnessAdmissionBlocked(task.id, "local_execution_disabled")
-
-        # [Harness] Admission control (spec docs/Task_harness_workflow.md §14).
-        if not self._harness_level3_allows_autopickup(task):
-            logger.warning(
-                f"event=task_blocked reason=harness_level3_needs_approval "
-                f"task_id={task.id} source={(task.metadata or {}).get('source', 'runtime')}"
-            )
-            self._emit_event(
-                "task_blocked",
-                task,
-                {"task_id": task.id, "reason": "harness_level3_needs_approval"},
-            )
-            raise HarnessAdmissionBlocked(task.id)
 
         # [A82 Stage 4a] A session carrying the DURABLE enrollment marker takes the
         # managed admission path (commit-before-ack; no BUSY/last_task_id write,
@@ -5935,14 +5845,10 @@ class TaskOrchestrator(ITaskOrchestrator):
                 {"priority": getattr(task.priority, "value", str(task.priority))},
             )
             logger.info(f"Queued runtime task: {task.id} ({task.type.value}, {task.priority.value})")
-            # [FlowRun A19/A22] Best-effort stage transition. When HARNESS_FLOW_DRIVE
-            # is OFF this is A19's exact `queued` write (byte-identical). When ON the
-            # task is now admitted/queued ⇒ the objective is locked in: write the
-            # §11 `objective_lock` stage instead (SHADOW record; nothing reads it).
-            if self._harness_flow_drive_enabled():
-                self._record_flow_stage(flow_run_id, "objective_lock")
-            else:
-                self._record_flow_stage(flow_run_id, "queued")
+            # [FlowRun A19/A22] Best-effort stage transition: the task is now
+            # admitted/queued ⇒ the objective is locked in: write the §11
+            # `objective_lock` stage (SHADOW record; nothing reads it).
+            self._record_flow_stage(flow_run_id, "objective_lock")
         except asyncio.QueueFull:
             priority_val = getattr(task.priority, "value", str(task.priority))
             if priority_val == "low":
@@ -5986,9 +5892,7 @@ class TaskOrchestrator(ITaskOrchestrator):
         logged: a telemetry write must never fail or delay a real task. Returns
         the flow_run_id on success, or None if the write was skipped/failed.
 
-        The initial stage is `intent` (the first §11 stage) when HARNESS_FLOW_DRIVE
-        is ON, and A19's legacy `dispatch_start` when it is OFF — so OFF behavior is
-        byte-identical to A19. The generated flow_run_id is stashed on
+        The initial stage is `intent` (the first §11 stage). The generated flow_run_id is stashed on
         ``task.metadata[_FLOW_RUN_META_KEY]`` so later transition points on the
         worker loop can resolve it without new plumbing.
         """
@@ -5997,14 +5901,8 @@ class TaskOrchestrator(ITaskOrchestrator):
             db = get_db()
             if db is None:
                 return None
-            drive_on = self._harness_flow_drive_enabled()
 
-            # OFF path — byte-identical to A19: exactly one dispatch-start RECORD
-            # per task, no admission, no stash. Nothing reads current_stage.
-            if not drive_on:
-                return db.create_flow_run(task.id, "dispatch_start")
-
-            # ---- Flag ON: A36 Case-admission policy -------------------------
+            # ---- A36 Case-admission policy ----------------------------------
             # The retired per-turn mint is replaced. A turn now: (A) BIRTHS a Case
             # iff it is a dispatched child (M2 lineage) or an explicit managed
             # root; (B) ATTACHES to the session's open Case; or (C) runs Case-less
@@ -6174,7 +6072,6 @@ class TaskOrchestrator(ITaskOrchestrator):
     # close_case()             — guard-checked close (open children, unresolved
     #                            rework, completion_criteria all checked first)
     # record_review()          — emit review.accepted / review.rework_requested
-    # record_worker_wait()     — A104 no-op shim (the inbox records the obligation)
     # arm_wait_group()         — A104 shim: store a D2 delivery filter
     # reconcile_worker_waits() — A104 shim: what pending_for holds for the Case
     # _close_worker_session_on_case_close() — best-effort warm-worker cleanup
@@ -6507,8 +6404,7 @@ class TaskOrchestrator(ITaskOrchestrator):
         metadata: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """[A56/M4] Orchestrator seam — publish a durable artifact onto a Case
-        (:func:`db.publish_artifact`). Mirrors the ``record_review`` seam. Flag-gated
-        in the db layer (``SPEC_AUTHORING_ENABLED`` OFF ⇒ nothing written). Returns
+        (:func:`db.publish_artifact`). Mirrors the ``record_review`` seam. Returns
         the db layer's ``{"ok", ...}`` (or ``{"ok": False, "reason": "db_unavailable"}``)."""
         from src.control.db import get_db
         db = get_db()
@@ -6579,27 +6475,6 @@ class TaskOrchestrator(ITaskOrchestrator):
             return {"ok": False, "reason": "db_unavailable"}
         return db.decompose_case(flow_run_id, spec_id, tasks, actor=actor)
 
-    def record_worker_wait(
-        self,
-        flow_run_id: str,
-        task_id: str,
-        *,
-        timeout: Optional[float] = None,
-        actor: str = "manager",
-    ) -> Dict[str, Any]:
-        """[A46 → A104 shim] Kept for un-redeployed callers; writes nothing (the
-        agent inbox records the obligation at dispatch + terminal). Returns
-        ``{"ok": True, "event_id": None}`` or ``{"ok": False, "reason": "db_unavailable"}``.
-        """
-        from src.control.db import get_db
-        db = get_db()
-        if db is None:
-            return {"ok": False, "reason": "db_unavailable"}
-        event_id = db.record_worker_wait(
-            flow_run_id, task_id, timeout=timeout, actor=actor,
-        )
-        return {"ok": True, "event_id": event_id}
-
     def arm_wait_group(
         self,
         flow_run_id: str,
@@ -6612,9 +6487,8 @@ class TaskOrchestrator(ITaskOrchestrator):
         """[M3.4] Orchestrator seam — arm a Manager wait-group over a dispatch set so
         the Wake-Dispatcher re-enters the Case when the group is satisfied.
 
-        Mirrors the ``record_worker_wait`` seam. ``condition`` ∈ {ANY, ALL, NAMED};
-        the write is flag-gated in the db layer (``CASE_CONTINUATION_ENABLED`` OFF ⇒
-        ``event_id`` None, nothing written). Returns ``{"ok": True, "event_id"}`` or
+        Mirrors the ``reconcile_worker_waits`` seam. ``condition`` ∈ {ANY, ALL, NAMED};
+        Returns ``{"ok": True, "event_id"}`` or
         ``{"ok": False, "reason": "db_unavailable"}``.
         """
         from src.control.db import get_db
@@ -6683,22 +6557,6 @@ class TaskOrchestrator(ITaskOrchestrator):
         if brief is None:
             return {"ok": False, "reason": "case_not_found"}
         return {"ok": True, "brief": brief}
-
-    def boot_reconcile_case(
-        self,
-        flow_run_id: str,
-        *,
-        actor: str = "manager",
-    ) -> Dict[str, Any]:
-        """[A54] Orchestrator seam — the boot-time reconcile+re-arm hook
-        (:func:`db.boot_reconcile_case`) a resuming Manager fires onto an existing
-        OPEN Case. Idempotent + flag-gated in the db layer. Mirrors the
-        ``reconcile_worker_waits`` seam."""
-        from src.control.db import get_db
-        db = get_db()
-        if db is None:
-            return {"ok": False, "reason": "db_unavailable"}
-        return db.boot_reconcile_case(flow_run_id, actor=actor)
 
     def _clear_session_case_affiliation(self, session_id: str, case_id: str) -> None:
         """[A37] Clear a session's durable Case affiliation on Case close.
@@ -6785,25 +6643,12 @@ class TaskOrchestrator(ITaskOrchestrator):
 
     # ---------------------------------------------------------------------------
     # MANAGER INVOCATION  (M3.1)
-    # Flag: MANAGER_ROLE_ENABLED (default OFF).
-    #
     # invoke_manager() is the single entry point for /api/manager.  It opens a
     # Case, creates or reuses a session, applies the Manager role boot
     # (system-prompt + scoped MCP tools), and submits the first-turn objective
     # via submit_instruction().  Everything after that is driven by the Manager
     # itself (dispatch_worker → wait/arm → review → close_case).
     # ---------------------------------------------------------------------------
-
-    def _manager_role_enabled(self) -> bool:
-        """[A38] Master gate for the Phase 3.1 Manager-role invocation path.
-
-        Default OFF ⇒ ``invoke_manager`` refuses (the new surface is inert), so the
-        gateway is byte-identical to pre-A38. Mirrors the driver's
-        ``_manager_role_enabled`` (same env var) — a Manager booted here only picks
-        up its role prompt + scoped tools when the driver gate is also ON.
-        """
-        from src.control.db import manager_role_enabled
-        return manager_role_enabled()
 
     async def invoke_manager(
         self,
@@ -6826,7 +6671,7 @@ class TaskOrchestrator(ITaskOrchestrator):
         → deliver the objective as the Manager's first assignment turn. The driver's
         ``_role_boot`` then loads the stable role prompt + scoped manager tools for
         that session. Returns ``{ok, session_id, case_id, task_id}``; a structured
-        ``{ok: False, reason}`` when the role path is disabled or a step fails.
+        ``{ok: False, reason}`` when a step fails.
         Raises ``HarnessAdmissionBlocked`` from the first-turn submit (the caller
         translates it), exactly like the ``/api/instructions`` seam. A typed
         ``TurnQueueError`` (managed first turn refused) is re-raised only after
@@ -6840,26 +6685,12 @@ class TaskOrchestrator(ITaskOrchestrator):
         line of work AND its role prompt AND its worker-dispatch tools. All three are
         optional; absent all three the boot is byte-identical to the legacy path.
 
-        [A82 Stage 8a] A Level-3 block of the first-turn submit is undone like a
+        [A82 Stage 8a] An admission block of the first-turn submit is undone like a
         typed refusal (``_abandon_manager_boot``: Case force-cancelled, session
         closed) and then re-raised — no orphan Case/session per retry.
         """
         from src.core.interfaces import SessionOrigin
         from src.core.roles import ManagerInvocation, render_first_assignment
-
-        if not self._manager_role_enabled():
-            return {"ok": False, "reason": "manager_role_disabled"}
-
-        # The Manager's Case machinery (per-turn attach + worker JOIN + task.finished
-        # timeline) is all guarded by HARNESS_FLOW_DRIVE. With it OFF the Manager still
-        # boots with its role prompt, but workers can't join the Case and wait_for_worker
-        # has no timeline to watch — surface that mismatch instead of failing silently.
-        if not self._harness_flow_drive_enabled():
-            logger.warning(
-                "event=manager_invoke_without_flow_drive session_repo=%s — MANAGER_ROLE_ENABLED "
-                "is ON but HARNESS_FLOW_DRIVE is OFF; Case attach/JOIN/timeline are inert.",
-                repo_path,
-            )
 
         resolved_node_id = node_id
         if not resolved_node_id or resolved_node_id == "__local__":
@@ -6956,7 +6787,6 @@ class TaskOrchestrator(ITaskOrchestrator):
 
     # ===========================================================================
     # FLOW TRACKING  (M1 flow_runs / M2 flow_events + flow_links)
-    # Flag: HARNESS_FLOW_DRIVE (default OFF ⇒ shadow-only, nothing reads stage).
     #
     # These are WRITE-ONLY observability records.  No execution path reads
     # current_stage or flow_events to decide what runs — they exist purely for
@@ -7149,14 +6979,11 @@ class TaskOrchestrator(ITaskOrchestrator):
         ``parent_flow_run_id`` directly. An explicit value takes precedence over
         one derived from ``parent_task``; either seam records the same edge.
 
-        Flag-guarded: when HARNESS_FLOW_DRIVE is OFF this is a NO-OP — the child's
-        metadata is left untouched ⇒ byte-identical to today. SHADOW/best-effort:
+        SHADOW/best-effort:
         wrapped so any failure logs and returns; it can NEVER raise into the
         dispatch path. Nothing reads the stamped keys to drive execution.
         """
         try:
-            if not self._harness_flow_drive_enabled():
-                return
             # Explicit loose id (A32 HTTP seam) wins; else derive from parent_task.
             if parent_task is not None:
                 pmeta = getattr(parent_task, "metadata", None) or {}
@@ -7180,33 +7007,16 @@ class TaskOrchestrator(ITaskOrchestrator):
                 getattr(child_task, "id", "?"), e,
             )
 
-    @staticmethod
-    def _harness_flow_drive_enabled() -> bool:
-        """Whether authoritative stage transitions are written (A22).
-
-        Opt-in via ``HARNESS_FLOW_DRIVE`` (truthy: 1/true/yes/on); default OFF.
-        When OFF, flow-stage behavior is byte-identical to A19 (legacy
-        `dispatch_start`/`queued` record only). When ON, the §11 vocabulary
-        (FLOW_STAGES) is written at each harness transition — a SHADOW record:
-        NO code path reads current_stage to decide what runs.
-        """
-        from src.control.db import flow_drive_enabled
-        return flow_drive_enabled()
-
     def _flow_stage_transition(self, task: "Task", stage: str) -> None:
-        """[A22] Single flag-guarded, best-effort stage-transition helper.
+        """[A22] Single best-effort stage-transition helper.
 
-        Called at each harness transition on the loop/driver surface. When
-        HARNESS_FLOW_DRIVE is OFF this is a no-op (⇒ byte-identical to A19). When
-        ON it resolves the flow_run_id stashed on the task and writes the given
+        Called at each harness transition on the loop/driver surface. It resolves the flow_run_id stashed on the task and writes the given
         FLOW_STAGES vocabulary stage (update_flow_stage also stamps updated_at).
 
         SHADOW ONLY — this only ever WRITES current_stage. It is wrapped so any
         failure logs and returns; it can NEVER raise into task execution.
         """
         try:
-            if not self._harness_flow_drive_enabled():
-                return
             meta = getattr(task, "metadata", None) or {}
             flow_run_id = meta.get(self._FLOW_RUN_META_KEY)
             if not flow_run_id:
@@ -7278,7 +7088,7 @@ class TaskOrchestrator(ITaskOrchestrator):
         logs and returns; it can NEVER raise into task handling. ``once=True`` makes
         the write idempotent (used by the reconciliation callers)."""
         try:
-            if not task_id or not self._harness_flow_drive_enabled():
+            if not task_id:
                 return
             case = flow_run_id
             if not case:
@@ -7341,8 +7151,7 @@ class TaskOrchestrator(ITaskOrchestrator):
         [M2] When this call is a child dispatch (a parent flow/task spawning
         another), pass ``parent_task`` (whose metadata carries the parent
         flow_run_id) and/or ``dispatched_by`` / ``dispatch_file``. These are
-        stamped onto the child task's flow_runs row for lineage — but ONLY when
-        HARNESS_FLOW_DRIVE is ON; otherwise stamping is a no-op ⇒ byte-identical.
+        stamped onto the child task's flow_runs row for lineage.
 
         [A32] When the caller only has the parent's *loose* flow_run_id (the HTTP
         ``/api/instructions`` seam — a Manager session dispatching a worker via
@@ -7782,10 +7591,9 @@ class TaskOrchestrator(ITaskOrchestrator):
                 pass
             logger.info(f"event=parsed task_id={task.id} type={task.type.value} priority={task.priority.value}")
 
-            # Admission (incl. the Level-3 harness gate) now lives in
-            # `_enqueue_task` — the choke point shared by every ingestion lane. A
-            # blocked Level-3 `.task.md` raises HarnessAdmissionBlocked there; here
-            # we just release this lane's file-tracking state so an `approved: true`
+            # Admission lives in `_enqueue_task` — the choke point shared by every
+            # ingestion lane. A refused `.task.md` raises HarnessAdmissionBlocked
+            # there; here we just release this lane's file-tracking state so a
             # re-write can be picked up later. The file is left un-enqueued.
             try:
                 await self._enqueue_task(task)
@@ -7808,46 +7616,6 @@ class TaskOrchestrator(ITaskOrchestrator):
                 self._save_state()
             except Exception:
                 pass
-
-    @staticmethod
-    def _harness_level3_allows_autopickup(task: "Task") -> bool:
-        """Task-harness Level-3 admission predicate (spec §14).
-
-        The single decision function behind the admission gate in `_enqueue_task`
-        (every ingestion lane) and the `.task.md` file lane. Pure over
-        `task.metadata`, so it is trivially testable.
-
-        Returns True (allow) in every case EXCEPT: the guard flag is enabled AND
-        the task declares `harness_level: 3` AND it is not `approved: true`.
-        Level ≤ 2 and any task without a `harness_level` field are always allowed
-        — behavior is byte-identical to before when the field is absent or the
-        flag is unset.
-
-        The guard is opt-in via `HARNESS_LEVEL3_GUARD` (truthy: 1/true/yes/on).
-        The convention (a documented rule the dispatch prompt obeys) is the primary
-        control; this is the enforcement backstop for when a drafter ignores it.
-        """
-        from src.control.db import harness_level3_guard_enabled
-        if not harness_level3_guard_enabled():
-            return True  # guard off ⇒ legacy behavior
-
-        meta = getattr(task, "metadata", None) or {}
-        raw_level = meta.get("harness_level", None)
-        if raw_level is None:
-            return True  # field absent ⇒ unchanged
-
-        # Coerce level defensively (YAML may give int or str); only "3" gates.
-        try:
-            level = int(str(raw_level).strip())
-        except (TypeError, ValueError):
-            return True  # unparseable level ⇒ don't invent a block
-        if level != 3:
-            return True  # Level ≤ 2 auto-enqueues
-
-        approved = meta.get("approved", False)
-        if isinstance(approved, str):
-            approved = approved.strip().lower() in ("1", "true", "yes", "on")
-        return bool(approved)
 
     # ===========================================================================
     # WORKER LOOP
@@ -7938,9 +7706,8 @@ class TaskOrchestrator(ITaskOrchestrator):
                 await self._maybe_inject_compact_context(task)
                 self._mesh_enqueue_task(task, backend_name)
 
-                # [FlowRun A22] Harness transition → `execution`. Flag-guarded,
-                # best-effort SHADOW write (no-op when HARNESS_FLOW_DRIVE is OFF);
-                # nothing below reads current_stage to decide what runs.
+                # [FlowRun A22] Harness transition → `execution`. Best-effort
+                # SHADOW write; nothing below reads current_stage to decide what runs.
                 self._flow_stage_transition(task, "execution")
 
                 # Process the task
@@ -9813,10 +9580,7 @@ Generated from user description: {description}
             "turn.queued", task,
             {"priority": getattr(task.priority, "value", str(task.priority))},
         )
-        if self._harness_flow_drive_enabled():
-            self._record_flow_stage(flow_run_id, "objective_lock")
-        else:
-            self._record_flow_stage(flow_run_id, "queued")
+        self._record_flow_stage(flow_run_id, "objective_lock")
         notify_turn_queue_changed()
         return admission
 
@@ -9985,9 +9749,7 @@ Generated from user description: {description}
             "turn.queued", task,
             {"priority": getattr(task.priority, "value", str(task.priority))},
         )
-        self._record_flow_stage(
-            flow_run_id, "objective_lock" if self._harness_flow_drive_enabled() else "queued",
-        )
+        self._record_flow_stage(flow_run_id, "objective_lock")
         notify_turn_queue_changed()
         return admission
 
@@ -10024,14 +9786,10 @@ Generated from user description: {description}
         re-route a half-written lineage. ``fence()`` (lease + withdrawal) runs
         after the decision read and before every write group. Sync; run it in a
         worker thread. Returns (flow_run_id, case_id)."""
-        drive_on = self._harness_flow_drive_enabled()
         prior = db.existing_task_lineage(task.id)
         fence()
         meta = task.metadata or {}
         session_id = str(meta.get("session_id") or "").strip()
-        if not drive_on:
-            fid = db.get_or_create_task_flow_run(task.id, "dispatch_start")
-            return fid, fid
         lineage = self._dispatch_lineage_fields(task)
         parent_fid = lineage.get("parent_flow_run_id")
         managed = bool(meta.get(self._MANAGED_CASE_META_KEY))
@@ -11299,7 +11057,7 @@ Generated from user description: {description}
             TelemetryStore(db).reconcile(turn_id=tid, since_hours=0)
         except Exception as e:  # noqa: BLE001 — retried
             errors.append(_effect_error("telemetry", e))
-        if conversational and case_id and self._harness_flow_drive_enabled():
+        if conversational and case_id:
             try:
                 self._record_flow_event(
                     case_id, "task.finished", "system", entity_type="task", entity_id=tid,

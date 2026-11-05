@@ -86,26 +86,23 @@ _REASON_STATUS = {
     "no_repo_path": 400,
     "dangerous_extension": 400,
     "file_too_large": 413,
-    # Task-harness Level-3 admission gate (A13) — task refused before enqueue.
-    "harness_level3_needs_approval": 409,
 }
 
 # Human copy for the admission block. The backend owns a single sentence; the
 # client may still map the stable `reason` to its own richer UI treatment.
 _HARNESS_BLOCK_DETAIL = (
-    "This is a Level-3 task and needs operator approval before it can run "
-    "(HARNESS_LEVEL3_GUARD is armed). Retrying will not help."
+    "This task was refused at admission on this gateway. Retrying will not help."
 )
 
 
 def _harness_blocked_http(blocked: Exception) -> HTTPException:
-    """Build the 409 for a task-harness Level-3 admission block.
+    """Build the 409 for an admission block (``HarnessAdmissionBlocked``).
 
     Mirrors the ``invalid_repo_path`` envelope shape: a stable machine ``reason``
     plus a human ``detail`` the client can surface verbatim. ``task_id`` echoes the
     refused task's id for logs/telemetry — no queue side-effect happened.
     """
-    reason = getattr(blocked, "reason", "harness_level3_needs_approval")
+    reason = getattr(blocked, "reason", "local_execution_disabled")
     return HTTPException(
         status_code=_REASON_STATUS.get(reason, 409),
         detail={
@@ -348,13 +345,11 @@ class InstructionBody(BaseModel):
     upload_attachment: Optional[UploadedFileAttachment] = None
     # [A32] Optional Manager→worker lineage. When a Manager session dispatches a
     # worker via mcp_manager, it passes its own flow_run id (the case). Stamped
-    # onto the child's flow_runs row ONLY when HARNESS_FLOW_DRIVE is ON (else a
-    # no-op ⇒ byte-identical). Absent/None on every normal Telegram/Web request.
+    # onto the child's flow_runs row. Absent/None on every normal Telegram/Web request.
     parent_flow_run_id: Optional[str] = None
     # [A38] Manager→worker MEMBERSHIP. When set, the worker task JOINS this existing
     # Case (a `task` link on it) instead of birthing a child Case — the M3.1 default
-    # for a Manager dispatching into its own Case. Attach only happens when
-    # HARNESS_FLOW_DRIVE is ON; absent/None on every normal request ⇒ byte-identical.
+    # for a Manager dispatching into its own Case. Absent/None on every normal request.
     case_id: Optional[str] = None
     # [A104 I2] The ai-team session that REQUESTED this work (mcp_manager
     # dispatch_worker sends its own SESSION_ID). Only honoured on an automation
@@ -571,15 +566,6 @@ class CaseReviewBody(BaseModel):
     verdict: str
     reason: Optional[str] = Field(default=None, max_length=_REASON_MAX)
     task_id: Optional[str] = Field(default=None, max_length=_ID_STR_MAX)
-
-
-class CaseWaitBody(BaseModel):
-    """[A46/M3.3] Record a durable pending-wait marker for a dispatched worker so a
-    resumed Manager can reconcile its outstanding waits from the ledger. ``task_id``
-    is the dispatched worker's task; ``timeout`` is the optional wait bound (seconds),
-    carried so a re-armed wait keeps the original deadline shape."""
-    task_id: str
-    timeout: Optional[float] = None
 
 
 class CaseWaitGroupBody(BaseModel):

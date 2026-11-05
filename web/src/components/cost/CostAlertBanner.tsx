@@ -2,9 +2,8 @@
  * CostAlertBanner — the P3 budget/burn-rate alert surface on the Cost tab.
  * Honest three-state: budgets unarmed (knob not set), within budget, or fired.
  * Alerts are billable-USD only; a fired card shows value vs budget + scope.
- * Enforcement is OFF by default and only surfaces the existing governor lever.
  */
-import { TriangleAlert, ShieldCheck } from "lucide-react";
+import { TriangleAlert } from "lucide-react";
 import { formatUsd } from "../../lib/costPresentation";
 import type { CostAlertRule, CostAlerts } from "../../domain/cost";
 
@@ -50,15 +49,6 @@ export function CostAlertBanner({ alerts }: { alerts: CostAlerts | undefined }) 
           </div>
         </div>
       ))}
-      {alerts.enforcement.enabled && (
-        <div className="flex items-center gap-1.5 px-1 text-[11px] text-ink-muted">
-          <ShieldCheck className="size-3" />
-          Enforcement surfaces the SDK governor ceiling
-          {alerts.enforcement.governorSdkMaxBudgetUsd != null
-            ? ` (${formatUsd(alerts.enforcement.governorSdkMaxBudgetUsd)})`
-            : " (none configured)"}
-        </div>
-      )}
     </div>
   );
 }

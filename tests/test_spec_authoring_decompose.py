@@ -12,7 +12,6 @@ Proves the acceptance contract:
   2. decomposition yields ONE Case with N task_attached links carrying dependency
      edges on metadata_json — NO orphan flow_runs, DAG edges queryable.
   3. publish_artifact → artifact link + event (durable evidence).
-  4. flag OFF ⇒ byte-identical (routes 404, db writes nothing).
   5. a cyclic / malformed DAG is refused.
 
 Run: `pytest tests/test_spec_authoring_decompose.py -q`
@@ -66,10 +65,6 @@ CRITICAL_ZERO_SCORES = {
 # ---------------------------------------------------------------------------
 # db-layer helpers
 # ---------------------------------------------------------------------------
-
-def _enabled(monkeypatch):
-    monkeypatch.setenv("SPEC_AUTHORING_ENABLED", "1")
-
 
 @pytest.fixture
 def db(tmp_path):
@@ -132,7 +127,6 @@ def test_score_blocked_when_malformed():
 # ---------------------------------------------------------------------------
 
 def test_publish_spec_links_artifact_and_events(monkeypatch, db):
-    _enabled(monkeypatch)
     cid = db.open_case("build feature X", "sess-1")
     r = db.publish_spec(cid, "spec-x", "real_objective: ...", title="Feature X")
     assert r["ok"] is True
@@ -144,7 +138,6 @@ def test_publish_spec_links_artifact_and_events(monkeypatch, db):
 
 
 def test_decompose_blocked_without_passing_review(monkeypatch, db):
-    _enabled(monkeypatch)
     cid = db.open_case("obj", "sess-1")
     db.publish_spec(cid, "spec-x", "body")
     # No review yet ⇒ blocked.
@@ -163,7 +156,6 @@ def test_decompose_blocked_without_passing_review(monkeypatch, db):
 
 
 def test_decompose_after_pass_makes_one_case_dag_no_orphan_flow_runs(monkeypatch, db):
-    _enabled(monkeypatch)
     cid = db.open_case("build feature X", "sess-1")
     db.publish_spec(cid, "spec-x", "body")
     review = db.record_spec_review(cid, "spec-x", GOOD_SCORES, reviewer="cheap-reviewer")
@@ -202,7 +194,6 @@ def test_decompose_after_pass_makes_one_case_dag_no_orphan_flow_runs(monkeypatch
 
 
 def test_decompose_refuses_cycle(monkeypatch, db):
-    _enabled(monkeypatch)
     cid = db.open_case("obj", "sess-1")
     db.publish_spec(cid, "spec-x", "body")
     db.record_spec_review(cid, "spec-x", GOOD_SCORES)
@@ -216,7 +207,6 @@ def test_decompose_refuses_cycle(monkeypatch, db):
 
 
 def test_decompose_refuses_unknown_dependency(monkeypatch, db):
-    _enabled(monkeypatch)
     cid = db.open_case("obj", "sess-1")
     db.publish_spec(cid, "spec-x", "body")
     db.record_spec_review(cid, "spec-x", GOOD_SCORES)
@@ -226,7 +216,6 @@ def test_decompose_refuses_unknown_dependency(monkeypatch, db):
 
 
 def test_decompose_refuses_duplicate_keys(monkeypatch, db):
-    _enabled(monkeypatch)
     cid = db.open_case("obj", "sess-1")
     db.publish_spec(cid, "spec-x", "body")
     db.record_spec_review(cid, "spec-x", GOOD_SCORES)
@@ -236,7 +225,6 @@ def test_decompose_refuses_duplicate_keys(monkeypatch, db):
 
 def test_review_seat_is_separate_from_author(monkeypatch, db):
     """The scored-review actor is the reviewer seat, not the manager author."""
-    _enabled(monkeypatch)
     cid = db.open_case("obj", "sess-1")
     db.publish_spec(cid, "spec-x", "body", actor="manager")
     db.record_spec_review(cid, "spec-x", GOOD_SCORES, reviewer="cheap-reviewer")
@@ -252,31 +240,12 @@ def test_review_seat_is_separate_from_author(monkeypatch, db):
 # ---------------------------------------------------------------------------
 
 def test_publish_artifact(monkeypatch, db):
-    _enabled(monkeypatch)
     cid = db.open_case("obj", "sess-1")
     r = db.publish_artifact(cid, "art-1", kind="report", title="R", uri="path/to/r")
     assert r["ok"] is True
     links = db.list_flow_links(flow_run_id=cid, entity_type="artifact")
     assert len(links) == 1 and links[0]["role"] == "report"
     assert any(e["event_type"] == "artifact.published" for e in db.list_flow_events(cid))
-
-
-# ---------------------------------------------------------------------------
-# (4) flag OFF ⇒ byte-identical (db writes nothing)
-# ---------------------------------------------------------------------------
-
-def test_db_writes_nothing_when_flag_off(monkeypatch, db):
-    monkeypatch.delenv("SPEC_AUTHORING_ENABLED", raising=False)
-    cid = db.open_case("obj", "sess-1")
-    events_before = len(db.list_flow_events(cid))
-    assert db.publish_spec(cid, "s", "b")["reason"] == "spec_authoring_disabled"
-    assert db.publish_artifact(cid, "a")["reason"] == "spec_authoring_disabled"
-    assert db.record_spec_review(cid, "s", GOOD_SCORES)["reason"] == "spec_authoring_disabled"
-    assert db.decompose_case(cid, "s", [{"task_key": "t"}])["reason"] == "spec_authoring_disabled"
-    # No new events, no links.
-    assert len(db.list_flow_events(cid)) == events_before
-    assert db.list_flow_links(flow_run_id=cid, entity_type="artifact") == []
-    assert db.list_flow_links(flow_run_id=cid, role="task_attached") == []
 
 
 # ---------------------------------------------------------------------------
@@ -307,7 +276,6 @@ def _auth():
 
 def test_e2e_route_flow_end_to_end(monkeypatch, client, db):
     """Full path over the API: author → score(low⇒block) → score(pass) → decompose."""
-    _enabled(monkeypatch)
     cid = db.open_case("build feature X", "sess-1")
 
     # author
@@ -341,25 +309,10 @@ def test_e2e_route_flow_end_to_end(monkeypatch, client, db):
     assert len(db.list_dag_tasks(cid)) == 2
 
 
-def test_e2e_routes_404_when_flag_off(monkeypatch, client, db):
-    monkeypatch.delenv("SPEC_AUTHORING_ENABLED", raising=False)
-    cid = db.open_case("obj", "sess-1")
-    for path, body in [
-        (f"/api/cases/{cid}/spec", {"spec_id": "s", "body": "b"}),
-        (f"/api/cases/{cid}/artifacts", {"artifact_id": "a"}),
-        (f"/api/cases/{cid}/spec-review", {"spec_id": "s", "scores": GOOD_SCORES}),
-        (f"/api/cases/{cid}/decompose", {"spec_id": "s", "tasks": [{"task_key": "t"}]}),
-    ]:
-        assert client.post(path, json=body, headers=_auth()).status_code == 404
-    assert db.list_flow_events(cid) == [e for e in db.list_flow_events(cid)
-                                        if not e["event_type"].startswith(("spec.", "artifact.", "case.decomposed"))]
-
-
 def test_spec_body_capped_server_side(monkeypatch, client, db):
     """[A72 review] The M4 case write surface shares the server-side bounds: an
     oversized spec body is rejected by pydantic (422) without touching the db."""
     from src.control.control_api import _MAX_INSTRUCTION_CHARS
-    _enabled(monkeypatch)
     cid = db.open_case("obj", "sess-1")
     big = "x" * (_MAX_INSTRUCTION_CHARS + 1)
     r = client.post(f"/api/cases/{cid}/spec",

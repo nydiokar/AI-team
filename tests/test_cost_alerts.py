@@ -1,5 +1,5 @@
 """A65 P3 cost alerts: fire on a billable-USD threshold, stay quiet below it,
-enforcement stays OFF by default and only surfaces the existing governor seam.
+never kill anything.
 Pure SQL/math over the isolated MeshDB (conftest) — no paid backend, so it is
 cheap and safe under the TEST COST GUARD."""
 from datetime import datetime, timezone
@@ -8,7 +8,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from src.control import control_api
-from src.control.db import get_db, runtime_flag_enabled
+from src.control.db import get_db
 from src.services import cost_alerts
 from src.services.cost_alerts import check_cost_alerts
 
@@ -99,17 +99,13 @@ def test_malformed_knob_treated_as_off(seeded_db, monkeypatch):
     assert out["enabled"] is False
 
 
-def test_enforcement_flag_is_off_by_default():
-    assert runtime_flag_enabled("COST_ALERT_ENFORCE_ENABLED") is False
-
-
 # --- Control API surface ------------------------------------------------------
 
 def test_alerts_endpoint_requires_auth(client):
     assert client.get("/api/cost/alerts").status_code in (401, 403)
 
 
-def test_alerts_endpoint_fires_and_surfaces_enforcement(client, seeded_db, monkeypatch):
+def test_alerts_endpoint_fires(client, seeded_db, monkeypatch):
     _knobs(monkeypatch, daily=1)
     monkeypatch.setattr(
         cost_alerts, "check_cost_alerts", lambda db: check_cost_alerts(db, now=NOW)
@@ -120,16 +116,7 @@ def test_alerts_endpoint_fires_and_surfaces_enforcement(client, seeded_db, monke
     assert body["ok"] is True
     assert body["enabled"] is True
     assert "daily_budget" in _rules(body["alerts"])
-    # Enforcement is OFF by default and only surfaces the existing governor lever.
-    assert body["enforcement"]["enabled"] is False
-    assert body["enforcement"]["mechanism"] == "sdk_max_budget_usd"
-
-
-def test_alerts_endpoint_enforcement_flag_turns_on(client, seeded_db, monkeypatch):
-    _knobs(monkeypatch, daily=1)
-    monkeypatch.setenv("COST_ALERT_ENFORCE_ENABLED", "1")
-    body = client.get("/api/cost/alerts", headers=_auth()).json()
-    assert body["enforcement"]["enabled"] is True
+    assert "enforcement" not in body
 
 
 def test_alerts_endpoint_quiet_when_within_budget(client, seeded_db, monkeypatch):

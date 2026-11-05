@@ -36,9 +36,6 @@ def _db(tmp_path) -> MeshDB:
 
 
 def _on(monkeypatch) -> None:
-    monkeypatch.setenv("CASE_CONTINUATION_ENABLED", "1")
-    monkeypatch.setenv("MANAGER_ROLE_ENABLED", "1")
-    monkeypatch.setenv("DURABLE_RELAY_ENABLED", "1")
     monkeypatch.setenv("CASE_RESPAWN_REQUIRES_APPROVAL", "0")
 
 

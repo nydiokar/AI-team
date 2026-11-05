@@ -26,12 +26,6 @@ import pytest
 # Shared helpers
 # ---------------------------------------------------------------------------
 
-@pytest.fixture(autouse=True)
-def _clear_flags(monkeypatch):
-    monkeypatch.delenv("MANAGER_ROLE_ENABLED", raising=False)
-    monkeypatch.delenv("MANAGER_TOOLS_ENABLED", raising=False)
-
-
 def _driver():
     from src.backends import claude_driver as d
     return d.ClaudeSDKClientDriver.__new__(d.ClaudeSDKClientDriver)
@@ -102,11 +96,10 @@ def test_worker_tool_scoping_byte_identical_when_flag_off(monkeypatch):
 
 def test_worker_tool_scoping_grants_no_manager_tools_when_flag_on(monkeypatch):
     from src.backends import claude_driver as d
-    monkeypatch.setenv("MANAGER_ROLE_ENABLED", "1")
     monkeypatch.setattr(d, "_mcp_jobs_configured", lambda: False)
     monkeypatch.setattr(d, "_mcp_manager_configured", lambda: True)
     worker = d._session_allowed_tools(role="worker")
-    # Even with the manager server present + flag ON, a worker holds NO manager tools.
+    # Even with the manager server present, a worker holds NO manager tools.
     assert not any("manager" in t for t in worker)
     # And its list equals the plain defaults (worker_tool_names() is empty).
     assert worker == list(d._DEFAULT_TOOLS)
@@ -122,37 +115,27 @@ def _worker_session(role_boot=None):
     return types.SimpleNamespace(session_id="w1", case_role="worker", role_boot=role_boot)
 
 
-def test_role_boot_worker_default_is_byte_identical_flag_off():
-    """Flag OFF ⇒ (None, None) for a case_role='worker' session (today's boot)."""
-    inst = _driver()
-    assert inst._role_boot(_worker_session(role_boot=None)) == (None, None)
-
-
 def test_role_boot_joined_worker_stays_tier0_without_opt_in(monkeypatch):
-    """THE constraint: with the master flag ON, a case_role='worker' session that
+    """THE constraint: a case_role='worker' session that
     was NOT opted-in (role_boot is None) must return the SAME role-less result as
     today — proving we do NOT auto-promote every joined worker."""
     from src.backends import claude_driver as d
-    monkeypatch.setenv("MANAGER_ROLE_ENABLED", "1")
     monkeypatch.setattr(d, "_mcp_manager_configured", lambda: True)
     inst = _driver()
 
-    default_off = inst._role_boot(_worker_session(role_boot=None))  # (flag ON here)
+    default_off = inst._role_boot(_worker_session(role_boot=None))
     # Exercise the ACTUAL default branch: case_role='worker', no role_boot.
     assert default_off == (None, None)
-    # Byte-identical to a plain role-less session AND to the flag-off result.
-    monkeypatch.delenv("MANAGER_ROLE_ENABLED", raising=False)
-    assert inst._role_boot(_worker_session(role_boot=None)) == default_off
+    # Byte-identical to a plain role-less session.
     plain = types.SimpleNamespace(session_id="x", case_role=None, role_boot=None)
     assert inst._role_boot(plain) == default_off
 
 
 def test_role_boot_worker_roleful_only_with_explicit_opt_in(monkeypatch):
-    """WITH the explicit role_boot='worker' opt-in (and the flag ON) the SAME
+    """WITH the explicit role_boot='worker' opt-in the SAME
     session shape becomes role-ful — a preset system_prompt + a (manager-free)
     tool list. This is the only difference from the default path above."""
     from src.backends import claude_driver as d
-    monkeypatch.setenv("MANAGER_ROLE_ENABLED", "1")
     monkeypatch.setattr(d, "_mcp_jobs_configured", lambda: False)
     inst = _driver()
 
@@ -162,18 +145,9 @@ def test_role_boot_worker_roleful_only_with_explicit_opt_in(monkeypatch):
     assert not any("manager" in t for t in tools)
 
 
-def test_role_boot_opt_in_still_gated_by_master_flag(monkeypatch):
-    """Even with role_boot='worker', the master gate (MANAGER_ROLE_ENABLED) must be
-    ON — OFF ⇒ (None, None), so the whole role path stays behind one flag."""
-    inst = _driver()
-    # flag cleared by the autouse fixture
-    assert inst._role_boot(_worker_session(role_boot="worker")) == (None, None)
-
-
 def test_role_boot_load_failure_falls_back_to_default(monkeypatch):
     """A worker-role load failure must log + fall back to (None, None), never block boot."""
     from src.backends import claude_driver as d
-    monkeypatch.setenv("MANAGER_ROLE_ENABLED", "1")
 
     def _boom():
         raise RuntimeError("worker.md unreadable")

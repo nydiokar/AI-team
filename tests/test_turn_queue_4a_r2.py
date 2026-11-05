@@ -15,7 +15,7 @@ from src.control import turn_queue as tq
 from src.control import turn_scheduler as ts
 from src.control.db import MeshDB
 from tests.test_turn_queue_producer1 import (  # noqa: F401 — autouse fixtures
-    _flags, _managed_rows, _no_cli_spawn, _setup, _submit,
+    _managed_rows, _no_cli_spawn, _setup, _submit,
 )
 from tests.stage8a_legacy import unenrolled
 
@@ -35,7 +35,6 @@ def _pass(db, o):
 
 # R1 — crash after commit: durable lineage-pending, never runs Case-less ------ #
 def test_R1_crash_after_commit_is_recovered_never_runs_caseless(tmp_path, monkeypatch):
-    monkeypatch.setenv("HARNESS_FLOW_DRIVE", "1")
     db, o = _setup(tmp_path, monkeypatch)
     o._LINEAGE_REPLAY_WAIT_SEC = 0.2
     case_id = db.open_case(objective="obj", session_id="mgr-x", role="manager")
@@ -67,7 +66,6 @@ def test_R1_crash_after_commit_is_recovered_never_runs_caseless(tmp_path, monkey
 
 
 def test_R1b_replay_after_lease_expiry_recovers_then_acks(tmp_path, monkeypatch):
-    monkeypatch.setenv("HARNESS_FLOW_DRIVE", "1")
     db, o = _setup(tmp_path, monkeypatch)
     case_id = db.open_case(objective="obj", session_id="mgr-x", role="manager")
     real = o._managed_lineage_converge
@@ -85,7 +83,6 @@ def test_R1b_replay_after_lease_expiry_recovers_then_acks(tmp_path, monkeypatch)
 def test_R1c_recovery_reuses_partial_birth_never_second_case(tmp_path, monkeypatch):
     """Writer died after BIRTHING the Case but before finalize: recovery reuses
     that flow, never creates a second one."""
-    monkeypatch.setenv("HARNESS_FLOW_DRIVE", "1")
     db, o = _setup(tmp_path, monkeypatch)
     real_fin = db.finalize_turn_lineage
     monkeypatch.setattr(db, "finalize_turn_lineage",
@@ -108,7 +105,6 @@ def test_R1c_recovery_reuses_partial_birth_never_second_case(tmp_path, monkeypat
 
 # R2 — finalize after activation is impossible by construction --------------- #
 def test_R2_stalled_writer_cannot_be_overtaken_by_activation(tmp_path, monkeypatch):
-    monkeypatch.setenv("HARNESS_FLOW_DRIVE", "1")
     db, o = _setup(tmp_path, monkeypatch)
     case_id = db.open_case(objective="obj", session_id="mgr-x", role="manager")
     real_fin = db.finalize_turn_lineage

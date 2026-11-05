@@ -19,7 +19,7 @@ from src.services import session_store as store_module
 from src.services.notification_service import NotificationService
 from src.telegram.interface import TelegramInterface
 from tests.test_turn_queue_4d import _env, _kind, _restart
-from tests.test_turn_queue_producer1 import _flags, _no_cli_spawn  # noqa: F401
+from tests.test_turn_queue_producer1 import _no_cli_spawn  # noqa: F401
 
 
 def _child(directory: str, boundary: str) -> None:
@@ -31,7 +31,6 @@ def _child(directory: str, boundary: str) -> None:
         # Same isolated registered-carrier policy as tests/conftest.py; never
         # start a gateway or enable networking in this fresh interpreter.
         patch.setattr(TaskOrchestrator, "_REFUSE_SESSION_TURNS_WITHOUT_MESH", False)
-        patch.setenv("HARNESS_LEVEL3_GUARD", "0")
         patch.setattr(store_module, "_SESSIONS_DIR", root / "sessions")
         patch.setattr(store_module, "_BINDINGS_FILE", root / "bindings.json")
         _no_cli_spawn.__wrapped__(patch)

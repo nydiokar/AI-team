@@ -59,7 +59,7 @@ from tests.test_agent_inbox_delivery import (  # noqa: F401 — autouse fixtures
     _drive, _env, _fresh_allowance, _wakes,
 )
 from tests.test_case_continuation import _FakeOrch, _FakeStore, _FakeSession
-from tests.test_turn_queue_producer1 import _flags, _no_cli_spawn  # noqa: F401
+from tests.test_turn_queue_producer1 import _no_cli_spawn  # noqa: F401
 
 
 # --------------------------------------------------------------------------- #

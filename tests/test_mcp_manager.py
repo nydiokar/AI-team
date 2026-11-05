@@ -121,8 +121,7 @@ def test_dispatch_worker_posts_and_reports(monkeypatch):
 
 def test_dispatch_worker_sends_parent_lineage(monkeypatch):
     """[A32/A33] Endpoint now accepts parent_flow_run_id, so dispatch_worker sends
-    it as the Manager→worker lineage edge (persisted server-side when
-    HARNESS_FLOW_DRIVE is ON)."""
+    it as the Manager→worker lineage edge (persisted server-side)."""
     seen = {}
 
     def fake_request(method, path, payload=None, timeout=20.0, headers=None):
@@ -938,7 +937,7 @@ def test_dispatch_worker_records_durable_wait_when_case(monkeypatch):
 
 
 def test_dispatch_worker_wait_relay_failure_is_nonfatal(monkeypatch):
-    """A relay failure (e.g. the 404 when DURABLE_RELAY_ENABLED is OFF) must NOT
+    """A relay failure (e.g. the 404 from the removed /waits route) must NOT
     break the dispatch — the worker is still dispatched, just without the note."""
     def fake_request(method, path, payload=None, timeout=20.0, headers=None):
         if path.endswith("/waits"):
@@ -989,14 +988,14 @@ def test_reconcile_waits_formats_resolved_and_pending(monkeypatch):
     assert "wait_for_worker" not in out
 
 
-def test_reconcile_waits_reports_disabled(monkeypatch):
-    """A disabled relay (ok:false) is surfaced, not silently swallowed."""
+def test_reconcile_waits_reports_failure(monkeypatch):
+    """A failed reconcile (ok:false) is surfaced, not silently swallowed."""
     monkeypatch.setattr(
         mcp_manager, "_api_request",
-        lambda *a, **k: {"ok": False, "reason": "durable_relay_disabled"},
+        lambda *a, **k: {"ok": False, "reason": "db_unavailable"},
     )
     out = mcp_manager._reconcile_waits({"case_id": "case_1"})
-    assert "durable_relay_disabled" in out
+    assert "db_unavailable" in out
 
 
 def test_reconcile_waits_registered():

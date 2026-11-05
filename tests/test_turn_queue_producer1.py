@@ -49,12 +49,6 @@ def _no_cli_spawn(monkeypatch):
     monkeypatch.setattr(asyncio, "create_subprocess_exec", _boom)
 
 
-@pytest.fixture(autouse=True)
-def _flags(monkeypatch):
-    monkeypatch.delenv("HARNESS_FLOW_DRIVE", raising=False)
-    monkeypatch.delenv("HARNESS_LEVEL3_GUARD", raising=False)
-
-
 def _sess(sid="sess-1"):
     from src.services.session_store import SessionStore
 
@@ -132,11 +126,18 @@ def test_P1_01_enrolled_session_gets_one_durable_managed_turn(tmp_path, monkeypa
 # the A82 Stage-8b convergence cutoff: a non-enrolled session turn is now refused
 # unconditionally (LegacyExecutionRetiredError), proven by
 # test_turn_queue_stage8a.py::test_S8_11b.
+
+def _refuse_admission(monkeypatch) -> None:
+    """Make ``_enqueue_task`` refuse at its choke point, before any admission."""
+    async def _refused(self, task):
+        raise HarnessAdmissionBlocked(task.id, "local_execution_disabled")
+
+    monkeypatch.setattr(TaskOrchestrator, "_enqueue_task", _refused)
+
 # P1-03 --------------------------------------------------------------------- #
 def test_P1_03_harness_gate_refuses_before_admission(tmp_path, monkeypatch):
     db, o = _setup(tmp_path, monkeypatch)
-    monkeypatch.setattr(TaskOrchestrator, "_harness_level3_allows_autopickup",
-                        staticmethod(lambda task: False))
+    _refuse_admission(monkeypatch)
     with pytest.raises(HarnessAdmissionBlocked):
         _submit(o)
     assert _managed_rows(db) == []
@@ -144,7 +145,6 @@ def test_P1_03_harness_gate_refuses_before_admission(tmp_path, monkeypatch):
 
 # P1-04 --------------------------------------------------------------------- #
 def test_P1_04_case_join_lineage_once_and_replay_is_side_effect_free(tmp_path, monkeypatch):
-    monkeypatch.setenv("HARNESS_FLOW_DRIVE", "1")
     db, o = _setup(tmp_path, monkeypatch)
     case_id = db.open_case(objective="obj", session_id="mgr-x", role="manager")
     tid = _submit(o, join_case_id=case_id, operation_id="op-join")
@@ -163,7 +163,6 @@ def test_P1_04_case_join_lineage_once_and_replay_is_side_effect_free(tmp_path, m
 
 
 def test_P1_04b_open_case_attach_sets_membership(tmp_path, monkeypatch):
-    monkeypatch.setenv("HARNESS_FLOW_DRIVE", "1")
     db, o = _setup(tmp_path, monkeypatch)
     case_id = db.open_case(objective="obj", session_id="sess-1", role="manager")
     tid = _submit(o)
@@ -253,7 +252,6 @@ def test_P1_07c_no_claimable_carrier_refuses_admission(tmp_path, monkeypatch):
     import socket
     from config import config
 
-    monkeypatch.setenv("HARNESS_FLOW_DRIVE", "1")
     db, o = _setup(tmp_path, monkeypatch, machine=None)
     monkeypatch.setattr(config.mesh, "local_carrier_node_id", "")
     case_id = db.open_case(objective="obj", session_id="mgr-x", role="manager")
@@ -500,7 +498,6 @@ def test_P1_07e_carrier_gone_before_activation_backs_off(tmp_path, monkeypatch):
 
 # P1-12 (A87 rework probes L3/L4) ------------------------------------------ #
 def test_P1_12_concurrent_same_operation_writes_lineage_once(tmp_path, monkeypatch):
-    monkeypatch.setenv("HARNESS_FLOW_DRIVE", "1")
     db, o = _setup(tmp_path, monkeypatch)
     case_id = db.open_case(objective="obj", session_id="mgr-x", role="manager")
 
@@ -517,7 +514,6 @@ def test_P1_12_concurrent_same_operation_writes_lineage_once(tmp_path, monkeypat
 
 
 def test_P1_12b_refused_admission_leaves_no_lineage(tmp_path, monkeypatch):
-    monkeypatch.setenv("HARNESS_FLOW_DRIVE", "1")
     db, o = _setup(tmp_path, monkeypatch)
     case_id = db.open_case(objective="obj", session_id="mgr-x", role="manager")
     for i in range(20):

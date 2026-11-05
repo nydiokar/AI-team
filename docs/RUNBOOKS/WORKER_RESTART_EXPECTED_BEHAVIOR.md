@@ -19,10 +19,9 @@ the backend conversations survive on disk (`backend_session_id`). The system mus
 operator **once**, and re-establish the Manager and worker on the **same Case** — never dead-end on
 resume-into-a-corpse.
 
-**Preconditions (flags, all live/ON by default):** `HARNESS_FLOW_DRIVE=1`, `CASE_CONTINUATION_ENABLED=1`,
-`RESTART_LOST_SESSION_FORK_DISABLED=0` (O1), `RESPAWN_ON_RESTART_ERROR_DISABLED=0` (O2),
-`RESTART_NOTIFY_DISABLED=0` (O5), `WORKER_MEMORY_WATCHDOG_DISABLED=0` (O7). Gateway on A98 image;
-workers restarted onto A98 code (O7 is worker-side).
+**Preconditions:** none flag-gated any more — the Work substrate, Case continuation and the
+A98 O1/O2/O5/O7 behaviours are unconditional since the 2026-11 rollout-flag retirement. Gateway on
+A98 image; workers restarted onto A98 code (O7 is worker-side).
 
 ## The frozen causal chain
 
@@ -54,8 +53,7 @@ Walk steps top-down; the **first** ❌ is the failure point. Map it to a cause b
 - **Step 4 = `resume_session`→`session_lost`** (no `create_session`): **FLAG**
   `RESTART_LOST_SESSION_FORK_DISABLED` on, OR session turn-queue-enrolled (A82, scoped out), OR
   **not-deployed** (gateway pre-A98). *This is the original incident behavior.*
-- **Step 5 absent** (Manager ERROR+lost, no respawn/approval): **FLAG** `CASE_CONTINUATION_ENABLED`
-  off or `RESPAWN_ON_RESTART_ERROR_DISABLED` on; approval raised but never actioned ⇒
+- **Step 5 absent** (Manager ERROR+lost, no respawn/approval): **RESPAWN PATH BROKEN**; approval raised but never actioned ⇒
   **OPERATOR-INACTION** (wedged Case); `event=respawn_failed` ⇒ **MISSING CARRIER** (no placement node
   / worker offline → `case.manager_unavailable`).
 - **Step 6 repeated `resume_session`→`session_lost`**: same O1 cause as step 4; repeated cold resumes

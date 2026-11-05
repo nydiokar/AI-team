@@ -10,7 +10,7 @@ scheduling.
 
 These tests exercise the whole contract from ``docs/AUTONOMOUS_CASE_CONTINUATION_
 DESIGN.md`` §8 with a real ``MeshDB`` and a duck-typed orchestrator ``self`` — no
-paid CLI, no live backend. Flag ``CASE_CONTINUATION_ENABLED`` gates every write.
+paid CLI, no live backend.
 
 [A104] The wait-group ledger / ``cont:`` token / watermark machinery is replaced
 by the agent inbox: a finished REQUESTED child writes one message addressed to
@@ -32,7 +32,7 @@ from tests.test_agent_inbox_delivery import (  # noqa: F401 — autouse fixtures
     _drive, _env, _fresh_allowance, _wakes,
 )
 from tests.test_turn_queue_4b import _pass, _run
-from tests.test_turn_queue_producer1 import _flags, _no_cli_spawn  # noqa: F401
+from tests.test_turn_queue_producer1 import _no_cli_spawn  # noqa: F401
 
 
 # --------------------------------------------------------------------------- #
@@ -44,7 +44,6 @@ def _db(tmp_path) -> MeshDB:
 
 
 def _on(monkeypatch) -> None:
-    monkeypatch.setenv("CASE_CONTINUATION_ENABLED", "1")
     # This file asserts the dead-session RESPAWN branch itself, so the operator
     # approval gate in front of it stays OFF here (covered in test_case_respawn.py).
     monkeypatch.setenv("CASE_RESPAWN_REQUIRES_APPROVAL", "0")
@@ -169,9 +168,6 @@ class _FakeOrch:
             self, case_id, state=state, actor=actor, reason=reason,
         )
 
-    def _manager_role_enabled(self):
-        return TaskOrchestrator._manager_role_enabled(self)
-
     def _set_session_case_affiliation(self, sid, case_id, role=None):
         sess = self.session_store.get(sid)
         if sess is not None:
@@ -256,25 +252,6 @@ def _open_case(db, session_id="mgr-sess", round_cap=None):
     crit = None if round_cap is None else f'{{"round_cap": {round_cap}}}'
     return db.open_case("obj", session_id, role="manager", completion_criteria=crit)
 
-
-# --------------------------------------------------------------------------- #
-# Flag gating — OFF is byte-identical                                          #
-# --------------------------------------------------------------------------- #
-
-def test_arm_wait_group_noop_when_flag_off(tmp_path, monkeypatch):
-    monkeypatch.delenv("CASE_CONTINUATION_ENABLED", raising=False)
-    db = _db(tmp_path)
-    fid = _open_case(db)
-    assert db.arm_wait_group(fid, "g1", "ANY", ["t1"]) is None
-    assert _events(db, fid, "worker.wait_pending") == []
-
-
-def test_tick_noop_when_flag_off(tmp_path, monkeypatch):
-    monkeypatch.delenv("CASE_CONTINUATION_ENABLED", raising=False)
-    db = _db(tmp_path)
-    orch = _FakeOrch(_FakeStore(_FakeSession("mgr-sess")))
-    # Even with a satisfied-looking ledger, the flag gate means the tick is inert.
-    assert asyncio.run(TaskOrchestrator._wake_dispatcher_tick_once(orch)) == 0
 
 
 # --------------------------------------------------------------------------- #
@@ -439,38 +416,11 @@ def test_any_group_partial_review_still_waits(tmp_path, monkeypatch):
     assert "t1" not in wake["prompt"]
 
 
-def test_satisfied_case_with_closed_manager_escalates_when_role_off(tmp_path, monkeypatch):
-    # With MANAGER_ROLE OFF, respawn is not viable (a respawned Manager would be a
-    # naked, tool-less session). The dead-session branch then falls back to the
-    # pre-A55 visible-strand ESCALATION (once, idempotent) instead of respawning;
-    # [A104] the stranded message dies (recipient_gone) instead of looping.
-    _on(monkeypatch)
-    monkeypatch.delenv("MANAGER_ROLE_ENABLED", raising=False)
-    db = _db(tmp_path)
-    fid = _open_case(db, round_cap=2)
-    seed_finished_child(db, fid, "t1", requester="mgr-sess")
-
-    session = _FakeSession("mgr-sess", status=SessionStatus.CLOSED)
-    orch = _FakeOrch(_FakeStore(session))
-    assert _continue(orch, db, fid) == 0
-    assert orch.managed_respawns == []
-    marker = _events(db, fid, "case.manager_unavailable")
-    assert len(marker) == 1
-    assert len(orch.notifier.errors) == 1
-    assert _msg_states(db) == {"t1": "dead"}
-
-    # Idempotent: a second tick does not double-escalate.
-    assert _continue(orch, db, fid) == 0
-    assert len(_events(db, fid, "case.manager_unavailable")) == 1
-    assert len(orch.notifier.errors) == 1
-
-
 def test_satisfied_case_with_closed_manager_respawns_when_role_on(tmp_path, monkeypatch):
     # [A55] With MANAGER_ROLE ON, a Case whose bound Manager session is CLOSED and
     # holds an undelivered message is CRASH-RESPAWNED on the SAME Case — not left
     # as a strand. [A104] The message stays pending for the successor.
     _on(monkeypatch)
-    monkeypatch.setenv("MANAGER_ROLE_ENABLED", "1")
     db = _db(tmp_path)
     fid = _open_case(db, round_cap=2)
     seed_finished_child(db, fid, "t1", requester="mgr-sess")
@@ -488,7 +438,6 @@ def test_missing_manager_session_respawns_when_role_on(tmp_path, monkeypatch):
     # [A55] Manager link resolves but the session row is GONE — respawn on the SAME
     # Case (with MANAGER_ROLE ON).
     _on(monkeypatch)
-    monkeypatch.setenv("MANAGER_ROLE_ENABLED", "1")
     db = _db(tmp_path)
     fid = _open_case(db, round_cap=2)
     seed_finished_child(db, fid, "t1", requester="mgr-sess")

@@ -67,7 +67,7 @@ FROZEN_STEPS = [
     Step(
         n=0, name="baseline (pre-restart)",
         trigger="Manager armed a wait-group on worker task(s)",
-        action_unit="Manager role loop (HARNESS_FLOW_DRIVE, CASE_CONTINUATION_ENABLED)",
+        action_unit="Manager role loop",
         effect="Manager AWAITING_INPUT/driver_live; flow has an open worker.wait_pending; node N online @ incarnation I0",
         page="—",
         evidence="flow_events worker.wait_pending without matching wait_resolved; sessions.driver_status='live'",
@@ -116,7 +116,7 @@ FROZEN_STEPS = [
         effect="auto-respawn OR case_manager_respawn approval; NEW Manager on SAME Case via get_case_brief; waits re-armed",
         page="OPERATOR: case_manager_respawn approval (if CASE_RESPAWN_REQUIRES_APPROVAL, default ON)",
         evidence="flow_event case.manager_respawned OR approval action=case_manager_respawn; (else) event=case.manager_unavailable escalation",
-        diagnosis_if_absent="Manager ERROR+lost with no respawn/approval ⇒ FLAG CASE_CONTINUATION_ENABLED off; approval raised but never actioned ⇒ OPERATOR-INACTION (wedged Case); respawn_failed ⇒ MISSING CARRIER (no placement node / worker offline).",
+        diagnosis_if_absent="Manager ERROR+lost with no respawn/approval ⇒ RESPAWN PATH BROKEN; approval raised but never actioned ⇒ OPERATOR-INACTION (wedged Case); respawn_failed ⇒ MISSING CARRIER (no placement node / worker offline).",
     ),
     Step(
         n=6, name="worker session re-established + continuation",

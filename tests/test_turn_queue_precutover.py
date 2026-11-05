@@ -33,7 +33,7 @@ from src.control import turn_scheduler as ts
 from src.core.interfaces import ExecutionResult, Session, SessionStatus
 from src.orchestrator import HarnessAdmissionBlocked, TaskOrchestrator
 from tests.test_turn_queue_producer1 import (  # noqa: F401
-    NOW, _client, _flags, _managed_rows, _no_cli_spawn, _register_carrier, _sess, _setup,
+    NOW, _client, _managed_rows, _no_cli_spawn, _register_carrier, _sess, _setup,
     _submit,
 )
 
@@ -81,10 +81,8 @@ def _born_managed_service(db, o, sid="mgr-1", machine="worker-a"):
 
 
 def test_PC01_manager_invoke_first_turn_is_one_managed_automation_turn(tmp_path, monkeypatch):
-    monkeypatch.setenv("HARNESS_FLOW_DRIVE", "1")
     db, o = _setup(tmp_path, monkeypatch, enroll=False)
     _born_managed_service(db, o)
-    o._manager_role_enabled = lambda: True
     res = asyncio.run(o.invoke_manager("ship X", repo_path="/tmp/repo", node_id="worker-a"))
     assert res["ok"] is True, res
     case_id, tid = res["case_id"], res["task_id"]

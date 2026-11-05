@@ -1097,7 +1097,7 @@ export interface RawCaseUsageResponse {
   totals: { tokens: RawTokenBuckets; usd: RawCostUsd };
 }
 
-// GET /api/cost/alerts → check_cost_alerts + enforcement (A65 P3)
+// GET /api/cost/alerts → check_cost_alerts (A65 P3)
 export interface RawCostAlert {
   rule: string;
   scope: string;
@@ -1115,11 +1115,6 @@ export interface RawCostAlertsResponse {
     case_total_usd: number;
   };
   alerts: RawCostAlert[];
-  enforcement: {
-    enabled: boolean;
-    mechanism: string;
-    governor_sdk_max_budget_usd: number | null;
-  };
 }
 
 // GET /api/system-alerts → recorded by ~/scripts/aiteam-healthcheck.sh (external

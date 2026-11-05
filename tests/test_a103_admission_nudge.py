@@ -27,7 +27,6 @@ from src.core.interfaces import Session, SessionStatus
 
 # reuse setup helpers from producer tests (session + orchestrator creation)
 from tests.test_turn_queue_producer1 import (  # noqa: F401  (autouse fixtures)
-    _flags,
     _no_cli_spawn,
     _register_carrier,
     _sess,

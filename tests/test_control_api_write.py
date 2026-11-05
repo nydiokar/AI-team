@@ -55,7 +55,7 @@ class _StubOrchestrator:
                                  parent_flow_run_id=None, **_):
         if self.block_task_id is not None:
             from src.orchestrator import HarnessAdmissionBlocked
-            raise HarnessAdmissionBlocked(self.block_task_id)
+            raise HarnessAdmissionBlocked(self.block_task_id, "local_execution_disabled")
         self.submitted.append((description, session_id, cwd, source))
         self.submit_kwargs.append({
             "target_files": target_files,
@@ -193,8 +193,8 @@ def test_case_open_objective_oversized_rejected(client, orch):
 
 def test_instruction_threads_parent_flow_run_id(client, orch):
     """[A32] A Manager→worker dispatch passes parent_flow_run_id; it must reach
-    submit_instruction (which stamps it onto the child flow_runs row when
-    HARNESS_FLOW_DRIVE is ON). Endpoint just threads it — no gating here."""
+    submit_instruction (which stamps it onto the child flow_runs row). Endpoint
+    just threads it — no gating here."""
     r = client.post("/api/instructions", headers=_auth(),
                     json={"description": "child work", "parent_flow_run_id": "flow_parent_1"})
     assert r.status_code == 200
@@ -213,17 +213,17 @@ def test_instruction_unknown_session_404(client):
     assert r.status_code == 404
 
 
-# --- harness Level-3 admission block (A13) ----------------------------------
+# --- admission block (HarnessAdmissionBlocked) ------------------------------
 
 def test_blocked_oneoff_instruction_is_409_with_reason(client, orch):
-    """A one-off submit refused by the Level-3 admission gate returns a clean 409
+    """A one-off submit refused at admission returns a clean 409
     with the stable machine reason + human detail — not an opaque 500."""
     orch.block_task_id = "task_blocked_1"
     r = client.post("/api/instructions", headers=_auth(),
                     json={"description": "migrate the auth schema"})
     assert r.status_code == 409
     detail = r.json()["detail"]
-    assert detail["reason"] == "harness_level3_needs_approval"
+    assert detail["reason"] == "local_execution_disabled"
     assert detail["task_id"] == "task_blocked_1"
     assert detail["detail"]  # non-empty human copy
     # Nothing was accepted.
@@ -241,7 +241,7 @@ def test_blocked_session_instruction_reverts_busy_to_idle(client, orch, tmp_path
     r = client.post("/api/instructions", headers=_auth(),
                     json={"description": "rewrite the mesh router", "session_id": sid})
     assert r.status_code == 409
-    assert r.json()["detail"]["reason"] == "harness_level3_needs_approval"
+    assert r.json()["detail"]["reason"] == "local_execution_disabled"
     # The session is usable again, not stuck BUSY.
     s = orch.session_service.store.get(sid)
     assert s.status == SessionStatus.IDLE
@@ -656,9 +656,8 @@ def test_jobs_requires_auth(client):
 
 # --- [M3.3] POST /api/cases — open a new Case on an existing Manager session ---
 
-def _wire_open_case(orch, *, enabled=True, returns="case-new"):
+def _wire_open_case(orch, *, returns="case-new"):
     """Give the stub orchestrator the two hooks the /api/cases route calls."""
-    orch._manager_role_enabled = lambda: enabled
     orch.open_case_calls = []
 
     def _open_case(objective, session_id, role="manager", completion_criteria=None, round_cap=None):
@@ -707,12 +706,6 @@ def test_open_case_rejects_non_positive_round_cap_422(client, orch):
     )
     assert r.status_code == 422
     assert orch.open_case_calls == []  # never reached the seam
-
-
-def test_open_case_disabled_returns_409(client, orch):
-    _wire_open_case(orch, enabled=False)
-    r = client.post("/api/cases", json={"objective": "x", "session_id": "s"}, headers=_auth())
-    assert r.status_code == 409
 
 
 def test_open_case_unknown_session_returns_404(client, orch):

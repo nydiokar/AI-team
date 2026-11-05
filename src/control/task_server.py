@@ -896,8 +896,6 @@ def _fire_nudge(node: NodeInfo) -> None:
 # instead of opening a mesh.db of their own (docs/backend/DATABASE_AUTHORITY.md).
 # ---------------------------------------------------------------------------
 
-_CASE_ID_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
-
 
 class RuntimeFlagRowOut(BaseModel):
     flag_name: str
@@ -935,24 +933,6 @@ def control_runtime_flags() -> RuntimeFlagSnapshotOut:
         json.dumps([[r.flag_name, r.value, r.set_at] for r in rows]).encode()
     ).hexdigest()[:16]
     return RuntimeFlagSnapshotOut(revision=digest, flags=rows)
-
-
-@app.post("/control/cases/{case_id}/boot-reconcile", dependencies=[Depends(_require_auth)])
-def control_boot_reconcile_case(case_id: str) -> dict[str, Any]:
-    """Manager boot reconcile for a worker-hosted Manager session, against the
-    controller ledger. Same guards the driver applied locally; the db call is
-    idempotent and self-gated on DURABLE_RELAY_ENABLED."""
-    if not _CASE_ID_RE.match(case_id):
-        raise HTTPException(status_code=422, detail="invalid case id")
-    db = get_db()
-    if db is None:
-        raise HTTPException(status_code=503, detail="Database unavailable")
-    row = db.get_flow_run(case_id)
-    if row is None:
-        return {"ok": False, "reason": "unknown_case"}
-    if (row.get("status") or "") in db._CLOSED_STATUSES:
-        return {"ok": False, "reason": "case_closed"}
-    return db.boot_reconcile_case(case_id, actor="manager")
 
 
 # ---------------------------------------------------------------------------
