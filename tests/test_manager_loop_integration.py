@@ -85,7 +85,6 @@ def orch(tmp_path, monkeypatch):
 
     # Both gates ON — the Manager Case machinery (attach / JOIN / timeline / close) lives
     # entirely behind these; OFF ⇒ byte-identical (covered by the A38 unit suite).
-    monkeypatch.setenv("MANAGER_ROLE_ENABLED", "1")
 
     o = TaskOrchestrator()
     # Fake ONLY the backend turn. Everything else — admission, links, events, terminal
@@ -200,15 +199,3 @@ def _finished_entities(events):
 # coverage (boot->dispatch->review->close, rework, worker-joins-case). A managed
 # in-process harness is recommended as A82 follow-up.
 # ---------------------------------------------------------------------------
-
-@pytest.mark.asyncio
-async def test_manager_invoke_disabled_is_refused(orch, client, monkeypatch):
-    """Negative control: with the role gate OFF, the whole surface is inert (409)."""
-    monkeypatch.delenv("MANAGER_ROLE_ENABLED", raising=False)
-    r = client.post(
-        "/api/manager",
-        headers={"Authorization": f"Bearer {TOKEN}"},
-        json={"objective": "x", "repo_path": str(config.system.tasks_dir)},
-    )
-    assert r.status_code == 409
-    assert r.json()["detail"]["reason"] == "manager_role_disabled"

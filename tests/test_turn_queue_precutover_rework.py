@@ -31,7 +31,6 @@ def _manager_orch(tmp_path, monkeypatch, machine):
     """Born-managed Manager sessions (``mgr-1``, ``mgr-2`` …) created by a REAL
     SessionService whose close path is the orchestrator's managed close."""
     db, o = _setup(tmp_path, monkeypatch, enroll=False)
-    o._manager_role_enabled = lambda: True
     svc = SessionService(o.session_store, remote_close_dispatcher=o._dispatch_remote_close,
                          managed_close=o._close_managed_session)
     ids = itertools.count(1)

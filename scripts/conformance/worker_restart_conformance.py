@@ -116,7 +116,7 @@ FROZEN_STEPS = [
         effect="auto-respawn OR case_manager_respawn approval; NEW Manager on SAME Case via get_case_brief; waits re-armed",
         page="OPERATOR: case_manager_respawn approval (if CASE_RESPAWN_REQUIRES_APPROVAL, default ON)",
         evidence="flow_event case.manager_respawned OR approval action=case_manager_respawn; (else) event=case.manager_unavailable escalation",
-        diagnosis_if_absent="Manager ERROR+lost with no respawn/approval ⇒ RESPAWN PATH BROKEN (check MANAGER_ROLE_ENABLED); approval raised but never actioned ⇒ OPERATOR-INACTION (wedged Case); respawn_failed ⇒ MISSING CARRIER (no placement node / worker offline).",
+        diagnosis_if_absent="Manager ERROR+lost with no respawn/approval ⇒ RESPAWN PATH BROKEN; approval raised but never actioned ⇒ OPERATOR-INACTION (wedged Case); respawn_failed ⇒ MISSING CARRIER (no placement node / worker offline).",
     ),
     Step(
         n=6, name="worker session re-established + continuation",

@@ -298,18 +298,6 @@ RUNTIME_FLAG_DEFINITIONS: Dict[str, Dict[str, str]] = {
         "registry_writable": "1",
         "description": "Refuse a Manager close_case unless the Case ledger proves the work was advanced (a second dispatch or a rework verdict) OR an explicit exhaustion_attestation is recorded. Turns 'judge contribution + continue the work' from prose into an enforced close gate.",
     },
-    "MANAGER_ROLE_ENABLED": {
-        "default": "0",
-        "effect_scope": "session_boot",
-        "registry_writable": "1",
-        "description": "Manager role path, role prompt, and scoped Manager tool grants for new sessions.",
-    },
-    "MANAGER_TOOLS_ENABLED": {
-        "default": "0",
-        "effect_scope": "session_boot",
-        "registry_writable": "1",
-        "description": "Legacy process-wide Manager MCP tool grant for new Claude sessions.",
-    },
     "CONTROL_API_DOCS": {
         "default": "0",
         "effect_scope": "startup",
@@ -1184,25 +1172,6 @@ def transient_resume_task_id(case_id: str, paused_task_id: str, attempt: int) ->
 def cache_heartbeat_task_id(session_id: str, slot_epoch: int) -> str:
     """Deterministic lease id for one session-cache heartbeat due slot."""
     return f"cachehb:{session_id}:{int(slot_epoch)}"
-
-
-def manager_role_enabled() -> bool:
-    """Registry-over-env read of ``MANAGER_ROLE_ENABLED``.
-
-    The API gate observes this immediately. Role prompts and scoped MCP grants
-    are session-boot decisions, so existing sessions do not gain/lose tools until
-    their next boot.
-    """
-    return runtime_flag_enabled("MANAGER_ROLE_ENABLED")
-
-
-def manager_tools_enabled() -> bool:
-    """Registry-over-env read of ``MANAGER_TOOLS_ENABLED``.
-
-    This controls the legacy Claude Manager MCP tool grant when a session boots;
-    changing it does not mutate an already-running SDK session's allowed tools.
-    """
-    return runtime_flag_enabled("MANAGER_TOOLS_ENABLED")
 
 
 def control_api_docs_enabled() -> bool:

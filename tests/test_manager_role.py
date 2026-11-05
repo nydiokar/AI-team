@@ -54,12 +54,6 @@ def _patch_db(monkeypatch, db):
     monkeypatch.setattr(db_mod, "get_db", lambda: db)
 
 
-@pytest.fixture(autouse=True)
-def _clear_flags(monkeypatch):
-    monkeypatch.delenv("MANAGER_ROLE_ENABLED", raising=False)
-    monkeypatch.delenv("MANAGER_TOOLS_ENABLED", raising=False)
-
-
 # ---------------------------------------------------------------------------
 # Layer 1/6 — provider-neutral role seam + Claude adapter
 # ---------------------------------------------------------------------------
@@ -119,17 +113,9 @@ def test_render_first_assignment_carries_dynamic_data():
 # Layer 6 — driver role-boot + per-session tool scoping
 # ---------------------------------------------------------------------------
 
-def test_tool_scoping_byte_identical_when_flag_off():
-    from src.backends import claude_driver as d
-    # Flag OFF (default): role arg is ignored ⇒ identical lists, no manager tools.
-    assert d._session_allowed_tools() == d._session_allowed_tools(role="manager")
-    assert not any("manager" in t for t in d._session_allowed_tools(role="manager"))
-
-
 def test_tool_scoping_manager_only_when_flag_on(monkeypatch):
     from src.backends import claude_driver as d
     from src.backends.claude_role_adapter import manager_tool_names
-    monkeypatch.setenv("MANAGER_ROLE_ENABLED", "1")
     monkeypatch.setattr(d, "_mcp_manager_configured", lambda: True)
     mgr = d._session_allowed_tools(role="manager")
     other = d._session_allowed_tools(role=None)
@@ -137,18 +123,9 @@ def test_tool_scoping_manager_only_when_flag_on(monkeypatch):
     assert not any("manager" in t for t in other)
 
 
-def test_role_boot_off_is_default_even_for_manager():
-    from src.backends import claude_driver as d
-    # Flag OFF ⇒ (None, None) even for a manager session (byte-identical boot).
-    inst = d.ClaudeSDKClientDriver.__new__(d.ClaudeSDKClientDriver)
-    sess_mgr = types.SimpleNamespace(session_id="m1", case_role="manager")
-    assert inst._role_boot(sess_mgr) == (None, None)
-
-
 def test_role_boot_manager_session_when_flag_on(monkeypatch):
     from src.backends import claude_driver as d
     from src.backends.claude_role_adapter import manager_tool_names
-    monkeypatch.setenv("MANAGER_ROLE_ENABLED", "1")
     monkeypatch.setattr(d, "_mcp_manager_configured", lambda: True)
     inst = d.ClaudeSDKClientDriver.__new__(d.ClaudeSDKClientDriver)
     sp, tools = inst._role_boot(types.SimpleNamespace(session_id="m1", case_role="manager"))
@@ -218,16 +195,8 @@ def test_join_absent_or_closed_case_falls_through(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_invoke_manager_refuses_when_disabled():
-    orch = _orch()
-    result = await orch.invoke_manager("obj", repo_path="/x")
-    assert result == {"ok": False, "reason": "manager_role_disabled"}
-
-
-@pytest.mark.asyncio
 async def test_invoke_manager_opens_case_and_boots(monkeypatch):
     from src.services.session_service import CommandResult
-    monkeypatch.setenv("MANAGER_ROLE_ENABLED", "1")
     orch = _orch()
 
     session = types.SimpleNamespace(session_id="mgr-1", repo_path="/x")
@@ -254,7 +223,6 @@ async def test_invoke_manager_autopins_unpinned_repo_before_create(monkeypatch):
     from src.control import session_node_resolver
     from src.services.session_service import CommandResult
 
-    monkeypatch.setenv("MANAGER_ROLE_ENABLED", "1")
     monkeypatch.setattr(
         session_node_resolver,
         "resolve_unpinned_session_node",
@@ -297,14 +265,6 @@ def _manager_client(monkeypatch, invoke_result):
     orch = types.SimpleNamespace(invoke_manager=_invoke)
     monkeypatch.setattr(control_api, "_dashboard_token", lambda: "tok")
     return TestClient(control_api.build_control_api(orch))
-
-
-def test_api_manager_disabled_is_409(monkeypatch):
-    client = _manager_client(monkeypatch, {"ok": False, "reason": "manager_role_disabled"})
-    r = client.post("/api/manager", headers={"Authorization": "Bearer tok"},
-                    json={"objective": "x", "repo_path": "/x"})
-    assert r.status_code == 409
-    assert r.json()["detail"]["reason"] == "manager_role_disabled"
 
 
 def test_api_agent_inbox_route(monkeypatch):
@@ -469,7 +429,6 @@ def _wire_manager_orch(monkeypatch, session_id="mgr-1"):
     """Bare orchestrator with create_session/open_case/submit_instruction stubbed,
     capturing the kwargs invoke_manager forwards to each seam."""
     from src.services.session_service import CommandResult
-    monkeypatch.setenv("MANAGER_ROLE_ENABLED", "1")
     orch = _orch()
     session = types.SimpleNamespace(session_id=session_id, repo_path="/x")
     cap = {"create_kw": None, "submit_kw": None}

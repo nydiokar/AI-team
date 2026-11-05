@@ -63,7 +63,6 @@ def _now() -> datetime:
 
 
 def _flags(monkeypatch, *, auto="0", ceiling=None) -> None:
-    monkeypatch.setenv("MANAGER_ROLE_ENABLED", "1")
     monkeypatch.setenv("CASE_QUOTA_RESUME_AUTO", auto)
     if ceiling is not None:
         monkeypatch.setenv("CASE_QUOTA_RESUME_AUTO_MAX_USD", str(ceiling))
@@ -192,9 +191,6 @@ class _Orch:
     # -- real implementations ------------------------------------------------
     def _emit_event(self, name, _t=None, payload=None):
         self.emitted.append((name, payload or {}))
-
-    def _manager_role_enabled(self):
-        return TaskOrchestrator._manager_role_enabled(self)
 
     def _short_failure_reason(self, result):
         return TaskOrchestrator._short_failure_reason(result)

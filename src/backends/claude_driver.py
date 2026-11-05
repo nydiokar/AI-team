@@ -541,32 +541,6 @@ def _mcp_manager_configured() -> bool:
         return False
 
 
-def _manager_tools_enabled() -> bool:
-    """[M3 A34] Second, INDEPENDENT gate for the Manager tool grant.
-
-    Default OFF ⇒ byte-identical: even if ~/.claude.json has the 'manager' server,
-    dispatch_worker / wait_for_worker are NOT added to a session's allowed_tools
-    unless MANAGER_TOOLS_ENABLED is truthy. Rationale: dispatch_worker is a
-    DISPATCH primitive (materially more powerful than jobs' read-only watch_job),
-    so its grant gets a kill switch the operator controls in the gateway env —
-    not just the global config file. Both gates must be satisfied to grant.
-    """
-    from src.control.db import manager_tools_enabled
-    return manager_tools_enabled()
-
-
-def _manager_role_enabled() -> bool:
-    """[M3 A38] Master gate for the Phase 3.1 Manager-role path.
-
-    Default OFF ⇒ byte-identical: no role prompt is loaded, no ``system_prompt``
-    is set, and tool scoping falls back to the legacy A34 process-wide grant.
-    When ON, the manager grant is SCOPED per-session (only a ``case_role=="manager"``
-    session gets the manager_v1 tools), superseding the A34 process-wide grant.
-    """
-    from src.control.db import manager_role_enabled
-    return manager_role_enabled()
-
-
 def _session_allowed_tools(role: Optional[str] = None) -> List[str]:
     """Assemble a Claude session's allowed-tool list: the built-in defaults, the
     UNIVERSAL base profile, and the role's own profile. Pure + gated so the grant
@@ -581,27 +555,19 @@ def _session_allowed_tools(role: Optional[str] = None) -> List[str]:
          here. ``manager_v1`` tools additionally require the 'manager' server
          configured; without it the role falls back to least-privilege (base only).
 
-    Manager grant has two modes:
-      - MANAGER_ROLE_ENABLED OFF (default): legacy A34 process-wide grant —
-        double-gated (MANAGER_TOOLS_ENABLED env AND ~/.claude.json). ``role`` is
-        ignored ⇒ byte-identical to before A38.
-      - MANAGER_ROLE_ENABLED ON: per-session scoping via the role→profile registry.
-        This SUPERSEDES the process-wide grant for every session.
+    The Manager grant is scoped per session via the role→profile registry.
     """
     tools = list(_DEFAULT_TOOLS)
     if _mcp_jobs_configured():
         tools.extend(base_tool_names())
-    if _manager_role_enabled():
-        if role:
-            profile = tool_profile_for_role(role)
-            # manager_v1 tools live on the 'manager' MCP server; if it is not
-            # configured on this node, drop to least-privilege (base only) rather
-            # than naming tools no server will answer.
-            if profile == MANAGER_TOOL_PROFILE and not _mcp_manager_configured():
-                profile = WORKER_TOOL_PROFILE
-            tools.extend(profile_tool_names(profile))
-    elif _manager_tools_enabled() and _mcp_manager_configured():
-        tools.extend(["mcp__manager__dispatch_worker", "mcp__manager__wait_for_worker"])
+    if role:
+        profile = tool_profile_for_role(role)
+        # manager_v1 tools live on the 'manager' MCP server; if it is not
+        # configured on this node, drop to least-privilege (base only) rather
+        # than naming tools no server will answer.
+        if profile == MANAGER_TOOL_PROFILE and not _mcp_manager_configured():
+            profile = WORKER_TOOL_PROFILE
+        tools.extend(profile_tool_names(profile))
     return tools
 
 
@@ -1900,16 +1866,14 @@ class ClaudeSDKClientDriver(ClaudeDriver):
     def _role_boot(self, session: Session) -> Tuple[Optional[Dict[str, object]], Optional[List[str]]]:
         """[A38] Resolve (system_prompt, allowed_tools) for a role-bound session.
 
-        Returns ``(None, None)`` — the default path — unless MANAGER_ROLE_ENABLED
-        is ON and this session's ``case_role`` is 'manager'. In that case it loads
+        Returns ``(None, None)`` — the default path — unless this session's
+        ``case_role`` is 'manager' (or it opted into the Worker role). It loads
         the canonical Manager role, builds the Claude ``system_prompt`` (preset +
         appended instructions) and the per-session manager tool grant. Isolated:
         any failure logs and falls back to the default path so a role-load problem
         never blocks a session from booting.
         """
         try:
-            if not _manager_role_enabled():
-                return None, None
             # Manager: role-ful when the session's Case role is 'manager'.
             if getattr(session, "case_role", None) == MANAGER_ROLE_ID:
                 role = load_manager_role()

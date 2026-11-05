@@ -1,14 +1,13 @@
 """
-A26 — Flow link/event write path tests (shadow, flag-guarded).
+A26 — Flow link/event write path tests (shadow).
 
 When a flow is created the orchestrator records authoritative case relationships
 and an append-only audit trail, WITHOUT changing execution:
 
-  * flag ON  ⇒ flow.created event + root_task link at flow creation; a child
+  * flow.created event + root_task link at flow creation; a child
     dispatch adds a child_flow link + task.dispatched event on the PARENT flow
     (CONSUMING A26a's stamped edge — no second stamping hook); stage transitions
     append flow.stage_changed events.
-  * flag OFF ⇒ NO flow_links/flow_events writes at all (byte-identical to A19/A22).
 
 Non-negotiable safety: a forced link/event write failure is swallowed and can
 NEVER raise into the dispatch path.

@@ -138,7 +138,7 @@ def test_find_open_case_blank_session_is_none(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Admission — standalone / attach (flag ON)
+# Admission — standalone / attach
 # ---------------------------------------------------------------------------
 
 def test_standalone_turn_creates_no_case(tmp_path, monkeypatch):

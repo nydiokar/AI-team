@@ -168,9 +168,6 @@ class _FakeOrch:
             self, case_id, state=state, actor=actor, reason=reason,
         )
 
-    def _manager_role_enabled(self):
-        return TaskOrchestrator._manager_role_enabled(self)
-
     def _set_session_case_affiliation(self, sid, case_id, role=None):
         sess = self.session_store.get(sid)
         if sess is not None:
@@ -419,38 +416,11 @@ def test_any_group_partial_review_still_waits(tmp_path, monkeypatch):
     assert "t1" not in wake["prompt"]
 
 
-def test_satisfied_case_with_closed_manager_escalates_when_role_off(tmp_path, monkeypatch):
-    # With MANAGER_ROLE OFF, respawn is not viable (a respawned Manager would be a
-    # naked, tool-less session). The dead-session branch then falls back to the
-    # pre-A55 visible-strand ESCALATION (once, idempotent) instead of respawning;
-    # [A104] the stranded message dies (recipient_gone) instead of looping.
-    _on(monkeypatch)
-    monkeypatch.delenv("MANAGER_ROLE_ENABLED", raising=False)
-    db = _db(tmp_path)
-    fid = _open_case(db, round_cap=2)
-    seed_finished_child(db, fid, "t1", requester="mgr-sess")
-
-    session = _FakeSession("mgr-sess", status=SessionStatus.CLOSED)
-    orch = _FakeOrch(_FakeStore(session))
-    assert _continue(orch, db, fid) == 0
-    assert orch.managed_respawns == []
-    marker = _events(db, fid, "case.manager_unavailable")
-    assert len(marker) == 1
-    assert len(orch.notifier.errors) == 1
-    assert _msg_states(db) == {"t1": "dead"}
-
-    # Idempotent: a second tick does not double-escalate.
-    assert _continue(orch, db, fid) == 0
-    assert len(_events(db, fid, "case.manager_unavailable")) == 1
-    assert len(orch.notifier.errors) == 1
-
-
 def test_satisfied_case_with_closed_manager_respawns_when_role_on(tmp_path, monkeypatch):
     # [A55] With MANAGER_ROLE ON, a Case whose bound Manager session is CLOSED and
     # holds an undelivered message is CRASH-RESPAWNED on the SAME Case — not left
     # as a strand. [A104] The message stays pending for the successor.
     _on(monkeypatch)
-    monkeypatch.setenv("MANAGER_ROLE_ENABLED", "1")
     db = _db(tmp_path)
     fid = _open_case(db, round_cap=2)
     seed_finished_child(db, fid, "t1", requester="mgr-sess")
@@ -468,7 +438,6 @@ def test_missing_manager_session_respawns_when_role_on(tmp_path, monkeypatch):
     # [A55] Manager link resolves but the session row is GONE — respawn on the SAME
     # Case (with MANAGER_ROLE ON).
     _on(monkeypatch)
-    monkeypatch.setenv("MANAGER_ROLE_ENABLED", "1")
     db = _db(tmp_path)
     fid = _open_case(db, round_cap=2)
     seed_finished_child(db, fid, "t1", requester="mgr-sess")

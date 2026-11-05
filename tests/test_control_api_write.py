@@ -656,9 +656,8 @@ def test_jobs_requires_auth(client):
 
 # --- [M3.3] POST /api/cases — open a new Case on an existing Manager session ---
 
-def _wire_open_case(orch, *, enabled=True, returns="case-new"):
+def _wire_open_case(orch, *, returns="case-new"):
     """Give the stub orchestrator the two hooks the /api/cases route calls."""
-    orch._manager_role_enabled = lambda: enabled
     orch.open_case_calls = []
 
     def _open_case(objective, session_id, role="manager", completion_criteria=None, round_cap=None):
@@ -707,12 +706,6 @@ def test_open_case_rejects_non_positive_round_cap_422(client, orch):
     )
     assert r.status_code == 422
     assert orch.open_case_calls == []  # never reached the seam
-
-
-def test_open_case_disabled_returns_409(client, orch):
-    _wire_open_case(orch, enabled=False)
-    r = client.post("/api/cases", json={"objective": "x", "session_id": "s"}, headers=_auth())
-    assert r.status_code == 409
 
 
 def test_open_case_unknown_session_returns_404(client, orch):

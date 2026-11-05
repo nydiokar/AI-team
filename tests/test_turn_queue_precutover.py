@@ -83,7 +83,6 @@ def _born_managed_service(db, o, sid="mgr-1", machine="worker-a"):
 def test_PC01_manager_invoke_first_turn_is_one_managed_automation_turn(tmp_path, monkeypatch):
     db, o = _setup(tmp_path, monkeypatch, enroll=False)
     _born_managed_service(db, o)
-    o._manager_role_enabled = lambda: True
     res = asyncio.run(o.invoke_manager("ship X", repo_path="/tmp/repo", node_id="worker-a"))
     assert res["ok"] is True, res
     case_id, tid = res["case_id"], res["task_id"]

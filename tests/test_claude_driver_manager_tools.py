@@ -1,16 +1,13 @@
 """[M3 A34] Session wiring for the Manager MCP tools (claude_driver).
 
-HERMETIC: no SDK boot, no subprocess, no network. Exercises the pure, double-gated
-allowed-tool assembly (`_session_allowed_tools`) + the two gate predicates
-(`_mcp_manager_configured`, `_manager_tools_enabled`).
+HERMETIC: no SDK boot, no subprocess, no network. Exercises the pure allowed-tool
+assembly (`_session_allowed_tools`) + the `_mcp_manager_configured` predicate.
 
 Invariants proved:
-  1. Default (flag OFF, no manager server) ⇒ byte-identical: no manager tools.
-  2. Env flag OFF alone suppresses the grant even when ~/.claude.json has it.
-  3. ~/.claude.json missing the manager server suppresses the grant even with the flag ON.
-  4. Legacy Manager-tools gate grants its original two tools; role-boot grants the complete
-     Manager MCP surface, defaults preserved.
-  5. The jobs grant is independent and unchanged by the manager wiring.
+  1. No role ⇒ no manager tools, even when ~/.claude.json has the manager server.
+  2. Role-boot Manager gets the complete Manager MCP surface, defaults preserved;
+     without the manager server it drops to least-privilege.
+  3. The jobs grant is independent and unchanged by the manager wiring.
 
 Run: `pytest tests/test_claude_driver_manager_tools.py -q` (plain pytest — cost-guard clean).
 """
@@ -33,16 +30,6 @@ def _write_claude_json(tmp_path, monkeypatch, servers: dict) -> None:
     (tmp_path / ".claude.json").write_text(
         json.dumps({"mcpServers": servers}), encoding="utf-8")
     monkeypatch.setattr(cd.Path, "home", staticmethod(lambda: tmp_path))
-
-
-@pytest.fixture(autouse=True)
-def _clean_flag(monkeypatch):
-    # These tests exercise the LEGACY (A34) grant path — MANAGER_ROLE_ENABLED OFF.
-    # Clear both flags so the file is deterministic regardless of the ambient .env
-    # (which may carry MANAGER_ROLE_ENABLED=1 when the live role path is enabled).
-    monkeypatch.delenv("MANAGER_TOOLS_ENABLED", raising=False)
-    monkeypatch.delenv("MANAGER_ROLE_ENABLED", raising=False)
-    yield
 
 
 _LEGACY_MANAGER_TOOLS = {
@@ -91,59 +78,29 @@ def test_manager_configured_false_when_no_file(tmp_path, monkeypatch):
     assert cd._mcp_manager_configured() is False
 
 
-@pytest.mark.parametrize("val,expected", [
-    ("1", True), ("true", True), ("YES", True), ("on", True),
-    ("0", False), ("false", False), ("", False), ("nope", False),
-])
-def test_manager_tools_enabled_flag_parsing(monkeypatch, val, expected):
-    monkeypatch.setenv("MANAGER_TOOLS_ENABLED", val)
-    assert cd._manager_tools_enabled() is expected
-
-
 # --------------------------------------------------------------------------- #
-# Assembly — the double gate
+# Assembly — per-role grant
 # --------------------------------------------------------------------------- #
 
 def test_default_has_no_manager_tools(monkeypatch):
-    """Flag OFF + no manager server ⇒ byte-identical to _DEFAULT_TOOLS (+jobs off)."""
+    """No role + no manager server ⇒ exactly _DEFAULT_TOOLS (+jobs off)."""
     monkeypatch.setattr(cd, "_mcp_jobs_configured", lambda: False)
     monkeypatch.setattr(cd, "_mcp_manager_configured", lambda: False)
     tools = cd._session_allowed_tools()
     assert tools == list(cd._DEFAULT_TOOLS)
 
 
-def test_flag_off_suppresses_even_when_configured(monkeypatch):
-    """Server present but flag OFF ⇒ NO manager tools (env kill switch wins)."""
+def test_roleless_session_gets_no_manager_tools_even_when_configured(monkeypatch):
+    """Server present but no role ⇒ NO manager tools (grants are per-role only)."""
     monkeypatch.setattr(cd, "_mcp_jobs_configured", lambda: False)
     monkeypatch.setattr(cd, "_mcp_manager_configured", lambda: True)
-    # flag not set (autouse fixture cleared it)
     assert not (_LEGACY_MANAGER_TOOLS & set(cd._session_allowed_tools()))
-
-
-def test_flag_on_but_not_configured_suppresses(monkeypatch):
-    """Flag ON but no manager server ⇒ NO manager tools (config gate wins)."""
-    monkeypatch.setenv("MANAGER_TOOLS_ENABLED", "1")
-    monkeypatch.setattr(cd, "_mcp_jobs_configured", lambda: False)
-    monkeypatch.setattr(cd, "_mcp_manager_configured", lambda: False)
-    assert not (_LEGACY_MANAGER_TOOLS & set(cd._session_allowed_tools()))
-
-
-def test_legacy_both_gates_grant_original_manager_tools(monkeypatch):
-    """The legacy opt-in remains restricted to its original two-tool grant."""
-    monkeypatch.setenv("MANAGER_TOOLS_ENABLED", "1")
-    monkeypatch.setattr(cd, "_mcp_jobs_configured", lambda: False)
-    monkeypatch.setattr(cd, "_mcp_manager_configured", lambda: True)
-    tools = cd._session_allowed_tools()
-    assert _LEGACY_MANAGER_TOOLS <= set(tools)
-    for t in cd._DEFAULT_TOOLS:
-        assert t in tools
 
 
 def test_role_manager_grants_complete_manager_surface(monkeypatch):
     """Role-boot Manager gets every tool advertised by the current Manager role."""
     monkeypatch.setattr(cd, "_mcp_jobs_configured", lambda: False)
     monkeypatch.setattr(cd, "_mcp_manager_configured", lambda: True)
-    monkeypatch.setattr(cd, "_manager_role_enabled", lambda: True)
     tools = cd._session_allowed_tools(role="manager")
     assert _ROLE_MANAGER_TOOLS == set(manager_tool_names())
     assert _ROLE_MANAGER_TOOLS <= set(tools)
@@ -161,7 +118,6 @@ def test_role_manager_grant_matches_advertised_mcp_surface():
 
 def test_jobs_grant_independent_of_manager(monkeypatch):
     """The jobs watch_job grant is unchanged and orthogonal to the manager gate."""
-    monkeypatch.setenv("MANAGER_TOOLS_ENABLED", "1")
     monkeypatch.setattr(cd, "_mcp_jobs_configured", lambda: True)
     monkeypatch.setattr(cd, "_mcp_manager_configured", lambda: False)
     tools = cd._session_allowed_tools()
@@ -188,7 +144,6 @@ def test_base_tools_reach_every_role(monkeypatch):
     unmapped role alike (when the jobs server is configured)."""
     monkeypatch.setattr(cd, "_mcp_jobs_configured", lambda: True)
     monkeypatch.setattr(cd, "_mcp_manager_configured", lambda: True)
-    monkeypatch.setattr(cd, "_manager_role_enabled", lambda: True)
     for role in ("manager", "worker", "scientific_governor", "some_future_advisory", None):
         tools = cd._session_allowed_tools(role=role)
         assert set(base_tool_names()) <= set(tools), f"base tools missing for role={role!r}"
@@ -199,7 +154,6 @@ def test_unmapped_role_is_least_privilege(monkeypatch):
     surface just by existing (least-privilege default in the role→profile registry)."""
     monkeypatch.setattr(cd, "_mcp_jobs_configured", lambda: True)
     monkeypatch.setattr(cd, "_mcp_manager_configured", lambda: True)
-    monkeypatch.setattr(cd, "_manager_role_enabled", lambda: True)
     tools = set(cd._session_allowed_tools(role="some_future_advisory"))
     assert not (set(manager_tool_names()) & tools)
     assert set(base_tool_names()) <= tools
@@ -224,7 +178,6 @@ def test_overlay_grants_extra_manager_tool_through_driver(monkeypatch):
     from src.backends.claude_role_adapter import static_profile_tools
     monkeypatch.setattr(cd, "_mcp_jobs_configured", lambda: True)
     monkeypatch.setattr(cd, "_mcp_manager_configured", lambda: True)
-    monkeypatch.setattr(cd, "_manager_role_enabled", lambda: True)
     _set_dynamic(monkeypatch, dynamic=True, overlay=json.dumps(
         {"profiles": {"manager_v1": static_profile_tools()["manager_v1"] + ["mcp__manager__brand_new"]}}))
     tools = cd._session_allowed_tools(role="manager")
@@ -236,7 +189,6 @@ def test_gate_off_driver_grant_is_static(monkeypatch):
     import json
     monkeypatch.setattr(cd, "_mcp_jobs_configured", lambda: True)
     monkeypatch.setattr(cd, "_mcp_manager_configured", lambda: True)
-    monkeypatch.setattr(cd, "_manager_role_enabled", lambda: True)
     _set_dynamic(monkeypatch, dynamic=False, overlay=json.dumps(
         {"profiles": {"manager_v1": ["mcp__manager__should_be_ignored"]}}))
     tools = cd._session_allowed_tools(role="manager")

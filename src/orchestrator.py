@@ -52,7 +52,6 @@ SECTIONS (in source order)
 
 FEATURE FLAGS (runtime-gated, all default OFF unless noted)
 ------------------------------------------------------------
-  MANAGER_ROLE_ENABLED        — enable M3 Manager role boot via /api/manager
   QUOTA_COORDINATOR_ENABLED   — observe-only quota/session-window coordinator
 """
 import asyncio
@@ -3660,15 +3659,6 @@ class TaskOrchestrator(ITaskOrchestrator):
         from src.control.db import case_respawn_requires_approval
         if not case_respawn_requires_approval():
             return await self._do_respawn_manager_for_case(db, case_id, generation, dead_session_id)
-        # Mirror _do_respawn_manager_for_case's own defensive re-gate BEFORE ever
-        # asking the operator: an approval the eventual respawn would refuse
-        # anyway (a naked tool-less Manager with role off)
-        # is worse than no approval — it would sit "approved" with nothing
-        # happening. Let these fall straight through to strand-escalation, same
-        # as pre-gate behavior.
-        if not self._manager_role_enabled():
-            return False
-
         action = "case_manager_respawn"
         try:
             self._ensure_approval_service(db)
@@ -3754,13 +3744,6 @@ class TaskOrchestrator(ITaskOrchestrator):
         binds the fresh session to the passed ``case_id`` via a manager ``flow_link`` and
         reconstructs the objective/waits from the DB (``get_case_brief``). The objective-lock is preserved end to end.
         """
-        # Manager respawn boots a role-full Manager session; the driver's _role_boot
-        # only applies the role prompt + scoped manager tools when MANAGER_ROLE is ON.
-        # Without it a "respawn" would be a naked session with no dispatch tools — worse
-        # than the visible strand. Surface via the escalation path instead.
-        if not self._manager_role_enabled():
-            return False
-
         # Reconstruct the Case from the DB ALONE (A54). A None brief means the Case is
         # unknown/unreadable — not respawnable; let the caller escalate.
         brief = db.get_case_brief(case_id)
@@ -6660,25 +6643,12 @@ class TaskOrchestrator(ITaskOrchestrator):
 
     # ---------------------------------------------------------------------------
     # MANAGER INVOCATION  (M3.1)
-    # Flag: MANAGER_ROLE_ENABLED (default OFF).
-    #
     # invoke_manager() is the single entry point for /api/manager.  It opens a
     # Case, creates or reuses a session, applies the Manager role boot
     # (system-prompt + scoped MCP tools), and submits the first-turn objective
     # via submit_instruction().  Everything after that is driven by the Manager
     # itself (dispatch_worker → wait/arm → review → close_case).
     # ---------------------------------------------------------------------------
-
-    def _manager_role_enabled(self) -> bool:
-        """[A38] Master gate for the Phase 3.1 Manager-role invocation path.
-
-        Default OFF ⇒ ``invoke_manager`` refuses (the new surface is inert), so the
-        gateway is byte-identical to pre-A38. Mirrors the driver's
-        ``_manager_role_enabled`` (same env var) — a Manager booted here only picks
-        up its role prompt + scoped tools when the driver gate is also ON.
-        """
-        from src.control.db import manager_role_enabled
-        return manager_role_enabled()
 
     async def invoke_manager(
         self,
@@ -6701,7 +6671,7 @@ class TaskOrchestrator(ITaskOrchestrator):
         → deliver the objective as the Manager's first assignment turn. The driver's
         ``_role_boot`` then loads the stable role prompt + scoped manager tools for
         that session. Returns ``{ok, session_id, case_id, task_id}``; a structured
-        ``{ok: False, reason}`` when the role path is disabled or a step fails.
+        ``{ok: False, reason}`` when a step fails.
         Raises ``HarnessAdmissionBlocked`` from the first-turn submit (the caller
         translates it), exactly like the ``/api/instructions`` seam. A typed
         ``TurnQueueError`` (managed first turn refused) is re-raised only after
@@ -6715,15 +6685,12 @@ class TaskOrchestrator(ITaskOrchestrator):
         line of work AND its role prompt AND its worker-dispatch tools. All three are
         optional; absent all three the boot is byte-identical to the legacy path.
 
-        [A82 Stage 8a] A Level-3 block of the first-turn submit is undone like a
+        [A82 Stage 8a] An admission block of the first-turn submit is undone like a
         typed refusal (``_abandon_manager_boot``: Case force-cancelled, session
         closed) and then re-raised — no orphan Case/session per retry.
         """
         from src.core.interfaces import SessionOrigin
         from src.core.roles import ManagerInvocation, render_first_assignment
-
-        if not self._manager_role_enabled():
-            return {"ok": False, "reason": "manager_role_disabled"}
 
         resolved_node_id = node_id
         if not resolved_node_id or resolved_node_id == "__local__":

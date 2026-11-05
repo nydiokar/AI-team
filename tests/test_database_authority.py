@@ -24,7 +24,7 @@ AUTH = {"Authorization": f"Bearer {TOKEN}"}
 
 # Flags these tests assert on; a developer .env (loaded into os.environ by config)
 # must not leak into the env → default fallback under test.
-_ASSERTED_FLAGS = ("QUOTA_PREWARM_ENABLED", "MANAGER_ROLE_ENABLED", "MANAGER_TOOLS_ENABLED")
+_ASSERTED_FLAGS = ("QUOTA_PREWARM_ENABLED", "TOOL_PROFILES_DYNAMIC")
 
 
 @pytest.fixture(autouse=True)
@@ -87,14 +87,14 @@ def test_installed_client_disables_local_mesh_db(tmp_path: Path) -> None:
 
 def test_flag_rows_come_from_client_then_env(monkeypatch: pytest.MonkeyPatch) -> None:
     http = _FakeHTTP()
-    http.get_responses.append(_snapshot("r1", MANAGER_ROLE_ENABLED="1"))
+    http.get_responses.append(_snapshot("r1", TOOL_PROFILES_DYNAMIC="1"))
     remote = RemoteControllerState(http)
     assert remote.refresh() is True
     controller_state.install(remote)
 
-    monkeypatch.setenv("MANAGER_ROLE_ENABLED", "0")
+    monkeypatch.setenv("TOOL_PROFILES_DYNAMIC", "0")
     monkeypatch.setenv("QUOTA_PREWARM_ENABLED", "1")
-    assert db_mod.runtime_flag_enabled("MANAGER_ROLE_ENABLED") is True  # controller row wins
+    assert db_mod.runtime_flag_enabled("TOOL_PROFILES_DYNAMIC") is True  # controller row wins
     assert db_mod.runtime_flag_enabled("QUOTA_PREWARM_ENABLED") is True  # no row ⇒ env
     monkeypatch.delenv("QUOTA_PREWARM_ENABLED")
     assert db_mod.runtime_flag_enabled("QUOTA_PREWARM_ENABLED") is False  # ⇒ default
@@ -103,8 +103,8 @@ def test_flag_rows_come_from_client_then_env(monkeypatch: pytest.MonkeyPatch) ->
 def test_controller_process_keeps_local_db_without_client() -> None:
     db = db_mod.get_db()
     assert db is not None
-    db.set_runtime_flag("MANAGER_ROLE_ENABLED", True)
-    assert db_mod.runtime_flag_enabled("MANAGER_ROLE_ENABLED") is True
+    db.set_runtime_flag("TOOL_PROFILES_DYNAMIC", True)
+    assert db_mod.runtime_flag_enabled("TOOL_PROFILES_DYNAMIC") is True
 
 
 # --- task-server routes ------------------------------------------------------
@@ -142,7 +142,7 @@ def test_runtime_flags_route_503_without_db(client: TestClient, monkeypatch: pyt
 def test_client_keeps_last_known_good_on_failure_and_malformed() -> None:
     http = _FakeHTTP()
     http.get_responses += [
-        _snapshot("r1", MANAGER_TOOLS_ENABLED="1"),
+        _snapshot("r1", TOOL_PROFILES_DYNAMIC="1"),
         OSError("controller down"),
         {"revision": "r2", "flags": "not-a-list"},
         {"unexpected": True},
@@ -152,7 +152,7 @@ def test_client_keeps_last_known_good_on_failure_and_malformed() -> None:
     assert remote.refresh() is False
     assert remote.refresh() is False
     assert remote.refresh() is False
-    row = remote.runtime_flag_row("manager_tools_enabled")
+    row = remote.runtime_flag_row("tool_profiles_dynamic")
     assert row is not None and row["value"] == "1"
     assert remote.revision == "r1"
 
@@ -167,7 +167,7 @@ def test_client_rejects_oversized_snapshot() -> None:
 
 def test_client_never_fetched_returns_no_rows() -> None:
     remote = RemoteControllerState(_FakeHTTP())
-    assert remote.runtime_flag_row("MANAGER_ROLE_ENABLED") is None
+    assert remote.runtime_flag_row("TOOL_PROFILES_DYNAMIC") is None
     assert remote.next_delay() == remote.retry_interval_sec
 
 
@@ -235,9 +235,9 @@ def test_worker_install_fetches_once_and_tolerates_outage(tmp_path: Path) -> Non
     config.mesh.db_path = str(tmp_path / "worker" / "mesh.db")
     db_mod._db_instance = None
     http = _FakeHTTP()
-    http.get_responses.append(_snapshot("r1", MANAGER_ROLE_ENABLED="1"))
+    http.get_responses.append(_snapshot("r1", TOOL_PROFILES_DYNAMIC="1"))
     _install_controller_state(http)  # type: ignore[arg-type]
-    assert db_mod.runtime_flag_enabled("MANAGER_ROLE_ENABLED") is True
+    assert db_mod.runtime_flag_enabled("TOOL_PROFILES_DYNAMIC") is True
     assert db_mod.get_db() is None
 
     controller_state.uninstall()
@@ -263,7 +263,7 @@ def test_authority_report_is_read_only_and_classifies(tmp_path: Path) -> None:
     ctl_path, wrk_path = tmp_path / "ctl.db", tmp_path / "wrk.db"
     ctl, wrk = MeshDB(str(ctl_path)), MeshDB(str(wrk_path))
     for db in (ctl, wrk):
-        db.set_runtime_flag("MANAGER_ROLE_ENABLED", True)
+        db.set_runtime_flag("TOOL_PROFILES_DYNAMIC", True)
     ctl.close()
     wrk.close()
 
@@ -277,7 +277,7 @@ def test_authority_report_is_read_only_and_classifies(tmp_path: Path) -> None:
     assert _digest() == before
 
     with sqlite3.connect(wrk_path) as conn:
-        conn.execute("UPDATE runtime_flags SET value='0' WHERE flag_name='MANAGER_ROLE_ENABLED'")
+        conn.execute("UPDATE runtime_flags SET value='0' WHERE flag_name='TOOL_PROFILES_DYNAMIC'")
         conn.execute(
             "INSERT INTO push_subscriptions(endpoint,p256dh_key,auth_key,enabled,created_at,updated_at)"
             " VALUES ('https://push.example/x','k','a',1,'2026-10-02','2026-10-02')"
@@ -285,7 +285,7 @@ def test_authority_report_is_read_only_and_classifies(tmp_path: Path) -> None:
     report = build_report(ctl_path, wrk_path)
     assert report.exit_code == 3  # flag conflict outranks row divergence
     assert [(c.flag_name, c.controller_value, c.worker_value) for c in report.flag_conflicts] == [
-        ("MANAGER_ROLE_ENABLED", "1", "0")
+        ("TOOL_PROFILES_DYNAMIC", "1", "0")
     ]
     push = next(t for t in report.tables if t.table == "push_subscriptions")
     assert push.worker_only == 1

@@ -7,9 +7,8 @@ the db level on a real temp MeshDB (like test_case_closure).
 
 Proves:
   (a) 'record_review' is a registered Manager tool;
-  (b) flag ON ⇒ POST /api/cases/{id}/review appends the correct review.* event per verdict;
-  (c) db.close_case refuses on an unresolved rework, closes after a later accept OR waive;
-  (d) flag OFF is byte-identical ⇒ route 404 + no review gate in close_case.
+  (b) POST /api/cases/{id}/review appends the correct review.* event per verdict;
+  (c) db.close_case refuses on an unresolved rework, closes after a later accept OR waive.
 
 Run: `pytest tests/test_review_emitter.py -q`
 """
@@ -87,7 +86,7 @@ def _auth():
 
 
 # ---------------------------------------------------------------------------
-# (b) flag ON ⇒ route appends the correct review.* event per verdict
+# (b) route appends the correct review.* event per verdict
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("verdict,event_type", [

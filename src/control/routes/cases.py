@@ -253,9 +253,8 @@ def build_router(
         idempotency_key: Optional[str] = Header(default=None, alias="Idempotency-Key"),
     ) -> JSONResponse:
         """[A38] Invoke a Manager: create a Case-owning session, open one Case, and
-        deliver the objective as its first assignment. Refuses with 409 when the
-        Manager-role path is disabled (MANAGER_ROLE_ENABLED OFF ⇒ new surface inert).
-        Translates the Level-3 admission block to a clean 409, like /api/instructions."""
+        deliver the objective as its first assignment. Translates an admission block
+        to a clean 409, like /api/instructions."""
         from src.control.turn_queue import TurnQueueError
         from src.orchestrator import HarnessAdmissionBlocked
 
@@ -286,8 +285,7 @@ def build_router(
 
             if not result.get("ok"):
                 reason = result.get("reason") or "manager_invoke_failed"
-                status = 409 if reason == "manager_role_disabled" else _REASON_STATUS.get(reason, 400)
-                raise HTTPException(status_code=status, detail={"ok": False, "reason": reason})
+                raise HTTPException(status_code=_REASON_STATUS.get(reason, 400), detail={"ok": False, "reason": reason})
 
             idem_put("manager", idempotency_key, result)
             return JSONResponse(result)
@@ -299,11 +297,8 @@ def build_router(
     def api_open_case(body: CaseOpenBody) -> JSONResponse:
         """[M3.3] Open a NEW Case on an existing Manager session — the seam that lets
         a single persistent Manager session run many Cases (open → dispatch → review →
-        close → open the next) without spawning a fresh session each time. Gated by
-        ``MANAGER_ROLE_ENABLED`` (409 when OFF ⇒ surface inert). Returns
+        close → open the next) without spawning a fresh session each time. Returns
         ``{ok, case_id}``; 404 for an unknown session, 400 on a Case-birth failure."""
-        if not orchestrator._manager_role_enabled():
-            raise HTTPException(status_code=409, detail={"ok": False, "reason": "manager_role_disabled"})
         session = orchestrator.session_service.store.get(body.session_id)
         if session is None:
             raise HTTPException(status_code=404, detail={"ok": False, "reason": "session_not_found"})
