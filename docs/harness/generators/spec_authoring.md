@@ -77,5 +77,3 @@ spiral at 2 rounds (spec §3), same as `adversarial_review.md`.
   `decomposer.md`) — orphan `flow_runs` are the anti-goal (§0.2 / M2.5).
 - **Separate seat, enforced.** The reviewer actor must differ from the author; the
   gateway records whoever the seam names, so pass a genuinely separate `reviewer`.
-- **Flag-gated.** The whole path is gated by `SPEC_AUTHORING_ENABLED`; with it OFF the
-  tools return a disabled marker and the routes 404 (byte-identical to pre-M4).

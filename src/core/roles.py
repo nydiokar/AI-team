@@ -83,7 +83,7 @@ WORKER_SKILLS: List[str] = []
 
 # worker.md mirrors manager.md: the concrete task arrives per-dispatch as the
 # dispatch envelope (the first assignment turn), never in this file. Loaded
-# verbatim, gated by MANAGER_ROLE_ENABLED + the opt-in role_boot='worker' signal
+# verbatim, gated by the opt-in role_boot='worker' signal
 # threaded from dispatch_worker(role='worker'). Same "no engineering meta-doc,
 # no human-only instructions" rule as manager.md above.
 _WORKER_ROLE_DOC: Path = (

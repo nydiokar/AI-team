@@ -167,11 +167,7 @@ still running) when you resume a Case.
 one worker outstanding and nothing else to do meanwhile. It is an in-turn BLOCKING poll: while it
 runs your session is BUSY, so you can neither review another finished worker nor answer the
 operator. Never chain it across a batch. Its ceiling is intentionally short (≤10 min) and a
-`TIMEOUT` return is not an error — it hands control back. If a tool returns a `disabled`/404 reason,
-`CASE_CONTINUATION_ENABLED` is OFF on the gateway — that is a deliberate **operator activation
-decision** (real autonomous behavior, real paid spend), never yours to flip; fall back to a single
-short `wait_for_worker` and surface the OFF state to the operator only if it is actually blocking
-the work at hand.
+`TIMEOUT` return is not an error — it hands control back.
 
 ## Reviewing a worker's delivery — adversarial review gate
 

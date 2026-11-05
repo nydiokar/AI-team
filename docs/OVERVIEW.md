@@ -16,7 +16,7 @@ anti-goals in [`.ai/context/production_vision.md`](../.ai/context/production_vis
 On top of that base, the gateway can also **invoke a Manager** — a Claude session
 bound to a durable Case that can dispatch worker sessions and authoritatively close
 the Case once done. This is invoked, not autonomous-by-default: it runs only when
-something calls `/api/manager`, and it's flag-gated (`MANAGER_ROLE_ENABLED`). See
+something calls `/api/manager`. See
 [`docs/backend/ARCHITECTURE.md` §2b](backend/ARCHITECTURE.md#2b-manager--case-surface-m2m3-flag-gated).
 
 ## The shape (as it runs)
