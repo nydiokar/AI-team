@@ -108,6 +108,26 @@ turn or historical job consumption. Boundary: four actual result mutations even 
 cancellation, 2 KiB body/five-second read deadline, bounded response and existing five-second
 DB lock budget; native COMMIT stalls remain outside a hard deadline. Evidence: A109/A110.
 
+**2026-11-05 — Session job notices + visible usage (PR #278, live `bd2d87e`, schema 49).**
+Session `78ec11af39a0` exposed internal consumption audits as fake user/agent exchanges.
+Existing local/federated completions now render once as system notices; internal delivery
+rows stay out of ordinary activity and restart context. Usage distinguishes pending,
+partial, recorded zero, unavailable and refresh errors. Claude live snapshots deduplicate
+message IDs and replace the same final aggregate. Focused tests, CI and production-copy
+replay pass; live read-only browser check shows six notices, no withdrawal pollution and
+10,079,478 recorded tokens, explicitly partial during work. No history rewrite or migration.
+Boundary: four usage-read slots, 128-character identity, constant response, shared ten-second
+cooperative SQLite budget; the existing native IO/Python/socket deferral still applies.
+Live delivery coalesces at most 200 invocation snapshots, with one uploader and at most
+4096 message identities per invocation. **Worker activation remains operator-gated:** both
+workers still report `c2a81c2`; Horse runs `task_6c1c9d9f`, and kanebra hosts this coding
+session (`task_4f26b406`). No worker restarted; the idle-only activation question is pending.
+Separate observed context-metric defect: the Claude adapter labels raw input inclusive-cache
+although Claude counters exclude cache, yielding tiny historical context readings. Spend
+SQL already source-gates cache normalization, so this does not change the verified spend
+totals. Historical context normalization needs a separately scoped repair; do not infer a
+valid context size from those raw-input readings.
+
 **2026-11-03 — A102 S2 merged + gateway live (`7c6d01a`, PR #271).** Carrier-owned `TurnControl` now drives
 the natural backend APIs; compatibility shims, rollout flags and dead gateway session
 execution are removed. Cancellation, runtime readiness, attachment refusal and failed-turn
