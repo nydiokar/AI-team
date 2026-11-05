@@ -115,12 +115,6 @@ def _worker_session(role_boot=None):
     return types.SimpleNamespace(session_id="w1", case_role="worker", role_boot=role_boot)
 
 
-def test_role_boot_worker_default_is_byte_identical_flag_off():
-    """Flag OFF ⇒ (None, None) for a case_role='worker' session (today's boot)."""
-    inst = _driver()
-    assert inst._role_boot(_worker_session(role_boot=None)) == (None, None)
-
-
 def test_role_boot_joined_worker_stays_tier0_without_opt_in(monkeypatch):
     """THE constraint: a case_role='worker' session that
     was NOT opted-in (role_boot is None) must return the SAME role-less result as

@@ -3,7 +3,7 @@ A38 — M3 Phase 3.1: Manager role wiring (canonical layers + minimal vertical s
 
 Covers, without any live/paid backend:
   * the provider-neutral role seam (`src/core/roles.py`) + Claude adapter;
-  * driver role-boot + per-session tool scoping (flag OFF ⇒ byte-identical);
+  * driver role-boot + per-session tool scoping;
   * admission JOIN branch — a worker task joins the Manager's Case, not a child Case,
     and worker completion leaves the Case OPEN;
   * `orchestrator.invoke_manager` gating + happy path;
