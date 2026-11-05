@@ -16,11 +16,35 @@ import { cn } from "../lib/cn";
 import { NodeActivityCards } from "../components/home/NodeActivityCards";
 import { BackendLogo } from "../components/home/BackendLogo";
 import { summarizeProviderUsage, type UsageWindow } from "../lib/homeUsage";
+import { relAgeFrom } from "../lib/time";
 import { dailySpend, totalKnownUsd, sparklinePoints } from "../lib/homeCost";
+
+function resetLabel(value: string | null | undefined): string | null {
+  if (!value) return null;
+  const resetAt = new Date(value);
+  if (!Number.isFinite(resetAt.getTime())) return null;
+  const delta = resetAt.getTime() - Date.now();
+  const abs = Math.abs(delta) / 1000;
+  const unit = abs < 90
+    ? "1m"
+    : abs < 3600
+      ? `${Math.round(abs / 60)}m`
+      : abs < 86_400
+        ? `${Math.round(abs / 3600)}h`
+        : `${Math.round(abs / 86_400)}d`;
+  const when = resetAt.toLocaleString([], {
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+  return `${delta >= 0 ? `resets in ${unit}` : `reset ${relAgeFrom(value)}`} · ${when}`;
+}
 
 function UsageMeter({ window: w, label }: { window?: UsageWindow; label: string }) {
   const percent = w?.usedPercent;
   const known = percent != null;
+  const reset = resetLabel(w?.resetAt);
   return <div className="min-w-0" title={w?.resetAt ? `Resets ${new Date(w.resetAt).toLocaleString()}` : w?.unknownReason ?? "Usage unavailable"}>
     <div className="mb-1.5 flex items-center justify-between gap-1 text-[11px]">
       <span className="text-ink-muted">{label}</span>
@@ -29,6 +53,7 @@ function UsageMeter({ window: w, label }: { window?: UsageWindow; label: string 
     <div role={known ? "meter" : undefined} aria-label={`${label} quota used`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={percent ?? undefined} className="h-1.5 overflow-hidden rounded-full bg-surface-3">
       {known && <div className={cn("h-full rounded-full", w?.nearLimit ? "bg-warn" : "bg-accent")} style={{ width: `${percent}%` }} />}
     </div>
+    {reset && <p className="mt-1 text-[10px] leading-tight tabular-nums text-ink-muted">{reset}</p>}
   </div>;
 }
 

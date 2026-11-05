@@ -1,25 +1,12 @@
 import { useEffect, useRef, useState } from "react";
-import {
-  Cpu,
-  Layers,
-  Download,
-  CheckCircle2,
-  Activity,
-  ChevronDown,
-} from "lucide-react";
+import { Download, Activity } from "lucide-react";
 import { CompactTopBar } from "../components/shell/CompactTopBar";
 import { SectionHeader } from "../components/ui/SectionHeader";
-import { HealthChip } from "../components/ui/StatusChip";
 import { Button } from "../components/ui/Button";
-import { NodeDetailSheet } from "../components/system/NodeDetailSheet";
-import { JobsPanel } from "../components/system/JobsPanel";
 import { PushSetting } from "../components/system/PushSetting";
-import { BackendUsagePanel } from "../components/system/BackendUsagePanel";
-import { QuotaWindowPanel } from "../components/system/QuotaWindowPanel";
-import { useMeshHealth, useTargets } from "../hooks/useLiveData";
-import type { Target } from "../domain/models";
+import { useMeshHealth } from "../hooks/useLiveData";
 import type { RawMeshHealthResponse } from "../transport/rawApi";
-import { relAge, elapsed } from "../lib/time";
+import { relAge } from "../lib/time";
 
 type BeforeInstallPromptEvent = Event & { prompt: () => Promise<void> };
 
@@ -48,116 +35,6 @@ function useInstallPrompt() {
   };
 
   return { canInstall, isIos, install };
-}
-
-/** Simplified mesh action → readable label for the task list. */
-function actionLabel(action: string): string {
-  if (action === "run_oneoff") return "oneoff";
-  if (action === "run_session" || action === "create_session" || action === "resume_session") return "session";
-  if (action === "compact_session") return "compact";
-  if (action === "cancel") return "cancel";
-  return action.replace(/_/g, " ");
-}
-
-function TargetCard({ target, onClick }: { target: Target; onClick: () => void }) {
-  const hasSlots = target.slotsUsed !== null && target.slotsTotal !== null;
-  const shownTasks = target.activeTasks.slice(0, 3);
-  const hiddenCount = target.activeTasks.length - shownTasks.length;
-
-  return (
-    <button
-      className="card-elev w-full rounded-xl px-4 py-3.5 text-left transition-transform active:scale-[0.99]"
-      onClick={onClick}
-      aria-label={`View details for ${target.id}`}
-    >
-      <div className="flex items-center gap-2">
-        <Cpu className="size-4 shrink-0 text-ink-muted" />
-        <span className="min-w-0 flex-1 truncate font-medium text-ink">{target.id}</span>
-        <HealthChip health={target.health} />
-      </div>
-      <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-ink-muted">
-        <span className="inline-flex items-center gap-1">
-          <CheckCircle2 className="size-3 text-ok" />
-          {relAge(target.heartbeatAgeSec)}
-        </span>
-        {target.backends.length > 0 && (
-          <span className="inline-flex items-center gap-1">
-            <Layers className="size-3" />
-            <span className="font-mono text-accent/90">{target.backends.join(" · ")}</span>
-          </span>
-        )}
-        <span className="ml-auto text-ink-muted">
-          {hasSlots ? `${target.slotsUsed}/${target.slotsTotal} slots` : `max ${target.maxConcurrent}`}
-        </span>
-      </div>
-      {shownTasks.length > 0 && (
-        <div className="mt-2.5 space-y-1.5 border-t border-hairline/50 pt-2.5">
-          {shownTasks.map((t) => {
-            const dur = elapsed(t.startedAt);
-            const durSec = t.startedAt
-              ? (Date.now() - new Date(t.startedAt).getTime()) / 1000
-              : 0;
-            const isLong = durSec > 3600;
-            return (
-              <div key={t.taskId} className="flex items-center gap-2 text-[11px]">
-                <span className="size-1.5 shrink-0 rounded-full bg-accent pulse-dot" />
-                <span className="min-w-0 flex-1 truncate font-mono text-ink-soft">
-                  {actionLabel(t.action)} · {t.backend}
-                </span>
-                {dur && (
-                  <span
-                    className={`shrink-0 tabular-nums ${isLong ? "font-medium text-warn" : "text-ink-muted"}`}
-                  >
-                    {dur}
-                    {isLong ? " ⚠" : ""}
-                  </span>
-                )}
-              </div>
-            );
-          })}
-          {hiddenCount > 0 && (
-            <div className="text-[11px] text-ink-muted/60">+{hiddenCount} more</div>
-          )}
-        </div>
-      )}
-    </button>
-  );
-}
-
-/** Dormant nodes aren't operational status — they're inventory. One muted,
- *  expandable line keeps them reachable without cluttering the live view. */
-function OfflineNodes({ nodes, onPick }: { nodes: Target[]; onPick: (t: Target) => void }) {
-  const [open, setOpen] = useState(false);
-  if (nodes.length === 0) return null;
-  return (
-    <div className="mt-2">
-      <button
-        onClick={() => setOpen((v) => !v)}
-        aria-expanded={open}
-        className="flex w-full items-center gap-2 rounded-lg bg-surface-1/50 px-3 py-2 text-[12px] text-ink-muted ring-1 ring-hairline/60 transition-colors hover:bg-surface-2/50 hover:text-ink-soft"
-      >
-        <span className="size-1.5 rounded-full bg-ink-muted/60" />
-        <span className="font-medium">{nodes.length} offline</span>
-        <span className="text-ink-muted/70">— {open ? "hide" : "show"}</span>
-        <ChevronDown className={`ml-auto size-3.5 transition-transform ${open ? "rotate-180" : ""}`} />
-      </button>
-      {open && (
-        <div className="mt-1 space-y-1">
-          {nodes.map((t) => (
-            <button
-              key={t.id}
-              onClick={() => onPick(t)}
-              className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-[13px] text-ink-soft transition-colors hover:bg-surface-2/40"
-            >
-              <Cpu className="size-3.5 shrink-0 text-ink-muted/60" />
-              <span className="min-w-0 flex-1 truncate">{t.id}</span>
-              <span className="shrink-0 text-[11px] text-ink-muted">{relAge(t.heartbeatAgeSec)}</span>
-            </button>
-          ))}
-        </div>
-      )}
-    </div>
-  );
 }
 
 function sampleAge(sampledAt: string | undefined): string {
@@ -306,16 +183,8 @@ function MeshHealthPanel({
 }
 
 export function SystemScreen() {
-  const { data: targets, isLoading, error } = useTargets();
   const { data: meshHealth, isLoading: meshHealthLoading, error: meshHealthError } = useMeshHealth();
   const { canInstall, isIos, install } = useInstallPrompt();
-  const [selectedTarget, setSelectedTarget] = useState<Target | null>(null);
-  const [jobsExpanded, setJobsExpanded] = useState(true);
-  const [jobs, setJobs] = useState({ total: 0, running: 0, unavailable: false });
-
-  const all = targets ?? [];
-  const liveNodes = all.filter((t) => t.live);
-  const offlineNodes = all.filter((t) => !t.live);
 
   return (
     <div className="pb-8">
@@ -323,68 +192,6 @@ export function SystemScreen() {
 
       <SectionHeader label="Mesh" />
       <MeshHealthPanel data={meshHealth} isLoading={meshHealthLoading} error={meshHealthError} />
-
-      {/* ── Nodes — live first; dormant ones fold away ── */}
-      <SectionHeader
-        label="Nodes"
-        action={
-          all.length > 0 ? (
-            <span className="text-[11px] text-ink-muted">
-              <span className={liveNodes.length > 0 ? "text-ok" : ""}>{liveNodes.length}</span> online
-            </span>
-          ) : undefined
-        }
-      />
-      <div className="px-4">
-        {isLoading && (
-          <div className="card-elev animate-pulse rounded-xl px-4 py-3.5">
-            <div className="flex items-center gap-2">
-              <div className="size-4 rounded bg-surface-2" />
-              <div className="h-4 flex-1 rounded bg-surface-2" />
-              <div className="h-5 w-16 rounded-full bg-surface-2" />
-            </div>
-          </div>
-        )}
-        {error && <p className="py-4 text-center text-sm text-bad">Couldn't load nodes.</p>}
-
-        <div className="space-y-2.5">
-          {liveNodes.map((t) => (
-            <TargetCard key={t.id} target={t} onClick={() => setSelectedTarget(t)} />
-          ))}
-        </div>
-
-        {!isLoading && !error && liveNodes.length === 0 && offlineNodes.length > 0 && (
-          <p className="py-3 text-center text-sm text-ink-muted">No nodes online right now.</p>
-        )}
-        {!isLoading && !error && all.length === 0 && (
-          <p className="py-6 text-center text-sm text-ink-muted">No registered nodes.</p>
-        )}
-
-        <OfflineNodes nodes={offlineNodes} onPick={setSelectedTarget} />
-      </div>
-
-      {/* ── Jobs — sits below the live infra (mesh + nodes); one collapsible
-          header, hidden entirely when there's nothing to watch. ── */}
-      {(jobs.total > 0 || jobsExpanded || jobs.unavailable) && (
-        <SectionHeader
-          label="Jobs"
-          count={jobs.total || undefined}
-          onToggle={() => setJobsExpanded((v) => !v)}
-          expanded={jobsExpanded}
-          action={
-            jobs.unavailable ? <span className="text-[10px] text-warn">Unavailable</span> : jobs.running > 0 ? (
-              <span className="flex items-center gap-1 rounded-full bg-accent-dim/60 px-1.5 py-0.5 text-[10px] font-medium text-accent">
-                <span className="size-1 rounded-full bg-accent pulse-dot" />
-                {jobs.running} running
-              </span>
-            ) : undefined
-          }
-        />
-      )}
-      <JobsPanel expanded={jobsExpanded} onSummary={setJobs} owned="unowned" />
-
-      <BackendUsagePanel />
-      <QuotaWindowPanel />
 
       {/* ── Settings — quiet footnote, not a faux feature card ── */}
       <SectionHeader label="Settings" />
@@ -410,17 +217,7 @@ export function SystemScreen() {
           </div>
         )}
         <PushSetting />
-        <p className="px-1 text-[11px] leading-relaxed text-ink-muted">
-          Approval policy and security settings arrive in a later phase.
-        </p>
       </div>
-
-      {selectedTarget && (
-        <NodeDetailSheet
-          target={selectedTarget}
-          onClose={() => setSelectedTarget(null)}
-        />
-      )}
     </div>
   );
 }
