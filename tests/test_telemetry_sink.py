@@ -38,6 +38,77 @@ def _event(event_id_suffix="1"):
     return event.model_copy(update={"event_id": f"evt_{event_id_suffix}"})
 
 
+def test_live_snapshots_are_coalesced_and_never_upload_on_sdk_thread(tmp_path, monkeypatch):
+    sink = BufferedHttpTelemetrySink(
+        "http://controller", "token", node_id="worker-a", spool_dir=tmp_path,
+        batch_size=1, flush_interval_ms=60_000,
+    )
+    calls = []
+    monkeypatch.setattr(sink, "_post_batch", lambda body: calls.append(body) or True)
+    try:
+        for i in range(100):
+            event = _event(str(i)).model_copy(update={"invocation_id": "live-inv"})
+            sink.emit_deferred(event)
+        assert calls == []
+        sink.flush()
+        assert len(calls) == 1
+        assert [e["event_id"] for e in calls[0]["events"]] == ["evt_99"]
+    finally:
+        sink.flush()
+
+
+def test_slow_live_uploads_remain_single_flight(tmp_path, monkeypatch):
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    sink = BufferedHttpTelemetrySink(
+        "http://controller", "token", node_id="worker-a", spool_dir=tmp_path,
+        flush_interval_ms=60_000,
+    )
+    started, release = threading.Event(), threading.Event()
+    inflight = 0
+    maximum = 0
+
+    def upload(body):
+        nonlocal inflight, maximum
+        inflight += 1
+        maximum = max(maximum, inflight)
+        started.set()
+        assert release.wait(3)
+        inflight -= 1
+        return True
+
+    monkeypatch.setattr(sink, "_post_batch", upload)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        sink.emit_deferred(_event("1").model_copy(update={"invocation_id": "inv"}))
+        first = pool.submit(sink.flush)
+        try:
+            assert started.wait(3)
+            sink.emit_deferred(_event("2").model_copy(update={"invocation_id": "inv"}))
+            second = pool.submit(sink.flush)
+        finally:
+            release.set()
+        first.result(timeout=3)
+        second.result(timeout=3)
+    sink.flush()
+    assert maximum == 1
+
+
+def test_live_fanout_uses_authority_and_preserves_final_shadow_delivery():
+    from unittest.mock import MagicMock
+    from src.control.telemetry_sink import DatabaseTelemetrySink
+
+    store = MagicMock()
+    remote = MagicMock()
+    sink = FanOutTelemetrySink([DatabaseTelemetrySink(store), remote])
+    event = _event()
+    sink.emit_deferred(event)
+    remote.emit_deferred.assert_called_once_with(event)
+    store.insert_events.assert_not_called()
+    sink.emit(event)
+    store.insert_events.assert_called_once_with([event])
+
+
 def test_failed_upload_spools_and_replays_without_changing_event_ids(tmp_path, monkeypatch):
     sink = BufferedHttpTelemetrySink(
         "http://controller",

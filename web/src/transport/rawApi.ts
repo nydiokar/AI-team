@@ -88,6 +88,7 @@ export interface RawSessionReason {
 // GET /api/sessions/{id}/usage → per-session token totals + approx USD cost.
 export interface RawSessionUsage {
   session_id: string;
+  usage_state?: "pending" | "partial" | "recorded" | "unavailable";
   model: string | null;
   tokens: {
     input: number;
@@ -298,6 +299,7 @@ export interface RawTokenUsage {
 
 export interface RawTranscriptTurn {
   task_id: string;
+  kind?: "system_notice";
   /** Back-compat single timestamp (completion-preferred). */
   timestamp: string;
   /** When the turn started (~when the user sent the message). Falls back to `timestamp`. */

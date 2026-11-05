@@ -3265,7 +3265,7 @@
     "/api/sessions/{session_id}/usage": {
       "get": {
         "summary": "Session Usage",
-        "description": "Per-session token totals + approximate USD cost.\n\nAggregates authoritative per-request token columns (llm_model_requests,\nde-duplicated) via the existing batched query \u2014 so it is inherently\nbackfilled for any session with recorded telemetry (no N+1). Cost is\nestimated honestly: an un-priceable model yields ``cost.known=false`` +\na reason, never a fabricated number.\n\nService boundary checklist: read-only, single bounded DB aggregate keyed\non one path id; no scarce resource held; DB-unavailable degrades to zero\ntotals with an unknown-cost estimate, not a fabricated one.",
+        "description": "Per-session token totals + approximate USD cost.\n\nAggregates authoritative per-request token columns (llm_model_requests,\nde-duplicated) via the existing batched query \u2014 so it is inherently\nbackfilled for any session with recorded telemetry (no N+1). Cost is\nestimated honestly: an un-priceable model yields ``cost.known=false`` +\na reason, never a fabricated number.\n\nFour concurrent reads, a shared ten-second cooperative SQLite budget,\nconstant-size aggregates/response and no request body. At N=100 only\nfour reads execute; malformed paths cannot alter parameterized SQL.\nBacking-store failure returns 503, saturation 429. Native IO/socket\ndeadlines retain the existing read-boundary deferral in CONTEXT.md.",
         "operationId": "api_session_usage_api_sessions__session_id__usage_get",
         "security": [
           {
@@ -3279,13 +3279,15 @@
             "required": true,
             "schema": {
               "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
               "title": "Session Id"
             }
           }
         ],
         "responses": {
           "200": {
-            "description": "Token totals and USD cost estimate for the session.",
+            "description": "Token totals, availability and USD cost estimate for the session.",
             "content": {
               "application/json": {
                 "schema": {
@@ -3293,6 +3295,12 @@
                 }
               }
             }
+          },
+          "429": {
+            "description": "Concurrent usage-read limit reached."
+          },
+          "503": {
+            "description": "Usage store unavailable."
           },
           "422": {
             "description": "Validation Error",
@@ -13139,13 +13147,24 @@
           },
           "cost": {
             "$ref": "#/components/schemas/CostEstimate"
+          },
+          "usage_state": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "partial",
+              "recorded",
+              "unavailable"
+            ],
+            "title": "Usage State"
           }
         },
         "type": "object",
         "required": [
           "session_id",
           "tokens",
-          "cost"
+          "cost",
+          "usage_state"
         ],
         "title": "UsageOut"
       },

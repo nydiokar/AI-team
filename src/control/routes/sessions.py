@@ -11,7 +11,7 @@ from contextlib import nullcontext
 
 import asyncio
 import threading
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, Literal, Optional
 
 from fastapi import (
     APIRouter,
@@ -20,6 +20,7 @@ from fastapi import (
     Form,
     Header,
     HTTPException,
+    Path,
     Query,
     Request,
     UploadFile,
@@ -47,6 +48,7 @@ from src.control.control_api import (
 
 
 _SESSIONS_READ_SLOTS = threading.BoundedSemaphore(4)
+_USAGE_READ_SLOTS = threading.BoundedSemaphore(4)
 
 
 # --- OpenAPI response models (documentation only) ----------------------------
@@ -158,6 +160,7 @@ class UsageOut(BaseModel):
     model: Optional[str] = None
     tokens: TokenTotals
     cost: CostEstimate
+    usage_state: Literal["pending", "partial", "recorded", "unavailable"]
 
 
 class InstructionsOut(BaseModel):
@@ -380,9 +383,11 @@ def build_router(
     @router.get(
         "/api/sessions/{session_id}/usage",
         responses={200: {"model": UsageOut,
-                         "description": "Token totals and USD cost estimate for the session."}},
+                         "description": "Token totals, availability and USD cost estimate for the session."},
+                   429: {"description": "Concurrent usage-read limit reached."},
+                   503: {"description": "Usage store unavailable."}},
     )
-    def api_session_usage(session_id: str) -> JSONResponse:
+    def api_session_usage(session_id: str = Path(min_length=1, max_length=_ID_STR_MAX)) -> JSONResponse:
         """Per-session token totals + approximate USD cost.
 
         Aggregates authoritative per-request token columns (llm_model_requests,
@@ -391,45 +396,47 @@ def build_router(
         estimated honestly: an un-priceable model yields ``cost.known=false`` +
         a reason, never a fabricated number.
 
-        Service boundary checklist: read-only, single bounded DB aggregate keyed
-        on one path id; no scarce resource held; DB-unavailable degrades to zero
-        totals with an unknown-cost estimate, not a fabricated one.
+        Four concurrent reads, a shared ten-second cooperative SQLite budget,
+        constant-size aggregates/response and no request body. At N=100 only
+        four reads execute; malformed paths cannot alter parameterized SQL.
+        Backing-store failure returns 503, saturation 429. Native IO/socket
+        deadlines retain the existing read-boundary deferral in CONTEXT.md.
         """
         from src.services.pricing import TokenTotals, estimate_cost
 
-        db = core._db()
-        session = orchestrator.session_service.store.get(session_id)
-        view = core._session_payload(session) if session is not None else None
-        model: Optional[str] = None
-        if view is not None:
-            model = view.get("model") or view.get("default_model")
-
-        raw: Dict[str, int] = {}
-        if db is not None:
+        if not _USAGE_READ_SLOTS.acquire(blocking=False):
+            raise HTTPException(status_code=429, detail="session_usage_busy")
+        try:
             try:
-                raw = db.get_session_token_totals([session_id]).get(session_id, {})
+                db = core._db()
+                if db is None:
+                    raise RuntimeError("usage store unavailable")
+                with db.read_snapshot():
+                    raw = db.get_session_token_totals([session_id]).get(session_id, {})
+                    active = session_id in db.live_task_sessions([session_id])
+                    session = orchestrator.session_service.store.get(session_id)
+                    view = core._session_payload(session) if session is not None else None
             except Exception as e:
                 logger.warning("session_usage_totals_failed session_id=%s err=%s", session_id, e)
-                raw = {}
-
-        totals = TokenTotals(
-            input=int(raw.get("input", 0) or 0),
-            output=int(raw.get("output", 0) or 0),
-            cache_read=int(raw.get("cache_read", 0) or 0),
-            cache_creation=int(raw.get("cache_creation", 0) or 0),
-        )
-        totals.total = (
-            totals.input + totals.output + totals.cache_read + totals.cache_creation
-        )
-        cost = estimate_cost(model, totals)
-        return JSONResponse(
-            {
-                "session_id": session_id,
-                "model": model,
-                "tokens": totals.model_dump(),
-                "cost": cost.model_dump(),
-            }
-        )
+                raise HTTPException(status_code=503, detail="session_usage_unavailable") from None
+            model = (view.get("model") or view.get("default_model")) if view else None
+            state = ("partial" if active else "recorded") if raw else (
+                "pending" if active else "unavailable"
+            )
+            totals = TokenTotals(
+                input=int(raw.get("input", 0) or 0),
+                output=int(raw.get("output", 0) or 0),
+                cache_read=int(raw.get("cache_read", 0) or 0),
+                cache_creation=int(raw.get("cache_creation", 0) or 0),
+            )
+            totals.total = totals.input + totals.output + totals.cache_read + totals.cache_creation
+            cost = estimate_cost(model if raw else None, totals)
+            return JSONResponse({
+                "session_id": session_id, "model": model, "usage_state": state,
+                "tokens": totals.model_dump(), "cost": cost.model_dump(),
+            })
+        finally:
+            _USAGE_READ_SLOTS.release()
 
     # [A82 Stage 8b] Single admission authority: an enrolled session turn goes
     # through core._submit_managed_instruction (the SAME authority as POST

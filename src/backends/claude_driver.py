@@ -38,6 +38,7 @@ import time
 import uuid
 from abc import ABC, abstractmethod
 from collections import deque
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, field, is_dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -419,6 +420,7 @@ class _PendingTurn:
     """
     future: "asyncio.Future"
     progress_cb: Any = None
+    usage_cb: Callable[[dict[str, object], str], None] | None = None
     turn_uuid: Optional[str] = None
     echo_seen: bool = False
     # The managed caller hit its deadline; the eventual reply is routed as
@@ -1115,7 +1117,18 @@ class _SDKSession:
                                 progress_cb("writing")
                     usage = _plain_usage_dict(getattr(msg, "usage", None))
                     if usage is not None:
-                        acc.ndjson_lines.append(json.dumps({"type": "assistant", "message": {"usage": usage}}))
+                        message_id = getattr(msg, "message_id", None) or ""
+                        acc.ndjson_lines.append(json.dumps({"type": "assistant", "message": {
+                            "usage": usage, "id": message_id,
+                        }}))
+                        # Only the echoed owner can receive this usage. An
+                        # unsolicited continuation or subagent is not our turn.
+                        owner = self._turn_owner
+                        if owner is not None and owner.usage_cb is not None and not getattr(msg, "parent_tool_use_id", None):
+                            try:
+                                owner.usage_cb(usage, message_id)
+                            except Exception:
+                                logger.debug("event=claude_live_usage_failed", exc_info=True)
                     sid = getattr(msg, "session_id", None) or ""
                     if sid:
                         acc.backend_session_id = sid
@@ -1364,6 +1377,7 @@ class _SDKSession:
     async def _submit_turn(
         self, message: str, *, turn_uuid: Optional[str] = None, progress_cb=None,
         ticket: Optional[Dict[str, Any]] = None, local_command: bool = False,
+        usage_cb: Callable[[dict[str, object], str], None] | None = None,
     ) -> "TurnOutcome":
         """Send one user turn and await its terminal result.
 
@@ -1393,7 +1407,7 @@ class _SDKSession:
             )
         loop = asyncio.get_event_loop()
         future: "asyncio.Future" = loop.create_future()
-        pending = _PendingTurn(future=future, progress_cb=progress_cb)
+        pending = _PendingTurn(future=future, progress_cb=progress_cb, usage_cb=usage_cb)
         self._pending.append(pending)
         # [A82 Stage 3] A query is now outstanding — this is the quiescence
         # oracle's `_last_query_terminal` conjunct (reset True by the reader on
@@ -1480,7 +1494,7 @@ class _SDKSession:
                 return False
         return True
 
-    def send(self, message: str, *, turn: "TurnControl", progress_cb=None, local_command: bool = False) -> "TurnOutcome":
+    def send(self, message: str, *, turn: "TurnControl", progress_cb=None, local_command: bool = False, usage_cb: Callable[[dict[str, object], str], None] | None = None) -> "TurnOutcome":
         """[A102] The ONE turn send. Fail-closed on conflict (NEVER interrupt),
         echo correlation, and a no-interrupt wait driven entirely by ``turn``:
         the carrier owns the policy (``turn.limits``); the backend only reports
@@ -1516,7 +1530,7 @@ class _SDKSession:
             self._turn_progress = turn.progress
             return self._submit_and_wait(
                 self._reserve_and_submit(
-                    message, turn, progress_cb, ticket, local_command=local_command,
+                    message, turn, progress_cb, ticket, local_command=local_command, usage_cb=usage_cb,
                 ),
                 turn, ticket,
             )
@@ -1526,6 +1540,7 @@ class _SDKSession:
     async def _reserve_and_submit(
         self, message: str, turn: "TurnControl", progress_cb=None,
         ticket: Optional[Dict[str, Any]] = None, local_command: bool = False,
+        usage_cb: Callable[[dict[str, object], str], None] | None = None,
     ) -> "TurnOutcome":
         """[A82 Stage 3 rework, M4] Quiescence reservation ON THE SDK LOOP.
 
@@ -1565,6 +1580,7 @@ class _SDKSession:
         return await self._submit_turn(
             message, turn_uuid=turn.turn_uuid, progress_cb=progress_cb, ticket=ticket,
             local_command=local_command,
+            usage_cb=usage_cb,
         )
 
     def process_identity(self) -> Dict[str, Any]:
@@ -2010,13 +2026,13 @@ class ClaudeSDKClientDriver(ClaudeDriver):
         with self._lock:
             return self._sessions.pop(session_key, None)
 
-    def start_session(self, session, message, *, turn: "TurnControl", model=None, telemetry_context=None, proc_env=None) -> ExecutionResult:
-        return self._run_turn(session, message, turn=turn, model=model, effort=getattr(session, "effort", None), proc_env=proc_env or {}, telemetry_context=telemetry_context)
+    def start_session(self, session, message, *, turn: "TurnControl", model=None, telemetry_context=None, telemetry_sink=None, proc_env=None) -> ExecutionResult:
+        return self._run_turn(session, message, turn=turn, model=model, effort=getattr(session, "effort", None), proc_env=proc_env or {}, telemetry_context=telemetry_context, telemetry_sink=telemetry_sink)
 
-    def send_turn(self, session, message, *, turn: "TurnControl", model=None, telemetry_context=None, proc_env=None) -> ExecutionResult:
-        return self._run_turn(session, message, turn=turn, model=model, effort=getattr(session, "effort", None), proc_env=proc_env or {}, telemetry_context=telemetry_context)
+    def send_turn(self, session, message, *, turn: "TurnControl", model=None, telemetry_context=None, telemetry_sink=None, proc_env=None) -> ExecutionResult:
+        return self._run_turn(session, message, turn=turn, model=model, effort=getattr(session, "effort", None), proc_env=proc_env or {}, telemetry_context=telemetry_context, telemetry_sink=telemetry_sink)
 
-    def compact_session(self, session, *, turn: "TurnControl", model=None, telemetry_context=None, proc_env=None) -> ExecutionResult:
+    def compact_session(self, session, *, turn: "TurnControl", model=None, telemetry_context=None, telemetry_sink=None, proc_env=None) -> ExecutionResult:
         """[A82 Stage 4b] `/compact`. The CLI answers a local slash command
         WITHOUT echoing the caller uuid (bundled CLI 2.1.191: the local command
         path yields init / local-command output / compact_boundary / result,
@@ -2041,7 +2057,7 @@ class ClaudeSDKClientDriver(ClaudeDriver):
                 )
         return self._run_turn(
             session, "/compact", turn=turn, model=model, effort=getattr(session, "effort", None),
-            proc_env=proc_env or {}, telemetry_context=telemetry_context, local_command=True,
+            proc_env=proc_env or {}, telemetry_context=telemetry_context, telemetry_sink=telemetry_sink, local_command=True,
             resume_if_new=getattr(session, "backend_session_id", "") or None,
         )
 
@@ -2056,7 +2072,7 @@ class ClaudeSDKClientDriver(ClaudeDriver):
         # unless a late reply is still being handed off.
         return sdk_sess.is_quiescent()
 
-    def _run_turn(self, session: Session, message: str, *, turn: "TurnControl", model: Optional[str], effort: Optional[str], proc_env: Dict[str, str], telemetry_context=None, local_command: bool = False, resume_if_new: Optional[str] = None) -> ExecutionResult:
+    def _run_turn(self, session: Session, message: str, *, turn: "TurnControl", model: Optional[str], effort: Optional[str], proc_env: Dict[str, str], telemetry_context=None, telemetry_sink=None, local_command: bool = False, resume_if_new: Optional[str] = None) -> ExecutionResult:
         start = time.time()
         try:
             sdk_sess = (
@@ -2078,7 +2094,24 @@ class ClaudeSDKClientDriver(ClaudeDriver):
                     turn.on_process(sdk_sess.process_identity())
                 except Exception:
                     logger.warning("event=sdk_process_identity_report_failed", exc_info=True)
-            outcome = sdk_sess.send(message, turn=turn, progress_cb=progress_cb, local_command=local_command)
+            usage_cb = None
+            if telemetry_context is not None and telemetry_sink is not None:
+                from src.core.telemetry import new_telemetry_id
+                from src.core.telemetry_adapters.claude_stream_json import ClaudeStreamJsonAdapter
+
+                adapter = ClaudeStreamJsonAdapter(
+                    telemetry_context, emitter_process_instance_id=new_telemetry_id("proc"),
+                )
+
+                def report_usage(usage: dict[str, object], message_id: str) -> None:
+                    for event in adapter.observe_assistant_usage(usage, message_id):
+                        telemetry_sink.emit_deferred(event)
+
+                usage_cb = report_usage
+            outcome = sdk_sess.send(
+                message, turn=turn, progress_cb=progress_cb, local_command=local_command,
+                **({"usage_cb": usage_cb} if usage_cb is not None else {}),
+            )
             elapsed = time.time() - start
             session.driver_status = "live"
 

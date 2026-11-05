@@ -275,6 +275,7 @@ class ClaudeCodeBackend(CodingBackend):
             turn=turn,
             model=_resolve_model(session),
             telemetry_context=telemetry_context,
+            telemetry_sink=telemetry_sink,
             proc_env=proc_env,
         )
         return self._finish(session, result, before_snapshot, telemetry_context, telemetry_sink)
@@ -298,6 +299,7 @@ class ClaudeCodeBackend(CodingBackend):
             turn=turn,
             model=_resolve_model(session),
             telemetry_context=telemetry_context,
+            telemetry_sink=telemetry_sink,
             proc_env=proc_env,
         )
         return self._finish(session, result, before_snapshot, telemetry_context, telemetry_sink)
@@ -316,6 +318,7 @@ class ClaudeCodeBackend(CodingBackend):
             turn=turn,
             model=_resolve_model(session),
             telemetry_context=telemetry_context,
+            telemetry_sink=telemetry_sink,
             proc_env=proc_env,
         )
         return self._finish(session, result, before_snapshot, telemetry_context, telemetry_sink)

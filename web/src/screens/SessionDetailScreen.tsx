@@ -404,12 +404,12 @@ function CostRow({
  * session's model. Cost is honest: an un-priceable model shows the tokens and a
  * muted "cost unavailable" note rather than a fabricated number.
  */
-function SessionCostPanel({ sessionId }: { sessionId: string }) {
-  const { data: usage } = useSessionUsage(sessionId);
-  if (!usage) return null;
-  const t = usage.tokens;
-  if (t.total === 0) return null; // nothing spent yet — no panel noise
-  const cost = usage.cost;
+export function SessionCostPanel({ sessionId }: { sessionId: string }) {
+  const { data: usage, isError, isLoading, refetch } = useSessionUsage(sessionId);
+  const state = usage?.usage_state ?? (usage?.tokens.total ? "recorded" : "unavailable");
+  const hasUsage = usage && (state === "recorded" || state === "partial");
+  const t = usage?.tokens;
+  const cost = usage?.cost;
 
   return (
     <div>
@@ -417,6 +417,21 @@ function SessionCostPanel({ sessionId }: { sessionId: string }) {
         Session usage &amp; cost
       </div>
       <div className="card-elev overflow-hidden rounded-xl divide-y divide-hairline">
+        {isError ? (
+          <div role="alert" className="px-4 py-3 text-[12px] text-ink-muted">
+            Usage could not be refreshed. {hasUsage && "Last recorded totals are shown below. "}
+            <button type="button" onClick={() => void refetch()} className="text-accent">Retry</button>
+          </div>
+        ) : isLoading ? (
+          <p role="status" className="px-4 py-3 text-[12px] text-ink-muted">Loading usage…</p>
+        ) : state === "pending" || state === "unavailable" ? (
+          <p role="status" className="px-4 py-3 text-[12px] text-ink-muted">
+            {state === "pending" ? "Usage pending — waiting for token counters." : "Usage unavailable — no token counters reported."}
+          </p>
+        ) : state === "partial" ? (
+          <p role="status" className="px-4 py-2 text-[11px] text-ink-muted">Recorded so far — work is still in flight.</p>
+        ) : null}
+        {hasUsage && t && cost && <>
         <CostRow label="Total tokens" value={compactTokens(t.total)} strong />
         <CostRow label="Input" value={compactTokens(t.input)} />
         <CostRow label="Output" value={compactTokens(t.output)} />
@@ -433,6 +448,7 @@ function SessionCostPanel({ sessionId }: { sessionId: string }) {
             Cost unavailable{cost.reason ? ` — ${cost.reason.replace(/_/g, " ")}` : ""}
           </div>
         )}
+        </>}
       </div>
     </div>
   );

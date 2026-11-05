@@ -24,12 +24,16 @@ logger = logging.getLogger(__name__)
 
 class TelemetrySink(Protocol):
     def emit(self, event: TelemetryEvent) -> None: ...
+    def emit_deferred(self, event: TelemetryEvent) -> None: ...
     def emit_many(self, events: Iterable[TelemetryEvent]) -> None: ...
     def flush(self) -> None: ...
 
 
 class NullTelemetrySink:
     def emit(self, event: TelemetryEvent) -> None:
+        return None
+
+    def emit_deferred(self, event: TelemetryEvent) -> None:
         return None
 
     def emit_many(self, events: Iterable[TelemetryEvent]) -> None:
@@ -47,6 +51,9 @@ class DatabaseTelemetrySink:
 
     def emit(self, event: TelemetryEvent) -> None:
         self.store.insert_events([event])
+
+    def emit_deferred(self, event: TelemetryEvent) -> None:
+        self.emit(event)
 
     def emit_many(self, events: Iterable[TelemetryEvent]) -> None:
         self.store.insert_events(list(events))
@@ -93,7 +100,9 @@ class BufferedHttpTelemetrySink:
         self.detailed_events = bool(detailed_events)
         self.spool_max_age_days = max(1, int(spool_max_age_days))
         self._events: List[TelemetryEvent] = []
+        self._live_events: dict[str, TelemetryEvent] = {}
         self._lock = threading.Lock()
+        self._flush_lock = threading.Lock()
         self._timer: threading.Timer | None = None
         self._last_failure_retryable = True
 
@@ -120,20 +129,50 @@ class BufferedHttpTelemetrySink:
         if should_flush:
             self.flush()
 
+    def emit_deferred(self, event: TelemetryEvent) -> None:
+        """Coalesce live usage without running HTTP/spool work on the SDK loop.
+
+        At most 200 invocation snapshots (fixed, sanitized usage attributes)
+        wait in memory. Final events retain the ordinary durable sink path.
+        """
+        if not filter_events_for_detail_level([event], detailed=self.detailed_events):
+            return
+        key = event.invocation_id
+        if not key:
+            return
+        timer_to_start: threading.Timer | None = None
+        with self._lock:
+            if key not in self._live_events and len(self._live_events) >= 200:
+                return
+            self._live_events[key] = event
+            if self._timer is None:
+                self._timer = threading.Timer(self.flush_interval_ms / 1000.0, self.flush)
+                self._timer.daemon = True
+                timer_to_start = self._timer
+        if timer_to_start is not None:
+            timer_to_start.start()
+
     def emit_many(self, events: Iterable[TelemetryEvent]) -> None:
         for event in events:
             self.emit(event)
 
     def flush(self) -> None:
+        # One uploader per sink. A timer waiting here remains registered until
+        # it acquires the lock, so slow HTTP cannot create a thread per update.
+        with self._flush_lock:
+            self._flush_buffer()
+
+    def _flush_buffer(self) -> None:
         with self._lock:
             timer = self._timer
             self._timer = None
             if timer is not None:
                 timer.cancel()
-            if not self._events:
+            if not self._events and not self._live_events:
                 return
-            events = self._events
+            events = [*self._live_events.values(), *self._events]
             self._events = []
+            self._live_events = {}
         for batch_events in self._split_batches(events):
             body = self._batch_body(batch_events)
             if not self._post_batch(body):
@@ -337,6 +376,18 @@ class FanOutTelemetrySink:
 
     def emit(self, event: TelemetryEvent) -> None:
         self._safe("emit", event)
+
+    def emit_deferred(self, event: TelemetryEvent) -> None:
+        # Live counters go to the authoritative HTTP destination. Rebuilding a
+        # local shadow projection per message would stall the SDK reader and
+        # duplicate work; the shadow still receives all ordinary final events.
+        for sink in self._sinks:
+            if isinstance(sink, DatabaseTelemetrySink):
+                continue
+            try:
+                sink.emit_deferred(event)
+            except Exception:
+                logger.debug("event=telemetry_live_sink_failed", exc_info=True)
 
     def emit_many(self, events: Iterable[TelemetryEvent]) -> None:
         materialized = list(events)

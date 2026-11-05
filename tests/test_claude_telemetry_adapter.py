@@ -55,6 +55,98 @@ def _events_from_fixture(name: str) -> list:
     return _events_from_ndjson((FIXTURE_DIR / name).read_text(encoding="utf-8"))
 
 
+def test_live_usage_replaces_message_snapshots_and_final_aggregate():
+    from src.core.telemetry_projection import project_turn
+
+    adapter = _adapter()
+    events = adapter.observe_assistant_usage({"input_tokens": 100, "output_tokens": 5}, "m1")
+    assert events[0].attributes["usage_coverage"] == "partial"
+    events += adapter.observe_assistant_usage({"input_tokens": 100, "output_tokens": 8}, "m1")
+    events += adapter.observe_assistant_usage({"input_tokens": 200, "output_tokens": 10}, "m2")
+    projection = project_turn(events)
+    assert len(projection["model_requests"]) == 1
+    assert projection["model_requests"][0]["input_tokens"] == 300
+    assert projection["model_requests"][0]["output_tokens"] == 18
+    events += adapter.consume_line(json.dumps({"type": "result", "usage": {
+        "input_tokens": 310, "output_tokens": 20,
+    }}))
+    final = project_turn(events)
+    assert len(final["model_requests"]) == 1
+    assert final["model_requests"][0]["input_tokens"] == 310
+    assert final["model_requests"][0]["output_tokens"] == 20
+
+
+def test_live_usage_requires_bounded_identity_and_valid_counters():
+    adapter = _adapter()
+    assert adapter.observe_assistant_usage({"input_tokens": 10}, "") == []
+    assert adapter.observe_assistant_usage({"input_tokens": 10}, "x" * 513) == []
+    assert adapter.observe_assistant_usage({"input_tokens": -1}, "bad") == []
+    assert adapter.observe_assistant_usage({"input_tokens": True}, "bad") == []
+    assert adapter.observe_assistant_usage({"input_tokens": "secret"}, "bad") == []
+    assert adapter.observe_assistant_usage({"input_tokens": 2**63 - 1}, "max")
+    assert adapter.observe_assistant_usage({"input_tokens": 1}, "overflow") == []
+
+
+def test_truncated_stream_keeps_all_identified_assistant_usage():
+    events = _events_from_ndjson("\n".join(json.dumps({
+        "type": "assistant", "message": {"id": message_id, "usage": {
+            "input_tokens": count, "output_tokens": 2,
+        }},
+    }) for message_id, count in [("m1", 100), ("m1", 100), ("m2", 200)]))
+    usage = [e for e in events if e.event_name == "model.request.usage"]
+    assert len(usage) == 1
+    assert usage[0].attributes["input_tokens"] == 300
+    assert usage[0].attributes["output_tokens"] == 4
+    assert usage[0].attributes["context_tokens"] == 200
+    assert usage[0].attributes["usage_coverage"] == "partial"
+
+
+def test_live_usage_persists_and_late_replay_cannot_double_final_totals(tmp_path):
+    from src.control.db import MeshDB
+    from src.control.telemetry_store import TelemetryStore
+
+    db = MeshDB(str(tmp_path / "usage.db"))
+    store = TelemetryStore(db)
+    adapter = _adapter()
+    interim = adapter.observe_assistant_usage({"input_tokens": 100, "output_tokens": 5}, "m1")
+    store.insert_events(interim)
+    assert db.get_session_token_totals(["session-a"])["session-a"]["total"] == 105
+    final = adapter.consume_line(json.dumps({"type": "result", "usage": {
+        "input_tokens": 300, "output_tokens": 20,
+    }}))
+    store.insert_events(final)
+    # Simulate a late upload/replay arriving after the authoritative result.
+    store.insert_events(interim)
+    assert len(store.get_model_requests("turn_claude_test")) == 1
+    assert db.get_session_token_totals(["session-a"])["session-a"]["total"] == 320
+
+
+def test_backend_wires_interim_usage_into_driver_before_return(monkeypatch):
+    from types import SimpleNamespace
+    from src.backends.claude_code import ClaudeCodeBackend
+    from src.backends.claude_driver import TurnOutcome
+    from src.core.interfaces import Session, SessionStatus
+    from src.core.turn_liveness import turn_control
+
+    monkeypatch.setattr("src.core.test_guard.assert_live_calls_allowed", lambda *_: None)
+    backend = ClaudeCodeBackend()
+    sink = MagicMock()
+    session = Session(
+        session_id="session-a", backend="claude", repo_path="",
+        status=SessionStatus.IDLE, created_at="", updated_at="", last_user_message="work",
+    )
+
+    def send(message, **kwargs):
+        kwargs["usage_cb"]({"input_tokens": 100, "output_tokens": 5}, "m1")
+        assert sink.emit_deferred.call_count == 1
+        return TurnOutcome(output="done", backend_session_id="native", raw_ndjson="")
+
+    monkeypatch.setattr(backend._driver, "_get_or_create", lambda *a, **kw: SimpleNamespace(send=send))
+    result = backend.create_session(session, turn=turn_control("wire-test"), telemetry_context=_ctx(), telemetry_sink=sink)
+    assert result.success
+    assert sink.emit_deferred.call_args.args[0].attributes["input_tokens"] == 100
+
+
 # ---------------------------------------------------------------------------
 # Coverage declarations
 # ---------------------------------------------------------------------------

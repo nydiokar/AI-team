@@ -32,6 +32,16 @@ button, per the mobile back-stack model. Tab routes render inside
   `useSessionTurns`) + `components/system/JobsPanel.tsx` scoped to the session
   + session metadata (repo, model, affiliation).
 
+Watched-job completions render once as system notices, keyed by job ID. Reading
+the result updates that notice to consumed; delivery withdrawals and internal
+audit rows stay out of chat and ordinary task history. Actual continuation
+replies remain agent messages. Existing records use the same read projection.
+Session usage stays visible: pending counters, recorded interim totals, recorded
+zero, unavailable counters, and refresh errors are distinct states. Claude SDK
+message usage supplies interim totals; the final invocation aggregate replaces
+them without double counting. This requires the updated worker process; a
+gateway deployment alone cannot enable live worker telemetry.
+
 Sheets opened from the top bar: `ModelPickerSheet` (parity with Telegram
 `/model`), `GitPanelSheet` (parity with `/git_status`, `/commit`,
 `/commit_all` — routed through `POST /api/sessions/{id}/inspect` so it runs on

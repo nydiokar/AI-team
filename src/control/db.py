@@ -6332,10 +6332,11 @@ class MeshDB:
             SELECT * FROM (
                 SELECT id AS task_id, prompt, reply_text,
                        files_modified_json, usage_json, status, result, action,
-                       created_at, completed_at
+                       created_at, completed_at, turn_kind
                 FROM mesh_tasks
                 WHERE session_id = ?
                   AND status NOT IN ('queued', 'withdrawn')
+                  AND COALESCE(action, '') != 'watched_job'
                 ORDER BY created_at DESC
                 LIMIT ?
             ) ORDER BY created_at ASC
@@ -6346,6 +6347,37 @@ class MeshDB:
         # rows (queued / withdrawn) excluded in SQL before the window is cut — an
         # oldest-N window hid the latest reply once a session passed the limit.
         return [dict(r) for r in rows]
+
+    def session_job_notices(self, session_id: str, limit: int = 200) -> list[dict[str, JsonValue]]:
+        """One bounded operator notice per terminal job, including consumed history."""
+        rows = self._conn().execute(
+            "SELECT j.id, substr(j.label,1,512) AS label, j.status, j.exit_code, "
+            "j.finished_at, e.consumed_at FROM jobs j "
+            "LEFT JOIN job_completion_effects e ON e.job_id=j.id "
+            "WHERE j.session_id=? AND j.status != 'running' "
+            "AND (j.notify=1 OR j.notify_agent=1) "
+            # Federated completions can have a receipt/wake or an older audit
+            # without a local jobs row. Recover those through the session index,
+            # never by scanning every completion payload or issuing N+1 reads.
+            "UNION ALL "
+            "SELECT COALESCE(e.job_id,a.id) AS id, "
+            "substr(COALESCE(json_extract(e.payload,'$.label'), "
+            "json_extract(a.payload,'$.job.label'),a.id),1,512) AS label, "
+            "COALESCE(json_extract(e.payload,'$.status'), "
+            "json_extract(a.payload,'$.job.status'), "
+            "CASE WHEN a.status='failed' THEN 'failed' ELSE 'finished' END) AS status, "
+            "json_extract(e.payload,'$.exit_code') AS exit_code, "
+            "MIN(a.created_at) AS finished_at,e.consumed_at "
+            "FROM mesh_tasks a LEFT JOIN job_completion_effects e ON e.job_id= "
+            "CASE WHEN a.action='watched_job' THEN a.id ELSE substr(a.coalesce_key,9) END "
+            "WHERE a.session_id=? AND (a.action='watched_job' OR "
+            "(a.turn_kind='watched_job' AND e.job_id IS NOT NULL)) "
+            "AND NOT EXISTS (SELECT 1 FROM jobs j WHERE j.id=COALESCE(e.job_id,a.id)) "
+            "GROUP BY COALESCE(e.job_id,a.id) "
+            "ORDER BY finished_at DESC,id DESC LIMIT ?",
+            (session_id, session_id, max(1, min(int(limit), 1000))),
+        ).fetchall()
+        return [dict(row) for row in rows]
 
     def get_session_turns_tail(self, session_id: str, limit: int = 3) -> List[Dict[str, Any]]:
         """Return the session's most-recent ``limit`` *completed* turns, oldest→newest.
@@ -6368,6 +6400,7 @@ class MeshDB:
             WHERE session_id = ?
               AND reply_text IS NOT NULL
               AND status = 'completed'
+              AND COALESCE(action, '') != 'watched_job'
             ORDER BY created_at DESC
             LIMIT ?
             """,
@@ -9169,7 +9202,7 @@ class MeshDB:
         # no extra round-trip; the flag is additive so other callers ignore it.
         rows = self._conn().execute(
             f"""
-            SELECT jobs.*,
+            SELECT jobs.*, completion.consumed_at,
                    CASE
                      WHEN jobs.session_id IS NOT NULL
                           AND NOT EXISTS (
@@ -9178,7 +9211,8 @@ class MeshDB:
                           )
                      THEN 1 ELSE 0
                    END AS orphaned
-            FROM jobs {where} ORDER BY created_at DESC LIMIT ?
+            FROM jobs LEFT JOIN job_completion_effects completion ON completion.job_id=jobs.id
+            {where} ORDER BY created_at DESC LIMIT ?
             """,
             params,
         ).fetchall()
@@ -9267,6 +9301,8 @@ class MeshDB:
             JOIN llm_model_requests r ON r.turn_id = t.turn_id
             WHERE t.session_id IN ({placeholders}) AND r.is_duplicate = 0
             GROUP BY t.session_id
+            HAVING COUNT(r.input_tokens) + COUNT(r.output_tokens)
+                 + COUNT(r.cache_read_tokens) + COUNT(r.cache_creation_tokens) > 0
             """,
             list(session_ids),
         ).fetchall()

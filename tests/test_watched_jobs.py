@@ -445,7 +445,8 @@ async def test_gateway_terminal_job_notifies_session_and_agent(tmp_path, monkeyp
     # The continuation turn carries the payload — no duplicate synthetic turn.
     assert store.get(session.session_id).last_task_id != "job_test123"
 
-    # Notify-only (no continuation) still records the synthetic job turn.
+    # Notify-only retains its internal audit but renders one system notice,
+    # including a federated completion with no local jobs row.
     await orch._process_terminal_job({
         "id": "job_notify_only",
         "session_id": session.session_id,
@@ -462,8 +463,9 @@ async def test_gateway_terminal_job_notifies_session_and_agent(tmp_path, monkeyp
     turns = transcript.get_transcript(tmp_path / "results", sessions_dir, session.session_id)
     assert turns is not None
     assert turns[-1]["task_id"] == "job_notify_only"
-    assert turns[-1]["instruction"] == "Watched job finished: npm test"
-    assert "all tests passed" in turns[-1]["result"]
+    assert turns[-1]["kind"] == "system_notice"
+    assert turns[-1]["instruction"] == ""
+    assert "npm test done" in turns[-1]["result"]
 
     from src.control.db import get_db
     row = get_db().get_task("job_notify_only")

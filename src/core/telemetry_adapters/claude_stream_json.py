@@ -26,14 +26,11 @@ appear in the EVENT_ATTRIBUTE_ALLOWLIST.  ``input``, ``command``, ``content``,
     context_tokens = input_tokens          (NOT input_tokens + cache_read_tokens)
 This is the same semantics Codex uses; see spec §5.2.
 
-**Double-count guard:**  Claude emits usage in the last ``type=assistant``
-message AND in the final ``type=result`` message.  With
-``--include-partial-messages`` OMITTED (which this project does), only one
-assistant message carries usage.  The adapter emits exactly ONE
-``model.request.usage`` event per invocation: if both ``type=assistant`` and
-``type=result`` carry usage, the ``type=result`` usage wins (it is the
-authoritative final aggregate).  A guard prevents emitting the assistant usage
-if result usage is seen later.
+**Double-count guard:** post-processing emits one final invocation aggregate.
+The SDK's live assistant snapshots are deduplicated by message identity and
+replace the SAME aggregate row; final ``type=result`` usage supersedes them.
+Unidentified messages cannot provide deduplicated live totals and wait for the
+final aggregate. A truncated identified stream retains the known message totals.
 """
 
 from __future__ import annotations
@@ -100,6 +97,51 @@ class ClaudeStreamJsonAdapter:
         # Set to True once a type=result usage event is emitted so we know to
         # discard the pending assistant usage.
         self._result_usage_emitted = False
+        # Bounded per-message snapshots; repeated SDK frames replace counters.
+        self._live_messages: dict[str, dict[str, int]] = {}
+        self._live_totals: dict[str, int] = {}
+        self._live_last_context: int | None = None
+
+    def observe_assistant_usage(
+        self, usage: dict[str, object], message_id: str,
+    ) -> list[TelemetryEvent]:
+        """Emit an interim invocation aggregate under the final aggregate's ID.
+
+        Missing identities cannot be deduplicated, so wait for final usage.
+        Memory is bounded to 4096 messages × four integer counters; overflow
+        stops interim updates, while final result processing remains intact.
+        """
+        if not isinstance(message_id, str) or not message_id or len(message_id) > 512 or self._result_usage_emitted:
+            return []
+        fields = ("input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")
+        counters: dict[str, int] = {
+            field: value for field in fields
+            if type(value := usage.get(field)) is int and 0 <= value <= 2**63 - 1
+        }
+        if not counters:
+            return []
+        if message_id not in self._live_messages and len(self._live_messages) >= 4096:
+            return []
+        previous = self._live_messages.get(message_id, {})
+        updated = {**previous, **counters}
+        if updated == previous:
+            return []
+        if any(self._live_totals.get(field, 0) + value - previous.get(field, 0) > 2**63 - 1
+               for field, value in updated.items()):
+            return []
+        self._live_messages[message_id] = updated
+        self._live_last_context = updated.get("input_tokens")
+        for field, value in updated.items():
+            self._live_totals[field] = self._live_totals.get(field, 0) + value - previous.get(field, 0)
+        event = self._build_usage_event(
+            self._live_totals, event_time=None, usage_source="claude.assistant.live",
+        )
+        return [event.model_copy(update={"attributes": {
+            **event.attributes, "usage_coverage": "partial",
+            "counter_semantics": "running_invocation_total",
+            # Context describes the latest request, not the sum of requests.
+            "context_tokens": self._live_last_context,
+        }})]
 
     def consume_line(
         self,
@@ -209,13 +251,18 @@ class ClaudeStreamJsonAdapter:
         even when no ``type=result`` line appears (e.g. truncated stream on kill).
         """
         if self._pending_assistant_usage is not None and not self._result_usage_emitted:
-            events = [self._build_usage_event(
+            event = self._build_usage_event(
                 self._pending_assistant_usage,
                 event_time=event_time,
                 usage_source="claude.assistant.message.usage",
-            )]
+            )
+            if self._live_totals:
+                event = event.model_copy(update={"attributes": {
+                    **event.attributes, "context_tokens": self._live_last_context,
+                    "usage_coverage": "partial",
+                }})
             self._pending_assistant_usage = None
-            return events
+            return [event]
         return []
 
     # ------------------------------------------------------------------
@@ -235,7 +282,12 @@ class ClaudeStreamJsonAdapter:
             if isinstance(usage, dict) and usage:
                 # Hold it: a type=result usage (the authoritative aggregate) may
                 # follow and should supersede this one.
-                self._pending_assistant_usage = usage
+                message_id = message.get("id")
+                if isinstance(message_id, str) and message_id:
+                    self.observe_assistant_usage(usage, message_id)
+                    self._pending_assistant_usage = dict(self._live_totals) or None
+                else:
+                    self._pending_assistant_usage = usage
         # Never store message content (text blocks, tool_use arrays, etc.)
         return []
 
