@@ -41,7 +41,10 @@ from collections import deque
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field, is_dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
+
+if TYPE_CHECKING:
+    from src.control.telemetry_sink import TelemetrySink
 
 from src.core.failure_markers import RATE_LIMIT_MARKERS, USAGE_LIMIT_MARKERS
 from src.core.interfaces import ExecutionResult, Session
@@ -493,6 +496,7 @@ class ClaudeDriver(ABC):
         *,
         model: Optional[str] = None,
         telemetry_context: Any = None,
+        telemetry_sink: "TelemetrySink | None" = None,
         proc_env: Optional[Dict[str, str]] = None,
     ) -> ExecutionResult: ...
 
@@ -504,6 +508,7 @@ class ClaudeDriver(ABC):
         *,
         model: Optional[str] = None,
         telemetry_context: Any = None,
+        telemetry_sink: "TelemetrySink | None" = None,
         proc_env: Optional[Dict[str, str]] = None,
     ) -> ExecutionResult: ...
 
