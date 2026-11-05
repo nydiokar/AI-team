@@ -74,8 +74,6 @@ Only jobs that are genuinely open. Everything merged/done is in git and the disp
 
 | Job | Packet | Depends on | Status | What it is |
 |---|---|---|---|---|
-| **A109** | `AGENT_109_WATCHED_JOB_CONSUMPTION.md` | — | active — final adversarial review, operator-authorized | Correct cancelled HTTP waiters releasing a still-running DB mutation's permit; existing wake/consumption semantics preserved. |
-| **A110** | `AGENT_110_LLM_TURN_LIFECYCLE.md` | — | active — final adversarial review, operator-authorized | Restore 1,560 canonical withdrawals overwritten by old cancelled events; isolate historical repair failures from current telemetry and retention. |
 | **A105** | `AGENT_105_CROSS_PROCESS_TURN_SIGNAL.md` | A104 ✅ | **ready** — Level 3, operator approval + D1 | Make the task-server's post-commit turn hint reach the gateway; scheduler, effects consumer and inbox wake all wake on that one signal (polls → safety nets). Today worker finish → Manager wake is polled (16.5 s live). |
 | **A102** | `AGENT_102_UNIFY_BACKEND_PATHWAYS.md` | — | **blocked** — S2 merged + gateway live (`7c6d01a`); worker promotion and natural S3 acceptance pending | One carrier-owned `TurnControl` and natural backend operations; shims, rollout gates and dead gateway session execution removed. Worker restart needs the operator decision and drain/ancestry checks; no paid proof turn. |
 | **A94** | `AGENT_94_SYSTEM_ONE_CORE_DELIVERY_SCORECARD.md` | — | ready (Level 3) | S1 core + decision log + replay baseline + advisory wake scorecard. Operator inputs: read-only controller DB copy, `TYPESAFE_API_KEY`. |
@@ -96,18 +94,19 @@ Only jobs that are genuinely open. Everything merged/done is in git and the disp
 
 ## Recent shift notes
 
-**2026-11-05 — A109/A110 shipped (PR #274, live `29e8225`, schema 49).** Watched-job
-registration allows continued work or yielding; `job_result` acknowledges terminal evidence
-and atomically retires an unstarted follow-up, with admission/start race coverage. Default
-wake-on-completion and operator notices remain. Queued-only LLM telemetry has no execution
-start/duration; retained historical lifecycle repair completed (0 old projections remaining),
-including the four never-executed notices in `a32f0cf19326`. Both online workers (`Horse`,
-`kanebra`) independently report `29e8225`, fresh incarnations and zero pooled sessions;
-no worker restart was issued by this task. CI, offline race/protocol/migration tests and
-live API/schema checks pass; no paid proof turn or historical job consumption was run.
-Boundary: four result requests, 2 KiB body/five-second read deadline, bounded response and
-existing five-second DB lock budget; native filesystem COMMIT stalls remain outside that
-deadline (authenticated operator workload). Detailed evidence lives in the two packets.
+**2026-11-05 — A109/A110 final adversarial corrections shipped (PR #276, live `fd8b501`,
+schema 49; initial delivery #274).** Consumed results still retire unstarted wakes; default
+wake-on-completion remains. Cancelled HTTP waiters now retain their DB permit until actual
+completion; consumption preserves a live lineage writer's lease until cleanup is safe.
+Historical reprojection preserves canonical withdrawals and cannot poison current telemetry
+or overwrite retained usage. The review found 1,560 withdrawals resurfaced by old cancelled
+events; all are restored (0 mismatches), and model-request/token totals match the pre-deploy
+backup exactly. A bounded v3 metadata revalidation continues normally; no repair-error flags.
+Both controllers healthy, both workers online; this correction needs no worker restart.
+CI, fault/race/retention regressions and a complete production-copy replay pass. No paid proof
+turn or historical job consumption. Boundary: four actual result mutations even after HTTP
+cancellation, 2 KiB body/five-second read deadline, bounded response and existing five-second
+DB lock budget; native COMMIT stalls remain outside a hard deadline. Evidence: A109/A110.
 
 **2026-11-03 — A102 S2 merged + gateway live (`7c6d01a`, PR #271).** Carrier-owned `TurnControl` now drives
 the natural backend APIs; compatibility shims, rollout flags and dead gateway session

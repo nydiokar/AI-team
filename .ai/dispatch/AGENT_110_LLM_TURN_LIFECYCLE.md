@@ -1,12 +1,12 @@
 ```yaml
 job_id: AGENT_110_LLM_TURN_LIFECYCLE
 created_at: "2026-11-04T02:11:25.550323+00:00"        # CANONICAL — set once at dispatch, never derive again
-status: active              # ready | active | blocked | done | dead
+status: done              # ready | active | blocked | done | dead
 owner: ""
 depends_on: []
 results_ref: DISPATCH_LOG.md#A110             # -> DISPATCH_LOG.md section with the verdict prose
-evidence: ["tests/test_telemetry_projection.py","tests/test_telemetry_store.py","tests/test_turn_queue_a84_effects.py"]                  # artifact paths that PROVE it ran (checked to exist)
-updated_at: "2026-11-04T23:37:11.082961+00:00"
+evidence: ["tests/test_telemetry_projection.py","tests/test_telemetry_store.py","tests/test_turn_queue_a84_effects.py","tests/test_job_review_regressions.py"]                  # artifact paths that PROVE it ran (checked to exist)
+updated_at: "2026-11-05T00:07:32.820171+00:00"
 ```
 
 # DISPATCH — 110 · Report queued requests separately from executing LLM turns
@@ -72,7 +72,7 @@ Job consumption semantics (A109), telemetry DB separation, unrelated cost/usage 
 
 ## Closure
 
-### Final adversarial review — reopened 2026-11-05
+### Final adversarial review — SHIPPED (2026-11-05)
 F1: the version-2 history repair replayed old `cancelled` events over canonical A104
 withdrawals, resurfacing 1,560 never-executed turns in production telemetry lists/counts.
 The original four job notices were unaffected. Canonical withdrawal now wins inside the
@@ -84,7 +84,7 @@ The historical pass is isolated from the live batch; malformed events receive an
 quality flag and cannot starve later repairs. A commit-time retention check preserves
 retained summaries if pruning wins after events were read. Logger initialization restores
 the existing per-row failure isolation paths. All three original red tests plus malformed-
-history/retention-race regressions pass. Production-copy repair and wider checks pending.
+history/retention-race regressions pass. Production-copy repair and wider checks completed.
 Issue #273 reopened; operator authorized fixing all review findings.
 
 Production-copy rehearsal completed: 6,410 retained projections rebuilt, canonical
@@ -92,6 +92,20 @@ withdrawal mismatches 1,560 → 0, malformed-history flags 0, remaining old proj
 Model-request count and sums of input/output/cache-read/cache-creation tokens were exactly
 unchanged. Focused verification: 50 consumption/protocol/projection tests, 129 wider
 completion/queue/migration/retention tests, then 57 final admission/lease/race tests passed.
+
+Live correction: PR #276 / `fd8b501`, both controllers healthy, schema 49, CI run
+`41936330373` green. Reapplied only the canonical telemetry relabel from
+`scripts/a104_seed_inbox.py:276` in 25-row transactions (64 batches, 1,560 rows), after
+deploying the guard that prevents recurrence. No jobs, queue rows, inbox messages or raw
+events changed. All canonical-withdrawal mismatches are zero; API samples from the old
+incident now report withdrawn with null start. Global classifications restored from
+cancelled=1605/withdrawn=9 to cancelled=45/withdrawn=1569. The live model-request count
+and aggregate token totals exactly match the pre-deployment backup (15,238 request rows).
+
+The indexed v3 metadata revalidation remains a normal bounded background pass; counts and
+statuses are already corrected, no repair-quality flags are present, and progress was
+verified. Complete replay was verified on the production copy (0 old versions left).
+Pruned summaries and actual usage are preserved. Same backup/rollback/deploy tag as A109.
 
 ### LLM turn lifecycle — SHIPPED (2026-11-05)
 **What changed:** projection version 2 distinguishes queued from execution and infers

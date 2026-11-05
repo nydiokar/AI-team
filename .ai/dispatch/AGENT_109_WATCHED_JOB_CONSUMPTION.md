@@ -1,12 +1,12 @@
 ```yaml
 job_id: AGENT_109_WATCHED_JOB_CONSUMPTION
 created_at: "2026-11-04T02:11:24.580839+00:00"        # CANONICAL — set once at dispatch, never derive again
-status: active              # ready | active | blocked | done | dead
+status: done              # ready | active | blocked | done | dead
 owner: ""
 depends_on: []
 results_ref: DISPATCH_LOG.md#A109             # -> DISPATCH_LOG.md section with the verdict prose
-evidence: ["tests/test_watched_job_consumption.py","tests/test_job_completion_protocol.py","tests/test_mcp_jobs.py"]                  # artifact paths that PROVE it ran (checked to exist)
-updated_at: "2026-11-04T23:37:11.957998+00:00"
+evidence: ["tests/test_watched_job_consumption.py","tests/test_job_completion_protocol.py","tests/test_mcp_jobs.py","tests/test_job_review_regressions.py"]                  # artifact paths that PROVE it ran (checked to exist)
+updated_at: "2026-11-05T00:08:25.242933+00:00"
 ```
 
 # DISPATCH — 109 · Consume watched-job results once while preserving durable wake-up
@@ -90,7 +90,7 @@ queue redesign, quota policy, paid proof turns, worker restarts without authoriz
 
 ## Closure
 
-### Final adversarial review — reopened 2026-11-05
+### Final adversarial review — SHIPPED (2026-11-05)
 The operator requested an adversarial review and correction of any demonstrated fault.
 F3: cancelling the result HTTP waiter released the four-slot gate while its SQLite thread
 continued. A deterministic blocking-thread regression reproduces this. The executor future
@@ -104,8 +104,19 @@ admission-boundary test reproduced the lost lease. Consumption now inherits its 
 matching `close_session_turns`; the withdrawn wake is fenced immediately while Case cleanup
 waits for the live writer's lease to expire.
 
-Verification in progress: three original red review tests, then five review regressions and
-50 focused protocol/projection/consumption checks green. No worker change or restart needed.
+Verification: original three failure tests and the lineage-lease test failed before their
+corrections; six review regressions pass afterward. Final command:
+`.venv/bin/pytest tests/test_job_review_regressions.py tests/test_watched_job_consumption.py tests/test_turn_queue_4d.py --tb=short`
+→ 57 passed. Another 129 wider completion/telemetry/migration/retention checks and 50 focused
+protocol/projection checks passed (overlapping sets). New-code undefined-name checks pass;
+two pre-existing unused imports in task_server.py were verified on origin/main and left alone.
+
+PR #276 merged as `fd8b501`; CI run `41936330373` green. Gateway and task-server healthy
+on that build, schema remains 49. No worker code/tool change or worker restart. Backup
+`/home/cifran/ai-team-data/backups/mesh-pre-fd8b501-20261104T2350Z.db` passed quick_check;
+rollback image `ai-team:pre-fd8b501`, deployment tag `deploy/20261104T2350Z-fd8b501` pushed.
+First Docker frontend build failed without switching containers; the normal retry succeeded.
+Body/output/lock bounds and independent operator notices remain as before.
 
 ### Watched-job consumption — SHIPPED (2026-11-05)
 **What changed:** `scripts/mcp_jobs.py` exposes `job_result` and corrects the registration
