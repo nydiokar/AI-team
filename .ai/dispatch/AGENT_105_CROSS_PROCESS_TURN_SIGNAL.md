@@ -241,3 +241,10 @@ First PR #280 CI run found two additional carrier-return tests observing the old
 signal path. Moved that spy to `_SUBSCRIBERS`, preserving the release, immediate
 activation and steady-heartbeat assertions. A repository-wide search found no
 other scheduler-only observers beyond the scheduler shutdown assertion.
+
+Post-merge main verification initially returned 516 passed / 1 failed: the auth
+coverage test included the public SPA routes only when `web/dist` was present.
+Reproduced the same failure on detached pre-A105 `bacf90f` with the main checkout's
+built assets. The follow-up isolates `_mount_web_ui` in that API-route audit;
+UI host-gate checks remain in `test_control_api_webui.py`. No production code
+or runtime permissions change. Main-merge CI itself passed.

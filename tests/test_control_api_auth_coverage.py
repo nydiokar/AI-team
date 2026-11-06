@@ -28,7 +28,10 @@ def _dep_calls(dependant) -> set:
     return out
 
 
-def test_every_api_route_requires_auth_except_allowlist():
+def test_every_api_route_requires_auth_except_allowlist(monkeypatch):
+    # Built SPA routes have their own host gate and tests; API auth must not
+    # depend on whether this checkout happens to contain web/dist.
+    monkeypatch.setattr(control_api, "_mount_web_ui", lambda app: None)
     app = control_api.build_control_api(types.SimpleNamespace())
     public = set()
     for ctx in iter_route_contexts(app.routes):
