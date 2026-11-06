@@ -4,7 +4,7 @@
 
 | status | job_id | created | updated | depends_on | proof | flags |
 |---|---|---|---|---|---|---|
-| active | AGENT_105_CROSS_PROCESS_TURN_SIGNAL | 2026-10-09 | 2026-11-05 | — | ✓ |  |
+| active | AGENT_105_CROSS_PROCESS_TURN_SIGNAL | 2026-10-09 | 2026-11-06 | — | ✓ |  |
 | ready | AGENT_62_RUNTIME_FLAG_REGISTRY_NONBOOLEAN | 2026-08-01 | 2026-08-03 | — | — |  |
 | ready | AGENT_63_QUOTA_COORDINATOR_INDEPENDENT_AUDIT | 2026-08-01 | 2026-08-03 | — | — |  |
 | ready | AGENT_66_FILE_EDIT_COLLISION_DETECTION | 2026-08-03 | 2026-08-03 | — | — |  |

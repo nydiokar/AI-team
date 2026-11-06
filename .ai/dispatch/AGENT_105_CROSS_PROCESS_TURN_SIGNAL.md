@@ -6,7 +6,7 @@ owner: ""
 depends_on: []
 results_ref: DISPATCH_LOG.md#A105             # -> DISPATCH_LOG.md section with the verdict prose
 evidence: ["tests/test_turn_signal.py", "tests/test_turn_queue_scheduler.py", "tests/test_agent_inbox_delivery.py"]                  # artifact paths that PROVE it ran (checked to exist)
-updated_at: "2026-11-05T23:19:30.549880+00:00"
+updated_at: "2026-11-06T18:27:46.247485+00:00"
 ```
 
 # DISPATCH — 105 · One turn-state signal across processes (completions reach their consumers when they happen)
@@ -248,3 +248,49 @@ Reproduced the same failure on detached pre-A105 `bacf90f` with the main checkou
 built assets. The follow-up isolates `_mount_web_ui` in that API-route audit;
 UI host-gate checks remain in `test_control_api_webui.py`. No production code
 or runtime permissions change. Main-merge CI itself passed.
+
+### Deployment and post-merge verification — 2026-11-06
+
+- PR #280 merged as `4dff0d2`; test-only follow-up #281 merged as `7d39020`.
+  Both PR CI runs and main CI at `7d39020` passed (run `42269763039`).
+- Final post-merge check with built SPA assets: **517 passed, 8 deprecation
+  warnings in 111.46s**. Exact command, from the clean main worktree:
+
+```bash
+/home/cifran/dev/AI-team/.venv/bin/pytest -n 4 tests/test_turn_signal.py tests/test_turn_queue_scheduler.py tests/test_turn_queue_stage6.py tests/test_turn_queue_stage7.py tests/test_turn_queue_a84_effects.py tests/test_turn_queue_carrier_integration.py tests/test_turn_queue_carrier_recovery.py tests/test_turn_queue_precutover_rework.py tests/test_turn_queue_4e_review.py tests/test_turn_queue_api.py tests/test_agent_inbox.py tests/test_agent_inbox_delivery.py tests/test_a104_seed_inbox.py tests/test_a104_single_pending_source.py tests/test_manager_worker_contract.py tests/test_a103_admission_nudge.py tests/test_wake_dispatcher_eventdriven.py tests/test_watched_jobs.py tests/test_session_cache_heartbeat.py tests/test_control_api.py tests/test_control_api_auth_coverage.py tests/test_control_api_bind_hosts.py tests/test_control_api_flows.py tests/test_control_api_fork.py tests/test_control_api_stream.py tests/test_control_api_wait_group.py tests/test_control_api_webui.py tests/test_control_api_work.py tests/test_control_api_write.py tests/test_task_server_client.py tests/test_task_server_upload_safety.py tests/test_response_model_coverage.py tests/test_build_info.py tests/test_docker_boundary.py tests/test_docker_runtime_config.py --tb=short
+```
+
+- The shared checkout had moved to a separate, unmerged dependency-audit branch
+  during the pause. Preserved it and used a clean `main` worktree with the same
+  host environment. Built only a Git archive of merged `7d39020`, excluding
+  unrelated untracked analysis scripts. No dependency-audit changes shipped.
+- Preflight GO; live and target schema both **49**, so no migration/DB restore
+  operation or new migration backup was needed. Runtime Compose configurations
+  were compared equal (apart from build context) before canonical host Compose
+  recreated gateway + task-server with `--no-build`.
+- Image `sha256:2b6cc855c314609c0de0c18ea27b417efd7661f05b969c386f43cf92bc918963`,
+  tagged `ai-team:prod-7d39020`. Off-host Git deployment tag:
+  `deploy/20261106T1824Z-7d39020`. Rollback `ai-team:pre-7d39020` retains the
+  actual old running image `03e0f3313ee5`, rather than the earlier undeployed build.
+- Both containers healthy and report **7d39020**; task-server reports schema 49,
+  two online nodes, zero pending/claimed tasks and no mesh degradation. Gateway
+  reports coverage true. No matching startup ERROR/Traceback/migration messages.
+  The local worker's PM2 restart count stayed at 9; no worker was restarted.
+- Live, bodyless authenticated HTTP from the task-server container to the gateway
+  was accepted in **0.0188s**. Missing auth returned **401**; a nonempty authenticated
+  body returned **413**. This proves real routing, DNS, credential acceptance and
+  endpoint response, not a natural terminal-transaction-to-Manager execution.
+- Read-only canonical DB queries after `2026-11-06T18:24:41Z` found **0 terminal
+  rows, 0 inbox completions and 0 matched completion/wake pairs**. No historical
+  consumption, synthetic result or paid proof turn was used.
+
+### Closure — PARTIAL (implementation deployed; acceptance observation open)
+
+Code, adversarial review/fixes, merge, post-merge tests and deployment are complete.
+Gate 4 stays unticked and machine status stays `active`: three natural eligible
+completion-to-wake admissions within 2s and the 24h production observation have
+not occurred yet. The live gateway-down/result receipt comparison is also not
+claimed; offline stalled-gateway and commit-independence tests cover that seam.
+Observe normal workload from the deployment cutoff above; do not manufacture
+paid work or replay/consume old jobs to close this evidence gap. Native DNS and
+existing consumer native IO deadline limits remain the explicit deferrals above.
