@@ -11,6 +11,7 @@ The backing store is MeshDB (src/control/db.py). No SQL lives here.
 """
 
 import asyncio
+import os
 import hashlib
 import json
 import logging
@@ -325,25 +326,32 @@ async def _lifespan(app: FastAPI):
     local_hb_task = asyncio.create_task(_local_node_heartbeat_loop()) if local_execution else None
     health_sampler_task = asyncio.create_task(_mesh_health_sampler_loop())
     projection_task = asyncio.create_task(_telemetry_projection_flusher_loop())
-    _bg_tasks = tuple(t for t in (reaper_task, local_hb_task, health_sampler_task, projection_task) if t is not None)
-    yield
-    for _t in _bg_tasks:
-        _t.cancel()
-    for _t in _bg_tasks:
-        try:
-            await _t
-        except asyncio.CancelledError:
-            pass
-    # Final drain so a clean shutdown does not strand pending projections.
+    from .turn_signal_transport import forward_turn_changes
+
+    signal_url: str = os.getenv("GATEWAY_TURN_SIGNAL_URL", "").strip()
+    signal_task = asyncio.create_task(
+        forward_turn_changes(signal_url, _cfg.mesh.worker_token), name="gateway-turn-signal",
+    ) if signal_url and _cfg.mesh.worker_token else None
+    _bg_tasks = tuple(t for t in (reaper_task, local_hb_task, health_sampler_task, projection_task, signal_task) if t is not None)
     try:
-        turns, sessions = _drain_projection()
-        if turns or sessions:
-            db = get_db()
-            if db is not None:
-                TelemetryStore(db).project_dirty(turns, sessions, isolate=True)
-    except Exception:
-        logger.debug("event=telemetry_projection_final_drain_failed", exc_info=True)
-    get_registry().stop()
+        # Register the sender before accepting the first carrier request.
+        await asyncio.sleep(0)
+        yield
+    finally:
+        for _t in _bg_tasks:
+            _t.cancel()
+        # Await every cancelled task even when another background loop failed.
+        await asyncio.gather(*_bg_tasks, return_exceptions=True)
+        # Final drain so a clean shutdown does not strand pending projections.
+        try:
+            turns, sessions = _drain_projection()
+            if turns or sessions:
+                db = get_db()
+                if db is not None:
+                    TelemetryStore(db).project_dirty(turns, sessions, isolate=True)
+        except Exception:
+            logger.debug("event=telemetry_projection_final_drain_failed", exc_info=True)
+        get_registry().stop()
 
 
 app = FastAPI(title="AI-Team Mesh Task Server", version="1.0", lifespan=_lifespan)
@@ -1120,7 +1128,6 @@ def claim_managed(task_id: str, payload: ManagedClaimPayload) -> Dict[str, Any]:
         if (getattr(e, "context", None) or {}).get("reason") in ("expired", "not_idle", "case_manager_rebound"):
             _hint_turn_scheduler()  # [A82 Stage 4d] expired optional turn freed the slot
         raise HTTPException(status_code=getattr(e, "status_code", 409), detail=str(e))
-    _hint_turn_scheduler()  # [A82 Stage 4a] waiting count dropped
     # [A82 Stage 3 rework] The carrier executes THIS response, so it must carry
     # the routing fields the executor needs (backend/action) from the committed
     # row — non-secret columns only.
@@ -1437,7 +1444,6 @@ def _commit_managed_result(
         )
     except TurnQueueError as e:
         raise HTTPException(status_code=getattr(e, "status_code", 409), detail=str(e))
-    _hint_turn_scheduler()  # [A82 Stage 4a] slot freed → next head may activate
     _emit_managed_change(_turn_session(db, task_id), task_id, str(completion.status), str(completion.status))
     return completion
 
@@ -1513,6 +1519,7 @@ def _emit_managed_change(
     transition (claim / start / release / recovery / result / resolution)."""
     from .turn_queue import emit_turn_queue_changed
 
+    _hint_turn_scheduler()
     emit_turn_queue_changed(
         str(session_id or ""), change, turn_id=task_id,
         status=str(status) if status else None,
@@ -1520,24 +1527,24 @@ def _emit_managed_change(
 
 
 def _hint_turn_scheduler() -> None:
-    """[A82 Stage 4a] Post-commit hint to the gateway turn scheduler (a no-op
-    when none runs in this process). Hints never carry authority."""
+    """Post-commit shared hint, forwarded to the gateway in split deployments.
+    Hints never carry authority and cannot delay or fail a carrier request."""
     try:
         from .turn_scheduler import notify_turn_queue_changed
 
         notify_turn_queue_changed()
-    except Exception:  # noqa: BLE001 — the 3 s fallback still covers it
+    except Exception:  # noqa: BLE001 — consumer polling still covers it
         logger.debug("event=turn_scheduler_hint_failed", exc_info=True)
 
 
 def _note_managed_released(count: int) -> None:
     """[A82 Stage 7] Post-commit: released managed rows re-entered the waiting
-    count — raise the shared allowance and hint the scheduler (the task server
-    is embedded in the gateway process). The scheduler refresh is the backstop."""
+    count — raise this process's allowance. `_emit_managed_change` sends the
+    post-commit signal; the gateway also refreshes its own DB count."""
     try:
-        from .turn_scheduler import notify_managed_released
+        from .turn_admission import ALLOWANCE
 
-        notify_managed_released(count)
+        ALLOWANCE.note_managed_released(count)
     except Exception:  # noqa: BLE001 — the scheduler refresh still covers it
         logger.debug("event=turn_allowance_release_note_failed", exc_info=True)
 
@@ -1685,7 +1692,6 @@ def record_quiescence_observation(
         )
     except TurnQueueError as e:
         raise HTTPException(status_code=getattr(e, "status_code", 409), detail=str(e))
-    _hint_turn_scheduler()
     _emit_managed_change(task.get("session_id"), task_id, "resolved", str(outcome.resolved_status))
     return {"status": "reconciled", "task_id": outcome.task_id, "resolved_status": outcome.resolved_status}
 
@@ -2208,6 +2214,7 @@ def report_job_done(job_id: str, payload: JobDonePayload) -> Dict[str, str]:
             err = f"{err}: {payload.tail[:500]}"
         db.fail_job(job_id, err)
 
+    _hint_turn_scheduler()
     return {"status": "accepted", "job_id": job_id}
 
 

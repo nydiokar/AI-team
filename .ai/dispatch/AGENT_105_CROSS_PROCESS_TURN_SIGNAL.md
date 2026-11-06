@@ -1,20 +1,19 @@
 ```yaml
 job_id: AGENT_105_CROSS_PROCESS_TURN_SIGNAL
 created_at: "2026-10-09T21:41:28.251301+00:00"        # CANONICAL — set once at dispatch, never derive again
-status: ready              # ready | active | blocked | done | dead
+status: active              # ready | active | blocked | done | dead
 owner: ""
 depends_on: []
-results_ref: null             # -> DISPATCH_LOG.md section with the verdict prose
-evidence: []                  # artifact paths that PROVE it ran (checked to exist)
-updated_at: "2026-10-09T21:41:28.251323+00:00"
+results_ref: DISPATCH_LOG.md#A105             # -> DISPATCH_LOG.md section with the verdict prose
+evidence: ["tests/test_turn_signal.py", "tests/test_turn_queue_scheduler.py", "tests/test_agent_inbox_delivery.py"]                  # artifact paths that PROVE it ran (checked to exist)
+updated_at: "2026-11-05T23:19:30.549880+00:00"
 ```
 
 # DISPATCH — 105 · One turn-state signal across processes (completions reach their consumers when they happen)
 
 **Level:** 3 (crosses the task-server ↔ gateway service boundary; new internal endpoint or channel; touches the
 turn scheduler, the managed-effects consumer and the Wake-Dispatcher) · **Type:** code
-**Authored:** 2026-10-10 by the A104 owner, at the operator's request · **Status:** ready — **Level 3: operator
-approval before execution** (D1 below is the one open choice; a recommendation is given).
+**Authored:** 2026-10-10 by the A104 owner, at the operator's request · **Status:** active — operator authorized D1(a), implementation, adversarial review and merge on 2026-11-05.
 **Depends on:** A104 (done, `d0f15c8`). Coordinate with **A102** (in flight in `src/backends/`, `src/worker/`): this job
 touches neither.
 **Branch:** `feat/turn-signal` · one PR per gate, self-merged when green.
@@ -76,7 +75,7 @@ event consumer (Governor included) — no consumer invents its own wake-up.
   `nudge_node_direct`), never on the commit path's critical section, never raising into the carrier request.
 
 ## DECISIONS
-- **D1 — Transport for S1 (open; operator to confirm).**
+- **D1 — Transport for S1 (HTTP nudge accepted 2026-11-05).**
   - **(a) HTTP nudge, task-server → gateway** — mirror of A103: an internal, authenticated, body-less
     `POST /internal/turn-signal` on the gateway that calls `notify_turn_queue_changed()`. Latency ≈ ms. Needs an auth
     decision (reuse the controller-local shared token; bind to the internal network) and the §7 service-boundary
@@ -142,14 +141,103 @@ dispatcher passes beyond the coalescing bound.
   turn_withdrawn_obsolete` must be 0.
 - **Inert history** `completion_outbox` table + `flow_runs.continuation_mode` column — drop in a later cleanup.
 
-## TRAIL / EVIDENCE (fill as gates close)
+## TRAIL / EVIDENCE
+
+### Gate 1 — inventory (2026-11-05, base `bacf90f`)
+
+Operator authorized implementation, review, fixes and merge on 2026-11-05;
+this accepts recommended D1(a), HTTP nudge, using existing WORKER_TOKEN auth.
+No worker restart or paid proof turn is included.
+
+| Producer / consumer | Observed path | Fate |
+|---|---|---|
+| Managed claim / claim refusal freeing a slot | `_hint_turn_scheduler` after commit | Forward shared signal |
+| Managed start / release / enter recovery | `_emit_managed_change`; release also updates local allowance | Signal after each committed transition |
+| Managed result / quiescence | `_hint_turn_scheduler` + UI event | Forward shared signal, coalesced |
+| Watched-job result consumption | `_hint_turn_scheduler` after consume | Forward shared signal |
+| Watched-job done | DB terminal write, no hint | Add post-commit hint |
+| Turn scheduler | private event; eligibility/backoff timers and 60s safety net | Subscribe to shared signal; preserve actual timers (packet 3s statement is outdated) |
+| Managed effects | 3s sleep; bounded terminal drain | Subscribe; publish after finalized projections so an earlier inbox pass retries |
+| Inbox / wake dispatcher | 30s sleep | Subscribe; keep timeout for quota/backoff clocks |
+| Cache heartbeat synchronization | Part of wake dispatcher tick | Follows shared wake signal; heartbeat due times remain DB-authoritative |
+| Carrier coverage | Separate 60s timer, observes node capability/liveness | Keep timer: membership changes are not exclusively turn transitions |
+
+Implementation stays in control-plane files; no new authoritative store, inbox reader,
+DB schema, worker protocol or backend path.
+
 
 ---
 ## Milestone (burndown)
-- [ ] D1 confirmed by the operator
-- [ ] Gate 1 — inventory of hint sites + poll loops, each with a fate
-- [ ] Gate 2 — cross-process transport, RED→GREEN, §7 checklist
-- [ ] Gate 3 — all consumers on the shared channel; ≤ 1 s end-to-end in tests; guard green
+- [x] D1 confirmed by the operator (2026-11-05)
+- [x] Gate 1 — inventory of hint sites + poll loops, each with a fate
+- [x] Gate 2 — cross-process transport, RED→GREEN, §7 checklist
+- [x] Gate 3 — all consumers on the shared channel; ≤ 1 s end-to-end in tests; guard green
 - [ ] Gate 4 — deployed; live latency ≤ 2 s ×3; 24 h pass counts bounded
 
 ## Closure (fill on completion)
+
+### Adversarial review and boundary check (2026-11-06)
+
+Self-review traced committed terminal result → HTTP bridge → shared subscriptions
+→ inbox admission → scheduler activation; delivery/inbox semantics remain unchanged.
+Findings fixed before merge:
+- Duplicate producer hints: successful claim/result/quiescence now signal through
+  `_emit_managed_change` once; release updates local allowance before that signal.
+- Signals bypass the effects consumer enrollment-idle optimization; finalized
+  projections republish so an earlier busy-recipient pass can retry immediately.
+- Connection cleanup shares the sender timeout instead of adding 100ms beyond it.
+- Lifespan cleanup awaits all cancelled tasks even after a background failure.
+  The new real lifespan test also caught/fixed a missing startup `os` import.
+- Transport exception logs contain no exception text/traceback that could reveal
+  a request credential during encoding failure.
+
+Service boundary checklist:
+- Concurrency: one lifespan sender, one pending bit, at most one outstanding
+  callback per subscriber, at most ten HTTP sends/second. Four admitted body
+  readers at the receiver; excess callers get 429. No DB work inside endpoint.
+- Memory at N=100: only four empty-body reads admitted; 96 excess calls are
+  rejected without allocating application body buffers or DB jobs. One sender
+  and fixed subscriber count; response/status-line reads capped to 1KiB.
+- Request size: zero body bytes; Content-Length and streamed/chunked bytes
+  checked, malformed content rejected with 413.
+- Timeout: receiver body 1s; sender socket awaits + cleanup share 2s. No authority
+  or carrier receipt depends on the nudge. Existing consumer timers recover loss.
+- Malformed/disconnected input: structured 401/408/413/429, no state payload,
+  and cancellation releases body-read permits; tests exercise these cases.
+- Backing resources: DB is never opened by the endpoint. Sender connection,
+  encoding, unavailable gateway and invalid-response failures are contained;
+  consumers retain existing per-pass DB-error recovery.
+- Explicit deferral: native DNS work uses asyncio resolver executor lifecycle;
+  cancellation bounds its waiter, not native resolver execution. This internal
+  Docker-service transport assumes healthy local DNS and the existing trusted
+  operator network; it adds no service-wide native-DNS or slow-response-client
+  deadline. No new native DB/socket deadline is claimed for consumer passes.
+
+Verification before merge:
+- Initial RED: 6 tests failed for absent shared subscriptions/transport and
+  sleeping consumers; first GREEN: 24 passed.
+- Expanded focused checks: 44 passed (10.19s).
+- Wider targeted offline set: 504 passed (90.21s), 34 modules covering scheduler,
+  carrier transitions/recovery, A84 effects, A104 inbox, manager/worker contract,
+  auth/control APIs, watched jobs, heartbeats and Docker boundaries.
+- Final review-fix regression: `/home/cifran/dev/AI-team/.venv/bin/pytest
+  tests/test_turn_signal.py tests/test_turn_queue_scheduler.py
+  tests/test_turn_queue_stage7.py tests/test_control_api_auth_coverage.py
+  tests/test_turn_queue_a84_effects.py --tb=short` → 78 passed (29.94s).
+- New-module Ruff checks, touched-source compilation and `git diff --check`
+  pass. Undefined-name diagnostics on existing modules match origin/main exactly;
+  no unrelated baseline lint changes included.
+- New H3 test drives the real task-server result route, terminal DB transaction,
+  inbox and scheduler with an ASGI transport seam; wake activates within 1s with
+  all consumer polls at 30s. Separate stalled-gateway case proves the commit
+  response does not await the sender. No paid backend/network in tests.
+
+Production acceptance remains distinct: observe three natural eligible completions
+within 2s and 24h behavior after deploy; do not manufacture paid work or replay
+historical completions. Keep the job active until this evidence exists.
+
+First PR #280 CI run found two additional carrier-return tests observing the old
+`_ACTIVE` hook. The real DB holds had cleared; the test spy was no longer on the
+signal path. Moved that spy to `_SUBSCRIBERS`, preserving the release, immediate
+activation and steady-heartbeat assertions. A repository-wide search found no
+other scheduler-only observers beyond the scheduler shutdown assertion.

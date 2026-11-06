@@ -50,6 +50,7 @@ services:
       MESH_BIND_HOST: "0.0.0.0"
       # No in-process execution here: skip the gateway self-node registration.
       GATEWAY_LOCAL_EXECUTION_ENABLED: "false"
+      GATEWAY_TURN_SIGNAL_URL: "http://gateway:${DASHBOARD_PORT:-9003}/internal/turn-signal"
 
     restart: unless-stopped
 

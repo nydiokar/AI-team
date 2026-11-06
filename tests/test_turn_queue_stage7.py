@@ -57,9 +57,14 @@ class _HintCounter:
 @pytest.fixture()
 def hints() -> Any:
     counter = _HintCounter()
-    turn_scheduler._register(counter)  # type: ignore[arg-type]
-    yield counter
-    turn_scheduler._unregister(counter)  # type: ignore[arg-type]
+    # Observe the shared channel, rather than the retired scheduler-only hint.
+    with turn_scheduler._SUBSCRIBERS_LOCK:
+        turn_scheduler._SUBSCRIBERS.add(counter)  # type: ignore[arg-type]
+    try:
+        yield counter
+    finally:
+        with turn_scheduler._SUBSCRIBERS_LOCK:
+            turn_scheduler._SUBSCRIBERS.discard(counter)  # type: ignore[arg-type]
 
 
 def _register(client: TestClient, incarnation_id: str) -> None:

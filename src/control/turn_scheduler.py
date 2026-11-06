@@ -24,8 +24,9 @@ import asyncio
 import logging
 import threading
 import time
+from contextlib import contextmanager
 from datetime import datetime, timezone
-from typing import Any, Awaitable, Callable, Dict, List, Optional
+from typing import Any, Awaitable, Callable, Dict, Iterator, List, Optional
 
 from pydantic import BaseModel
 
@@ -342,6 +343,75 @@ SLOT_BACKOFF_BASE_SEC = 3.0
 SLOT_BACKOFF_CAP_SEC = 30.0
 
 
+class TurnChangeSubscription:
+    """One coalesced waiter on the process-wide turn signal.
+
+    Clear BEFORE reading durable state so a hint arriving during that read is
+    retained. At most one loop callback is outstanding, even across threads.
+    Events live here, never in the consumer loops.
+    """
+
+    def __init__(self) -> None:
+        self._loop = asyncio.get_running_loop()
+        self._event = asyncio.Event()
+        self._lock = threading.Lock()
+        self._pending = False
+        self._scheduled = False
+        self._closed = False
+
+    def hint(self) -> None:
+        with self._lock:
+            if self._closed or self._pending:
+                return
+            self._pending = True
+            if self._scheduled:
+                return
+            self._scheduled = True
+            try:
+                self._loop.call_soon_threadsafe(self._deliver)
+            except RuntimeError:
+                self._scheduled = False
+
+    def _deliver(self) -> None:
+        with self._lock:
+            self._scheduled = False
+            if self._pending and not self._closed:
+                self._event.set()
+
+    def clear(self) -> None:
+        with self._lock:
+            self._pending = False
+            self._event.clear()
+
+    async def wait(self, timeout: Optional[float]) -> bool:
+        try:
+            await asyncio.wait_for(self._event.wait(), timeout=timeout)
+            return True
+        except asyncio.TimeoutError:
+            return False
+
+    def close(self) -> None:
+        with self._lock:
+            self._closed = True
+
+
+_SUBSCRIBERS: set[TurnChangeSubscription] = set()
+_SUBSCRIBERS_LOCK = threading.Lock()
+
+
+@contextmanager
+def subscribe_turn_changes() -> Iterator[TurnChangeSubscription]:
+    subscription = TurnChangeSubscription()
+    with _SUBSCRIBERS_LOCK:
+        _SUBSCRIBERS.add(subscription)
+    try:
+        yield subscription
+    finally:
+        with _SUBSCRIBERS_LOCK:
+            _SUBSCRIBERS.discard(subscription)
+        subscription.close()
+
+
 class TurnScheduler:
     """The single gateway scheduler loop (event hint + bounded fallback)."""
 
@@ -366,34 +436,34 @@ class TurnScheduler:
         self._slot_backoff_k = 0
         self._limit = limit
         self._allowance = allowance
-        self._event: Optional[asyncio.Event] = None
-        self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._changes: Optional[TurnChangeSubscription] = None
         self._running = False
         self._last_error_log = 0.0
         self.passes = 0
 
     def hint(self) -> None:
         """Thread-safe, coalescing wake-up (callable from any loop/thread)."""
-        loop, event = self._loop, self._event
-        if loop is None or event is None or loop.is_closed():
-            return
-        try:
-            loop.call_soon_threadsafe(event.set)
-        except RuntimeError:
-            pass
+        if self._changes is not None:
+            self._changes.hint()
 
     def stop(self) -> None:
         self._running = False
         self.hint()
 
     async def run(self) -> None:
-        self._loop = asyncio.get_running_loop()
-        self._event = asyncio.Event()
+        with subscribe_turn_changes() as changes:
+            self._changes = changes
+            try:
+                await self._run(changes)
+            finally:
+                self._changes = None
+
+    async def _run(self, changes: TurnChangeSubscription) -> None:
         self._running = True
         _register(self)
         try:
             while self._running:
-                self._event.clear()
+                changes.clear()
                 timeout: Optional[float] = None
                 try:
                     res = await run_scheduler_pass(
@@ -422,10 +492,9 @@ class TurnScheduler:
                     break
                 if timeout == 0:
                     continue
-                try:
-                    await asyncio.wait_for(self._event.wait(), timeout=timeout)
+                if await changes.wait(timeout):
                     self._slot_backoff_k = 0  # a hint: fresh, fast recheck
-                except asyncio.TimeoutError:
+                else:
                     self._slot_backoff_k = min(self._slot_backoff_k + 1, 16)
         finally:
             _unregister(self)
@@ -449,13 +518,11 @@ def _unregister(scheduler: TurnScheduler) -> None:
 
 
 def notify_turn_queue_changed() -> None:
-    """Hint the gateway scheduler that queue state changed (admission,
-    completion, claim, withdrawal). No-op without a scheduler; the durable rows
-    remain the authority either way."""
-    with _ACTIVE_LOCK:
-        scheduler = _ACTIVE
-    if scheduler is not None:
-        scheduler.hint()
+    """Broadcast one coalesced hint; every consumer re-reads durable state."""
+    with _SUBSCRIBERS_LOCK:
+        subscribers = tuple(_SUBSCRIBERS)
+    for subscription in subscribers:
+        subscription.hint()
 
 
 def notify_managed_released(count: int) -> None:

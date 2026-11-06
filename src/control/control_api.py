@@ -1563,9 +1563,10 @@ def build_control_api(orchestrator) -> FastAPI:
             yield cached
 
     # --- route areas: one APIRouter per area (src/control/routes/) -----------
-    from src.control.routes import admin, cases, cost, monitoring, sessions, turn_requests, work
+    from src.control.routes import admin, cases, cost, internal, monitoring, sessions, turn_requests, work
 
     auth = {"require_auth": _require_auth}
+    app.include_router(internal.build_router(**auth))
     idem = {"idem_put": _idem_put, "idem_guard": _idem_guard}
     app.include_router(monitoring.build_router(orchestrator, **auth))
     app.include_router(turn_requests.build_router(orchestrator, **auth, bearer=_bearer))
