@@ -4,6 +4,7 @@ import subprocess
 import sys
 
 import anyio
+from anyio.abc import Process
 from claude_agent_sdk import ClaudeAgentOptions
 from claude_agent_sdk._internal.transport.subprocess_cli import SubprocessCLITransport
 
@@ -13,7 +14,7 @@ async def test_sdk_transport_reaps_child_in_cancelled_scope() -> None:
     transport: SubprocessCLITransport = SubprocessCLITransport(
         prompt="offline", options=ClaudeAgentOptions(cli_path=sys.executable),
     )
-    child = await anyio.open_process(
+    child: Process = await anyio.open_process(
         [sys.executable, "-c", "import time; time.sleep(60)"],
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
     )

@@ -4,6 +4,7 @@ import asyncio
 from pathlib import Path
 
 import pytest
+from watchdog.observers.api import BaseObserver, EventEmitter
 
 from src.services.file_watcher import FileWatcher
 
@@ -24,10 +25,11 @@ async def test_linux_watcher_delivers_task_and_stops(
         delivered.set()
 
     watcher: FileWatcher = FileWatcher(str(tmp_path))
-    observer = None
-    emitters = ()
+    observer: BaseObserver | None = None
+    emitters: tuple[EventEmitter, ...] = ()
     try:
         watcher.start(callback)
+        assert isinstance(watcher.observer, BaseObserver)
         observer = watcher.observer
         emitters = tuple(observer.emitters)
         assert watcher.is_running()
