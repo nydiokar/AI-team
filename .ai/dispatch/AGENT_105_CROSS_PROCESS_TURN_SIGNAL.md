@@ -235,3 +235,9 @@ Verification before merge:
 Production acceptance remains distinct: observe three natural eligible completions
 within 2s and 24h behavior after deploy; do not manufacture paid work or replay
 historical completions. Keep the job active until this evidence exists.
+
+First PR #280 CI run found two additional carrier-return tests observing the old
+`_ACTIVE` hook. The real DB holds had cleared; the test spy was no longer on the
+signal path. Moved that spy to `_SUBSCRIBERS`, preserving the release, immediate
+activation and steady-heartbeat assertions. A repository-wide search found no
+other scheduler-only observers beyond the scheduler shutdown assertion.

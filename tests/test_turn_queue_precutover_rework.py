@@ -213,7 +213,8 @@ def _offline_admitted(tmp_path, monkeypatch):
     assert row["status"] == "queued" and row["blocked_reason"] == "carrier_offline: worker-a"
     assert row["blocked_until"], "admitted under the blocked-head backoff"
     spy = _HintSpy()
-    monkeypatch.setattr(tsch, "_ACTIVE", spy)
+    # Carrier recovery publishes on the shared channel, not a scheduler-only hook.
+    monkeypatch.setattr(tsch, "_SUBSCRIBERS", {spy})
     reg = nr_mod.NodeRegistry()
     monkeypatch.setattr(nr_mod, "_registry", reg)
     return db, o, tid, spy, reg
