@@ -62,7 +62,7 @@ The direct runtime declarations are watchdog, Pydantic, python-dotenv, PyYAML, F
 
 `pyproject.toml` declares ranges (exact watchdog/dotenv); `constraints.txt` pins the runtime/dev/optional closure. CI installs `.[dev,test,telegram]`; Docker extracts runtime + push dependencies and uses the same constraints. This is a constraints workflow, not a hash-locked resolver workflow. Only selected pins and matching exact declarations change. All other constraints stay byte-for-byte intact. Build-system setuptools/wheel remain unpinned, as before.
 
-Running gateway health was read-only and healthy (`bacf90f`); checkout was `4dff0d2`. Gateway/task-server run in separate Compose boundaries; workers are separate host/carrier processes with active sessions. No service command, restart, deployment, worker call, direct live DB access, credentialed agent invocation, live venv installation or system package change was performed. Unrelated untracked files/directories were preserved.
+Running gateway health was read-only and healthy (`bacf90f`); checkout was `4dff0d2`. Gateway/task-server run in separate Compose boundaries; workers are separate host/carrier processes with active sessions. No service mutation, restart, deployment, worker call, direct live DB access, credentialed agent invocation, live venv installation or system package change was performed. Unrelated untracked files/directories were preserved.
 
 Baseline installed environment: `pip check` clean; original 15-file regression selection: **331 passed, 8 warnings**. Clean isolated installation of `.[dev,test,telegram,push,dispatch]` also succeeds; same selection with the two newly added dotenv tests gives **332 passed, 1 expected failure, 8 warnings**. The expected failure is the deliberately reproduced empty-token bug.
 
@@ -96,6 +96,7 @@ The watcher initially revealed an existing duplicate-callback race within the fi
 | Gateway/task-server ASGI startup | 2 passed | 2 passed | Application construction, task-server real lifespan, health and auth rejection, shutdown | PASS in isolation |
 | Broader integration selection | 136 passed, 1 failure | 136 passed, same failure | Existing tests retained unchanged | Pre-existing SPA/auth audit assertion |
 | Combined final 30-file selection | Original 468 cases: 467 passed, 1 failure | **478 passed, 1 failure, 8 warnings** | **11 added cases** | No newly introduced test failure |
+| GitHub default CI collection | Not rerun on old SHA in this task | PASS at `2853472` | Existing `pytest -q -n auto` workflow; e2e remains gated | PASS on CI environment |
 | Dependency integrity / clean install | Clean | Clean | Fresh final environment; all declared extras except llama | PASS |
 | Ruff, whole Python tree | 5891 errors | 5891 errors; output byte-identical | Four new test modules lint clean | Pre-existing failures |
 | Mypy, explicit package bases | 898 errors / 42 files | 898 errors / 42 files; diagnostic multiset identical | Four new test modules separately type-check clean | Pre-existing failures |
@@ -128,7 +129,7 @@ Rechecked outdated packages in the final dependency closure: **41 remain**, deli
 
 ## Outstanding risks
 
-- Full-suite/e2e verification is not claimed: project hard rules and `.claude/skills/running-targeted-tests/SKILL.md` prohibit it because tests can reach paid CLIs. Only explicit relevant targets run. No credentials or paid integrations were used.
+- Local full-suite/e2e verification was not run under the project test-cost guard. Opening the draft PR automatically ran the existing GitHub CI workflow (`pytest -q -n auto`), which **passed** at `2853472c5f8598bf96e1b8b761b2a334b62d63b0`: [run 42138402651](https://github.com/nydiokar/AI-team/actions/runs/42138402651), test job 3m49s. CI has no built SPA assets, so the asset-sensitive baseline assertion passes there. CI uses double quiet output and emits no final test count; the counted local 479-case selection remains the numerical evidence. E2e remains gated and no credentials/paid integrations were used. The final commit only records this CI evidence and skips rerunning unchanged code.
 - Claude 0.2.111 bundles CLI 2.1.202 (was 2.1.191). Explicit external CLI paths still follow existing configuration. Actual bundled/external CLI session creation, continuation, tool execution and long-turn cleanup remain unverified; offline tests cannot certify production.
 - The cancellation regression covers AnyIO cancellation scopes. Upstream documents that raw asyncio task cancellation can still interrupt shielded cleanup; this is not claimed fixed. Later SDK resume/session argv hardening (0.2.121), skill allowlist hardening (0.2.129) and MCP transport rewrite (0.2.140) remain outside the selected intermediate batch.
 - WebSocket tests exercise the library asyncio recv path, not Uvicorn’s independent SansIO frame accumulation. No application WebSocket routes were found. No claim is made that upgrading websockets alone hardens every Uvicorn path.
