@@ -110,6 +110,10 @@ def test_X01_cancel_interrupts_exactly_the_running_managed_turn(db, tmp_path, re
     assert fake.interrupts == 1
     row = _row(db, "t-x")
     assert row["status"] == "cancelled"
+    assert row["error_class"] == "cancelled"
+    assert "Stopped by you" in row["reply_text"]
+    assert "backend error" not in row["reply_text"]
+    assert "working" in row["reply_text"]
     [ctl] = [r for r in db._conn().execute(
         "SELECT * FROM mesh_tasks WHERE action='cancel_managed'").fetchall()]
     assert ctl["status"] == "completed" and "interrupt delivered" in (ctl["result"] or "")

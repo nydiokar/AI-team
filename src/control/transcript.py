@@ -279,7 +279,7 @@ def _turns_from_db(session_id: str, limit: int) -> Optional[List[Dict[str, Any]]
         # belongs to the queue card read model, never to the conversation.
         if status in _UNCONSUMED_TURN_STATUSES:
             continue
-        success = status not in ("failed", "failed_node_offline")
+        success = status not in ("failed", "failed_node_offline", "cancelled")
         instruction = (r.get("prompt") or "").strip()
         result = (r.get("reply_text") or "").strip()
         # Back-compat: a row enriched only via the legacy `result` JSON.
@@ -288,6 +288,17 @@ def _turns_from_db(session_id: str, limit: int) -> Optional[List[Dict[str, Any]]
                 result = (json.loads(r["result"]) or {}).get("output") or ""
             except Exception:
                 result = ""
+        if status == "cancelled":
+            from src.backends.claude_driver import SALVAGE_ERROR_BANNER, _build_salvaged_reply
+
+            # Older carriers produced a generic error banner for an operator
+            # interrupt. Project canonical cancellation honestly without
+            # rewriting historical diagnostic evidence or provider failures.
+            if result.startswith(SALVAGE_ERROR_BANNER):
+                progress = result[len(SALVAGE_ERROR_BANNER):].removeprefix("\n\n---\n\n")
+                result = _build_salvaged_reply("cancelled", progress)
+            elif not result:
+                result = "Stopped by you."
         result = _clean_result(result, success, None)
         if not instruction and not result:
             continue

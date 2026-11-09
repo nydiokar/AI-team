@@ -89,6 +89,26 @@ def _result(text: str, sid: str = "sid-1", is_error: bool = False) -> ResultMess
     )
 
 
+@pytest.mark.parametrize("cancel_requested,is_error,status,expected", [
+    (False, True, None, "backend_error"),
+    (True, True, None, "cancelled"),
+    (True, False, None, ""),  # success won the finish/stop race
+    (True, True, 429, "usage_limit"),  # retain a structured provider refusal
+])
+def test_terminal_classification_uses_exact_owner_cancel(cancel_requested, is_error, status, expected):
+    from types import SimpleNamespace
+    from src.backends.claude_driver import _TurnAccumulator
+
+    session = _SDKSession.__new__(_SDKSession)
+    session._turn_owner = SimpleNamespace(cancel_requested=cancel_requested)
+    acc = _TurnAccumulator(backend_session_id="sid-1")
+    message = _result("[ede_diagnostic] result_type=user", is_error=is_error)
+    message.api_error_status = status
+    outcome = session._outcome_from_result(acc, message)
+    assert outcome.error_class == expected
+    assert outcome.is_error is is_error
+
+
 def _task_notification(task_id: str, status: str = "completed", sid: str = "sid-1") -> TaskNotificationMessage:
     """A background task reached a terminal status (completed/failed/stopped)."""
     return TaskNotificationMessage(

@@ -110,3 +110,30 @@ def test_session_created_composite_index_serves_the_read(tmp_path):
     assert "idx_mesh_tasks_session_created" in plan, plan
     # The composite covers both the filter AND the order → no sort step.
     assert "USE TEMP B-TREE FOR ORDER BY" not in plan.upper(), plan
+
+
+def test_cancelled_transcript_uses_ledger_truth_and_excludes_control_receipts(tmp_path, monkeypatch):
+    import src.control.db as db_mod
+    from src.backends.claude_driver import SALVAGE_ERROR_BANNER
+
+    db = MeshDB(str(tmp_path / "mesh.db"))
+    db.upsert_session(_session("sess_stop"))
+    monkeypatch.setattr(db_mod, "_db_instance", db)
+    for task_id, action, reply, status in (
+        ("turn", "resume_session", SALVAGE_ERROR_BANNER + "\n\n---\n\nWork in progress", "cancelled"),
+        ("cancel", "cancel_managed", "interrupt delivered or armed", "completed"),
+        ("close", "close_session", "session closed", "completed"),
+    ):
+        enqueue_pre_cutover(db, task_id=task_id, session_id="sess_stop", machine_id="Horse",
+                           backend="claude", action=action, payload={"prompt": "question"})
+        with db._write() as conn:
+            conn.execute("UPDATE mesh_tasks SET status=?, reply_text=? WHERE id=?", (status, reply, task_id))
+    turns = transcript_mod.get_transcript(tmp_path, tmp_path, "sess_stop", limit=1)
+    assert len(turns) == 1 and turns[0]["task_id"] == "turn"
+    assert turns[0]["success"] is False
+    assert "Stopped by you" in turns[0]["result"]
+    assert "Work in progress" in turns[0]["result"]
+    assert "backend error" not in turns[0]["result"]
+    assert db.get_session_turns_tail("sess_stop") == []
+    # Original evidence is retained; this is a read correction, no history rewrite.
+    assert db.get_task("turn")["reply_text"].startswith(SALVAGE_ERROR_BANNER)

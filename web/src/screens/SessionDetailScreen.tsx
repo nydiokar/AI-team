@@ -644,6 +644,7 @@ export function SessionDetailScreen() {
     id, session?.turnQueue?.activeTurnId ?? session?.lastTaskId ?? undefined,
   );
   const running = session?.opState === "running";
+  const stopping = running && session?.turnQueue?.hold === "operator_stop";
   const closed = session?.lifecycle === "closed";
   // [A82 Stage 8a] A retired-backend session stays readable; it takes no turns.
   const retiredReason = retiredBackendReason(session?.backend);
@@ -961,7 +962,7 @@ export function SessionDetailScreen() {
                   >
                     <RefreshCw className={cn("size-4", refreshing && "animate-spin")} />
                   </button>
-                  <SessionStatusChip state={session.opState} closed={closed} reason={session.reason} showReason={false} />
+                  <SessionStatusChip state={session.opState} closed={closed} reason={session.reason} showReason={false} stopping={stopping} />
                   <div className="relative">
                     <button
                       onClick={() => setMenuOpen((v) => !v)}
@@ -1112,7 +1113,7 @@ export function SessionDetailScreen() {
                     >
                       <RefreshCw className={cn("size-4", refreshing && "animate-spin")} />
                     </button>
-                    <SessionStatusChip state={session.opState} closed={closed} reason={session.reason} showReason={false} />
+                    <SessionStatusChip state={session.opState} closed={closed} reason={session.reason} showReason={false} stopping={stopping} />
                     <div className="relative">
                       <button
                         onClick={() => setMenuOpen((v) => !v)}
@@ -1417,7 +1418,8 @@ export function SessionDetailScreen() {
                 {retiredReason}
               </div>
             ) : (
-              <Composer sessionId={id} running={running} />
+              <Composer sessionId={id} running={running} stopping={stopping}
+                activeTurnId={session?.turnQueue?.activeTurnId ?? session?.lastTaskId} />
             )}
           </>
         ) : id ? (

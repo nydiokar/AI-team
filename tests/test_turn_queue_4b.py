@@ -145,6 +145,47 @@ def test_C03_cancel_running_is_fenced_to_the_attempt_and_idempotent(tmp_path, mo
     assert out.status == "cancelled" and db.get_task(t1)["status"] == "cancelled"
 
 
+def test_cancel_nudges_the_claiming_carrier_after_control_commit(tmp_path, monkeypatch):
+    import src.control.node_inspector as inspector
+
+    db, o = _setup(tmp_path, monkeypatch)
+    _wire(o)
+    tid = _submit(o, operation_id="cancel-nudge")
+    _pass(db, o)
+    _run(db, tid)
+    calls: list[str] = []
+
+    def nudge(node_id: str, database) -> bool:
+        assert database is db
+        assert _control_rows(db, "cancel_managed")[0]["status"] == "pending"
+        calls.append(node_id)
+        return False  # failed delivery must retain the durable polling fallback
+
+    monkeypatch.setattr(inspector, "nudge_node_direct", nudge)
+    assert o.cancel_task(tid) is True
+    assert calls == ["worker-a"]
+    assert db.get_task(tid)["status"] == "running"
+
+
+def test_explicit_stop_retry_redelivers_after_a_control_receipt_without_reusing_its_id(tmp_path, monkeypatch):
+    db, o = _setup(tmp_path, monkeypatch)
+    _wire(o)
+    tid = _submit(o, operation_id="cancel-retry")
+    _pass(db, o)
+    _run(db, tid)
+    first = db.request_turn_cancel(tid)
+    assert db.claim_task(first.control_task_id, "worker-a")
+    db.complete_task(first.control_task_id, {"success": True, "output": "interrupt delivered or armed"})
+    # A receipt acknowledged delivery, but the native turn is STILL running.
+    retry = db.request_turn_cancel(tid)
+    assert retry.control_task_id != first.control_task_id
+    assert db.get_task(retry.control_task_id)["status"] == "pending"
+    assert db.request_turn_cancel(tid).control_task_id == retry.control_task_id
+    # A delayed/replayed result for the first control cannot swallow the retry.
+    db.complete_task(first.control_task_id, {"success": True})
+    assert db.get_task(retry.control_task_id)["status"] == "pending"
+
+
 def test_C03b_turn_that_finished_before_the_interrupt_stays_completed(tmp_path, monkeypatch):
     db, o = _setup(tmp_path, monkeypatch)
     _wire(o)

@@ -492,11 +492,11 @@ export function SessionTimeline({
                 <CircleDot className="size-3.5 shrink-0 text-accent opacity-70" />
               )}
               <span className="min-w-0 flex-1 truncate text-[12.5px] text-ink-soft">
-                {item.state === "running" && liveActivity
+                {item.state === "running" && !item.stopping && liveActivity
                   ? liveActivity
                   : item.objective}
               </span>
-              <TaskStatusChip state={item.state} />
+              <TaskStatusChip state={item.state} stopping={item.stopping} />
             </div>
           );
         }

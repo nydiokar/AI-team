@@ -554,7 +554,7 @@ export const api = {
     token: string,
     sessionId: string,
   ): Promise<{ ok: boolean; cancelled: boolean; task_id: string | null }> {
-    return post(`/api/sessions/${encodeURIComponent(sessionId)}/stop`, token, {});
+    return post(`/api/sessions/${encodeURIComponent(sessionId)}/stop`, token, {}, undefined, AbortSignal.timeout(15000));
   },
 
   /** Close a session (control_api.api_close_session). */

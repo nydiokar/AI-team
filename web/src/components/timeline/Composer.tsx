@@ -23,9 +23,13 @@ interface PendingUpload {
 export function Composer({
   sessionId,
   running,
+  stopping = false,
+  activeTurnId,
 }: {
   sessionId: string;
   running: boolean;
+  stopping?: boolean;
+  activeTurnId?: string | null;
 }) {
   // Seed from any persisted draft for this session so a half-typed instruction
   // survives navigating away and back (and full reloads / PWA restarts).
@@ -68,6 +72,11 @@ export function Composer({
 
   const submit = useSubmitInstruction();
   const stop = useStopSession();
+  // An HTTP acknowledgement is not confirmation that the native turn ended.
+  // The session's durable operator-stop hold survives navigation/reload.
+  const stopRequested = stopping || (running && stop.isSuccess && stop.variables === sessionId
+    && stop.data?.cancelled && (!activeTurnId || stop.data.task_id === activeTurnId));
+  const stopPending = stop.isPending && stop.variables === sessionId;
   const upload = useUploadFile();
   const addSent = useSentStore((s) => s.add);
   const updateSent = useSentStore((s) => s.update);
@@ -221,6 +230,19 @@ export function Composer({
       {uploadBanner && (
         <p className="mb-1.5 px-1 text-[11px] text-ink-soft">{uploadBanner}</p>
       )}
+      {(stopPending || stopRequested) && (
+        <p role="status" className="mb-1.5 px-1 text-[11px] text-ink-soft">
+          {stopPending ? "Requesting stop…" : "Stop requested — waiting for the agent to confirm. Queued messages are paused."}
+        </p>
+      )}
+      {stop.isError && stop.variables === sessionId && (
+        <p role="alert" className="mb-1.5 px-1 text-[11px] text-bad">
+          Could not confirm the stop request. The agent may still be running — retry Stop.
+        </p>
+      )}
+      {!running && stop.isSuccess && stop.variables === sessionId && !stop.data?.cancelled && (
+        <p role="status" className="mb-1.5 px-1 text-[11px] text-ink-soft">No active turn to stop.</p>
+      )}
       {rejected && !uploadBanner && (
         <p className="mb-1.5 px-1 text-[11px] text-bad">
           {blockedMessage ?? "Send failed — tap send to retry."}
@@ -230,9 +252,9 @@ export function Composer({
         {running ? (
           <button
             onClick={() => stop.mutate(sessionId)}
-            disabled={stop.isPending}
+            disabled={stopPending}
             className="flex size-11 shrink-0 items-center justify-center rounded-full border border-bad/50 text-bad hover:bg-bad/10 disabled:opacity-50"
-            aria-label="Stop running task"
+            aria-label={stopRequested ? "Retry stop request" : "Stop running task"}
           >
             <Square className="size-4" fill="currentColor" />
           </button>
@@ -261,7 +283,7 @@ export function Composer({
           aria-label="Instruction text"
           onChange={(e) => updateText(e.target.value)}
           onKeyDown={sendOnEnter}
-          placeholder={running ? "Task running…" : "Send an instruction…"}
+          placeholder={stopRequested ? "Waiting for stop confirmation…" : running ? "Task running…" : "Send an instruction…"}
           rows={1}
           className="min-h-[44px] max-h-[160px] flex-1 resize-none overflow-y-auto rounded-2xl bg-surface-2 px-4 py-3 text-[15px] text-ink outline-none ring-1 ring-inset ring-transparent transition-shadow placeholder:text-ink-muted focus:ring-accent/50"
         />

@@ -577,7 +577,20 @@ def build_router(
         responses={200: {"model": StopOut,
                          "description": "Active turn cancel requested (if any)."}},
     )
-    def api_stop_session(session_id: str) -> JSONResponse:
+    async def api_stop_session(session_id: str) -> JSONResponse:
+        from src.control.turn_admission import run_turn_mutation_async
+        from src.control.turn_queue import TurnQueueError
+
+        if len(session_id) > 128:
+            raise HTTPException(status_code=400, detail="invalid_session_id")
+        try:
+            # Keep the permit until the actual DB/nudge work finishes, even
+            # if the HTTP waiter disconnects. Reuse queue mutation admission.
+            return await run_turn_mutation_async(lambda: _stop_session(session_id))
+        except TurnQueueError as err:
+            raise core._turn_queue_http(err)
+
+    def _stop_session(session_id: str) -> JSONResponse:
         session = orchestrator.session_service.store.get(session_id)
         if session is None:
             raise HTTPException(status_code=404, detail="session_not_found")

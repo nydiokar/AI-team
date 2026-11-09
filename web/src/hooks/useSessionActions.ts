@@ -103,6 +103,7 @@ export function useStopSession() {
       // [A82 Stage 6] Enrolled stop = persistent queue pause + cancel the active
       // turn only: the queue cards (now "paused") must reflect it at once.
       qc.invalidateQueries({ queryKey: ["session-turn-queue", sessionId] });
+      qc.invalidateQueries({ queryKey: ["session", sessionId] });
     },
   });
 }
