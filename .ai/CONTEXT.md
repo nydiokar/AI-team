@@ -97,7 +97,8 @@ Only jobs that are genuinely open. Everything merged/done is in git and the disp
 **2026-11-09 — Stop-turn cancellation correction (session `9fd6defe12e7`).**
 Ledger evidence on 2026-11-08: stop 23:49:18.360 UTC → Horse control claim
 23:49:36.166 → cancelled terminal 23:49:36.454. Cancellation now nudges the
-claiming carrier after durable enqueue; Claude's exact cancelled owner avoids
+claiming carrier after durable enqueue; explicit retries after a finished control
+receipt get a fresh identity (pending controls still deduplicate). Claude's exact cancelled owner avoids
 the generic backend-error banner. Conversation/restart reads exclude control
 receipts; cancelled historical replies project honestly without rewriting evidence.
 UI distinguishes requesting/stopping/unknown delivery from confirmed termination.

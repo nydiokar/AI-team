@@ -4221,6 +4221,21 @@ class MeshDB:
                         f"cancelm-{task_id}-"
                         f"{hashlib.sha256(token.encode()).hexdigest()[:12]}"
                     )
+                    retry_prefix = control_id + "-retry-"
+                    outstanding = conn.execute(
+                        "SELECT id FROM mesh_tasks WHERE session_id = ? AND action = ? "
+                        "AND status IN ('pending', 'claimed') "
+                        "AND (id = ? OR substr(id, 1, ?) = ?) LIMIT 1",
+                        (row["session_id"], CANCEL_MANAGED_ACTION, control_id,
+                         len(retry_prefix), retry_prefix),
+                    ).fetchone()
+                    if outstanding:
+                        control_id = outstanding["id"]
+                    elif conn.execute("SELECT 1 FROM mesh_tasks WHERE id = ?", (control_id,)).fetchone():
+                        # A receipt is not native termination. An explicit retry
+                        # must deliver again, with a fresh control identity so a
+                        # late protocol-0 result cannot consume the new request.
+                        control_id = retry_prefix + uuid.uuid4().hex[:12]
                     payload = {
                         "target_task_id": task_id,
                         "session": {"session_id": row["session_id"], "backend": row["backend"]},
