@@ -1,6 +1,6 @@
 # AI-Team Gateway — Hot Context
 
-**Last Updated:** 2026-11-06
+**Last Updated:** 2026-11-09
 **Branch policy:** `main` for docs-only; `feat/<slug>` + PR + self-merge for any `src/` or config
 change. Restart the **gateway** freely when deploying merged code. Never restart a worker/node-carrier
 without surfacing it to the operator first.
@@ -110,8 +110,12 @@ the existing unbounded session-history/file-fallback byte deferral remains under
 the read-path's trusted-operator assumption. Unknown outcomes retain ownership,
 polling recovers a missed nudge, and the UI permits manual retry. Stop controls retain
 the existing authenticated low-rate worker-control concurrency deferral (A102).
-Verification: fake-SDK/carrier/queue regressions and read-only production transcript
-projection. Gateway deployment and worker activation remain pending; no worker restart.
+Verification: fake-SDK/carrier/queue regressions, green PR CI, 45 frontend checks,
+production build and read-only live API/mobile conversation check (three actual turns,
+correct cancellation, no control receipts or browser mutation requests). Gateway and
+task-server live on `49e9bd0` (PR #283), schema 49 unchanged. Rollback image:
+`ai-team:pre-49e9bd0`. Worker adapter activation remains pending: both report `c2a81c2`;
+Horse idle with one pooled session; kanebra hosts this coding turn. No worker restart.
 
 **2026-11-06 — A105 merged and live (`7d39020`, PRs #280/#281).** Adversarial
 corrections are included; post-merge 517 targeted tests and main CI pass. Both
