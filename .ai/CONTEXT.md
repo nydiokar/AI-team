@@ -94,6 +94,24 @@ Only jobs that are genuinely open. Everything merged/done is in git and the disp
 
 ## Recent shift notes
 
+**2026-11-09 — Stop-turn cancellation correction (session `9fd6defe12e7`).**
+Ledger evidence on 2026-11-08: stop 23:49:18.360 UTC → Horse control claim
+23:49:36.166 → cancelled terminal 23:49:36.454. Cancellation now nudges the
+claiming carrier after durable enqueue; Claude's exact cancelled owner avoids
+the generic backend-error banner. Conversation/restart reads exclude control
+receipts; cancelled historical replies project honestly without rewriting evidence.
+UI distinguishes requesting/stopping/unknown delivery from confirmed termination.
+Boundary: stop reuses four queue-mutation permits (retained after HTTP cancellation),
+128-character identity, no body read, fixed response and 15s browser deadline;
+existing DB lock budgets and 2s best-effort nudge socket timeout apply. No hard
+native DB/DNS/SDK termination deadline is claimed. At 100 requests four execute;
+the existing unbounded session-history/file-fallback byte deferral remains under
+the read-path's trusted-operator assumption. Unknown outcomes retain ownership,
+polling recovers a missed nudge, and the UI permits manual retry. Stop controls retain
+the existing authenticated low-rate worker-control concurrency deferral (A102).
+Verification: fake-SDK/carrier/queue regressions and read-only production transcript
+projection. Gateway deployment and worker activation remain pending; no worker restart.
+
 **2026-11-06 — A105 merged and live (`7d39020`, PRs #280/#281).** Adversarial
 corrections are included; post-merge 517 targeted tests and main CI pass. Both
 controllers healthy, schema 49 unchanged, two nodes online. Real task-server →

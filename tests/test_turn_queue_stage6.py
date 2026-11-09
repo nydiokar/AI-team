@@ -128,6 +128,21 @@ SUMMARY_KEYS = {
 }
 
 
+def test_stop_uses_existing_mutation_capacity_and_rejects_oversized_identity(env: _Env) -> None:
+    acquired: int = 0
+    try:
+        for _ in range(ta.MAX_CONCURRENT_ADMISSIONS):
+            assert ta._ADMISSION_PERMITS.acquire(blocking=False)
+            acquired += 1
+        response = env.client.post(f"/api/sessions/{SID}/stop", headers=AUTH)
+        assert response.status_code == 429
+        assert env.db.get_session(SID)["turn_queue_paused"] == 0
+    finally:
+        for _ in range(acquired):
+            ta._ADMISSION_PERMITS.release()
+    assert env.client.post("/api/sessions/" + "x" * 129 + "/stop", headers=AUTH).status_code == 400
+
+
 # S6-01 --------------------------------------------------------------------- #
 def test_S6_01_create_202_receipt_and_replay_returns_current_state(env: _Env) -> None:
     r = env.create("first", "op-1")

@@ -100,20 +100,24 @@ export function SessionStatusChip(
     closed,
     reason,
     showReason = true,
+    stopping = false,
   }: {
     state: SessionOpState;
     closed?: boolean;
     reason?: SessionReason | null;
     /** Header chrome has one line of scarce space; keep diagnostics in Info. */
     showReason?: boolean;
+    stopping?: boolean;
   },
 ) {
   if (closed) return <Pill role="idle" label="Closed" />;
+  if (stopping && state === "running") return <Pill role="warn" label="Stopping" />;
   const { role, label } = opMap(state);
   return <Pill role={role} label={label} sublabel={showReason ? reasonSublabel(reason) : null} />;
 }
 
-export function TaskStatusChip({ state }: { state: TaskState }) {
+export function TaskStatusChip({ state, stopping = false }: { state: TaskState; stopping?: boolean }) {
+  if (stopping && state === "running") return <Pill role="warn" label="Stopping" />;
   const { role, label } = taskMap(state);
   return <Pill role={role} label={label} />;
 }

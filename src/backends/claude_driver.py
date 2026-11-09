@@ -254,7 +254,11 @@ def _build_salvaged_reply(error_class: str, salvaged: str, error_text: str = "")
             "In the web chat, enter /login to open the account panel."
         )
         return banner if signed_out or not salvaged else f"{banner}\n\n---\n\n{salvaged}"
-    if error_class == "context_overflow":
+    if error_class == "cancelled":
+        banner = "Stopped by you."
+        if salvaged:
+            banner += " The agent's progress before stopping is below."
+    elif error_class == "context_overflow":
         banner = (
             "⚠️ Context window full — the agent did the work but ran out of room to "
             "write its final summary. Use /compact or start a new session to continue."
@@ -1295,15 +1299,22 @@ class _SDKSession:
 
         raw_ndjson = "\n".join(acc.ndjson_lines)
         if is_error:
+            error_class = classify_error_text(
+                error_text, subtype=subtype, api_error_status=api_error_status,
+                rate_limit_rejected=acc.rate_limit_rejected,
+            )
+            # An interrupt ends Claude's stream with error_during_execution.
+            # Correlate with this exact echoed owner, never another pending
+            # prompt or free-text guesses. Keep specific provider failures.
+            owner = self._turn_owner
+            if error_class == "backend_error" and owner is not None and owner.cancel_requested:
+                error_class = "cancelled"
             return TurnOutcome(
                 output=acc.last_assistant_text,
                 backend_session_id=acc.backend_session_id,
                 raw_ndjson=raw_ndjson,
                 is_error=True,
-                error_class=classify_error_text(
-                    error_text, subtype=subtype, api_error_status=api_error_status,
-                    rate_limit_rejected=acc.rate_limit_rejected,
-                ),
+                error_class=error_class,
                 error_text=error_text,
                 salvaged_output=acc.last_assistant_text,
             )

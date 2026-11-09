@@ -195,7 +195,10 @@ export function useSessionTimeline(
         at: session.updatedAt,
         taskId: session.turnQueue?.activeTurnId ?? session.lastTaskId ?? "current",
         state: "running",
-        objective: "Working…",
+        stopping: session.turnQueue?.hold === "operator_stop",
+        objective: session.turnQueue?.hold === "operator_stop"
+          ? "Stop requested — waiting for the agent to confirm…"
+          : "Working…",
       });
     }
 

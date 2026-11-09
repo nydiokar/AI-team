@@ -6336,7 +6336,9 @@ class MeshDB:
                 FROM mesh_tasks
                 WHERE session_id = ?
                   AND status NOT IN ('queued', 'withdrawn')
-                  AND COALESCE(action, '') != 'watched_job'
+                  AND COALESCE(action, '') NOT IN (
+                      'watched_job', 'cancel_managed', 'cancel_turn', 'cancel_codex', 'close_session'
+                  )
                 ORDER BY created_at DESC
                 LIMIT ?
             ) ORDER BY created_at ASC
@@ -6400,7 +6402,9 @@ class MeshDB:
             WHERE session_id = ?
               AND reply_text IS NOT NULL
               AND status = 'completed'
-              AND COALESCE(action, '') != 'watched_job'
+              AND COALESCE(action, '') NOT IN (
+                  'watched_job', 'cancel_managed', 'cancel_turn', 'cancel_codex', 'close_session'
+              )
             ORDER BY created_at DESC
             LIMIT ?
             """,

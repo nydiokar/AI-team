@@ -10120,6 +10120,13 @@ Generated from user description: {description}
                 str(row.get("session_id") or ""), out.outcome, turn_id=task_id,
                 status="cancelled" if out.outcome == "cancelled" else None,
             )
+        if out.outcome == "requested" and out.node_id:
+            # The control row is claimable now. Wake its carrier rather than
+            # waiting for the idle poll's 30-second backoff. Polling remains the
+            # recovery path if this existing, bounded best-effort nudge fails.
+            from src.control.node_inspector import nudge_node_direct
+
+            nudge_node_direct(out.node_id, db)
         logger.info(
             "event=managed_turn_cancel task_id=%s outcome=%s node=%s control=%s",
             task_id, out.outcome, out.node_id, out.control_task_id,

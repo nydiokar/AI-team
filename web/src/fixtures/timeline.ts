@@ -27,7 +27,7 @@ export type TimelineItem =
       usage?: TokenUsage | null;
       delivery?: MessageDelivery;
     }
-  | { kind: "task_state"; at: string; taskId: string; state: TaskState; objective: string }
+  | { kind: "task_state"; at: string; taskId: string; state: TaskState; objective: string; stopping?: boolean }
   | { kind: "notice"; at: string; notice: SystemNotice }
   | { kind: "approval"; at: string; approval: ApprovalRequest }
   | { kind: "artifact"; at: string; artifact: Artifact }
