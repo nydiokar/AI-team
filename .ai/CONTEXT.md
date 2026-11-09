@@ -1,6 +1,6 @@
 # AI-Team Gateway — Hot Context
 
-**Last Updated:** 2026-11-09
+**Last Updated:** 2026-11-10
 **Branch policy:** `main` for docs-only; `feat/<slug>` + PR + self-merge for any `src/` or config
 change. Restart the **gateway** freely when deploying merged code. Never restart a worker/node-carrier
 without surfacing it to the operator first.
@@ -25,7 +25,7 @@ instead and leave a one-liner here.
 
 ## Current Focus
 
-**Task harness specification + dispatch system modernisation.**
+**Intent-preserving, independently verified hands-off Case closure (A111).**
 
 Current work:
 
@@ -53,13 +53,23 @@ operator workload assumptions until S3 oversized-history/native/slow-reader poli
 is sized for broader use. S1 pagination, S2 retirement and S4 extra indexes are
 optional and not justified by present measurements. No worker restarted.
 
-1. **System-One decision layer (TypeSafe Jev) → Governor programme.** Spec
+1. **A111 — dependable delegation + trustworthy acceptance.** Operator-requested staged
+   dispatch: `dispatch/AGENT_111_INTENT_ALIGNED_VERIFIED_CLOSURE.md`. Start P0's writer/bypass
+   map and offline reproductions, then preserve owner intent/revisions, enforce evidence-bound
+   acceptance in existing `record_review`/`close_case`, integrate the existing Scientific Governor,
+   calibrate with the operator and demonstrate useful hands-off work. Execution completion stays
+   separate from objective acceptance. One queue/inbox/closer; retire the activity-count gate.
+   Engineering can start without S1; model quality, domain labels and production activation are
+   distinct gates. Packet authored, implementation not started; no paid run or worker restart.
+
+2. **System-One decision layer (TypeSafe Jev), advisory → Governor programme.** Spec
    `docs/SYSTEM_ONE_DECISION_LAYER_SPEC.md` (accepted 2026-10-05). Next: **A94** (core + replay +
    wake scorecard; Level 3; needs a read-only controller DB copy and `TYPESAFE_API_KEY` from the
    operator). Then A95 (pre-flight). A96 (bounce) is blocked on A94's measured precision. The Governor
    programme design (`.ai/context/GOVERNOR_OUTER_LOOP_V1.md` + `BOOTSTRAP_GOVERNOR_PROGRAMME_JOBS.md`,
    bootstrap not yet run) now carries the S1 slots (§37) and three design conflicts (DC-1..3) awaiting
-   an owner ruling.
+   an owner ruling. A111 owns the bounded-Case G1/G3/G4 contract/closure subset; future programme
+   jobs must consume it rather than implement another gate/reviewer. S1 does not own acceptance.
 
 
 > **Finding active jobs:** `.ai/dispatch/DISPATCH_LOG.md` is the human index; run
@@ -74,6 +84,7 @@ Only jobs that are genuinely open. Everything merged/done is in git and the disp
 
 | Job | Packet | Depends on | Status | What it is |
 |---|---|---|---|---|
+| **A111** | `AGENT_111_INTENT_ALIGNED_VERIFIED_CLOSURE.md` | staged gates in packet | **ready** — plan authored; implementation not started | P0–P6: original intent → evidence/authority → one closure gate → existing independent reviewer → recovery/bounds → owner calibration → useful hands-off production acceptance. Reuses A102/A105/A94–96; ORACLE evidence remains external. |
 | **A105** | `AGENT_105_CROSS_PROCESS_TURN_SIGNAL.md` | A104 ✅ | **active** — PRs #280/#281 merged; live `7d39020`; natural acceptance pending | Shared bounded HTTP turn signal wakes scheduler, effects and inbox; polls remain recovery. Await three natural eligible completions ≤2s and 24h observation; no paid proof turn. |
 | **A102** | `AGENT_102_UNIFY_BACKEND_PATHWAYS.md` | — | **blocked** — S2 merged + gateway live (`7c6d01a`); worker promotion and natural S3 acceptance pending | One carrier-owned `TurnControl` and natural backend operations; shims, rollout gates and dead gateway session execution removed. Worker restart needs the operator decision and drain/ancestry checks; no paid proof turn. |
 | **A94** | `AGENT_94_SYSTEM_ONE_CORE_DELIVERY_SCORECARD.md` | — | ready (Level 3) | S1 core + decision log + replay baseline + advisory wake scorecard. Operator inputs: read-only controller DB copy, `TYPESAFE_API_KEY`. |

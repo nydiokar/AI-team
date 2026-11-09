@@ -21,6 +21,16 @@ pages cited in §3. Repo seams were checked against `main` @ `8e46afd`.
 > are building (A94/A95/A96).** Everything an implementer needs is in this file and the packet. Nothing
 > lives only in chat history.
 
+**Integration addendum, 2026-11-10:**
+[A111](../.ai/dispatch/AGENT_111_INTENT_ALIGNED_VERIFIED_CLOSURE.md) owns enforced,
+intent-preserving acceptance of bounded Cases through existing review/closure seams. S1 remains
+advisory (or measured rework routing under A96); it never supplies acceptance authority or domain
+truth. Deterministic intent/evidence/permission checks and the existing Scientific Governor's
+independent closure review can proceed without S1. References below making A94 a prerequisite
+of all G1 gates apply only to S1 batteries, not those engineering invariants. A94 remains the
+one S1 runtime/replay implementation. Rebase historical wake/schema seams before coding and
+do not treat historical Manager acceptance as objective-alignment ground truth.
+
 ---
 
 ## 0. Executive summary

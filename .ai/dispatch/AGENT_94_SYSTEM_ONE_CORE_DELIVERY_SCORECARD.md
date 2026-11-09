@@ -11,6 +11,14 @@ updated_at: "2026-10-05T08:46:47.362691+00:00"
 
 # DISPATCH — A94 · System-One (Jev) core + replay harness + Move 1 "scorecard in the wake"
 
+**Integration update, 2026-11-10:** [A111](AGENT_111_INTENT_ALIGNED_VERIFIED_CLOSURE.md)
+owns intent provenance and enforced Case acceptance; this job remains the sole advisory S1
+runtime/replay implementation. Its absence/failure cannot authorize acceptance or block the
+deterministic gate. Before implementation, rebase the historical schema numbers and two-wake/
+continuation-token assumptions below onto the current A104 inbox and A111 contract/evidence
+revisions. Historical Manager verdicts are noisy labels; owner-checked held-out judgments are
+needed to measure objective alignment. Do not build a second reviewer or replay infrastructure.
+
 **Level:** 3 (DB migration + new secret `TYPESAFE_API_KEY` + agent-behaviour change to the Manager's
 wake text; > 5 files) · **Type:** code
 **Authored:** 2026-10-05 · **Status of this packet:** ready (authored, not executed)

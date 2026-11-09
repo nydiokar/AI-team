@@ -11,6 +11,13 @@ updated_at: "2026-10-05T08:46:51.273644+00:00"
 
 # DISPATCH — A95 · System-One Move 2 "soft pre-flight" on `dispatch_worker`
 
+**Integration update, 2026-11-10:** [A111](AGENT_111_INTENT_ALIGNED_VERIFIED_CLOSURE.md)
+owns deterministic intent/authority validation and the successful-closure gate. This remains
+the sole optional semantic dispatch preflight, dependent on A94. Evaluate the worker envelope
+against the original owner contract and milestone/project references, not merely a Manager's
+potentially narrowed paraphrase. A semantic hold override cannot amend that contract, waive
+authority checks or supply acceptance evidence. Reuse A111 contract revisions when available.
+
 **Level:** 3 (agent-behaviour change: the Manager's dispatch can be held; crosses the MCP→gateway
 service boundary) · **Type:** code
 **Authored:** 2026-10-05 · **Status of this packet:** ready (authored; execute after A94 merges)

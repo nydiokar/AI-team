@@ -1,5 +1,13 @@
 # TASK — Bootstrap the Governor implementation programme in AI-team
 
+**Deduplication update, 2026-11-10:**
+[A111](../dispatch/AGENT_111_INTENT_ALIGNED_VERIFIED_CLOSURE.md) is the dispatched owner
+for bounded-Case intent/evidence closure (G1 subset), its benchmark (G3 subset) and existing
+Scientific Governor integration (G4 subset). Reference its stages and evidence when bootstrapping;
+do not dispatch those subsets again or introduce another closure reviewer/coordinator. Remaining
+programme work retains its scope below. A94 remains the sole S1 runtime, optional for the
+deterministic contract/permission gate; it is required only for the S1 battery integrations.
+
 ## Objective
 
 Instantiate the already-designed `GOVERNOR_OUTER_LOOP_V1` architecture inside the `AI-team` repository as a **durable implementation programme**.

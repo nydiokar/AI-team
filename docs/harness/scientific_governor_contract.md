@@ -4,6 +4,17 @@ This document specifies how a **manager** engages the **scientific governor** ro
 (`docs/harness/roles/scientific_governor.md`) to review a research-programme milestone before
 closing it. It defines the CONTEXT PACKET the governor must receive and the completion lifecycle.
 
+**Planned enforcement, 2026-11-10:**
+[A111](../../.ai/dispatch/AGENT_111_INTENT_ALIGNED_VERIFIED_CLOSURE.md) extends this existing
+review contract into evidence-bound Case closure. The sections below describe the current
+convention, not an implemented mandatory gate. A111 preserves the six-question protocol,
+steelman-first discipline and review caps, adds original-owner provenance and independently
+executed/verified challenges, and binds authorization to current evidence and contract revision.
+The Manager remains the sole Case closer; an unsupported Manager verdict cannot satisfy the
+planned independent-review requirement. No separate Intent Governor or review runtime is needed.
+The existing offline fixture tests do not establish reviewer judgment quality; A111 P3/P5 own
+the executable benchmark and owner calibration before protected production activation.
+
 ## How the governor is dispatched (harness reality)
 
 The harness `_role_boot` path (`src/backends/claude_driver.py`) promotes only two live tiers:

@@ -6,6 +6,15 @@
 
 **Domain integration example:** `tokens_ingest`.
 
+**Bounded-Case integration, 2026-11-10:**
+[A111](../dispatch/AGENT_111_INTENT_ALIGNED_VERIFIED_CLOSURE.md) owns the immediate
+intent/evidence/closure subset of G1, the executable closure-review benchmark subset of G3,
+and integration of the existing Scientific Governor reviewer for that gate (G4 subset).
+Future programme jobs consume those implementations; they must not create competing contracts,
+acceptance stores, reviewers or queues. The broader Governor still owns programme direction,
+not domain truth. S1 is advisory and is not a prerequisite for deterministic closure invariants.
+This is a staged dispatch, not a claim that these capabilities or the outer loop have shipped.
+
 **Purpose:** Define a generic, durable, event-driven outer loop that governs Manager Cases, can accept semantic events from external projects, preserves project/domain authority, and can progressively replace the human as routine research/programme orchestrator without confusing local task completion with truth.
 
 **Companion spec [S1 addendum 2026-10-05]:** [`docs/SYSTEM_ONE_DECISION_LAYER_SPEC.md`](../../docs/SYSTEM_ONE_DECISION_LAYER_SPEC.md) (`SYSTEM_ONE_DECISION_LAYER_V1`) defines the calibrated System-One layer (TypeSafe Jev). It fills this spec's classifier-shaped slots: §10.3, §15.3/§34, §17, §26. Its integration, and the design conflicts it raises, are summarised in **§37**. Additions marked `[S1]` are owner-authored. Semantic tensions are flagged as DESIGN CONFLICT, never silently applied.

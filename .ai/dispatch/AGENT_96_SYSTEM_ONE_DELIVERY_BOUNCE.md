@@ -11,6 +11,12 @@ updated_at: "2026-10-05T08:46:53.362696+00:00"
 
 # DISPATCH — A96 · System-One Move 3 "bounce instead of wake" (BLOCKED on A94 data)
 
+**Integration update, 2026-11-10:** [A111](AGENT_111_INTENT_ALIGNED_VERIFIED_CLOSURE.md)
+owns evidence-bound acceptance and the existing-queue repair lifecycle. This job remains an
+optional routing optimization under its existing measured gates, never acceptance authority.
+Rebase old wait-group/continuation assumptions onto A104's canonical inbox before coding;
+route a bounce into the same repair obligation rather than creating a parallel retry loop.
+
 **Level:** 3 (agent-behaviour change: the harness sends a bounded rework instruction to a worker and
 withholds a Manager wake; touches the Wake-Dispatcher) · **Type:** code
 **Authored:** 2026-10-05 · **Status of this packet:** blocked
