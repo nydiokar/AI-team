@@ -105,6 +105,16 @@ Only jobs that are genuinely open. Everything merged/done is in git and the disp
 
 ## Recent shift notes
 
+**2026-11-13 — Python dependency modernization (unmerged).** Successor to PR #282;
+verification and rollout limits live in `DEPENDENCY_MODERNIZATION_FINAL_REPORT.md`.
+No services or live environments are changed. SDK stdout resynchronization retains
+the existing 16 Mi-character per-stream limit, now checked before decoding complete
+frames too; this is not a process-RSS bound (Unicode and decoded objects add memory).
+Existing carrier admission/session ownership remain authoritative. A 100-session
+native-process/RSS bound is deferred: that workload is not sized or certified by
+this migration; keep the existing trusted-operator workload assumption. Offline
+SDK protocol peers and actual MCP adapters are tested without paid model calls.
+
 **2026-11-09 — Stop-turn cancellation correction (session `9fd6defe12e7`).**
 Ledger evidence on 2026-11-08: stop 23:49:18.360 UTC → Horse control claim
 23:49:36.166 → cancelled terminal 23:49:36.454. Cancellation now nudges the

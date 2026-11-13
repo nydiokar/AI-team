@@ -16,22 +16,45 @@ jobs:
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: '3.12'
 
-      - name: Install project (dev)
+      - name: Install every supported Python extra
         run: |
-          python -m pip install --upgrade pip
-          if [ -f pyproject.toml ]; then
-            pip install -e ".[dev,test,telegram]" -c constraints.txt
-          else
-            pip install -r requirements.txt
-          fi
+          python -m pip install --upgrade pip setuptools wheel -c constraints.txt
+          pip install -e ".[dev,test,telegram,push,dispatch,llama]" -c constraints.txt
+          pip check
+
+      - name: Install backup integration tools
+        run: sudo apt-get update && sudo apt-get install --no-install-recommends -y sqlite3 zstd
 
       - name: Run tests
         env:
           CLAUDE_SKIP_PERMISSIONS: "true"
+          AI_TEAM_TEST_MODE: "1"
+          AI_TEAM_BLOCK_LIVE_CLI: "1"
         run: |
           # -n auto: one xdist worker per runner core (A104 test speed). Each test
           # still gets its own temp DB, seeded from a once-per-session migrated
           # template (tests/conftest.py::_migrated_db_template).
-          pytest -q -n auto
+          pytest --tb=short -n auto
+
+  isolated-docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build runtime and all-extra test image
+        run: docker build --target python-tests -t ai-team-python-tests .
+      - name: Run complete safe suite without external network or credentials
+        run: >-
+          docker run --rm --network none --cpus 2
+          -e GIT_CONFIG_COUNT=1 -e GIT_CONFIG_KEY_0=safe.directory
+          -e GIT_CONFIG_VALUE_0=/workspace
+          -v "$GITHUB_WORKSPACE:/workspace"
+          ai-team-python-tests
+      - name: Build worker image with the same Python stack
+        run: docker build --target worker-agents -t ai-team-worker-check .
+      - name: Verify native Codex control and cleanup without a model turn
+        run: >-
+          docker run --rm --network none --entrypoint python
+          -e PYTHONPATH=/workspace -v "$GITHUB_WORKSPACE:/workspace" -w /workspace
+          ai-team-worker-check tests/fixtures/native_agent_smoke.py
