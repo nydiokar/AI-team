@@ -86,3 +86,32 @@ def test_explicit_env_file_overrides_stale_managed_env_values(tmp_path: Path) ->
     result: subprocess.CompletedProcess[str] = _run_settings_import(SCRIPT_OVERRIDE, env_file)
 
     assert result.returncode == 0, result.stderr
+
+
+def test_explicit_env_file_preserves_quoted_values_and_interpolation(tmp_path: Path) -> None:
+    env_file: Path = tmp_path / "gateway.env"
+    env_file.write_text(
+        'AUDIT_BASE=sample\n'
+        'GATEWAY_TELEGRAM_BOT_TOKEN="${AUDIT_BASE} # literal"\n'
+        'MESH_ENABLED=false\n',
+        encoding="utf-8",
+    )
+    result: subprocess.CompletedProcess[str] = _run_settings_import(
+        'from config import config; '
+        'assert config.telegram.bot_token == "sample # literal"',
+        env_file,
+        extra_env={"AUDIT_BASE": "stale"},
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_explicit_env_file_empty_token_with_comment(tmp_path: Path) -> None:
+    env_file: Path = tmp_path / "gateway.env"
+    env_file.write_text(
+        'GATEWAY_TELEGRAM_BOT_TOKEN= # intentionally disabled\nMESH_ENABLED=false\n',
+        encoding="utf-8",
+    )
+    result: subprocess.CompletedProcess[str] = _run_settings_import(
+        'from config import config; assert config.telegram.bot_token == ""', env_file,
+    )
+    assert result.returncode == 0, result.stderr
