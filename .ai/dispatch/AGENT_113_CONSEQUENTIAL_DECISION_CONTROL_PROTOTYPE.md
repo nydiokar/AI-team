@@ -364,7 +364,8 @@ are regression-covered. No unresolved critical/high defect remains inside the st
 .venv/bin/pytest tests/test_consequential_decision_prototype.py --tb=short
 ```
 
-Final essential proof: **51 passed in 17.23s**, fresh temporary state. Earlier complete proof:
+Final essential proof: **51 passed in 6.23s**, fresh temporary state after test type annotations;
+the same essential proof also passed in 17.23s. Earlier complete proof:
 50 passed in 39.40s. Independent repeat with existing approval/flag compatibility checks:
 
 ```bash
@@ -401,4 +402,7 @@ no missing state blocks or new proof gaps. Do not publish private A67 evidence t
 canonical SDK budget → immutable boot specification → actual worker/SDK consumption, then
 operator recovery/observability and safe deployment. It defines overall workflow completion,
 coordinates A111/A71/A75, and must not rebuild this local mechanism or add a parallel queue.
-A114 is authored only, not implemented in this session. Delivery PR reference follows below.
+A114 is authored only, not implemented in this session.
+
+**Delivery:** implementation commit `a7f7cd6` and final review/type-annotation follow-up on
+`feat/a113-decision-control`, [PR #285](https://github.com/nydiokar/AI-team/pull/285).

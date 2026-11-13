@@ -24,7 +24,7 @@ from scripts.prototypes.consequential_decision import (
 
 
 @pytest.fixture
-def pilot(tmp_path):
+def pilot(tmp_path) -> tuple[PaletteConsumer, Principal, Principal, Principal, list[float]]:
     owner = Principal(id="owner", kind="human")
     agent = Principal(id="manager", kind="agent")
     reviewer = Principal(id="reviewer", kind="agent")
@@ -34,7 +34,7 @@ def pilot(tmp_path):
     return consumer, owner, agent, reviewer, clock
 
 
-def explanation():
+def explanation() -> Explanation:
     return Explanation(
         effects="Accent is the background of buttons carrying white text.",
         alternatives=(
@@ -45,12 +45,12 @@ def explanation():
     )
 
 
-def proposed(pilot, actor=None):
+def proposed(pilot, actor=None) -> str:
     consumer, _, agent, _, _ = pilot
     return consumer.propose(actor or agent, explanation(), 2000)
 
 
-def approved(pilot, evaluate=True):
+def approved(pilot, evaluate=True) -> str:
     consumer, owner, *_ = pilot
     revision = proposed(pilot)
     consumer.resolve(owner, Resolution(revision=revision, decision="approved"))
@@ -59,24 +59,24 @@ def approved(pilot, evaluate=True):
     return revision
 
 
-def rows(consumer, table):
+def rows(consumer, table) -> list[tuple[object, ...]]:
     with sqlite3.connect(consumer.path) as db:
         return db.execute(f"SELECT * FROM {table}").fetchall()
 
 
-def state_of(consumer):
+def state_of(consumer) -> State:
     with consumer.transaction() as db:
         return consumer.state(db)
 
 
-def change(pilot, **updates):
+def change(pilot, **updates) -> None:
     consumer, owner, *_ = pilot
     state = state_of(consumer).model_dump()
     state.update(updates)
     consumer.configure(owner, State.model_validate(state))
 
 
-def test_baseline_inherited_default_publishes_without_decision(tmp_path):
+def test_baseline_inherited_default_publishes_without_decision(tmp_path) -> None:
     """Executable FM-1 counterexample: the pre-control fixture consumer."""
     with sqlite3.connect(tmp_path / "baseline.db") as db:
         db.execute("CREATE TABLE artifacts (css TEXT NOT NULL)")
@@ -89,7 +89,7 @@ def test_baseline_inherited_default_publishes_without_decision(tmp_path):
         )
 
 
-def test_required_default_has_no_consumer_effect(pilot):
+def test_required_default_has_no_consumer_effect(pilot) -> None:
     consumer, _, agent, *_ = pilot
     change(pilot, accent=None)
     with pytest.raises(Blocked, match="accent.*required decision"):
@@ -97,7 +97,7 @@ def test_required_default_has_no_consumer_effect(pilot):
     assert rows(consumer, "artifacts") == []
 
 
-def test_exact_approved_snapshot_and_packet_are_consumed_after_reopen(pilot):
+def test_exact_approved_snapshot_and_packet_are_consumed_after_reopen(pilot) -> None:
     consumer, owner, agent, reviewer, clock = pilot
     revision = approved(pilot)
     packet = json.loads(consumer.render(revision))
@@ -129,7 +129,7 @@ def test_exact_approved_snapshot_and_packet_are_consumed_after_reopen(pilot):
         ("policy", Policy(evaluation="na", na_reason="Owner-only brand choice")),
     ],
 )
-def test_material_changes_cannot_publish(pilot, field, value):
+def test_material_changes_cannot_publish(pilot, field, value) -> None:
     consumer, _, agent, *_ = pilot
     revision = approved(pilot)
     change(pilot, **{field: value})
@@ -139,7 +139,7 @@ def test_material_changes_cannot_publish(pilot, field, value):
     assert len(rows(consumer, "evaluations")) == 1  # historical result is retained
 
 
-def test_unrelated_change_does_not_reapprove(pilot):
+def test_unrelated_change_does_not_reapprove(pilot) -> None:
     consumer, _, agent, *_ = pilot
     revision = approved(pilot)
     change(pilot, routine_note="new development note")
@@ -148,7 +148,7 @@ def test_unrelated_change_does_not_reapprove(pilot):
 
 
 @pytest.mark.parametrize("decision", ["rejected", "cancelled"])
-def test_terminal_nonapproval_never_certifies(pilot, decision):
+def test_terminal_nonapproval_never_certifies(pilot, decision) -> None:
     consumer, owner, agent, *_ = pilot
     revision = proposed(pilot)
     consumer.resolve(owner, Resolution(revision=revision, decision=decision))
@@ -158,7 +158,7 @@ def test_terminal_nonapproval_never_certifies(pilot, decision):
     assert not rows(consumer, "artifacts")
 
 
-def test_approval_and_evaluation_are_separate(pilot):
+def test_approval_and_evaluation_are_separate(pilot) -> None:
     consumer, _, agent, *_ = pilot
     revision = approved(pilot, evaluate=False)
     assert not rows(consumer, "evaluations")
@@ -169,7 +169,7 @@ def test_approval_and_evaluation_are_separate(pilot):
     consumer.publish(agent, "yes", revision=revision)
 
 
-def test_inherited_gray_fails_actual_contrast_evaluation(pilot):
+def test_inherited_gray_fails_actual_contrast_evaluation(pilot) -> None:
     consumer, _, agent, *_ = pilot
     change(pilot, accent=None)
     revision = approved(pilot)
@@ -181,7 +181,7 @@ def test_inherited_gray_fails_actual_contrast_evaluation(pilot):
     assert not rows(consumer, "artifacts")
 
 
-def test_explicit_na_and_reason(pilot):
+def test_explicit_na_and_reason(pilot) -> None:
     consumer, _, agent, *_ = pilot
     change(pilot, policy=Policy(evaluation="na", na_reason="Brand judgment has no local evaluator"))
     revision = approved(pilot)
@@ -192,7 +192,7 @@ def test_explicit_na_and_reason(pilot):
     consumer.publish(agent, "na", revision=revision)
 
 
-def test_na_without_reason_blocks(pilot):
+def test_na_without_reason_blocks(pilot) -> None:
     consumer, *_ = pilot
     change(pilot, policy=Policy(evaluation="na"))
     with pytest.raises(Blocked, match="N/A requires"):
@@ -200,7 +200,7 @@ def test_na_without_reason_blocks(pilot):
     assert not rows(consumer, "proposals")
 
 
-def test_spoofed_identity_and_agent_self_approval(pilot):
+def test_spoofed_identity_and_agent_self_approval(pilot) -> None:
     consumer, owner, agent, *_ = pilot
     revision = proposed(pilot)
     resolution = Resolution(revision=revision, decision="approved")
@@ -218,7 +218,7 @@ def test_spoofed_identity_and_agent_self_approval(pilot):
 
 
 @pytest.mark.parametrize("invalidity", ["revoked", "expired", "wrong_scope", "unknown"])
-def test_delegation_is_current_scoped_and_cannot_be_resurrected(pilot, invalidity):
+def test_delegation_is_current_scoped_and_cannot_be_resurrected(pilot, invalidity) -> None:
     consumer, owner, agent, reviewer, clock = pilot
     revision = proposed(pilot)
     grant = consumer.delegate(owner, reviewer, revision, 1500)
@@ -238,7 +238,7 @@ def test_delegation_is_current_scoped_and_cannot_be_resurrected(pilot, invalidit
     assert not rows(consumer, "artifacts")
 
 
-def test_valid_delegation_and_human_proposer(pilot):
+def test_valid_delegation_and_human_proposer(pilot) -> None:
     consumer, owner, agent, reviewer, _ = pilot
     revision = proposed(pilot)
     grant = consumer.delegate(owner, reviewer, revision, 1900)
@@ -251,7 +251,7 @@ def test_valid_delegation_and_human_proposer(pilot):
     consumer.publish(agent, "human", revision=own)
 
 
-def test_timeout_does_not_approve(pilot):
+def test_timeout_does_not_approve(pilot) -> None:
     consumer, _, agent, _, clock = pilot
     revision = approved(pilot)
     clock[0] = 2000
@@ -260,7 +260,7 @@ def test_timeout_does_not_approve(pilot):
     assert not rows(consumer, "artifacts")
 
 
-def test_sandbox_runs_without_approval_and_cannot_be_promoted(pilot):
+def test_sandbox_runs_without_approval_and_cannot_be_promoted(pilot) -> None:
     consumer, _, agent, *_ = pilot
     result = json.loads(consumer.publish(agent, "experiment", sandbox=True))
     assert result["mode"] == "provisional" and result["revision"] is None
@@ -273,7 +273,7 @@ def test_sandbox_runs_without_approval_and_cannot_be_promoted(pilot):
     assert [row[1] for row in rows(consumer, "artifacts")] == ["provisional"]
 
 
-def test_explicit_optout_keeps_original_path(tmp_path, pilot):
+def test_explicit_optout_keeps_original_path(tmp_path, pilot) -> None:
     _, owner, agent, *_ = pilot
     consumer = PaletteConsumer(tmp_path / "unconfigured.db", (owner, agent))
     consumer.initialize(State(policy=None))
@@ -283,7 +283,7 @@ def test_explicit_optout_keeps_original_path(tmp_path, pilot):
 
 
 @pytest.mark.parametrize("bad", ["not json", "{}", '{"policy": {"setting": "unknown"}}'])
-def test_policy_load_errors_fail_closed_even_in_sandbox(pilot, bad):
+def test_policy_load_errors_fail_closed_even_in_sandbox(pilot, bad) -> None:
     consumer, _, agent, *_ = pilot
     with sqlite3.connect(consumer.path) as db:
         db.execute("UPDATE config SET body=?", (bad,))
@@ -293,7 +293,7 @@ def test_policy_load_errors_fail_closed_even_in_sandbox(pilot, bad):
     assert not rows(consumer, "artifacts")
 
 
-def test_missing_store_and_missing_policy_do_not_optout(pilot):
+def test_missing_store_and_missing_policy_do_not_optout(pilot) -> None:
     consumer, _, agent, *_ = pilot
     with sqlite3.connect(consumer.path) as db:
         db.execute("DELETE FROM config")
@@ -305,7 +305,7 @@ def test_missing_store_and_missing_policy_do_not_optout(pilot):
         missing.publish(agent, "no")
 
 
-def test_policy_cannot_be_disabled_by_task_or_agent(pilot):
+def test_policy_cannot_be_disabled_by_task_or_agent(pilot) -> None:
     consumer, owner, agent, *_ = pilot
     with pytest.raises(Blocked, match="owner required"):
         consumer.configure(agent, State(policy=None))
@@ -316,7 +316,7 @@ def test_policy_cannot_be_disabled_by_task_or_agent(pilot):
     assert not rows(consumer, "artifacts")
 
 
-def test_missing_explanation_unknown_fields_and_injection_are_rejected(pilot):
+def test_missing_explanation_unknown_fields_and_injection_are_rejected(pilot) -> None:
     consumer, *_ = pilot
     with pytest.raises(ValidationError):
         Explanation(effects=" ", alternatives=("one",), uncertainty="?")
@@ -327,7 +327,7 @@ def test_missing_explanation_unknown_fields_and_injection_are_rejected(pilot):
     assert not rows(consumer, "proposals") and not rows(consumer, "artifacts")
 
 
-def test_duplicate_proposal_resolution_and_consumer_are_idempotent(pilot):
+def test_duplicate_proposal_resolution_and_consumer_are_idempotent(pilot) -> None:
     consumer, owner, agent, *_ = pilot
     revision = approved(pilot)
     assert proposed(pilot) == revision
@@ -343,12 +343,12 @@ def test_duplicate_proposal_resolution_and_consumer_are_idempotent(pilot):
         consumer.publish(agent, "same", revision=proposed(pilot))
 
 
-def test_concurrent_conflicting_decisions_have_one_winner(pilot):
+def test_concurrent_conflicting_decisions_have_one_winner(pilot) -> None:
     consumer, owner, agent, *_ = pilot
     revision = proposed(pilot)
     barrier = Barrier(2)
 
-    def decide(outcome):
+    def decide(outcome) -> str:
         barrier.wait(timeout=5)
         try:
             consumer.resolve(owner, Resolution(revision=revision, decision=outcome))
@@ -380,7 +380,7 @@ def test_concurrent_conflicting_decisions_have_one_winner(pilot):
         ("artifacts", "publish"),
     ],
 )
-def test_storage_write_failure_is_never_success_and_recovers(pilot, table, action, timing):
+def test_storage_write_failure_is_never_success_and_recovers(pilot, table, action, timing) -> None:
     consumer, owner, agent, *_ = pilot
     revision = None if action == "propose" else proposed(pilot)
     if action in ("evaluate", "publish"):
@@ -392,7 +392,7 @@ def test_storage_write_failure_is_never_success_and_recovers(pilot, table, actio
             f"CREATE TRIGGER fail {timing} INSERT ON {table} BEGIN SELECT RAISE(ABORT, 'disk failure'); END"
         )
 
-    def attempt():
+    def attempt() -> object:
         if action == "propose":
             return proposed(pilot)
         if action == "resolve":
@@ -411,12 +411,12 @@ def test_storage_write_failure_is_never_success_and_recovers(pilot, table, actio
     assert len(rows(consumer, table)) == 1
 
 
-def test_no_change_between_check_and_use(pilot, monkeypatch):
+def test_no_change_between_check_and_use(pilot, monkeypatch) -> None:
     consumer, _, agent, *_ = pilot
     revision = approved(pilot)
     original = consumer.authority
 
-    def race(db, packet, actor, grant):
+    def race(db, packet, actor, grant) -> None:
         original(db, packet, actor, grant)
         with (
             sqlite3.connect(consumer.path, timeout=0) as competing,
@@ -431,7 +431,7 @@ def test_no_change_between_check_and_use(pilot, monkeypatch):
 
 
 @pytest.mark.parametrize("stage", ["before_commit", "after_commit"])
-def test_real_process_death_during_publication_recovers(pilot, stage):
+def test_real_process_death_during_publication_recovers(pilot, stage) -> None:
     consumer, _, agent, *_ = pilot
     revision = approved(pilot)
     program = """
@@ -467,7 +467,7 @@ os._exit(17)
     assert len(rows(consumer, "decisions")) == len(rows(consumer, "artifacts")) == 1
 
 
-def test_reverting_a_value_does_not_resurrect_approval(pilot):
+def test_reverting_a_value_does_not_resurrect_approval(pilot) -> None:
     consumer, _, agent, *_ = pilot
     revision = approved(pilot)
     change(pilot, accent="#003300")
@@ -480,7 +480,7 @@ def test_reverting_a_value_does_not_resurrect_approval(pilot):
     consumer.publish(agent, "new", revision=new_revision)
 
 
-def test_commit_failure_rolls_back_actual_artifact_and_retry_recovers(pilot):
+def test_commit_failure_rolls_back_actual_artifact_and_retry_recovers(pilot) -> None:
     consumer, _, agent, *_ = pilot
     revision = approved(pilot)
     with sqlite3.connect(consumer.path) as db:
@@ -500,7 +500,7 @@ def test_commit_failure_rolls_back_actual_artifact_and_retry_recovers(pilot):
     assert len(rows(consumer, "artifacts")) == 1
 
 
-def test_proposal_corruption_cannot_substitute_an_approved_value(pilot):
+def test_proposal_corruption_cannot_substitute_an_approved_value(pilot) -> None:
     consumer, _, agent, *_ = pilot
     revision = approved(pilot)
     packet = json.loads(consumer.render(revision))
@@ -512,12 +512,12 @@ def test_proposal_corruption_cannot_substitute_an_approved_value(pilot):
     assert not rows(consumer, "artifacts")
 
 
-def test_concurrent_retries_produce_one_persisted_effect(pilot):
+def test_concurrent_retries_produce_one_persisted_effect(pilot) -> None:
     consumer, _, agent, *_ = pilot
     revision = approved(pilot)
     barrier = Barrier(2)
 
-    def publish(_):
+    def publish(_) -> str:
         barrier.wait(timeout=5)
         return consumer.publish(agent, "same", revision=revision)
 
@@ -527,7 +527,7 @@ def test_concurrent_retries_produce_one_persisted_effect(pilot):
     assert len(rows(consumer, "artifacts")) == 1
 
 
-def test_explanation_change_requires_its_own_decision(pilot):
+def test_explanation_change_requires_its_own_decision(pilot) -> None:
     consumer, _, agent, *_ = pilot
     original = approved(pilot)
     changed = explanation().model_copy(update={"effects": "New effects disclosed"})
@@ -539,7 +539,7 @@ def test_explanation_change_requires_its_own_decision(pilot):
     assert not rows(consumer, "artifacts")
 
 
-def test_grant_cannot_approve_another_current_packet(pilot):
+def test_grant_cannot_approve_another_current_packet(pilot) -> None:
     consumer, owner, agent, reviewer, _ = pilot
     original = proposed(pilot)
     grant = consumer.delegate(owner, reviewer, original, 1900)
