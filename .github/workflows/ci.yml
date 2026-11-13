@@ -53,7 +53,7 @@ jobs:
           ai-team-python-tests
       - name: Build worker image with the same Python stack
         run: docker build --target worker-agents -t ai-team-worker-check .
-      - name: Verify native Codex control and cleanup without a model turn
+      - name: Verify native agent control and cleanup without a model turn
         run: >-
           docker run --rm --network none --entrypoint python
           -e PYTHONPATH=/workspace -v "$GITHUB_WORKSPACE:/workspace" -w /workspace
