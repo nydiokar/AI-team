@@ -26,7 +26,7 @@ import asyncio
 import logging
 import threading
 from contextlib import contextmanager
-from typing import Any, Callable, Dict, Generator, List, Optional, TypeVar
+from typing import Any, Callable, Dict, Generator, List, Optional
 
 from pydantic import BaseModel, Field
 
@@ -36,10 +36,9 @@ logger = logging.getLogger(__name__)
 
 MAX_CONCURRENT_ADMISSIONS = 4
 _ADMISSION_PERMITS = threading.BoundedSemaphore(MAX_CONCURRENT_ADMISSIONS)
-_MutationResult = TypeVar("_MutationResult")
-
-
-async def run_turn_mutation_async(fn: Callable[[], _MutationResult]) -> _MutationResult:
+async def run_turn_mutation_async[MutationResult](
+    fn: Callable[[], MutationResult],
+) -> MutationResult:
     """Bound an operator queue mutation before scheduling its DB thread.
 
     The done callback owns the permit: cancelling an HTTP waiter cannot release

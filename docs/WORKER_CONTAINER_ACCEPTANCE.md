@@ -186,7 +186,7 @@ the uid-autodetect entrypoint; all volumes and security options.
 Run:
 
 ```
-PYTHONPATH=/tmp/tvenv/lib/python3.11/site-packages /opt/venv/bin/python \
+PYTHONPATH=/tmp/tvenv/lib/python3.12/site-packages /opt/venv/bin/python \
   -m pytest tests/test_container_acceptance.py -q -p no:cacheprovider
 ```
 

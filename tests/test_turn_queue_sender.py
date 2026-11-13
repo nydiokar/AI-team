@@ -181,14 +181,22 @@ def _route_tool_to(monkeypatch, api: TestClient, base: str, seen: Optional[List[
 
 
 async def _call_tool(server: Dict[str, Any], args: Dict[str, Any]) -> Tuple[str, bool]:
-    from mcp.types import CallToolRequest, CallToolRequestParams
+    import anyio
+    from mcp import ClientSession
+    from mcp.shared.memory import create_client_server_memory_streams
 
-    handler = server["instance"].request_handlers[CallToolRequest]
-    res = await handler(CallToolRequest(
-        method="tools/call",
-        params=CallToolRequestParams(name=agent_sender.SEND_TOOL_NAME, arguments=args),
-    ))
-    return res.root.content[0].text, bool(res.root.isError)
+    instance = server["instance"]
+    async with (
+        create_client_server_memory_streams() as (client_streams, server_streams),
+        anyio.create_task_group() as tasks,
+    ):
+        tasks.start_soon(instance.run, *server_streams, instance.create_initialization_options())
+        async with ClientSession(*client_streams) as client:
+            await client.initialize()
+            result = await client.call_tool(agent_sender.SEND_TOOL_NAME, args)
+        tasks.cancel_scope.cancel()
+    wire = result.model_dump(by_alias=True)
+    return wire["content"][0]["text"], bool(wire["isError"])
 
 
 # --------------------------------------------------------------------------- #

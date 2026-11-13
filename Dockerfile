@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 ARG NODE_IMAGE=node:22-bookworm-slim
-ARG PYTHON_IMAGE=python:3.11-slim-bookworm
+ARG PYTHON_IMAGE=python:3.12-slim-bookworm
 
 FROM ${NODE_IMAGE} AS node-runtime
 
@@ -38,8 +38,10 @@ RUN apt-get update \
 RUN --mount=type=cache,id=ai-team-pip,target=/root/.cache/pip \
     --mount=type=bind,from=python-requirements,source=/spec/requirements.txt,target=/tmp/requirements.txt \
     --mount=type=bind,source=constraints.txt,target=/tmp/constraints.txt \
-    pip install -c /tmp/constraints.txt -r /tmp/requirements.txt
+    pip install --upgrade pip setuptools wheel -c /tmp/constraints.txt \
+    && pip install -c /tmp/constraints.txt -r /tmp/requirements.txt
 COPY --chown=ai-team:ai-team pyproject.toml constraints.txt __init__.py ./
+COPY --chown=ai-team:ai-team docs/README.md ./docs/README.md
 COPY --chown=ai-team:ai-team src/ ./src/
 COPY --chown=ai-team:ai-team config/ ./config/
 # Project only (console scripts + package copy); deps are already installed above.
@@ -56,6 +58,22 @@ ARG AI_TEAM_GIT_SHA=unknown
 ENV AI_TEAM_GIT_SHA=${AI_TEAM_GIT_SHA}
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/docker-entrypoint"]
 CMD ["python", "main.py"]
+
+# Optional verification image. Run with a checkout mounted at /workspace and
+# --network none: loopback integration works without access to paid APIs or hosts.
+# It is never selected by the production Compose targets.
+FROM runtime AS python-tests
+RUN apt-get update \
+    && apt-get install --no-install-recommends -y sqlite3 zstd \
+    && rm -rf /var/lib/apt/lists/*
+RUN --mount=type=cache,id=ai-team-pip,target=/root/.cache/pip \
+    pip install --upgrade pip setuptools wheel -c constraints.txt \
+    && pip install -e ".[dev,test,telegram,push,dispatch,llama]" -c constraints.txt \
+    && pip check
+ENV AI_TEAM_TEST_MODE=1 AI_TEAM_BLOCK_LIVE_CLI=1 MESH_ENABLED=false HOME=/tmp/test-home
+WORKDIR /workspace
+ENTRYPOINT ["python", "-m", "pytest"]
+CMD ["--tb=short", "-n", "2"]
 
 FROM runtime AS worker-agents
 COPY --from=node-runtime /usr/local /usr/local
