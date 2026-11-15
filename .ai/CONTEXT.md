@@ -106,9 +106,13 @@ Only jobs that are genuinely open. Everything merged/done is in git and the disp
 
 ## Recent shift notes
 
-**2026-11-15 — Python dependency modernization (PR #286; supersedes #282).**
+**2026-11-15 — Python dependency modernization merged (PR #286, `9bbdd35`; #282 absorbed).**
 Verification and rollout limits live in `DEPENDENCY_UPGRADE_REPORT.md`.
-No services or live environments are changed. SDK stdout resynchronization retains
+Both final CI jobs pass; production-copy Sessions/Jobs/Affiliations/Cost JSON is
+identical. Production promotion remains pending: main checkout `9152240` contains
+unrelated work and fails deploy preflight; host workers need Python 3.12 and an
+operator-authorized drain/restart. No services or live environments are changed.
+SDK stdout resynchronization retains
 the existing 16 Mi-character per-stream limit, now checked before decoding complete
 frames too; this is not a process-RSS bound (Unicode and decoded objects add memory).
 Existing carrier admission/session ownership remain authoritative. A 100-session

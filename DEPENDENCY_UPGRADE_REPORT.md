@@ -7,6 +7,16 @@ all seven commits from #282; #282 is superseded rather than a second deployment.
 The acceptance goal is preserved gateway, queue, worker and agent behavior on an
 updated Python stack. New upstream features are not enabled by this migration.
 
+**Code closure:** #286 merged to `main` as `9bbdd35` on 2026-11-15. GitHub also
+marked #282 merged because all its commits are included. Final exact-code
+[CI run 43714943295](https://github.com/nydiokar/AI-team/actions/runs/43714943295)
+at `ed4698877234effdc10826050ae9fb6a4200b40c` passes both jobs: normal Python
+**3240 passed, 38 skipped**; isolated Docker **3237 passed, 41 skipped**. The
+worker build and actual native control/cleanup smoke pass with zero model turns.
+These skips remain unverified coverage, not passes. No known regression remains
+in the verified scope. **Production activation is still pending** the checkout
+and operator-authorized worker rollout described below; merged is not live.
+
 ### Scope and plan
 
 `pyproject.toml` owns dependency groups; `constraints.txt` pins the supported Linux
@@ -98,6 +108,7 @@ Final local evidence (ARM64 Linux, Python 3.12.16, SDK 0.2.182 / FastAPI 0.163.1
 | Gate | Result |
 |---|---|
 | Fresh Docker runtime and every-extra test image | Build passes; `pip check` passes |
+| Final exact-code GitHub CI, normal / isolated Docker | 3240 passed + 38 skipped / 3237 passed + 41 skipped; both jobs green |
 | Installed versions versus all 83 constraints | Zero mismatches |
 | Final `pip list --outdated --format=json` on 2026-11-15 | `[]` |
 | Real SDK/control/application subprocess tests | 9 passed in 21.13s |
