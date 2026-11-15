@@ -106,8 +106,8 @@ Only jobs that are genuinely open. Everything merged/done is in git and the disp
 
 ## Recent shift notes
 
-**2026-11-13 — Python dependency modernization (unmerged).** Successor to PR #282;
-verification and rollout limits live in `DEPENDENCY_MODERNIZATION_FINAL_REPORT.md`.
+**2026-11-15 — Python dependency modernization (PR #286; supersedes #282).**
+Verification and rollout limits live in `DEPENDENCY_UPGRADE_REPORT.md`.
 No services or live environments are changed. SDK stdout resynchronization retains
 the existing 16 Mi-character per-stream limit, now checked before decoding complete
 frames too; this is not a process-RSS bound (Unicode and decoded objects add memory).

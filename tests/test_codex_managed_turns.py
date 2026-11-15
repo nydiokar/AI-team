@@ -35,7 +35,7 @@ from src.backends.codex_native import CodexBackend
 from src.backends.codex_ownership import CodexOwnership
 from src.control.turn_queue import ManagedTurnOwnership
 from src.core.interfaces import Session, SessionStatus
-from src.core.turn_liveness import turn_control
+from src.core.turn_liveness import ProgressClock, TurnControl, TurnLimits, turn_control
 from src.core.process_utils import process_gone_proof, process_identity
 
 FAKE_APP_SERVER = r'''#!/usr/bin/env python3
@@ -518,16 +518,32 @@ def test_working_turn_longer_than_the_stall_window_is_never_cut_off(h):
     result; only a turn with NO native event for the window goes to recovery."""
     assert run_turn(h.backend, h.session(), "warm", own()).success  # app-server up
     h.ctl(hold=h.release_path, output="long answer", progress_every=0.2)
-    out: dict = {}
-    th = threading.Thread(target=lambda: out.update(
-        r=run_turn(h.backend, h.session(), "hello", own(turn_uuid="uuid-long"), stall=0.6)), daemon=True)
-    th.start()
-    time.sleep(1.8)  # 3x the stall window
-    assert out == {}, f"a progressing turn was given up on: {out}"
-    h.release()
-    th.join(10)
-    assert out["r"].success is True and out["r"].output == "long answer", out["r"].errors
-    assert h.requests("turn/interrupt") == []
+    elapsed: float = 1000.0
+    ownership = own(turn_uuid="uuid-long")
+    control = TurnControl(
+        turn_uuid=ownership.turn_uuid, ownership=ownership,
+        limits=TurnLimits(stall_sec=0.6, hard_cap_sec=2.4),
+        progress=ProgressClock(now=lambda: elapsed),
+    )
+    th, out = run_bg(h.backend.resume_session, h.session(), "hello", turn=control)
+    try:
+        # Advance the carrier's clock only after the real subprocess event
+        # reader records progress. Runner scheduling/IO cannot consume the
+        # entire tiny hard cap before it notices the release file.
+        for _ in range(5):
+            elapsed += 0.4
+            wait_for(lambda: control.progress.last_progress_at == elapsed)
+            assert out == {}, f"a progressing turn was given up on: {out}"
+        assert elapsed - control.progress.started_at > 3 * control.limits.stall_sec
+        h.release()
+        th.join(10)
+        assert not th.is_alive()
+        result = out["result"]
+        assert result.success is True and result.output == "long answer", result.errors
+        assert h.requests("turn/interrupt") == []
+    finally:
+        h.release()
+        th.join(10)
 
 
 def test_forget_drops_late_delivery_but_quiescence_follows_native_truth(h):

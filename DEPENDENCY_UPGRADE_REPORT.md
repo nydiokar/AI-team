@@ -1,5 +1,196 @@
 # Dependency upgrade report
 
+## Current migration review — 2026-11-15
+
+This section supersedes the **2026-11-06 historical audit below**. PR #286 contains
+all seven commits from #282; #282 is superseded rather than a second deployment.
+The acceptance goal is preserved gateway, queue, worker and agent behavior on an
+updated Python stack. New upstream features are not enabled by this migration.
+
+### Scope and plan
+
+`pyproject.toml` owns dependency groups; `constraints.txt` pins the supported Linux
+closure. Docker and CI use Python 3.12 and those same pins. All declared extras
+(`dev,test,telegram,push,dispatch,llama`) install in the verification image. The
+production image retains its existing runtime-plus-push selection.
+
+The original four-package audit left the API/validation, SDK/MCP and optional
+stacks deferred. Its successor upgrades the complete closure, adds real local
+protocol coverage, and makes the Python runtime migration explicit. There are
+83 constraints. The 2026-11-15 isolated package-index check found only two newer
+versions than the reviewed 2026-11-13 candidate; both are included in this final
+candidate: **claude-agent-sdk 0.2.182** and **FastAPI 0.163.1**. Freeze this dated
+set after verification; subsequent releases belong in subsequent dependency PRs.
+
+Key transitions: SDK 0.2.110 → 0.2.182, MCP 1.28.1 → 2.3.0, FastAPI 0.141.1 →
+0.163.1, Starlette 1.6.0 → 1.10.0, Pydantic 2.13.5 → 2.14.3, AnyIO 4.15.1 →
+4.16.0, pandas 3.0.6 → 3.1.1, NumPy 2.4.6 → 2.5.4 and dateutil 2.9 → 4.0.
+NumPy's Python >=3.12 requirement drives the new project minimum. Host-only
+`py-spy` is outside the declared groups. `pydantic-settings`, `httpx-sse` and `six`
+leave the resolved closure; MCP 2 introduces `mcp-types` and `httpx2`/`httpcore2`.
+The existing `httpx` client remains available for application/tests.
+
+Upstream deltas checked during closure: [SDK 0.2.182](https://github.com/anthropics/claude-agent-sdk-python/compare/v0.2.181...v0.2.182)
+updates its bundled CLI to 2.1.325, with no Python implementation change;
+[FastAPI 0.162.7–0.163.1](https://fastapi.tiangolo.com/release-notes/)
+fixes cancellation cleanup and nested computed-field OpenAPI and adds optional
+dependency concurrency controls. No new FastAPI concurrency option is adopted.
+
+### Application changes and root causes
+
+- The existing private SDK stdout patch stripped arbitrary chunks, corrupting
+  whitespace inside JSON strings, and bypassed the newer SDK's version check.
+  It now preserves chunk content, calls the upstream check, bounds complete as
+  well as incomplete frames, and returns on generator closure before awaiting.
+  Poisoned-stream recovery and nonzero process-exit errors remain supported.
+- MCP authorization tests used removed low-level handler invocation internals.
+  They now run actual client/server memory streams with initialization and call
+  the same sender adapter. Authorization assertions remain intact.
+- Test fixtures now establish filesystem ordering explicitly and release a held
+  fake Codex turn even when a timing assertion fails. No application queue or
+  eviction policy changes.
+- Fresh CI at `46e8c81` caught two scheduler-plan failures (**3238 passed,
+  2 failed, 38 skipped**): SQLite chose the general status index and a temporary
+  sort rather than the declared bounded waiting subset. Head selection now uses
+  `INDEXED BY idx_mesh_turns_waiting`, matching nearby scheduler queries and its
+  existing contract. Filters, ordering and returned rows are unchanged; existing
+  plan tests remain intact. This does not require a schema change.
+- Subsequent CI at `fd32a57` passed the plan checks but exposed a Codex test's
+  1.8s sleep racing its 2.4s hard cap (**3239 passed, 1 failed, 38 skipped**;
+  its isolated Docker job passed). That test now advances an injected carrier
+  clock only after real subprocess events acknowledge progress. It still
+  requires success beyond three stall windows, the exact final output and no
+  interrupt, without depending on runner scheduling. Production liveness policy
+  is unchanged.
+- Native Claude control tests used a 30s deadline despite the application's 90s
+  connection budget and the SDK initialization floor of 60s. The bundled control
+  check failed once under concurrent ARM64 load and passed alone in 16.73s.
+  Tests now use the application's budget and preserve the initialization error
+  instead of masking it with an assertion about a child captured only on success.
+
+### Evidence and its limits
+
+The original #286 head `947bf8f` had green GitHub CI:
+[run 43443767248](https://github.com/nydiokar/AI-team/actions/runs/43443767248),
+**3240 passed, 38 skipped, 367 warnings** in its normal Python job, plus a green
+network-isolated Docker job and native control smoke. This is historical CI
+evidence, not evidence for later pins or the current production build.
+
+Independent closure review first merged current `origin/main` (`c12fa46`) into
+the migration branch. The 20-module network-isolated ARM64/Python 3.12 selection
+then returned **306 passed, 1 failed** (the bundled CLI cold-start deadline above).
+Both previously failing cancellation/large-DB migration checks passed. A separate
+native smoke initially hit Codex's existing 30s initialize deadline; its next run
+initialized Codex successfully but reached the old Claude smoke deadline. These
+failures are retained here rather than counted as unconditional passes.
+
+Earlier local broad-run evidence included 9 baseline failures caused by missing
+backup tools and unavailable host-worktree Git metadata inside Docker. CI installs
+`sqlite3`/`zstd` and mounts its own checkout with Git safe-directory configuration.
+A later local run had 2 failures / 3184 passes; those two exact tests passed in
+the independent closure selection. No full/e2e suite was run locally during this
+closure review. Existing lint/type debt is not waived as green: historical mypy
+had 898 errors in 42 files before and after modernization; Ruff had thousands of
+baseline findings. Changed-code checks and final candidate results follow below.
+
+Final local evidence (ARM64 Linux, Python 3.12.16, SDK 0.2.182 / FastAPI 0.163.1):
+
+| Gate | Result |
+|---|---|
+| Fresh Docker runtime and every-extra test image | Build passes; `pip check` passes |
+| Installed versions versus all 83 constraints | Zero mismatches |
+| Final `pip list --outdated --format=json` on 2026-11-15 | `[]` |
+| Real SDK/control/application subprocess tests | 9 passed in 21.13s |
+| 31-file API/MCP/queue/recovery/push/Telegram/Codex selection | 417 passed, 1 failed in 351.87s; failed SSE TCP connect exceeded its 10s total budget during the local build |
+| Same SSE asyncio/uvloop disconnect/reconnect tests, isolated | 2 passed in 7.78s; assertions and timeouts unchanged |
+| Bounded index + scheduler behavior | 18 passed in 28.67s, including the 100k-row probe |
+| Codex managed turns + shared liveness after deterministic fixture repair | 57 passed in 63.99s |
+| Worker image build + actual native control smoke | Build passes; Codex initialize/empty thread/cleanup and external Claude initialize/interrupt/cleanup pass; zero model turns |
+| Changed SDK test/native fixture Ruff | Pass |
+| Private production-copy API replay | Four canonical JSON responses identical to running image; 401 auth and 422 invalid limit preserved |
+
+The private replay used a consistent SQLite online backup in an explicit read
+transaction (no live DB/file writes), then independent container-local copies,
+no network, credentials or worker contact. It compared running `ai-team:local`
+(`49e9bd0`, Python 3.11) against the final dependency image/current source:
+
+| GET | Canonical JSON bytes | SHA-256, identical on both stacks |
+|---|---:|---|
+| `/api/sessions?limit=200` | 237831 | `c016d18f39ae9fb717d7bfd87b8d5a064486aa35fba27601233c8da6acbbfd01` |
+| `/api/jobs?limit=50` | 79315 | `dd3c3b1a3f8ec2c6fbd199d4fd44c9427815df417e47f4938eb895254f2dbf6d` |
+| `/api/work/affiliations/sessions` | 5140880 | `e82611239fe4c58569fcfe89025f603d847f6e0c1669a8f75bab917afc3381eb` |
+| `/api/cost/explorer?from=2026-01-01&to=2026-11-15` | 118429 | `0573e776f1aa1c66af7e59dc56ce5c54b1615b698d86b29d9ececcd1642eccd4` |
+
+Reproduction runs use `docker build --target python-tests -t ai-team:dependency-closure-tests .`
+and `docker build --target worker-agents -t ai-team:dependency-closure-worker .`.
+Run tests with the checkout mounted at `/workspace`, `PYTHONPATH=/workspace`,
+working directory `/workspace` and `--network none`. The selected pytest commands:
+
+```bash
+python -m pytest --tb=short tests/test_dependency_sdk.py
+python -m pytest --tb=short tests/test_dependency_sse.py
+python -m pytest --tb=short tests/test_turn_queue_4a_probes.py::test_plans_100k tests/test_turn_queue_scheduler.py
+python -m pytest --tb=short tests/test_codex_managed_turns.py tests/test_turn_liveness.py
+python -m pytest --tb=short -n 2 tests/test_dependency_mcp.py tests/test_dependency_optional.py tests/test_dependency_sse.py tests/test_dependency_startup.py tests/test_dependency_watcher.py tests/test_dependency_websockets.py tests/test_settings_env_file.py tests/test_claude_driver.py tests/test_claude_driver_manager_tools.py tests/test_turn_queue_sdk_ownership.py tests/test_turn_queue_sender.py tests/test_codex_native.py tests/test_turn_queue_oversize_artifact.py tests/test_control_api_auth_coverage.py tests/test_control_api_write.py tests/test_turn_queue_carrier_recovery.py tests/test_worker_managed_turns_default.py tests/test_session_cancellation.py tests/test_turn_queue_stage8a.py tests/test_task_server_client.py tests/test_task_server_upload_safety.py tests/test_control_api_stream.py tests/test_push_notifications.py tests/test_dispatch_state.py tests/test_telegram_session_flow.py tests/test_telegram_turn_queue_resume.py tests/test_sdk_governor.py tests/test_claude_usage_control.py tests/test_retry_transient.py tests/test_codex_app_server.py tests/test_codex_managed_carrier_integration.py
+```
+
+For dispatch tests mount the host common `.git` directory at the same absolute
+path and set Git's safe directory to `/workspace`; a worktree's `.git` file alone
+does not supply its repository metadata. Native smoke:
+`docker run --rm --network none --entrypoint python -e PYTHONPATH=/workspace -v "$PWD:/workspace" -w /workspace ai-team:dependency-closure-worker tests/fixtures/native_agent_smoke.py`.
+Closure logs remain under `/tmp/ai-team-deps-*`; the prior implementation's logs
+remain under `/tmp/ai-team-modernization-evidence/`. No private snapshot is committed.
+
+### Boundary and architecture review
+
+No endpoint, payload, DB schema, transport envelope, queue policy, feature flag or
+worker ownership policy is introduced. The affected entry point is the existing
+native SDK stdout reader. The scheduler read explicitly retains the fleet-bounded
+waiting index; it does not add a query or fetch full payloads. Existing carrier admission/session ownership limits
+remain authoritative. Its per-stream limit is 16 Mi characters; Unicode storage
+and decoded objects mean this is not a process-RSS bound. At N=100 concurrent
+native sessions total RSS is not certified; the concrete trusted-operator-load
+deferral remains in `.ai/CONTEXT.md`. SDK initialization retains the application's
+90s connection budget; turn liveness and process teardown retain their existing
+controls. Malformed/oversize stdout is dropped/resynchronized; process failure
+still raises the SDK error. No database migration or new backing resource exists.
+This migration does not remove existing HTTP size/native-IO/slow-reader deferrals.
+
+### Production promotion and rollback
+
+**Merged code, a built image, and running workers are separate acceptance gates.**
+On 2026-11-15 the running gateway was healthy at `49e9bd0`, schema 49. Kanebra
+reported worker build `c2a81c2`, two active tasks (including this review session),
+and host `.venv` Python 3.11. Horse reported `77823e7`, idle, with zero pooled
+sessions. No worker restart or host/live-venv upgrade was performed.
+
+Gateway preflight returned STOP: the main checkout has unrelated unpushed
+auto-commit `9152240` plus dirty nested worktrees. Preserve that work. Do not build
+production from that tree or silently reset/stash it. Resolve the checkout state
+before using `.claude/skills/deploying-the-gateway` to tag the previous image,
+build/recreate both controllers, check both health/build/schema identities, and
+exercise authenticated read/validation/SSE paths. Schema stays 49. Retain the
+previous image for code rollback; no DB restoration is required by this migration.
+
+Workers require an operator-authorized, drained promotion. Do not update the
+Python 3.11 worker checkout under a running daemon: fresh imports/MCP subprocesses
+can encounter Python 3.12 syntax. Prepare a separate Python >=3.12 environment
+with the repository editable-install/constraints workflow, validate it, then move
+the exact supervisor checkout/interpreter only during the authorized drain. Keep
+the old interpreter/environment and source revision for rollback. Verify a new
+incarnation, expected loaded build, tools/continuation/cancellation and usage on
+natural work. This session is hosted by Kanebra; any approved restart must use a
+supervised handoff after it drains. No paid proof turn is implied.
+
+Credentialed provider inference, external Telegram/push delivery, long-running
+production sessions and activation on both worker hosts remain unverified until
+that promotion. Offline control handshakes submit zero model turns. Do not label
+production migration complete from install/tests/health alone.
+
+---
+
+## Historical audit — 2026-11-06
+
 Audit date: 2026-11-06 (Europe/Vilnius). Baseline: `4dff0d2`. ARM64 Linux, Python 3.11.2.
 
 ## Dependency decisions
