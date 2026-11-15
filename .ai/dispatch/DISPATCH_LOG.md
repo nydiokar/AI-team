@@ -35,9 +35,11 @@ rollout; a separate investigation job does not gate starting the build.
 <a id="A112"></a>
 <a id="A113"></a>
 <a id="A114"></a>
+<a id="A115"></a>
 
 | # | Dispatch | Date | Level | Status | One-line |
 |---|---|---|---|---|---|
+| A115 | `A115_AGENT_DISCOVERY_FOR_DELEGATION.md` | 2026-11-15 | 3 | ready — implementation must re-verify assessment and current runtime before widening sender use | **Make same-Case agent delegation discoverable.** Add a bounded, caller-scoped roster for already-existing eligible sessions and a discover→select→send flow over the current durable turn queue; no worker spawn, cross-Case discovery, or broad mesh authority. |
 | A114 | `AGENT_114_CONSEQUENTIAL_DECISION_INTEGRATION.md` | 2026-11-13 | 3 | ready — follows proven A113; activation needs owner/worker authority | **Finish real consequential-decision integration.** Protect declared SDK budgets through canonical resolution and exact worker/SDK consumption; deliver recovery, visibility, compatibility and safe rollout without rebuilding the prototype. |
 | A113 | `AGENT_113_CONSEQUENTIAL_DECISION_CONTROL_PROTOTYPE.md` | 2026-11-10 | 3 | done — offline prototype proven, PR #285 | **Guard consequential publication.** Immutable informed decisions, scoped authority, exact CSS snapshot consumption, separate evaluation and crash/retry/promotion tests pass; production identity/SDK integration remains A114. |
 | A112 | `AGENT_112_CONSEQUENTIAL_DECISION_CONTROLS.md` | 2026-11-10 | 3 | done — supplied code-grounded design; FM-1 ledger | **Consequential defaults.** Mapped Case/approval/config/role/Governor gaps and recommended bounded consumer enforcement; no runtime enforcement claimed. |

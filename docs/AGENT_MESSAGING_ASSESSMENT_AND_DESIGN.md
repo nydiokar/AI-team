@@ -179,3 +179,7 @@ flowchart LR
 - [A104 evidence inventory](../.ai/dispatch/evidence/A104_GATE1_INVENTORY.md) — observed sender row count/status in its DB snapshot.
 - [Peer messaging investigation](PEER_MESSAGING_INVESTIGATION.md) — prior options and rationale for retaining gateway DB/Case authority; useful background, not current production behavior.
 - [Manager role instructions](harness/roles/manager.md) — current `dispatch_worker` delegation workflow.
+
+## Follow-on work
+
+The next bounded implementation/audit job is [A115](../.ai/dispatch/A115_AGENT_DISCOVERY_FOR_DELEGATION.md), registered in [DISPATCH_LOG](../.ai/dispatch/DISPATCH_LOG.md#A115). It begins with independent verification of this assessment and current runtime, then targets same-Case discovery for already-existing sessions. It explicitly leaves worker creation, cross-Case access, and handoff ownership out of scope pending evidence and a separate decision.

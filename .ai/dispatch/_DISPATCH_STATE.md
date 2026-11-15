@@ -5,6 +5,7 @@
 | status | job_id | created | updated | depends_on | proof | flags |
 |---|---|---|---|---|---|---|
 | active | AGENT_105_CROSS_PROCESS_TURN_SIGNAL | 2026-10-09 | 2026-11-06 | — | ✓ |  |
+| ready | A115_AGENT_DISCOVERY_FOR_DELEGATION | 2026-11-15 | 2026-11-15 | — | — |  |
 | ready | AGENT_111_INTENT_ALIGNED_VERIFIED_CLOSURE | 2026-11-09 | 2026-11-09 | — | — |  |
 | ready | AGENT_114_CONSEQUENTIAL_DECISION_INTEGRATION | 2026-11-13 | 2026-11-13 | 113 | — |  |
 | ready | AGENT_62_RUNTIME_FLAG_REGISTRY_NONBOOLEAN | 2026-08-01 | 2026-08-03 | — | — |  |
