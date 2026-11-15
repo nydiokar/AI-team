@@ -532,7 +532,7 @@ def test_working_turn_longer_than_the_stall_window_is_never_cut_off(h):
         # entire tiny hard cap before it notices the release file.
         for _ in range(5):
             elapsed += 0.4
-            wait_for(lambda: control.progress.last_progress_at == elapsed)
+            wait_for(lambda at=elapsed: control.progress.last_progress_at == at)
             assert out == {}, f"a progressing turn was given up on: {out}"
         assert elapsed - control.progress.started_at > 3 * control.limits.stall_sec
         h.release()
