@@ -154,11 +154,14 @@ the same picker and choose **Use default identity** to reset. An agent can help
 prepare an image; the operator can select it through this control.
 
 Backend meters show plan usage, not session context fill or dollar spend. Claude
-uses its existing quota coordinator. Codex uses sanitized native account limits
-forwarded alongside session telemetry, choosing the highest fresh observation
-across nodes (never summing nodes or inferring account identity). Observations
-expire after 15 minutes or at reset; a dash means unavailable, not zero. The
-Codex app-server worker code must be deployed/restarted before it can forward
-these observations. OpenCode routes to providers and has no single plan quota.
-Dollar amounts remain approximate standard API equivalents; subscription plan
-usage is reported by the provider and is not calculated from token prices.
+and Codex both use the quota coordinator. Claude is observed in-process by the
+worker's `get_usage` control request. Codex is observed on the worker that owns
+the app-server via `account/rateLimits/read` (account metadata, no turn) and
+ingested by the controller; the controller never spawns Codex. Coordinator
+numeric windows take precedence over the legacy 15-minute turn event for the
+same provider and label. A dash means unavailable, not zero; a read error leaves
+the previous good snapshot in place. The Codex app-server worker code must be
+deployed/restarted before it can forward these observations. OpenCode routes to
+providers and has no single plan quota. Dollar amounts remain approximate
+standard API equivalents; subscription plan usage is reported by the provider
+and is not calculated from token prices.

@@ -1,6 +1,6 @@
 ﻿# Quota Window Coordinator Phase 1
 
-Status: A61 finalized observe-only baseline for Claude; activation/warming/classification remain out of scope.
+Status: A61 observe-only baseline; Claude and Codex telemetry are implemented, activation/warming/classification remain out of scope. Codex as-built: `docs/CODEX_QUOTA_OBSERVATION_DESIGN.md` (2026-11-15).
 
 ## Architecture
 
@@ -9,7 +9,7 @@ Phase 1 adds `src/services/quota_window_coordinator.py` as a passive service bes
 The subsystem has four layers:
 
 - typed quota models and `QuotaAdapter` protocol;
-- provider-owned adapters: Claude status-line observation plus unsupported placeholders for Codex and OpenCode;
+- provider-owned adapters: Claude `get_usage` observation, Codex account-rate-limit observation (worker-ingested), and an explicit unsupported OpenCode declaration;
 - `QuotaWindowStore`, a dedicated SQLite WAL database with transactional writes and schema versioning;
 - `QuotaWindowCoordinator`, which records sanitized observations and exposes read-only status.
 
@@ -20,7 +20,7 @@ The coordinator is constructed during `TaskOrchestrator` initialization after co
 Verified against the tree on 2026-07-31:
 
 - Claude is no longer an unsupported placeholder. `ClaudeGetUsageQuotaAdapter` issues a Python Agent SDK control request with subtype `get_usage`, records the server-reported `five_hour` / `seven_day` buckets, and never starts a model turn. (The earlier `ClaudeStatusLineQuotaAdapter` was removed once `get_usage` proved canonical — status-line scraping was a local estimate, `get_usage` is server-backed.)
-- Codex remains `UnsupportedQuotaAdapter("codex", "codex_quota_telemetry_not_validated_phase1")`; the Codex telemetry surface is still unverified.
+- Codex is observed by the worker through `CodexBackend.read_account_rate_limits()` (`account/rateLimits/read`, no turn) and ingested through `/telemetry/quota-observation`; the controller does not spawn Codex. `build_default_quota_adapters()` omits Codex so local observation cannot overwrite worker-ingested status. Provider coverage is enforced by `src/services/quota_provider_registry.py` and `tests/test_quota_provider_coverage.py`.
 - OpenCode remains unsupported as a quota owner; provider-specific adapters must own provider quota telemetry.
 - `GET /api/quota-windows` is wired in `src/control/routes/cost.py`, bearer-protected, and reads the live in-process coordinator when constructed. With the coordinator flag off, it returns the explicit disabled observe-only shape without constructing the quota store.
 - Observe cadence is adaptive. When snapshots contain a known reset boundary, the loop sleeps until the reset-probe lead window, bounded by `QUOTA_OBSERVE_MAX_INTERVAL_SEC`, instead of unconditionally polling every five minutes. Limit-reached or unknown telemetry falls back to the tight observe interval.
@@ -67,6 +67,9 @@ CLAUDE_GET_USAGE_TIMEOUT_SEC=60
 # Stable local account label for principal hashing; no raw account id is stored.
 CLAUDE_QUOTA_PRINCIPAL_KEY=claude-max-nyd
 
+# Optional Codex account label for worker-ingested observations.
+CODEX_QUOTA_PRINCIPAL_KEY=
+
 # Temporary operator digest. Separate flag; default off.
 QUOTA_DIGEST_TELEGRAM_ENABLED=false
 QUOTA_DIGEST_INTERVAL_SEC=3600
@@ -102,13 +105,13 @@ Quota windows are shown in the System tab, directly after backend token-usage ca
 - reset boundary when the adapter observed one;
 - telemetry quality and unavailable reason.
 
-## Unresolved Codex Telemetry Questions
+## Codex Telemetry Notes
 
-- Which installed Codex versions expose quota telemetry without sending a model request?
-- Is `account/rateLimits/read` available to the CLI, and what authenticated surface owns it?
-- What stable schema version or CLI version should validate `rateLimitsByLimitId`, `limitId`, `usedPercent`, `windowDurationMins`, `resetsAt`, and `rateLimitReachedType`?
-- Which identity fields can safely produce a stable `principal_hash` without storing raw account data?
-- Does telemetry differ between ChatGPT subscription authentication, Codex access tokens, and API-key usage-based billing?
+- The worker calls `account/rateLimits/read` on its owned app-server; this is account metadata, not a model turn. `primary` maps to the 300-minute 5-hour window and `secondary` to the 10,080-minute 7-day window.
+- Values are provider-reported **used** percent; the UI derives remaining. Missing buckets are unknown, never zero. A stale `resets_at` is unavailable (`reset_at_stale`).
+- The controller accepts only the allowlisted Codex shape and rejects undeclared providers. A read error updates adapter status without overwriting the last good snapshots.
+- `CODEX_QUOTA_PRINCIPAL_KEY` labels the observed account but defaults empty; multi-account observation is not implemented.
+- Open questions: which Codex versions/durations are guaranteed, and whether one runtime can represent multiple accounts.
 
 ## Claude Telemetry Notes
 

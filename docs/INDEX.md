@@ -116,6 +116,7 @@ v0.6 automation; the file said the operator may delete it). Both existed only in
 | [`EVENT_DRIVEN_READ_REFRESH.md`](EVENT_DRIVEN_READ_REFRESH.md) | 🟢 | A81 (PR #142): Web UI read models refresh on SSE events instead of redundant 3–5 s polls. |
 | [`session_kept_pins_design.md`](session_kept_pins_design.md) | 🟢 | "Keep" mark on a chat session (survives close/restart, searchable note). Built — `POST /api/sessions/{id}/keep`. |
 | [`SESSION_WINDOW_WARMING_SPEC.md`](SESSION_WINDOW_WARMING_SPEC.md) | 🟢 | Quota window coordinator spec — implemented 2026-08-19; §19 records divergences. Architecture summary: `backend/QUOTA_WINDOW_COORDINATOR_PHASE1.md`. |
+| [`CODEX_QUOTA_OBSERVATION_DESIGN.md`](CODEX_QUOTA_OBSERVATION_DESIGN.md) | 🔵 | Codex 5-hour/7-day quota observation through the worker, provider coverage registry, controller ingest, and Home precedence. Design + implementation in review (2026-11-15). |
 | [`DEFERRED.md`](DEFERRED.md) | 🟢 | Web UI/Cockpit items deliberately not built, with why. |
 
 ## Runbooks — operational procedures
