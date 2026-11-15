@@ -434,3 +434,27 @@ def _cancel_task(backend, task_id):
     if active is not None:
         return backend.cancel(SimpleNamespace(session_id=active.session_id), active.turn_uuid)
     return False
+
+
+def test_read_account_rate_limits_reuses_runtime_without_a_turn(monkeypatch):
+    backend = CodexBackend()
+    calls = []
+
+    class Runtime:
+        def read_rate_limits(self, timeout=5.0):
+            calls.append(timeout)
+            return {
+                "plan_type": "plus",
+                "primary": {
+                    "used_percent": 31.0,
+                    "window_minutes": 300,
+                    "resets_at": 2000000000,
+                },
+            }
+
+    monkeypatch.setattr(backend, "_runtime", lambda: Runtime())
+
+    limits = backend.read_account_rate_limits(5.0)
+
+    assert calls == [5.0]
+    assert limits["primary"]["used_percent"] == 31.0

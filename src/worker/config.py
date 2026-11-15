@@ -54,9 +54,14 @@ class WorkerConfig:
             os.getenv("WORKER_SHARES_CONTROLLER_FS", "").strip().lower() in _TRUE
         )
 
-        # Quota observation defaults ON for a claude-capable worker whenever the
-        # controller's coordinator is enabled; WORKER_QUOTA_OBSERVE forces it
-        # either way for per-node control.
+        # Quota observation defaults ON for a worker carrying any observable
+        # provider whenever the controller's coordinator is enabled;
+        # WORKER_QUOTA_OBSERVE forces it either way for per-node control.
+        # Provider coverage comes from the ONE registry, not a hardcoded name.
+        from src.services.quota_provider_registry import (
+            observable_providers_for_backends,
+        )
+
         coordinator_on = (
             os.getenv("QUOTA_COORDINATOR_ENABLED", "").strip().lower() in _TRUE
         )
@@ -66,7 +71,9 @@ class WorkerConfig:
         elif observe_override in _FALSE:
             quota_observe_enabled = False
         else:
-            quota_observe_enabled = coordinator_on and ("claude" in backends)
+            quota_observe_enabled = coordinator_on and bool(
+                observable_providers_for_backends(backends)
+            )
         quota_observe_interval_sec = int(os.getenv("QUOTA_OBSERVE_INTERVAL_SEC") or 300)
 
         return cls(

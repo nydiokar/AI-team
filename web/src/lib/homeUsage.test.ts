@@ -147,3 +147,23 @@ it("uses fresh native Codex plan observations independently of the Claude coordi
   expect(summarizeProviderUsage(resp({ observed_usage: [{ ...observation, observed_at: new Date(Date.now() - 960000).toISOString() }] }))).toEqual([]);
   expect(summarizeProviderUsage(resp({ observed_usage: [{ ...observation, reset_at: new Date(Date.now() - 1).toISOString() }] }))).toEqual([]);
 });
+
+it("prefers a numeric coordinator Codex window over a turn observation", () => {
+  const observation = { provider: "codex", node_id: "node", observed_at: new Date().toISOString(), used_percent: 80, window_duration_seconds: 18000, reset_at: new Date(Date.now() + 3600000).toISOString(), plan_type: "plus" };
+  const data = resp({
+    buckets: [bucket("codex_five_hour", 18000)],
+    window_states: [{ ...state("codex_five_hour", 20), provider: "codex" }],
+    observed_usage: [observation],
+  });
+  expect(summarizeProviderUsage(data)[0]?.windows[0]?.usedPercent).toBe(20);
+});
+
+it("lets a fresh turn observation fill an unknown coordinator Codex window", () => {
+  const observation = { provider: "codex", node_id: "node", observed_at: new Date().toISOString(), used_percent: 12, window_duration_seconds: 18000, reset_at: new Date(Date.now() + 3600000).toISOString(), plan_type: "plus" };
+  const data = resp({
+    buckets: [bucket("codex_five_hour", 18000)],
+    window_states: [{ ...state("codex_five_hour", null), provider: "codex" }],
+    observed_usage: [observation],
+  });
+  expect(summarizeProviderUsage(data)[0]?.windows[0]?.usedPercent).toBe(12);
+});

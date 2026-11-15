@@ -358,6 +358,7 @@ class QuotaConfig:
     reset_probe_lead_sec: int = 900        # QUOTA_RESET_PROBE_LEAD_SEC
     claude_get_usage_timeout_sec: float = 60.0  # CLAUDE_GET_USAGE_TIMEOUT_SEC
     claude_principal_key: str = ""         # CLAUDE_QUOTA_PRINCIPAL_KEY
+    codex_principal_key: str = ""          # CODEX_QUOTA_PRINCIPAL_KEY
     # Window prewarming (QUOTA_PREWARM_ENABLED flag; runs around the clock by
     # design — the value of an already-ticking window only exists before work
     # starts). One activation per window at most; these are the extra bounds.
@@ -740,6 +741,12 @@ class Config:
             v = os.getenv("CLAUDE_QUOTA_PRINCIPAL_KEY")
             if v:
                 self.quota.claude_principal_key = v
+        except Exception:
+            pass
+        try:
+            v = os.getenv("CODEX_QUOTA_PRINCIPAL_KEY")
+            if v:
+                self.quota.codex_principal_key = v
         except Exception:
             pass
         # Mesh env overrides

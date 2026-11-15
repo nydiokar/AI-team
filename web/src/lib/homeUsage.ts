@@ -74,6 +74,13 @@ export function summarizeProviderUsage(
   for (const b of resp.buckets ?? []) bucketById.set(b.bucket_id, b);
 
   const byProvider = new Map<string, { accountHint: string | null; windows: UsageWindow[] }>();
+  // Numeric coordinator windows are authoritative. The native Codex turn
+  // observation is only a fallback for a provider/window the coordinator has
+  // not reported yet; it must never overwrite a fresh poll with a turn event.
+  const coordinatorWindows = new Set<string>();
+  const markCoordinator = (provider: string, durationSeconds: number | null, used: number | null) => {
+    if (used != null) coordinatorWindows.add(`${provider}:${windowLabel(durationSeconds)}`);
+  };
 
   const push = (
     provider: string,
@@ -114,10 +121,12 @@ export function summarizeProviderUsage(
         s.used_percent == null
           ? s.telemetry_state || s.classification_status || "unavailable"
           : null;
+      const duration = bucket?.window_duration_seconds ?? null;
+      markCoordinator(s.provider, duration, s.used_percent);
       push(
         s.provider,
         s.principal_hash,
-        bucket?.window_duration_seconds ?? null,
+        duration,
         s.used_percent,
         unknown,
         s.window_end_at,
@@ -128,10 +137,13 @@ export function summarizeProviderUsage(
       if (snap.bucket_id.startsWith("weekly_scoped:")) continue;
       const unknown =
         snap.used_percent == null ? snap.unavailable_reason || snap.raw_status || "unavailable" : null;
+      const duration =
+        snap.window_duration_seconds ?? bucketById.get(snap.bucket_id)?.window_duration_seconds ?? null;
+      markCoordinator(snap.provider, duration, snap.used_percent);
       push(
         snap.provider,
         snap.principal_hash,
-        snap.window_duration_seconds ?? bucketById.get(snap.bucket_id)?.window_duration_seconds ?? null,
+        duration,
         snap.used_percent,
         unknown,
         snap.reset_at,
@@ -141,8 +153,11 @@ export function summarizeProviderUsage(
 
   // Native Codex observations are node-scoped, not fabricated account identities.
   // The gateway expires these after 15 minutes; re-check expiry in cached UI data.
+  // A numeric coordinator window wins for its provider/window; an unknown
+  // coordinator state does not suppress a fresher event reading.
   for (const usage of resp.observed_usage ?? []) {
     if (Date.now() - Date.parse(usage.observed_at) > 900_000 || Date.parse(usage.reset_at) <= Date.now()) continue;
+    if (coordinatorWindows.has(`${usage.provider}:${windowLabel(usage.window_duration_seconds)}`)) continue;
     push(usage.provider, "", usage.window_duration_seconds, usage.used_percent, null, usage.reset_at);
   }
 

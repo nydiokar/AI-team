@@ -288,6 +288,24 @@ def test_worker_quota_observe_defaults_on_for_claude_when_coordinator_enabled(mo
     assert WorkerConfig.from_env().quota_observe_enabled is True
 
 
+def test_worker_quota_observe_defaults_on_for_codex_only(monkeypatch):
+    from src.worker.config import WorkerConfig
+
+    _base_worker_env(monkeypatch)
+    monkeypatch.setenv("WORKER_BACKENDS", "codex")
+    monkeypatch.setenv("QUOTA_COORDINATOR_ENABLED", "1")
+    assert WorkerConfig.from_env().quota_observe_enabled is True
+
+
+def test_worker_quota_observe_off_when_only_unsupported_provider(monkeypatch):
+    from src.worker.config import WorkerConfig
+
+    _base_worker_env(monkeypatch)
+    monkeypatch.setenv("WORKER_BACKENDS", "opencode-server")
+    monkeypatch.setenv("QUOTA_COORDINATOR_ENABLED", "1")
+    assert WorkerConfig.from_env().quota_observe_enabled is False
+
+
 def test_worker_quota_observe_off_when_coordinator_disabled(monkeypatch):
     from src.worker.config import WorkerConfig
 

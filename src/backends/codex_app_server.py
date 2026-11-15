@@ -186,6 +186,18 @@ class CodexAppServerClient:
         if self.process is None or self.process.poll() is not None:
             raise CodexProtocolError("codex_runtime_lost")
 
+    def read_rate_limits(self, timeout: float = 5.0) -> dict[str, JsonValue]:
+        """Read account plan limits without starting a turn or spending tokens.
+
+        The response is normalized through ``_set_rate_limits`` so the caller
+        only ever sees the allowlisted counters (never credits/account payloads).
+        The read is request-scoped: a slow app-server yields a late reply that is
+        routed instead of failing the shared client.
+        """
+        result = self.request("account/rateLimits/read", {}, timeout=timeout)
+        self._set_rate_limits(result.get("rateLimits"))
+        return dict(self.rate_limits)
+
     def attach_thread(self, thread_id: str, cwd: str, model: str | None,
                       config: dict[str, JsonValue]) -> dict[str, JsonValue]:
         params: dict[str, JsonValue] = {"cwd": cwd, "model": model,

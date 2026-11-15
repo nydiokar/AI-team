@@ -197,3 +197,15 @@ def test_account_limits_are_sanitized_and_updated_without_thread_id(server):
     client.request('turn/interrupt', {'threadId': 'rate-limits', 'turnId': 'turn'})
     assert client.rate_limits['primary']['used_percent'] == 45
     assert not client.failure
+
+
+def test_read_rate_limits_returns_allowlisted_shape(server):
+    client = server()
+    client.start()
+
+    limits = client.read_rate_limits(timeout=2.0)
+
+    assert limits["plan_type"] == "plus"
+    assert limits["primary"]["used_percent"] == 31.0
+    assert limits["primary"]["window_minutes"] == 300
+    assert "credits" not in limits
