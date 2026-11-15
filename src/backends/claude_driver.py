@@ -667,11 +667,13 @@ def _resync_stdout_reader(read_lines, max_buffer_size: int):
     async def _iter():
         json_buffer = ""
         async for chunk in read_lines:
-            chunk_str = chunk.strip()
+            # TextReceiveStream yields arbitrary chunks, including boundaries
+            # inside JSON strings. Stripping a chunk corrupts message content.
+            chunk_str = chunk
             if not chunk_str:
                 continue
             for raw_line in chunk_str.split("\n"):
-                line = raw_line.strip()
+                line = raw_line if json_buffer else raw_line.lstrip()
                 if not line:
                     continue
                 # Non-JSON noise while nothing is half-parsed: skip it, exactly
@@ -680,6 +682,14 @@ def _resync_stdout_reader(read_lines, max_buffer_size: int):
                     logger.debug("skipping non-JSON CLI stdout line: %s", line[:200])
                     continue
                 json_buffer += line
+                if len(json_buffer) > max_buffer_size:
+                    # Apply the bound before decoding complete frames too.
+                    # Drop and resync rather than end the native session.
+                    _log_stream_poison(json_buffer, "overflow")
+                    # A new bounded frame can be what crossed the ceiling.
+                    json_buffer = line if len(line) <= max_buffer_size and line.startswith("{") else ""
+                    if not json_buffer:
+                        continue
                 try:
                     data = json.loads(json_buffer)
                 except json.JSONDecodeError:
@@ -697,11 +707,6 @@ def _resync_stdout_reader(read_lines, max_buffer_size: int):
                             json_buffer = ""
                             yield standalone
                             continue
-                    if len(json_buffer) > max_buffer_size:
-                        # Memory bound. Drop and resync rather than kill the
-                        # session — the SDK's raise here is what ended turns.
-                        _log_stream_poison(json_buffer, "overflow")
-                        json_buffer = ""
                     continue
                 json_buffer = ""
                 yield data
@@ -745,11 +750,13 @@ def _install_sdk_stream_resync() -> None:
             raise CLIConnectionError("Not connected")
         try:
             async for data in _resync_stdout_reader(self._stdout_stream, self._max_buffer_size):
+                self._check_claude_version(data)
                 yield data
         except anyio.ClosedResourceError:
             pass
         except GeneratorExit:
-            pass
+            # Closing an async generator must not fall through to an await.
+            return
         # Preserved verbatim from the SDK: a non-zero exit is still an error.
         try:
             returncode = await self._process.wait()

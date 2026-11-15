@@ -234,9 +234,15 @@ def test_cancel_interrupts_exact_turn_and_does_not_poison_followup(native):
     runtime.hold = True
     with ThreadPoolExecutor() as pool:
         future = pool.submit(run, backend, cwd)
-        assert runtime.started.wait(2)
-        _cancel_task(backend, "task")
-        result = future.result(timeout=3)
+        try:
+            assert runtime.started.wait(2)
+            _cancel_task(backend, "task")
+            result = future.result(timeout=3)
+        finally:
+            # A failed timing assertion must not leave __exit__ joining an
+            # intentionally held fake turn forever.
+            if not future.done():
+                runtime.dead = True
     assert result.errors == ["cancelled"]
     assert ("turn/interrupt", {"threadId": "native-0", "turnId": runtime.active["native-0"]}) in runtime.calls
     _cancel_task(backend, "task")

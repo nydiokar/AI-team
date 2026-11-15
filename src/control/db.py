@@ -3664,7 +3664,7 @@ class MeshDB:
             f"""
             SELECT t.id, t.session_id, t.revision, t.queue_sequence, t.created_at,
                    t.expires_at, t.turn_source, s.config_revision
-            FROM mesh_tasks t
+            FROM mesh_tasks t INDEXED BY idx_mesh_turns_waiting
             JOIN sessions s ON s.session_id = t.session_id
             WHERE t.queue_protocol = 1 AND t.status = 'queued'
               AND (t.not_before IS NULL OR t.not_before <= ?)
