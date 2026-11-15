@@ -14,11 +14,11 @@ black==26.10.1
 certifi==2026.10.23
 cffi==2.1.1
 charset-normalizer==3.5.2
-claude-agent-sdk==0.2.181
+claude-agent-sdk==0.2.182
 click==8.5.1
 cryptography==50.0.2
 execnet==2.1.2
-fastapi==0.162.6
+fastapi==0.163.1
 frozenlist==1.8.0
 h11==0.16.0
 http-ece==1.2.1

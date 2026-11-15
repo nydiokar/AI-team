@@ -15,6 +15,7 @@ import anyio
 from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient
 from claude_agent_sdk._internal.transport.subprocess_cli import SubprocessCLITransport
 
+from src.backends.claude_driver import _SDKSession
 from src.backends.codex_app_server import CodexAppServerClient
 
 
@@ -32,7 +33,7 @@ async def claude_control(root: str) -> None:
     ))
     child = None
     try:
-        with anyio.fail_after(30):
+        with anyio.fail_after(_SDKSession._CONNECT_TIMEOUT_SEC):
             await client.connect()
             assert isinstance(client._transport, SubprocessCLITransport)
             child = client._transport._process

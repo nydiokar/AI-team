@@ -15,10 +15,10 @@ dependencies = [
   "pydantic>=2.14.3",
   "python-dotenv>=1.2.4",
   "pyyaml>=6.0.3",
-  "fastapi>=0.162.6",
+  "fastapi>=0.163.1",
   "uvicorn[standard]>=0.54.0",
   "python-multipart>=0.0.33",
-  "claude-agent-sdk>=0.2.181",
+  "claude-agent-sdk>=0.2.182",
   "anyio>=4.16.0",
   # [A82] backend-process liveness proof for managed-turn recovery; also makes
   # reap_stale_worker_children real (it was a silent no-op without psutil).

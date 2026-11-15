@@ -53,6 +53,8 @@ def test_sdk_bundled_cli_version_without_model_call(tmp_path: Path) -> None:
 
 async def test_sdk_real_bundled_cli_control_handshake_without_prompt(tmp_path: Path) -> None:
     """Initialize/interrupt/close the actual bundled CLI; never submit a prompt."""
+    from src.backends.claude_driver import _SDKSession
+
     client = ClaudeSDKClient(options=ClaudeAgentOptions(
         cwd=str(tmp_path), setting_sources=[],
         env={"HOME": str(tmp_path), "CLAUDE_CONFIG_DIR": str(tmp_path / "claude"),
@@ -60,7 +62,9 @@ async def test_sdk_real_bundled_cli_control_handshake_without_prompt(tmp_path: P
     ))
     child = None
     try:
-        with anyio.fail_after(30):
+        # Use the application's cold-start budget, including the SDK's 60s
+        # control initialization floor, on slower Linux/ARM64 hosts too.
+        with anyio.fail_after(_SDKSession._CONNECT_TIMEOUT_SEC):
             await client.connect()
             assert isinstance(client._transport, SubprocessCLITransport)
             child = client._transport._process
@@ -70,7 +74,8 @@ async def test_sdk_real_bundled_cli_control_handshake_without_prompt(tmp_path: P
         with anyio.CancelScope(shield=True):
             try:
                 await client.disconnect()
-                assert child is not None and child.returncode is not None
+                if child is not None:
+                    assert child.returncode is not None
             finally:
                 if child is not None:
                     if child.returncode is None:
