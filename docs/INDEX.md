@@ -156,6 +156,7 @@ tables for the authoritative prioritization; these are the supporting writeups.
 | Doc | Status | What it's for |
 |---|---|---|
 | [`TBD/BACKEND_HOOKS_STRATEGY.md`](TBD/BACKEND_HOOKS_STRATEGY.md) | 🔵 | Whether backend lifecycle hooks (Claude Code/Codex/OpenCode) can replace/supplement gateway state management. |
+| [`CODE_QUALITY_CONTROLS_DESIGN.md`](CODE_QUALITY_CONTROLS_DESIGN.md) | 🔵 | Six recurring failure families, database coherence diagnosis, architecture-tool enforcement limits, and staged deterministic/semantic/verification controls. |
 | [`TBD/CLAUDE_HOOK_IDEAS.md`](TBD/CLAUDE_HOOK_IDEAS.md) | 🔵 | Claude Code hooks as a leverage point for deterministic lifecycle behavior. |
 | [`TBD/SESSION_WINDOW_WARMING_SPEC.md`](TBD/SESSION_WINDOW_WARMING_SPEC.md) | 🟡 | Older "proposal only" copy of the quota window coordinator spec. The implemented, maintained version is [`SESSION_WINDOW_WARMING_SPEC.md`](SESSION_WINDOW_WARMING_SPEC.md). |
 | [`TBD/AI_TEAM_RUNTIME_UPDATE_AUTOMATION_SPEC.md`](TBD/AI_TEAM_RUNTIME_UPDATE_AUTOMATION_SPEC.md) | 🔵 | Operator-gated Codex/Claude runtime-update automation (replaced `BACKEND_RUNTIME_RELEASES.md` on 2026-09-25). A86 is blocked: workers still run as host processes. |

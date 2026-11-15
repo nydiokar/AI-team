@@ -9,11 +9,11 @@ executor should be able to run a small task from **this file alone**.
 > **not** describe the **live `submit_instruction` lane** — the Telegram/Web path
 > where an operator sends a turn to an existing session; that lane has no packet and
 > no burndown, it just enqueues.
-> The **Level-3 admission gate**, however, is NOT limited to `.task.md`: it runs in
-> `orchestrator._enqueue_task`, the choke point every ingestion lane shares
-> (`submit_instruction` from Telegram/Web, `.task.md` auto-pickup, and internal
-> runtime tasks). So an un-approved Level-3 task is refused on the main door too,
-> not just the batch lane.
+> Level-3 operator approval is an **authoring convention**. The former runtime
+> admission predicate and `HARNESS_LEVEL3_GUARD` were removed (`3bf0317`); neither
+> lane provides a general consequential-setting certification gate. See
+> [ENV_FEATURE_FLAGS](../backend/ENV_FEATURE_FLAGS.md) and the
+> [A113 proof boundary](consequential_decision_control.md).
 
 **Zero new gateway state.** The free-prose dispatch packet, the `## Milestone` burndown
 section, and the dispatch convention *are* the state. No `flow_runs` table, no stage
@@ -141,32 +141,12 @@ is allowed for **Level ≤ 2** only. A `harness_level: 3` task
 clear the **operator-approval stage before dispatch**. Approval is expressed as
 `approved: true` in the frontmatter.
 
-**Enforcement backstop (code, flag-guarded, OFF by default):** the decision
-predicate `orchestrator.py::_harness_level3_allows_autopickup` is invoked at
-admission in `_enqueue_task` — the shared choke point — so it covers **every**
-lane (`submit_instruction` from Telegram/Web, `.task.md` auto-pickup, internal
-tasks). It is opt-in via the `HARNESS_LEVEL3_GUARD` env flag:
-
-| `HARNESS_LEVEL3_GUARD` | `harness_level` | `approved` | Result |
-|------------------------|-----------------|-----------|--------|
-| unset / falsey         | *(anything)*    | —         | **allow** (byte-identical legacy behavior) |
-| on (`1`/`true`/`yes`/`on`) | absent      | —         | allow (unchanged) |
-| on                     | 0 / 1 / 2       | —         | allow (enqueue) |
-| on                     | 3               | absent / false | **BLOCK** — emits `task_blocked`, raises `HarnessAdmissionBlocked`, nothing queued |
-| on                     | 3               | `true`    | allow |
-| on                     | unparseable     | —         | allow (never invents a block) |
-
-On a block, `_enqueue_task` raises `HarnessAdmissionBlocked(task_id, reason)`
-**instead of returning a task_id** — so no caller can mistake a blocked task for
-an accepted one, and no side effect (queue / `active_tasks`) leaks past the gate.
-
-**Surface handling is intentionally NOT built in this pass (backend-only).** The
-gate raises a typed signal at the choke point and stops there. How each surface
-presents "blocked" — an HTTP status on the control API, a message on Telegram — is
-a **separate, later, WebUI-first integration task**, not part of the backend gate.
-Until then a raised `HarnessAdmissionBlocked` propagates to the caller as an
-unhandled error (and the `.task.md` lane still releases its file-tracking state so
-an `approved: true` re-write is re-picked-up). Do not wire per-surface UX here.
+**Current enforcement:** the old runtime backstop was removed in `3bf0317`.
+`approved: true` expresses the authoring decision; it is not authenticated proof
+of a per-value choice. Do not set the retired flag or rely on the former predicate.
+`HarnessAdmissionBlocked` remains for other admission failures such as disabled
+local execution. A113 proves an isolated consumer guard; it activates no replacement
+gate in `.task.md`, Web, Telegram or internal runtime admission.
 
 Covered by `tests/test_harness_level3_guard.py` (24 cases: the pure predicate + the
 `_enqueue_task` admission behavior). When the flag is unset the gate is a pure

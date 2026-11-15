@@ -28,6 +28,11 @@ _STALE_AGENT_VARS = (
     "AI_TEAM_TURN_ID",
     "AI_TEAM_INVOCATION_ID",
     "CLAUDECODE",
+    # PM2 sets these for Node-managed children. This daemon is Python, so
+    # forwarding the stale IPC descriptor to unrelated Node CLIs makes them
+    # treat fd 3 as their own channel and can abort during libuv shutdown.
+    "NODE_CHANNEL_FD",
+    "NODE_CHANNEL_SERIALIZATION_MODE",
 )
 for _var in _STALE_AGENT_VARS:
     os.environ.pop(_var, None)

@@ -32,9 +32,15 @@ rollout; a separate investigation job does not gate starting the build.
 <a id="A109"></a>
 <a id="A110"></a>
 <a id="A111"></a>
+<a id="A112"></a>
+<a id="A113"></a>
+<a id="A114"></a>
 
 | # | Dispatch | Date | Level | Status | One-line |
 |---|---|---|---|---|---|
+| A114 | `AGENT_114_CONSEQUENTIAL_DECISION_INTEGRATION.md` | 2026-11-13 | 3 | ready — follows proven A113; activation needs owner/worker authority | **Finish real consequential-decision integration.** Protect declared SDK budgets through canonical resolution and exact worker/SDK consumption; deliver recovery, visibility, compatibility and safe rollout without rebuilding the prototype. |
+| A113 | `AGENT_113_CONSEQUENTIAL_DECISION_CONTROL_PROTOTYPE.md` | 2026-11-10 | 3 | done — offline prototype proven, PR #285 | **Guard consequential publication.** Immutable informed decisions, scoped authority, exact CSS snapshot consumption, separate evaluation and crash/retry/promotion tests pass; production identity/SDK integration remains A114. |
+| A112 | `AGENT_112_CONSEQUENTIAL_DECISION_CONTROLS.md` | 2026-11-10 | 3 | done — supplied code-grounded design; FM-1 ledger | **Consequential defaults.** Mapped Case/approval/config/role/Governor gaps and recommended bounded consumer enforcement; no runtime enforcement claimed. |
 | A111 | `AGENT_111_INTENT_ALIGNED_VERIFIED_CLOSURE.md` | 2026-11-10 | 3 | dispatched — ready; planning only | **Intent-preserving verified delegation.** P0–P6 staged plan: preserve original objective, enforce evidence-bound review/closure authority, integrate existing Scientific Governor, verify recovery/bounds, calibrate judgments and prove useful hands-off closure. Existing queue/inbox/S1 jobs reused; runtime implementation and empirical acceptance remain open. |
 | A110 | `AGENT_110_LLM_TURN_LIFECYCLE.md` | 2026-11-04 | 3 | done — PR #276 `fd8b501`, live; final review corrected #274 | **Honest LLM lifecycle.** Restored 1,560 canonical withdrawals (0 mismatches, unchanged usage), preserved retention and isolated historical repair from live telemetry. Bounded v3 metadata revalidation continues normally. |
 | A109 | `AGENT_109_WATCHED_JOB_CONSUMPTION.md` | 2026-11-04 | 3 | done — PR #276 `fd8b501`, live; final review corrected #274 | **Consume watched-job results once.** Fixed cancelled HTTP waiters escaping the real mutation bound and consumption clearing a live lineage writer lease. Wake/consumption behavior preserved; race/failure tests and CI pass. |

@@ -1167,46 +1167,41 @@ def test_all_four_identity_keys_are_in_agent_identity_keys():
 
 def test_worker_main_startup_scrubs_stale_agent_vars(monkeypatch):
     """
-    Simulate a worker that inherited stale agent-identity vars and then ran the
-    worker_main.py module-level scrub.  All five vars must be absent afterwards.
+    Simulate a worker that inherited stale agent identity and Node IPC vars and
+    then ran the worker_main.py module-level scrub.
     """
+    import importlib
+
     stale_vars = {
         "SESSION_ID": "d9342d3315a3",
         "AI_TEAM_SESSION_ID": "d9342d3315a3",
         "AI_TEAM_TURN_ID": "task_33d791f6",
         "AI_TEAM_INVOCATION_ID": "inv_dead",
         "CLAUDECODE": "1",
+        "NODE_CHANNEL_FD": "3",
+        "NODE_CHANNEL_SERIALIZATION_MODE": "json",
     }
     # Inject the stale vars into os.environ.
     for k, v in stale_vars.items():
         monkeypatch.setenv(k, v)
+    monkeypatch.setenv("PM2_HOME", "/tmp/keep-pm2-home")
 
-    # Re-execute only the scrub block from worker_main.py, not the full startup.
-    _STALE_AGENT_VARS = (
-        "SESSION_ID",
-        "AI_TEAM_SESSION_ID",
-        "AI_TEAM_TURN_ID",
-        "AI_TEAM_INVOCATION_ID",
-        "CLAUDECODE",
-    )
-    for var in _STALE_AGENT_VARS:
-        os.environ.pop(var, None)
+    import worker_main
+
+    importlib.reload(worker_main)
 
     for k in stale_vars:
         assert k not in os.environ, f"{k} must have been scrubbed at worker startup"
+    assert os.environ["PM2_HOME"] == "/tmp/keep-pm2-home"
 
 
 def test_worker_main_startup_scrub_is_idempotent_when_vars_absent():
     """Scrubbing vars that are not present must not raise."""
-    _STALE_AGENT_VARS = (
-        "SESSION_ID",
-        "AI_TEAM_SESSION_ID",
-        "AI_TEAM_TURN_ID",
-        "AI_TEAM_INVOCATION_ID",
-        "CLAUDECODE",
-    )
-    for var in _STALE_AGENT_VARS:
-        os.environ.pop(var, None)  # no KeyError even when absent
+    import importlib
+
+    import worker_main
+
+    importlib.reload(worker_main)
 
 
 def test_signed_out_is_not_salvaged_agent_work():
