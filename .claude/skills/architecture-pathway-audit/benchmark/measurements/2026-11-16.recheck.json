@@ -1,0 +1,71 @@
+{
+  "checked_at": "2026-11-16T13:24:26.351922+00:00",
+  "source_revision": "244a397e8eecbf33881b0e4d386754725c43d758",
+  "baseline_revision": "49c4dfa62d34e84d891c5730897d2b72cd0155d9",
+  "application_src_tree": "3c66764daf2783ee6d13b1ac4e1c698f66362443",
+  "audit_scripts_tree": "3c8218b9d829c9e329cc364e3d47857ba7a06128",
+  "source_or_detector_code_changes_since_baseline": false,
+  "command": "python .claude/skills/architecture-pathway-audit/scripts/pathway_explorer.py --repo . --scope src --project ai-team-audit-py312 --cbm /evidence/bin/codebase-memory-mcp --cache-dir /evidence/cache-py312 --out /evidence/evidence/pathways-recheck.html --report /evidence/evidence/findings-recheck.json --no-serve --sweep-depth 6 --sweep-cap 600 --roots all",
+  "environment": {
+    "python": "3.12.16",
+    "cbm": "0.11.0",
+    "architecture": "aarch64",
+    "docker_image": "ai-team:dependency-closure-tests",
+    "network": "none"
+  },
+  "result": {
+    "exit_status": 0,
+    "cold_total_seconds": 152.3,
+    "repeat_total_seconds": 22.6,
+    "repeat_sweep_seconds": 1.5,
+    "repeat_cbm_index_seconds": 8.2,
+    "cbm_index_recreated_in_fresh_container": true,
+    "fetched_expansions": 0,
+    "reused_expansions": 1988,
+    "sweep_cache_hits": 12454,
+    "cbm_calls": 10,
+    "routes": 141,
+    "roots": 766,
+    "emitted_findings": 280,
+    "levels": {
+      "candidate": 200,
+      "fact": 80
+    },
+    "counts_before_caps": 698,
+    "findings_identical": true,
+    "coverage_identical": true,
+    "routes_identical": true,
+    "analysis_scope_identical": true,
+    "required_candidate_ids_present": [
+      "3a7bd241ebdb",
+      "cf15dbf85a47"
+    ]
+  },
+  "stats": {
+    "cache_hits": 12454,
+    "cache_misses": 0,
+    "index_runs": 1,
+    "index_seconds": 8.20732512511313,
+    "expansions": 0,
+    "last_expand_ms": null,
+    "ast_reparsed_files": 0,
+    "cbm_calls": 10,
+    "cbm_query_seconds": 8.95,
+    "cbm_version": "0.11.0",
+    "index": {
+      "at": "2026-11-16T13:23:13",
+      "seconds": 8.21,
+      "nodes": 3433,
+      "edges": 15061
+    }
+  },
+  "original_json_sha256": "02945b003b3517e1e4dd6ce82faf4d7f95004540455227dded9e5a7e03f8a24a",
+  "recheck_json_sha256": "88523a35203202ff70d8713858151f10956e2fc2579a61fbd7cfe99813ec8697",
+  "normalized_findings_sha256": "35b5209e50d7c92a909970543cbf264b8acec67083325e63287b7fbf7d3a70ac",
+  "limitations": [
+    "Reused explorer cache; this is not a second cold scan.",
+    "Fresh container reindexed CBM; not fully persistent-index warm timing.",
+    "Equal candidate output does not certify semantic correctness, source coverage completeness or fixes.",
+    "Known application and audit-tool defects remain unfixed."
+  ]
+}

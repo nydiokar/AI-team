@@ -5,6 +5,117 @@ Usage and requirements belong in [README.md](README.md). Machine-readable data:
 [2026-11-16.json](benchmark/measurements/2026-11-16.json). The historical contracts remain
 frozen; no detector, contract, application code or baseline was changed for this audit.
 
+## 2026-11-16 — detection attribution and approved follow-up
+
+Execution handoff: [issue #290](https://github.com/nydiokar/AI-team/issues/290) and
+[A116](../../../.ai/dispatch/AGENT_116_TRUSTWORTHY_ARCHITECTURE_AUDIT.md).
+A116 is ready and approved for autonomous implementation, review, verification,
+shipping and certification within its stated scope. No fixes or final certification
+are implied by authoring that handoff.
+
+### Which work was done by the tool?
+
+The two confirmed current application defects began with **two candidates emitted
+by the tool itself** in an untargeted `src` sweep. The relevant detector is the
+**AST SQL shared-medium layer**, not a demonstrated CBM duplicate-execution-path
+catch. `pyast_adapter.data_access` mechanically extracts SQL table accesses and
+window shapes; the explorer builds table-access edges; `structure.analyze` emits
+`TRUNCATED_WINDOW` for limited oldest-N reads against apparently insert-only media.
+CBM supplies graph symbols/navigation; source/consumer review supplies semantics.
+No agent-created graph edges or known defect names were supplied to the sweep.
+This was not a blind experiment: the project already has historical window scars.
+
+| Origin | Exact machine evidence | Additional agent work | Justified conclusion |
+|---|---|---|---|
+| Tool | `cf15dbf85a47`, `TRUNCATED_WINDOW`, `table::flow_events`; AST READS_TABLE edge at `control/db.py:7289`, reader `list_flow_events_of_types` | Followed its caller `latest_spec_review`, optional-spec filtering and `decompose_case`; seeded 5,001 rows and inverted last verdicts | Real stale-review authority defect. The tool localized the risky reader; it did not know that row 5001 should reject decomposition. |
+| Tool | `3a7bd241ebdb`, `TRUNCATED_WINDOW`, `table::flow_links`; AST edge at `control/db.py:6799`, reader `list_flow_links` | Followed default limit 200 into work roster/detail and cost-role projection; seeded 201 links and observed omission | Real incomplete-membership projection defect. The tool did not independently prove UI consequences or lost role attribution. |
+| Tool candidate, agent rejection | Same flow_links finding also points to `resolve_dispatch_requester`, line 7923 | Inspected exact-one semantics; tested one and two executing candidates | Correct LIMIT-2 ambiguity detection, not a bug. One candidate can contain both useful and benign leads. |
+| Contract checker output, agent interpretation | Frozen A104 example reports 41 occurrences on current main | Compared lifecycle/migration/test readers with the actual pending-state authority | Contract intent/encoding mismatch, not 41 application bugs or a newly proven duplicate inbox authority. |
+| Agent adversarial investigation | Persisted checker/index/scorer probes in the baseline JSON | Read implementation and injected missing scope, malformed Python, index failure, qualified SQL and convergence-only scorer input | Real audit-tool reliability/evaluation defects; not automatically detected by the graph rules. |
+
+Both machine candidates explicitly say `level: candidate` and
+`semantic_verification: not performed (requires source review by an agent or human)`.
+That is the original output, not a later reclassification. The generic sweep
+produced neither a certified defect count nor a clean-architecture verdict.
+
+### Original output, not just selected observations
+
+The original full report is now preserved as
+[2026-11-16.findings.json.gz](benchmark/measurements/2026-11-16.findings.json.gz).
+It is 1,190,254 uncompressed bytes, archived losslessly as 56,501 bytes. The original
+run identity, scope, coverage, stats, route list and all 280 emitted findings are
+preserved. It does not recover the 418 patterns omitted by the detector's caps;
+those omissions were counted in `analysis_scope`, not serialized as full findings.
+
+- Original JSON SHA-256: `02945b003b3517e1e4dd6ce82faf4d7f95004540455227dded9e5a7e03f8a24a`.
+- Compressed file SHA-256: `bf040e320eff66630b2caa3b6039a781b6bbad25bb35a17ca58091a071a81ab9`.
+
+Inspect the original output without CBM, a gateway or any paid model call:
+
+```bash
+python -c 'import gzip,json; from collections import Counter; p=".claude/skills/architecture-pathway-audit/benchmark/measurements/2026-11-16.findings.json.gz"; d=json.load(gzip.open(p,"rt")); print(Counter(f["level"] for f in d["findings"])); print(json.dumps([f for f in d["findings"] if f["kind"]=="TRUNCATED_WINDOW"],indent=2))'
+```
+
+Expected level counts: **200 candidates, 80 facts**. The two window IDs and source
+edges above must be present. The 698 uncapped structural patterns are not 698 bugs;
+280 emitted items are not 280 bugs; the two confirmed defects divided by 280 is
+not a measured precision because the full denominator was not semantically reviewed.
+
+Exact configuration, executed from the isolated `/audit` checkout:
+
+```bash
+python .claude/skills/architecture-pathway-audit/scripts/pathway_explorer.py --repo . --scope src --project ai-team-audit-py312 --cbm /evidence/bin/codebase-memory-mcp --cache-dir /evidence/cache-py312 --out /evidence/evidence/pathways-py312.html --report /evidence/evidence/findings-py312.json --no-serve --sweep-depth 6 --sweep-cap 600 --roots all
+```
+
+Relevant original stdout:
+
+```text
+[pathway] CBM index ready in 9.4s: 3433 nodes, 15061 edges
+[pathway] Sweep depth 6: 766 roots, 12454 node visits, 1988 expansions fetched, 10466 cache hits, 0 truncated, 122.3s
+[pathway] Wrote /evidence/evidence/pathways-py312.html and /evidence/evidence/findings-py312.json: 2112 nodes, 6299 edges, 280 findings, 4539 CBM calls, total 152.3s
+```
+
+**Biggest demonstrated value of this run:** a generic mechanical scan localized
+bounded durable-ledger readers whose downstream decision/projection consumers
+were incorrect. That produced two reproducible application defects and a benign
+control, rather than only diagrams or a summary of already-known symbols. The
+historical deleted-import contract is separate evidence of deterministic cutover
+checking. Neither demonstrates calibrated detection of every architecture class.
+
+### Repeat execution during the issue/dispatch handoff
+
+The tool was run again during this follow-up on source/detector code unchanged
+from the recorded baseline. A fresh network-isolated Python 3.12 container reused
+the explorer cache and reindexed its disposable CBM store. It completed in **22.6 s**
+(1.5 s sweep), fetched zero expansions, used 10 CBM calls and again emitted **280
+items: 80 facts and 200 candidates**. The entire normalized finding payload, route
+inventory, coverage and analysis scope matched the original report, including both
+window candidate IDs. This establishes observed repeatability on the same input;
+it does not repair the known false-green/scoring counterexamples.
+
+[2026-11-16.recheck.json](benchmark/measurements/2026-11-16.recheck.json) records
+the exact command, source-tree IDs, timestamps, result hashes, equality assertions,
+stats and limitations. The full original findings are in the compressed report
+above; the new report only changes run-specific metadata/statistics.
+
+### What can be trusted now, and what must A116 establish?
+
+Currently the tool is functional as an evidence-producing candidate generator and
+explicit static-contract checker. Its blanket success/clean-result interpretation
+is not dependable: the baseline records false-green and false-catch counterexamples.
+A successful cold run and 54 passing tests do not remove those counterexamples.
+
+A trustworthy future result must independently report: did the requested checks
+execute; what source/capabilities/limits were covered; how many facts/candidates
+exist before/after caps; which items were source-verified, benign, known or still
+unreviewed; and whether required evidence is unavailable. A complete successful
+zero means no matching findings for those declared checks. A partial zero, failed
+index or stale report must be unmistakably noncertifying. A 101-item result must
+remain attributable/countable with its omissions/review state visible, never be
+presented as 101 defects by default. A116's C1–C12 matrix makes these properties
+executable acceptance conditions and separately requires repairing the two
+application readers and proving their downstream behavior.
+
 ## 2026-11-16 — does it still work, and does it catch real defects?
 
 **Verdict:** useful for finding architectural candidates and enforcing explicit
