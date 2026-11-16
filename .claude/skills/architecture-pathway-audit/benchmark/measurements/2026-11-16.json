@@ -1,0 +1,727 @@
+{
+  "date": "2026-11-16",
+  "repository_revision": "49c4dfa62d34e84d891c5730897d2b72cd0155d9",
+  "scope": "src",
+  "environment": {
+    "architecture": "aarch64",
+    "primary_python": "3.12.16",
+    "cbm": "0.11.0",
+    "image": "ai-team:dependency-closure-tests",
+    "binary_sha256": "403d0fab6204e712916701936a3229dd472bad05080c757ea5177318a80fdbfe"
+  },
+  "sweep": {
+    "depth": 6,
+    "cap_per_root": 600,
+    "roots_mode": "all",
+    "roots": 766,
+    "node_visits": 12454,
+    "truncated_roots": 0,
+    "cold_total_seconds": 152.3,
+    "cold_sweep_seconds": 122.3,
+    "cached_total_seconds": 21.7,
+    "cached_sweep_seconds": 1.5,
+    "cached_run_reindexed_cbm": true
+  },
+  "coverage": {
+    "routes_discovered": 141,
+    "routes_by_status": {
+      "registered": 141
+    },
+    "routes_conditional_registration": 2,
+    "routes_loaded_in_selector": 141,
+    "routes_expanded": 141,
+    "handlers": {
+      "nested_ast_only": 106,
+      "cbm_symbol": 35
+    },
+    "route_cross_check_vs_cbm": {
+      "available": true,
+      "cbm_route_nodes": 143,
+      "ast_route_keys": 140,
+      "matched": 140,
+      "ast_only": [],
+      "cbm_only_server": [
+        "__route__ANY__/assets"
+      ],
+      "cbm_only_client_http_targets": [
+        "__route__ANY__/config/providers",
+        "__route__ANY__/session/status"
+      ]
+    },
+    "route_limitations": [
+      {
+        "kind": "mounted_subapp",
+        "file": "control/control_api.py",
+        "line": 1636,
+        "detail": "mount('/assets') routes are not enumerated (static files or sub-app)"
+      },
+      {
+        "kind": "conditional_registration",
+        "file": "control/control_api.py",
+        "line": 1641,
+        "detail": "GET / is registered under a branch or after a conditional early return; it may be absent at runtime"
+      },
+      {
+        "kind": "conditional_registration",
+        "file": "control/control_api.py",
+        "line": 1648,
+        "detail": "GET /{full_path:path} is registered under a branch or after a conditional early return; it may be absent at runtime"
+      }
+    ],
+    "apps": [
+      "control/control_api.py:build_control_api:app",
+      "control/task_server.py::app"
+    ],
+    "loaded_nodes": 2112,
+    "loaded_edges": 6299,
+    "edge_sources": {
+      "ast": 2070,
+      "cbm": 4229
+    },
+    "edge_types": {
+      "HANDLES": 141,
+      "CALLS": 4735,
+      "CONFIGURES": 29,
+      "WRITES": 160,
+      "CANDIDATE_CALL": 373,
+      "SIMILAR_TO": 24,
+      "CALL_REFERENCE": 39,
+      "SPAWNS": 140,
+      "OVERRIDDEN_BY": 52,
+      "HTTP_CALLS": 2,
+      "REGISTERS": 106,
+      "WRITES_TABLE": 182,
+      "READS_TABLE": 316
+    },
+    "expanded_entries": 1988,
+    "incomplete_entries": [],
+    "unresolved_calls": {
+      "ambiguous_builtin_name": 2709,
+      "dynamic": 1386,
+      "ambiguous": 270,
+      "unresolved": 244
+    },
+    "parse_errors": [],
+    "cbm_limitations": [
+      "CBM 0.11 does not index nested function bodies; nested handlers are linked by the AST adapter (edge source=ast).",
+      "CBM Route nodes are keyed by METHOD+path only and ignore include_router prefixes; the route inventory is AST-derived.",
+      "Calls on objects of unknown type resolve only when the method name is unique in scope (strategy=unique_method_name); otherwise listed as ambiguous."
+    ],
+    "complete_repository_audit": false
+  },
+  "analysis_scope": {
+    "roots_with_loaded_paths": 141,
+    "max_depth": 12,
+    "counts_by_kind": {
+      "BEHAVIOURAL_TWIN": 20,
+      "BYPASS": 154,
+      "CONFIG_DIVERGENCE": 2,
+      "CONVERGENCE": 203,
+      "DIVERGE_REJOIN": 175,
+      "DUPLICATE_IMPLEMENTATION": 16,
+      "MULTIPLE_WRITERS": 2,
+      "ORPHAN_MEDIUM": 9,
+      "OVERLAPPING_PATHS": 23,
+      "PACKAGE_CYCLE": 10,
+      "SAME_FOOTPRINT": 13,
+      "SIBLING_OVERLAP": 46,
+      "SPLIT_READERS": 23,
+      "TRUNCATED_WINDOW": 2
+    },
+    "capped_kinds": [
+      "BYPASS",
+      "CONVERGENCE",
+      "DIVERGE_REJOIN",
+      "SIBLING_OVERLAP"
+    ],
+    "cap_per_kind": 40,
+    "utility_fanin_threshold": 10,
+    "hubs": [
+      {
+        "id": "ai-team-audit-py312-src.control.db.get_db",
+        "fan_in": 137
+      },
+      {
+        "id": "ai-team-audit-py312-src.control.db.MeshDB._conn",
+        "fan_in": 129
+      },
+      {
+        "id": "ai-team-audit-py312-src.control.db._now",
+        "fan_in": 121
+      },
+      {
+        "id": "ai-team-audit-py312-src.control.db.MeshDB._write",
+        "fan_in": 68
+      },
+      {
+        "id": "ai-team-audit-py312-src.orchestrator.TaskOrchestrator._emit_event",
+        "fan_in": 36
+      },
+      {
+        "id": "ai-team-audit-py312-src.control.db.MeshDB._managed_write",
+        "fan_in": 34
+      },
+      {
+        "id": "ai-team-audit-py312-src.telegram.interface.TelegramInterface._check_user_permission",
+        "fan_in": 34
+      },
+      {
+        "id": "ai-team-audit-py312-src.control.db._turn_backing_error",
+        "fan_in": 29
+      },
+      {
+        "id": "ai-team-audit-py312-src.control.turn_queue.OwnershipConflictError",
+        "fan_in": 24
+      },
+      {
+        "id": "ai-team-audit-py312-src.control.agent_inbox.now_iso",
+        "fan_in": 23
+      },
+      {
+        "id": "ai-team-audit-py312-src.control.turn_scheduler.TurnScheduler.run",
+        "fan_in": 21
+      },
+      {
+        "id": "ai-team-audit-py312-src.services.quota_window_coordinator.utc_iso",
+        "fan_in": 20
+      },
+      {
+        "id": "ai-team-audit-py312-src.telegram.interface.TelegramInterface._user_can_access_session",
+        "fan_in": 20
+      },
+      {
+        "id": "ai-team-audit-py312-src.services.quota_window_coordinator.normalize_utc",
+        "fan_in": 19
+      },
+      {
+        "id": "ai-team-audit-py312-src.control.turn_queue.TurnNotFoundError",
+        "fan_in": 17
+      },
+      {
+        "id": "ai-team-audit-py312-src.core.observability.emit_event",
+        "fan_in": 17
+      },
+      {
+        "id": "ai-team-audit-py312-src.services.quota_window_coordinator.utc_now",
+        "fan_in": 17
+      },
+      {
+        "id": "ai-team-audit-py312-src.control.node_registry.get_registry",
+        "fan_in": 16
+      },
+      {
+        "id": "ai-team-audit-py312-src.backends.codex_ownership.CodexOwnership._connect",
+        "fan_in": 13
+      },
+      {
+        "id": "ai-team-audit-py312-src.control.turn_scheduler.notify_turn_queue_changed",
+        "fan_in": 13
+      },
+      {
+        "id": "ai-team-audit-py312-src.core.interfaces.ExecutionResult",
+        "fan_in": 13
+      },
+      {
+        "id": "ai-team-audit-py312-src.control.control_api._db",
+        "fan_in": 12
+      },
+      {
+        "id": "ai-team-audit-py312-src.services.quota_window_coordinator.QuotaWindowStore._write",
+        "fan_in": 11
+      },
+      {
+        "id": "ai-team-audit-py312-src.services.session_service.CommandResult",
+        "fan_in": 11
+      },
+      {
+        "id": "ai-team-audit-py312-src.backends.opencode.OpenCodeServerBackend._http",
+        "fan_in": 10
+      }
+    ],
+    "note": "Computed only over expanded neighbourhoods; absence of a finding is not evidence of absence.",
+    "baseline": {
+      "file": "/audit/.arch-audit/baseline.json",
+      "known": 0,
+      "new": 280,
+      "stale_ids": []
+    }
+  },
+  "emitted_counts": {
+    "BEHAVIOURAL_TWIN": 20,
+    "BYPASS": 40,
+    "CONFIG_DIVERGENCE": 2,
+    "DUPLICATE_IMPLEMENTATION": 16,
+    "MULTIPLE_WRITERS": 2,
+    "ORPHAN_MEDIUM": 9,
+    "OVERLAPPING_PATHS": 23,
+    "PACKAGE_CYCLE": 10,
+    "SAME_FOOTPRINT": 13,
+    "SIBLING_OVERLAP": 40,
+    "SPLIT_READERS": 23,
+    "TRUNCATED_WINDOW": 2,
+    "CONVERGENCE": 40,
+    "DIVERGE_REJOIN": 40
+  },
+  "cold_stats": {
+    "cache_hits": 10466,
+    "cache_misses": 1988,
+    "index_runs": 1,
+    "index_seconds": 9.423612141050398,
+    "expansions": 1988,
+    "last_expand_ms": 70.8,
+    "ast_reparsed_files": 107,
+    "cbm_calls": 4539,
+    "cbm_query_seconds": 125.92,
+    "cbm_version": "0.11.0",
+    "index": {
+      "at": "2026-11-16T10:23:24",
+      "seconds": 9.42,
+      "nodes": 3433,
+      "edges": 15061
+    }
+  },
+  "cached_stats": {
+    "cache_hits": 12454,
+    "cache_misses": 0,
+    "index_runs": 1,
+    "index_seconds": 7.5226998114958405,
+    "expansions": 0,
+    "last_expand_ms": null,
+    "ast_reparsed_files": 0,
+    "cbm_calls": 10,
+    "cbm_query_seconds": 8.27,
+    "cbm_version": "0.11.0",
+    "index": {
+      "at": "2026-11-16T10:28:05",
+      "seconds": 7.52,
+      "nodes": 3433,
+      "edges": 15061
+    }
+  },
+  "application_reproductions": {
+    "stale_decomposition_gate": {
+      "expected": "spec_not_approved",
+      "observed": "invalid_task_keys"
+    },
+    "stale_spec_review": {
+      "expected": {
+        "passed": false,
+        "n": 5001
+      },
+      "observed": {
+        "passed": true,
+        "n": 5000
+      }
+    },
+    "missed_spec_approval": {
+      "expected": {
+        "passed": true,
+        "n": 5001
+      },
+      "observed": {
+        "passed": false,
+        "n": 5000
+      }
+    },
+    "truncated_case_links": {
+      "stored": 201,
+      "returned": 200,
+      "newest_session_in_result": false,
+      "consumers": [
+        "api_work_roster",
+        "api_work_detail",
+        "assemble_case_usage role attribution"
+      ]
+    },
+    "requester_limit_2_control": {
+      "two_candidates": null,
+      "one_candidate": "s1",
+      "classification": "intentional ambiguity detection"
+    }
+  },
+  "checker_probes": {
+    "empty_scope": {
+      "ok": true,
+      "rev": null,
+      "violations": [],
+      "waived": [],
+      "notes": [],
+      "coverage": {
+        "files": 0,
+        "python": 0,
+        "text": 0,
+        "skipped": [],
+        "parse_errors": []
+      },
+      "limits": [
+        "Static only: names built at runtime (string concatenation, computed getattr) are not seen.",
+        "SQL is read from string literals inside a def or at module level; SQL assembled across functions is not seen.",
+        "Python comments are ignored; docstring mentions are listed as notes, not violations."
+      ]
+    },
+    "unparseable_store": {
+      "ok": true,
+      "rev": null,
+      "violations": [],
+      "waived": [],
+      "notes": [],
+      "coverage": {
+        "files": 1,
+        "python": 1,
+        "text": 0,
+        "skipped": [],
+        "parse_errors": [
+          "src/m.py"
+        ]
+      },
+      "limits": [
+        "Static only: names built at runtime (string concatenation, computed getattr) are not seen.",
+        "SQL is read from string literals inside a def or at module level; SQL assembled across functions is not seen.",
+        "Python comments are ignored; docstring mentions are listed as notes, not violations."
+      ]
+    },
+    "docstring_store": {
+      "ok": false,
+      "rev": null,
+      "violations": [
+        {
+          "rule": "store:secret:readers",
+          "token": "secret",
+          "kind": "read",
+          "file": "src/m.py",
+          "line": 2,
+          "where": "src/m.py::reader"
+        }
+      ],
+      "waived": [],
+      "notes": [],
+      "coverage": {
+        "files": 1,
+        "python": 1,
+        "text": 0,
+        "skipped": [],
+        "parse_errors": []
+      },
+      "limits": [
+        "Static only: names built at runtime (string concatenation, computed getattr) are not seen.",
+        "SQL is read from string literals inside a def or at module level; SQL assembled across functions is not seen.",
+        "Python comments are ignored; docstring mentions are listed as notes, not violations."
+      ]
+    },
+    "literal_store_control": {
+      "ok": false,
+      "rev": null,
+      "violations": [
+        {
+          "rule": "store:secret:readers",
+          "token": "secret",
+          "kind": "read",
+          "file": "src/m.py",
+          "line": 2,
+          "where": "src/m.py::reader"
+        }
+      ],
+      "waived": [],
+      "notes": [],
+      "coverage": {
+        "files": 1,
+        "python": 1,
+        "text": 0,
+        "skipped": [],
+        "parse_errors": []
+      },
+      "limits": [
+        "Static only: names built at runtime (string concatenation, computed getattr) are not seen.",
+        "SQL is read from string literals inside a def or at module level; SQL assembled across functions is not seen.",
+        "Python comments are ignored; docstring mentions are listed as notes, not violations."
+      ]
+    },
+    "qualified_store": {
+      "ok": true,
+      "rev": null,
+      "violations": [],
+      "waived": [],
+      "notes": [],
+      "coverage": {
+        "files": 1,
+        "python": 1,
+        "text": 0,
+        "skipped": [],
+        "parse_errors": []
+      },
+      "limits": [
+        "Static only: names built at runtime (string concatenation, computed getattr) are not seen.",
+        "SQL is read from string literals inside a def or at module level; SQL assembled across functions is not seen.",
+        "Python comments are ignored; docstring mentions are listed as notes, not violations."
+      ]
+    },
+    "empty_store_rule": {
+      "ok": true,
+      "rev": null,
+      "violations": [],
+      "waived": [],
+      "notes": [],
+      "coverage": {
+        "files": 1,
+        "python": 1,
+        "text": 0,
+        "skipped": [],
+        "parse_errors": []
+      },
+      "limits": [
+        "Static only: names built at runtime (string concatenation, computed getattr) are not seen.",
+        "SQL is read from string literals inside a def or at module level; SQL assembled across functions is not seen.",
+        "Python comments are ignored; docstring mentions are listed as notes, not violations."
+      ]
+    }
+  },
+  "explorer_failure_probe": {
+    "main_returned_normally": true,
+    "findings": [],
+    "report_contains_ready_error": false,
+    "parse_errors": [],
+    "analysis_scope": {
+      "note": "CBM statistics not loaded yet; analysis pending first expansion."
+    }
+  },
+  "scorer_probe": {
+    "input_kind": "CONVERGENCE",
+    "input_level": "fact",
+    "output": "CAUGHT; recall 1 / 1",
+    "verified_defect_present": false
+  },
+  "browser": {
+    "routes": 141,
+    "findings": 280,
+    "selected": "cf15dbf85a47",
+    "visibleNodes": 3,
+    "root": "ai-team-audit-py312-src.control.db.MeshDB.list_flow_events_of_types",
+    "coverageVisible": true,
+    "findingRows": 280,
+    "errors": []
+  },
+  "browser_process_exit_status": 0,
+  "browser_limitation": "Offline snapshot rendering, graph selection and Coverage/Findings assertions passed. Live HTTP expansion/source not exercised. Initial Node shutdown status 134 was eliminated by unsetting inherited NODE_CHANNEL_FD, NODE_CHANNEL_SERIALIZATION_MODE and NODE_UNIQUE_ID for the browser subprocess, consistent with worker_main startup sanitation.",
+  "tests": {
+    "python312_real_cbm": "54 passed in 22.47s",
+    "python311_real_cbm": "54 passed in 22.21s",
+    "python312_without_cbm": "53 passed, 1 skipped, 1 warning in 1.84s"
+  },
+  "contracts": {
+    "A102-c64a4a7": {
+      "ok": false,
+      "rev": "c64a4a76db44f6bc6e819199969f0b3fbc9c7b1a",
+      "coverage": {
+        "files": 324,
+        "python": 315,
+        "text": 9,
+        "skipped": [],
+        "parse_errors": []
+      },
+      "violation_count": 343,
+      "waived_count": 0,
+      "notes_count": 28,
+      "by_rule": {
+        "forbidden_in:src/backends:^inactivity_timeout_sec$": 1,
+        "forbidden_in:src/backends:^managed$": 40,
+        "forbidden_in:src/backends:^sdk_turn_timeout_sec$": 2,
+        "retired:ClaudePrintResumeDriver": 28,
+        "retired:MANAGED_STALL_SECONDS": 8,
+        "retired:MAX_TURN_SECONDS": 2,
+        "retired:OpenCodeBackend": 4,
+        "retired:TURN_QUEUE_ENROLLMENT_ENABLED": 4,
+        "retired:WORKER_MANAGED_TURNS": 12,
+        "retired:_dispatch_or_run_local": 1,
+        "retired:_enrollment_exclusion": 4,
+        "retired:_legacy_put_guard": 2,
+        "retired:_run_backend_local": 3,
+        "retired:_run_managed": 6,
+        "retired:_submit_managed_no_interrupt": 2,
+        "retired:_turn_timeout_sec": 1,
+        "retired:cancel_execution": 11,
+        "retired:cancel_managed_turn": 20,
+        "retired:forget_managed_turn": 15,
+        "retired:run_managed_compaction": 18,
+        "retired:run_managed_turn": 106,
+        "retired:send_managed": 25,
+        "retired:supports_managed_turns": 28
+      }
+    },
+    "A84-645ab38": {
+      "ok": false,
+      "rev": "645ab3811cf0b5a22079ba6c6917ebabf678e7a2",
+      "coverage": {
+        "files": 133,
+        "python": 128,
+        "text": 5,
+        "skipped": [],
+        "parse_errors": []
+      },
+      "violation_count": 29,
+      "waived_count": 0,
+      "notes_count": 9,
+      "by_rule": {
+        "retired:arm_wait_group": 14,
+        "retired:boot_reconcile_case": 10,
+        "retired:reconcile_worker_waits": 5
+      }
+    },
+    "A102-main": {
+      "ok": false,
+      "rev": "49c4dfa62d34e84d891c5730897d2b72cd0155d9",
+      "coverage": {
+        "files": 379,
+        "python": 370,
+        "text": 9,
+        "skipped": [],
+        "parse_errors": []
+      },
+      "violation_count": 7,
+      "waived_count": 0,
+      "notes_count": 5,
+      "by_rule": {
+        "retired:TURN_QUEUE_ENROLLMENT_ENABLED": 1,
+        "retired:WORKER_MANAGED_TURNS": 6
+      }
+    },
+    "A104-main-py312": {
+      "ok": false,
+      "rev": "49c4dfa62d34e84d891c5730897d2b72cd0155d9",
+      "coverage": {
+        "files": 595,
+        "python": 403,
+        "text": 192,
+        "skipped": [],
+        "parse_errors": []
+      },
+      "violation_count": 41,
+      "waived_count": 0,
+      "notes_count": 8,
+      "by_rule": {
+        "retired:CASE_COMPLETION_OUTBOX_ENABLED": 1,
+        "retired:compute_continuation_tick": 1,
+        "retired:continuation_mode": 4,
+        "retired:continuation_watermark": 1,
+        "store:agent_inbox:readers": 34
+      }
+    },
+    "A102-live-contract-py312": {
+      "ok": true,
+      "rev": "49c4dfa62d34e84d891c5730897d2b72cd0155d9",
+      "coverage": {
+        "files": 423,
+        "python": 404,
+        "text": 19,
+        "skipped": [],
+        "parse_errors": []
+      },
+      "violation_count": 0,
+      "waived_count": 7,
+      "notes_count": 1,
+      "by_rule": {}
+    }
+  },
+  "reviewed_graph_evidence": [
+    {
+      "id": "cf15dbf85a47",
+      "kind": "TRUNCATED_WINDOW",
+      "level": "candidate",
+      "anchor": "table::flow_events",
+      "related": [
+        "ai-team-audit-py312-src.control.db.MeshDB.list_flow_events_of_types"
+      ],
+      "title": "1 reader(s) take the oldest-N rows of append-only flow_events",
+      "detail": "The table is only ever inserted into; LIMIT without ORDER BY .. DESC returns the oldest rows, so state derived from it silently degrades as the table grows.",
+      "evidence": [
+        {
+          "path": [
+            "ai-team-audit-py312-src.control.db.MeshDB.list_flow_events_of_types",
+            "table::flow_events"
+          ],
+          "edges": [
+            {
+              "from": "ai-team-audit-py312-src.control.db.MeshDB.list_flow_events_of_types",
+              "to": "table::flow_events",
+              "type": "READS_TABLE",
+              "file": "control/db.py",
+              "line": 7289,
+              "source": "ast",
+              "props": {
+                "op": "select",
+                "window": "oldest_n"
+              }
+            }
+          ]
+        }
+      ],
+      "semantic_verification": "not performed (requires source review by an agent or human)",
+      "tags": [],
+      "status": "new"
+    },
+    {
+      "id": "3a7bd241ebdb",
+      "kind": "TRUNCATED_WINDOW",
+      "level": "candidate",
+      "anchor": "table::flow_links",
+      "related": [
+        "ai-team-audit-py312-src.control.db.MeshDB.list_flow_links",
+        "ai-team-audit-py312-src.control.db.MeshDB.resolve_dispatch_requester"
+      ],
+      "title": "2 reader(s) take the oldest-N rows of append-only flow_links",
+      "detail": "The table is only ever inserted into; LIMIT without ORDER BY .. DESC returns the oldest rows, so state derived from it silently degrades as the table grows.",
+      "evidence": [
+        {
+          "path": [
+            "ai-team-audit-py312-src.control.db.MeshDB.list_flow_links",
+            "table::flow_links"
+          ],
+          "edges": [
+            {
+              "from": "ai-team-audit-py312-src.control.db.MeshDB.list_flow_links",
+              "to": "table::flow_links",
+              "type": "READS_TABLE",
+              "file": "control/db.py",
+              "line": 6799,
+              "source": "ast",
+              "props": {
+                "op": "select",
+                "window": "oldest_n"
+              }
+            }
+          ]
+        },
+        {
+          "path": [
+            "ai-team-audit-py312-src.control.db.MeshDB.resolve_dispatch_requester",
+            "table::flow_links"
+          ],
+          "edges": [
+            {
+              "from": "ai-team-audit-py312-src.control.db.MeshDB.resolve_dispatch_requester",
+              "to": "table::flow_links",
+              "type": "READS_TABLE",
+              "file": "control/db.py",
+              "line": 7923,
+              "source": "ast",
+              "props": {
+                "op": "select",
+                "window": "oldest_n"
+              }
+            }
+          ]
+        }
+      ],
+      "semantic_verification": "not performed (requires source review by an agent or human)",
+      "tags": [],
+      "status": "new"
+    }
+  ],
+  "not_claimed": [
+    "complete repository audit",
+    "precision or semantic recall",
+    "all 280 findings individually validated",
+    "live incident frequency",
+    "CBM 0.12.1 compatibility",
+    "live HTTP expansion verified"
+  ]
+}
