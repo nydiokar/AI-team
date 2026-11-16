@@ -1,71 +1,144 @@
-# Architecture Pathway Explorer — src-scoped, CBM + FastAPI AST adapter
+# Architecture Pathway Audit
 
-## Run (PowerShell)
+Inspect execution paths and check whether an architectural cutover has reached its
+declared end state. Two tools serve different purposes:
 
-```powershell
-python .claude/skills/architecture-pathway-audit/scripts/pathway_explorer.py --repo . --scope src --project ai-team-local-audit --out .arch-audit/pathways.html --report .arch-audit/findings.json
+| Tool | Purpose | Output |
+|---|---|---|
+| `scripts/contract_check.py` | Retired symbols, layer boundaries, SQL store ownership at a git revision | File/line violations and exit status |
+| `scripts/pathway_explorer.py` | FastAPI routes, calls, shared SQL tables and competing implementations | Browser explorer, HTML snapshot and JSON report |
+
+The explorer produces structural facts and candidates. Confirm defects by reading
+the implicated implementations, callers, configuration and consumers. Neither tool
+proves runtime correctness or deployment state.
+
+## Requirements
+
+Use the repository's configured Python version and development environment
+(`pyproject.toml`; AI-Team requires Python 3.12+). The contract checker uses
+Pydantic 2 and PyYAML. Follow the project's dependency installation workflow.
+
+The explorer also requires `codebase-memory-mcp`. Supply `--cbm /absolute/path`,
+set `CBM_BIN`, or put it on `PATH`; Linux also checks
+`~/.local/bin/codebase-memory-mcp`. Obtain the binary from the
+[upstream releases](https://github.com/DeusData/codebase-memory-mcp/releases) and
+verify its published checksum. Tested versions and measurements live in
+[MEASUREMENTS.md](MEASUREMENTS.md).
+
+## Check a declared end state
+
+Run from the repository root:
+
+```bash
+.venv/bin/python .claude/skills/architecture-pathway-audit/scripts/contract_check.py --contract .ai/dispatch/AGENT_102_UNIFY_BACKEND_PATHWAYS.md --rev HEAD --json /tmp/architecture-contract.json
 ```
 
-Serves `http://127.0.0.1:8766/` and opens the browser. `--no-serve` writes HTML/JSON and exits;
-`--no-open`, `--port`, `--refresh`, `--sweep-depth N` (pre-expand every route N levels for repo-wide findings),
-`--roots all` (also sweep every unreferenced public callable: worker loops and interface-dispatch targets that no HTTP route reaches).
+`--contract` accepts YAML or a Markdown packet containing exactly one
+`arch-contract` fenced YAML block. `--repo` selects the repository. Omit `--rev`
+to inspect working files, including untracked files that are not ignored.
 
-## How it works
+```yaml
+scope: [src, scripts]
+retired: [old_send]
+retired_patterns: ['^run_legacy_']
+forbidden_in:
+  src/backends: ['^timeout_seconds$']
+stores:
+  agent_inbox:
+    writers: [src/control/agent_inbox.py]
+waivers:
+  - match: 'retired:old_send'
+    path: scripts/migrate_legacy.py
+    reason: 'Reads the old format for the documented one-time migration.'
+```
 
-- **One long-lived CBM MCP stdio session** (`cbm_client.py`, verified on codebase-memory-mcp 0.11.0). Warm
-  queries take ~20-40 ms; the CLI form pays ~2.5 s per call. CBM tool errors raise `CBMError` and are never cached
-  as an empty neighbourhood. CBM's Cypher subset rejects `id()`/`labels()` in WHERE, so nodes are looked up by
-  `qualified_name`.
-- **Scope:** `--scope src` indexes only that folder into CBM project `<project>-src`. The index persists in CBM; it
-  is re-run only when a source file's content hash changed.
-- **Routes:** a generic FastAPI AST adapter (`pyast_adapter.py`) resolves decorators, `APIRouter` prefixes and
-  `include_router` chains, and links handlers to CBM symbols by file+line (CBM misses nested handlers and prefixes).
-  The full inventory is loaded at startup (no CBM query); it is cross-checked against CBM Route nodes in the
-  Coverage tab.
-- **Expansion:** on demand, per (node, direction), cached in
-  `%LOCALAPPDATA%/architecture-pathway-audit/<hash>/pathway_cache.json`; only entries touching changed files (and
-  all `in` entries) are invalidated.
-- **Findings** (`structure.py`) are deterministic graph rules (fact -> candidate); semantic verification is a separate,
-  agent-assisted step.
+Scope entries select git paths; `exclude` skips path prefixes/globs. Store rules
+accept file globs or `path::qualified_function` globs. An omitted reader/writer
+constraint permits that access; an empty list permits nobody. Choose constraints
+around actual responsibilities: lifecycle queries are not necessarily competing
+pending-state read models.
 
-## Measured (this repo, `src/`, 130 routes, 3077 CBM nodes / 13.7k edges, 2026-10-09)
+Exit statuses: **0** no unwaived violations found; **1** violations; **2** invalid
+contract/input. Always inspect coverage: zero scanned files, skipped files and
+Python parse failures can invalidate a passing result. Static SQL extraction misses
+some queries, including schema-qualified table names and queries assembled
+elsewhere. SQL examples in docstrings can be mistaken for accesses. Python
+symbol mentions in docstrings are otherwise notes; comments are ignored. Other
+text files are scanned lexically. Tests and historical references may require
+explicit, reasoned waivers.
 
-| Case | Time |
+In AI-Team, `scripts/dispatch/dispatch_state.py --set <job> status done` runs the
+checker against `HEAD` when the packet contains an `arch-contract` block. This is
+an opt-in check of declared assertions. Frozen examples in `benchmark/history/`
+preserve historical intent and need not match a maintained packet's later waivers.
+
+## Explore execution paths
+
+```bash
+.venv/bin/python .claude/skills/architecture-pathway-audit/scripts/pathway_explorer.py --repo . --scope src --project ai-team-local-audit
+```
+
+Indexes only `src/`, serves `http://127.0.0.1:8766/` and opens a browser. In the 2D
+explorer, select a route, expand downstream/upstream and inspect Coverage alongside
+the evidence. Ctrl+C stops the explorer; check CBM's separate daemon lifecycle
+after a disposable run.
+
+For a bounded batch sweep without a server:
+
+```bash
+.venv/bin/python .claude/skills/architecture-pathway-audit/scripts/pathway_explorer.py --repo . --scope src --project ai-team-local-audit --no-serve --sweep-depth 6 --sweep-cap 600 --roots all --out .arch-audit/pathways.html --report .arch-audit/findings.json
+```
+
+| Option | Purpose |
 |---|---|
-| Cold: fresh CBM index + `--sweep-depth 4` over all 130 routes (1216 CBM calls) | ~96 s (index 12.8 s, sweep 79 s) |
-| Warm, unchanged source, full cached sweep (1 CBM call) | ~3.5-4 s |
-| Server ready (routes listed) | ~0.1 s; CBM stats warm in background ~1 s |
-| Repeat expansion | local cache hit, 0 CBM calls |
+| `--scope` | Existing folder inside `--repo`; `.` selects the repository |
+| `--roots routes` / `--roots all` | Routes only, or routes plus unreferenced public callables; private entry points are not all-root seeds |
+| `--sweep-depth`, `--sweep-cap` | Bound recursive exploration per root |
+| `--neighbors`, `--timeout` | CBM page size and query timeout |
+| `--cache-dir` | Explicit cache; Linux default is under `~/.cache/architecture-pathway-audit/` |
+| `--refresh` | Reindex and drop expansions; use a new cache directory when changing Python versions |
+| `--no-open`, `--port`, `--no-serve` | Browser launch, local port, or write artifacts and exit |
+| `--baseline` | Reviewed acknowledgements; default `.arch-audit/baseline.json` |
+| `--baseline-update` | Acknowledge **every** current finding and exit; use only after reviewing that exact set |
 
-## Rules (structure.py)
+The scope suffix is appended to the CBM project name. Content changes trigger
+reindexing and invalidate affected expansions. The Python AST adapter resolves
+router prefixes, factories and `include_router` chains, supplementing CBM's graph
+with nested-function calls and SQL accesses. Findings retain evidence provenance.
 
-Facts: convergence, diverge/rejoin. Candidates: bypass of a common gate, overlapping route handlers,
-`SIBLING_OVERLAP` (operations of one class sharing most downstream components, neither calling the other;
-clustered per class), duplicate implementation (CBM SIMILAR_TO), config divergence, multiple writers, package cycles.
-Shared-medium layer (SQL tables from string literals, AST-derived): `ORPHAN_MEDIUM` (written never read / read never
-written), `TRUNCATED_WINDOW` (oldest-N reads of an insert-only table), `SPLIT_READERS` (tables written together by a
-focused operation but read by disjoint focused readers). `Hubs` (high fan-in nodes) are listed in `analysis_scope`
-instead of being silently excluded. Table access via helper constants or ORMs is not seen.
-Behavioural twins (`BEHAVIOURAL_TWIN`: bodies identical up to naming via an alpha-renamed AST fingerprint;
-`SAME_FOOTPRINT`: same arity, same tables, >=85% same callees, no calls between them).
-Noise handling: findings carry `tags` (e.g. `hub_medium:<table>` for media read by many functions; `same_name`
-for copied overrides) and are ordered after untagged ones. `.arch-audit/baseline.json` (`--baseline`,
-`--baseline-update`) holds reviewed acknowledgements keyed by stable finding id; they show as `known`, new
-findings stay `new`, and ids that no longer exist are reported as `stale_ids`. Nothing is hidden.
-All are candidates until a human/agent verifies semantics; legitimate variants over a shared core are flagged too.
+Rules cover convergence and diverge/rejoin facts; bypass, configuration divergence,
+multiple writers, package cycles, similar/sibling implementations, behavioral twins
+and matching footprints; orphan SQL media, truncated windows and split readers.
+Similar structure can be intentional. Baselines mark findings `known` without
+hiding them; vanished IDs appear as `stale_ids`.
 
-## Coverage and limitations
+## Interpret coverage before findings
 
-Progressive explorer, not a comprehensive audit: findings are computed only over expanded neighbourhoods
-(`analysis_scope` in the report). Dynamic calls, ambiguous method names and unresolved callbacks are listed per node
-and in the Coverage tab; absence of an edge is not proof of absence. Sub-app mounts (e.g. `StaticFiles`) and
-conditionally registered routes are reported as route limitations. Python only for route discovery.
+Read `coverage` and `analysis_scope` in JSON: route discovery/expansion counts,
+parse failures, unresolved calls, incomplete pages, hub boundaries and finding
+caps. Graph rules use loaded neighborhoods; SQL/fingerprint rules also inspect
+AST definitions outside expanded routes. Bounded sweeps are not complete audits.
+For `--no-serve` without a sweep, an index failure can still exit successfully
+with empty findings; inspect stderr/stdout and reject a report whose analysis is
+still pending. The JSON report currently omits the index error itself.
 
-## Tests
+Dynamic dispatch, unknown receiver types, callbacks, conditional registration and
+sub-app mounts limit coverage. Scope may exclude scripts, config, frontend code
+or another process that changes behavior. A call graph cannot prove statement
+order, authorization, transactions or failure recovery.
 
-```powershell
-python -m unittest discover -s .claude/skills/architecture-pathway-audit/tests -t .claude/skills/architecture-pathway-audit/tests
+## Verify the tool
+
+Run only the skill's tests; they use disposable fixtures and do not invoke a paid
+coding-agent CLI:
+
+```bash
+.venv/bin/python -m pytest .claude/skills/architecture-pathway-audit/tests --tb=short
 ```
 
-Includes `test_real_cbm.py`, which drives the real CBM binary against a disposable fixture (cache reuse,
-invalidation, competing-path detection). It never touches the paid Claude CLI.
+`test_real_cbm.py` exercises the real binary, expansion, cache reuse/invalidation
+and competing-path detection. It skips when CBM is missing; a skip does not prove
+compatibility. The benchmark runner/scorer require an external corpus containing
+`base/`, `variants/`, `controls/` and `GROUND_TRUTH.json`. The scorer's `CAUGHT`
+label measures entity touches, not verified defect recall. Results, reviewed
+findings, reproductions and experience belong in [MEASUREMENTS.md](MEASUREMENTS.md).
