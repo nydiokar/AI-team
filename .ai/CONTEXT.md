@@ -1,6 +1,6 @@
 # AI-Team Gateway — Hot Context
 
-**Last Updated:** 2026-11-10
+**Last Updated:** 2026-11-16
 **Branch policy:** `main` for docs-only; `feat/<slug>` + PR + self-merge for any `src/` or config
 change. Restart the **gateway** freely when deploying merged code. Never restart a worker/node-carrier
 without surfacing it to the operator first.
@@ -84,6 +84,7 @@ Only jobs that are genuinely open. Everything merged/done is in git and the disp
 
 | Job | Packet | Depends on | Status | What it is |
 |---|---|---|---|---|
+| **A116** | `AGENT_116_TRUSTWORTHY_ARCHITECTURE_AUDIT.md` | none; coordinate A111 | **ready — operator-approved 2026-11-16; issue #290** | Repair authoritative review/membership reads and make architecture-audit execution, coverage, counts and evaluation failure-honest; autonomous implementation, independent verification and scoped certification required. |
 | **A114** | `AGENT_114_CONSEQUENTIAL_DECISION_INTEGRATION.md` | A113 proven; coordinate A111/A71/A75 | ready | Finish declared SDK-budget control at actual worker/SDK process creation: verified owner authority, immutable consumed boot specification, recovery/visibility and safe rollout. A113's offline palette proof is complete; production enforcement remains unactivated. |
 | **A111** | `AGENT_111_INTENT_ALIGNED_VERIFIED_CLOSURE.md` | staged gates in packet | **ready** — plan authored; implementation not started | P0–P6: original intent → evidence/authority → one closure gate → existing independent reviewer → recovery/bounds → owner calibration → useful hands-off production acceptance. Reuses A102/A105/A94–96; ORACLE evidence remains external. |
 | **A105** | `AGENT_105_CROSS_PROCESS_TURN_SIGNAL.md` | A104 ✅ | **active** — PRs #280/#281 merged; live `7d39020`; natural acceptance pending | Shared bounded HTTP turn signal wakes scheduler, effects and inbox; polls remain recovery. Await three natural eligible completions ≤2s and 24h observation; no paid proof turn. |
