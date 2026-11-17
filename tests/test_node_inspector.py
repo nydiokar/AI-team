@@ -92,11 +92,14 @@ async def test_offline_node_raises_instead_of_lying(monkeypatch, tmp_path):
     node = _online_node("worker-down")
     reg.register(node)
     node.status = "offline"
-    with patch("src.control.node_registry.get_registry", return_value=reg):
+    db = _split_topology_db(tmp_path, node_id="worker-down", status="offline")
+    with patch("src.control.node_registry.get_registry", return_value=reg), \
+         patch("src.control.db.get_db", return_value=db):
         s = _session(machine_id="worker-down", repo_path=str(tmp_path))
         with pytest.raises(InspectError) as ei:
             await NodeInspector().run(s, "git_status")
-    assert "offline" in str(ei.value)
+    assert "which is offline" in str(ei.value)
+    assert db.list_tasks() == []
 
 
 def _split_topology_db(tmp_path, node_id="Horse", status="online") -> MeshDB:
