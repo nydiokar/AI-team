@@ -115,7 +115,12 @@ adds GHA BuildKit caches for both image targets and 15 slowest-test timings whil
 retaining the complete credential-free offline suite. PR #296 measured 6m24s:
 87s test-image build, 207s tests (3,244 passed/41 skipped), 48s worker-image build
 and 29s native control smoke; no hang established. Warm-cache benefit remains
-unmeasured until later runs; initial cache export can add time.
+unmeasured until later runs; initial cache export can add time. Slow-test output
+exposed a false-positive offline-node test: only memory was marked offline, so the
+DB-authoritative path enqueued work and waited 30s; its timeout text satisfied the
+weak assertion. The test now marks the canonical DB offline, checks the exact
+refusal and asserts no queued task. Actions use current Node 24 runtimes; native
+Python dependencies also have a pip cache.
 
 **2026-11-17 — Codex worker startup recovery.** Kanebra restart drained zero active
 tasks; the first native `initialize` exceeded its 30s deadline and a later runtime
@@ -133,8 +138,10 @@ tasks and successful Codex discovery. `.venv` now points to that runtime; the
 old quota feature branch and Python 3.11 venv are retained for recovery. The
 original divergent local main was preserved as `archive/main-pre-python312-20261117`;
 the primary checkout is current main. Never switch its source during worker startup.
-Gateway Python promotion, remaining external-client MCP helpers and remote Horse
-verification are tracked separately until observed. The four expired telemetry batches and pre-existing Claude
+Gateway/task-server `e51795f` are healthy on Python 3.12.16, schema 49
+unchanged. The host process scan found no Python 3.11 processes after retiring
+idle external-client MCP helpers and fixing the OpenCode interpreter command.
+Remote Horse interpreter verification remains pending under the Linux-only rule. The four expired telemetry batches and pre-existing Claude
 prewarm failures are separate observations, not repaired by this startup patch.
 
 **2026-11-15 — Python dependency modernization merged (PR #286, `9bbdd35`; #282 absorbed).**

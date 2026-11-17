@@ -11,12 +11,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: '3.12'
+          cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            constraints.txt
 
       - name: Install every supported Python extra
         run: |
@@ -41,10 +45,10 @@ jobs:
   isolated-docker:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: docker/setup-buildx-action@v3
+      - uses: actions/checkout@v7
+      - uses: docker/setup-buildx-action@v4
       - name: Build runtime and all-extra test image
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           target: python-tests
@@ -60,7 +64,7 @@ jobs:
           -v "$GITHUB_WORKSPACE:/workspace"
           ai-team-python-tests --tb=short -n 2 --durations=15
       - name: Build worker image with the same Python stack
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           target: worker-agents
