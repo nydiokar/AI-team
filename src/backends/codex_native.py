@@ -306,8 +306,18 @@ class CodexBackend(CodingBackend):
             if executable is None:
                 raise FileNotFoundError("codex_executable_not_found: not on the carrier PATH nor at the "
                                         "standalone install location")
-            client = CodexAppServerClient(executable, env)
-            client.start()
+            for attempt in range(2):
+                client = CodexAppServerClient(executable, env)
+                try:
+                    client.start()
+                    break
+                except CodexRPCTimeout as exc:
+                    # Only initialize is safe to retry: this client has never
+                    # been published and cannot own a session or a model turn.
+                    # start() must finish teardown before a replacement spawns.
+                    if str(exc) != "codex_rpc_deadline_exceeded:initialize" or attempt:
+                        raise
+                    logger.warning("event=codex_startup_retry reason=initialize_timeout attempt=2")
             self._client = client
             logger.info("event=codex_app_server_ready pid=%s", client.process.pid)
             return client

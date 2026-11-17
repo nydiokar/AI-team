@@ -26,6 +26,7 @@ for line in sys.stdin:
     if "id" not in request: continue
     method=request["method"]
     if method=="initialize":
+        time.sleep(float(os.getenv("INIT_DELAY", "0")))
         emit({"id":request["id"],"result":{"codexHome":"/tmp","platformFamily":"unix","platformOs":"linux","userAgent":"codex/test"}})
         continue
     if method=="account/rateLimits/read":
@@ -197,3 +198,83 @@ def test_account_limits_are_sanitized_and_updated_without_thread_id(server):
     client.request('turn/interrupt', {'threadId': 'rate-limits', 'turnId': 'turn'})
     assert client.rate_limits['primary']['used_percent'] == 45
     assert not client.failure
+
+
+@pytest.mark.parametrize("timeouts", [1, 2])
+def test_runtime_retries_only_unpublished_initialize_timeout(server, monkeypatch, timeouts: int) -> None:
+    import src.backends.codex_native as native
+
+    clients: list[CodexAppServerClient] = []
+
+    def make_client(executable, env) -> CodexAppServerClient:
+        slow = len(clients) < timeouts
+        client = server(INIT_DELAY="0.5" if slow else "0")
+        original = client.request
+
+        def request(method, params, **kwargs):
+            if method == "initialize":
+                kwargs["timeout"] = 0.2 if slow else 2.0
+            return original(method, params, **kwargs)
+
+        monkeypatch.setattr(client, "request", request)
+        clients.append(client)
+        return client
+
+    monkeypatch.setattr(native, "CodexAppServerClient", make_client)
+    monkeypatch.setattr(native, "resolve_codex_executable", lambda env: "fake-codex")
+    backend = native.CodexBackend()
+    if timeouts == 2:
+        with pytest.raises(CodexRPCTimeout, match="initialize"):
+            backend._runtime()
+        assert backend._client is None
+    else:
+        with ThreadPoolExecutor(2) as pool:
+            runtimes = list(pool.map(lambda _: backend._runtime(), range(2)))
+        runtime = runtimes[0]
+        assert runtimes[1] is runtime
+        assert runtime is clients[1]
+        assert backend._runtime() is runtime
+        assert runtime.rate_limits["primary"]["used_percent"] == 31
+    assert len(clients) == 2
+    for failed in clients[:timeouts]:
+        assert failed.process is None
+        assert not any(reader.is_alive() for reader in failed.readers)
+
+
+def test_startup_interrupt_cleans_owned_process_and_threads(server, monkeypatch) -> None:
+    client = server()
+
+    def interrupted(*args, **kwargs) -> None:
+        raise KeyboardInterrupt()
+
+    monkeypatch.setattr(client, "request", interrupted)
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            client.start()
+        assert client.process is None
+        assert not any(reader.is_alive() for reader in client.readers)
+    finally:
+        client.close()
+
+
+def test_runtime_does_not_retry_protocol_rejection(server, monkeypatch) -> None:
+    import src.backends.codex_native as native
+
+    clients: list[CodexAppServerClient] = []
+
+    def make_client(executable, env) -> CodexAppServerClient:
+        client = server()
+        def rejected(*args, **kwargs) -> None:
+            raise CodexRPCError({"code": -32000, "message": "refused"})
+        monkeypatch.setattr(client, "request", rejected)
+        clients.append(client)
+        return client
+
+    monkeypatch.setattr(native, "CodexAppServerClient", make_client)
+    monkeypatch.setattr(native, "resolve_codex_executable", lambda env: "fake-codex")
+    backend = native.CodexBackend()
+    with pytest.raises(CodexRPCError):
+        backend._runtime()
+    assert len(clients) == 1
+    assert backend._client is None
+    assert clients[0].process is None
