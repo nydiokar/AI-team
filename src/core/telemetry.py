@@ -171,6 +171,7 @@ EVENT_ATTRIBUTE_ALLOWLIST: Dict[str, frozenset[str]] = {
         "process_instance_id", "exit_code", "signal", "duration_ms",
     }),
     "process.exit_unknown": frozenset({"process_instance_id", "reason_code"}),
+    "context.compacted": frozenset({"before_tokens", "after_tokens", "trigger"}),
     "model.request.started": frozenset({
         "sequence", "provider_request_id", "work_category",
     }),
@@ -179,7 +180,7 @@ EVENT_ATTRIBUTE_ALLOWLIST: Dict[str, frozenset[str]] = {
         "output_tokens", "cache_read_tokens", "cache_creation_tokens",
         "reasoning_tokens", "context_tokens", "input_token_semantics",
         "usage_granularity", "usage_source", "usage_coverage",
-        "counter_semantics", "context_window_tokens",
+        "counter_semantics", "context_window_tokens", "context_entry_tokens", "adapter_version", "provider_reported_cost_usd",
     }),
     "model.session_usage": frozenset({
         "input_tokens", "output_tokens", "cache_read_tokens",

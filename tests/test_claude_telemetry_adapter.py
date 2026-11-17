@@ -180,18 +180,14 @@ def test_plain_answer_usage_extracted():
     assert attrs["input_tokens"] == 5000
     assert attrs["output_tokens"] == 150
     assert attrs["cache_read_tokens"] == 4200
-    assert attrs["input_token_semantics"] == "includes_cache"
+    assert attrs["input_token_semantics"] == "excludes_cache"
     assert attrs["usage_granularity"] == "invocation_total"
 
 
-def test_plain_answer_context_tokens_equals_input_tokens():
-    """Inclusive-cache: context_tokens = input_tokens (NOT input + cache_read)."""
+def test_result_aggregate_without_assistant_context_is_unknown():
     events = _events_from_fixture("plain_answer.ndjson")
     usage = next(e for e in events if e.event_name == "model.request.usage")
-    assert usage.attributes["context_tokens"] == usage.attributes["input_tokens"]
-    assert usage.attributes["context_tokens"] == 5000
-    # Paranoia: must NOT be the sum input + cache_read (that would be double-counting)
-    assert usage.attributes["context_tokens"] != 5000 + 4200
+    assert "context_tokens" not in usage.attributes
 
 
 # ---------------------------------------------------------------------------
@@ -232,14 +228,13 @@ def test_assistant_usage_emitted_when_no_result_follows():
 
 
 # ---------------------------------------------------------------------------
-# Cache semantics (inclusive-cache — verified by fixture)
+# Cache semantics (result aggregate does not measure request context)
 # ---------------------------------------------------------------------------
 
-def test_cache_heavy_fixture_inclusive_semantics():
+def test_cache_heavy_fixture_keeps_cost_buckets_but_context_unknown():
     events = _events_from_fixture("cache_heavy.ndjson")
     usage = next(e for e in events if e.event_name == "model.request.usage")
-    # input_tokens=100000, cache_read=98000 — context = input (inclusive)
-    assert usage.attributes["context_tokens"] == 100000
+    assert "context_tokens" not in usage.attributes
     assert usage.attributes["cache_read_tokens"] == 98000
     assert usage.attributes["cache_creation_tokens"] == 1500
 
@@ -413,3 +408,118 @@ def test_wire_smoke_sink_exception_does_not_propagate():
     backend = ClaudeCodeBackend.__new__(ClaudeCodeBackend)
     # Must not raise — telemetry errors are swallowed (spec §8.2)
     backend._maybe_emit_telemetry(result, _ctx(), sink)
+
+
+def test_context_uses_last_request_while_cost_uses_invocation_total():
+    from src.core.telemetry_projection import project_turn
+
+    adapter = _adapter()
+    events = adapter.observe_assistant_usage({
+        "input_tokens": 100, "cache_read_input_tokens": 150000,
+        "cache_creation_input_tokens": 10000, "output_tokens": 10,
+    }, "m1")
+    events += adapter.observe_assistant_usage({
+        "input_tokens": 200, "cache_read_input_tokens": 160000,
+        "cache_creation_input_tokens": 5000, "output_tokens": 20,
+    }, "m2")
+    events += adapter.consume_line(json.dumps({"type": "result", "usage": {
+        "input_tokens": 300, "cache_read_input_tokens": 310000,
+        "cache_creation_input_tokens": 15000, "output_tokens": 30,
+    }, "modelUsage": {"claude-opus-4": {"contextWindow": 200000}}}))
+    metrics = project_turn(events)["turn"]["metrics"]
+    assert metrics["turn_entry_context_tokens"] == 160100
+    assert metrics["turn_exit_context_tokens"] == 165200
+    assert metrics["context_used_ratio"] == .826
+    assert metrics["input_tokens"] == 300
+    assert metrics["uncached_input_tokens"] == 300
+    assert metrics["total_token_work"] == 325330
+    assert metrics["token_work_by_category"] == {"primary": 325330}
+
+
+def test_result_only_aggregate_does_not_fabricate_context():
+    from src.core.telemetry_projection import project_turn
+
+    events = _events_from_ndjson(json.dumps({"type": "result", "usage": {
+        "input_tokens": 200, "cache_read_input_tokens": 900000,
+    }}))
+    metrics = project_turn(events)["turn"]["metrics"]
+    assert metrics["turn_exit_context_tokens"] is None
+    assert metrics["context_used_ratio"] is None
+
+
+def test_context_economics_threshold_and_cache_write_premium():
+    from src.services.context_economics import context_economics, compaction_outcome
+
+    assert context_economics(159999, 200000, "opus").recommendation == "continue"
+    advice = context_economics(160000, 200000, "opus")
+    assert advice.recommendation == "compact"
+    assert advice.cold_write_usd == 1.0
+    assert advice.warm_read_usd == .08
+    assert advice.cold_premium_usd == .92
+    outcome = compaction_outcome("compact-1", "completed", 160000, 40000, "opus", .30)
+    assert outcome.reclaimed_tokens == 120000
+    assert outcome.reclaimed_ratio == .75
+    assert outcome.avoided_read_usd_per_request == .06
+    assert outcome.break_even_warm_requests == 9
+    assert compaction_outcome("pending", "running", 160000, None, "opus", None).reclaimed_tokens is None
+    assert context_economics(None, 200000, "opus").recommendation == "unavailable"
+    assert context_economics(160000, None, "opus").recommendation == "unavailable"
+    assert context_economics(160000, 200000, "unpriced").cold_write_usd is None
+
+
+def test_native_auto_compaction_keeps_boundary_without_content():
+    from src.core.telemetry_projection import project_turn
+
+    events = _events_from_ndjson("\n".join(json.dumps(item) for item in [
+        {"type": "system", "subtype": "compact_boundary", "compact_metadata": {
+            "pre_tokens": 180000, "trigger": "auto", "secret": "DO_NOT_RECORD"}},
+        {"type": "assistant", "message": {"id": "after", "usage": {
+            "input_tokens": 100, "cache_read_input_tokens": 39900}}},
+        {"type": "result", "usage": {"input_tokens": 100, "cache_read_input_tokens": 39900}},
+    ]))
+    boundaries = project_turn(events)["turn"]["metrics"]["compactions"]
+    assert len(boundaries) == 1
+    assert boundaries[0]["before_tokens"] == 180000
+    assert boundaries[0]["after_tokens"] == 40000
+    assert "DO_NOT_RECORD" not in str(events)
+
+
+@pytest.mark.parametrize("cost", [-1, "secret", True, float("inf")])
+def test_invalid_provider_cost_is_not_a_recorded_price(cost):
+    from src.core.telemetry_projection import project_turn
+    events = _events_from_ndjson(json.dumps({"type": "result", "total_cost_usd": cost,
+                                            "usage": {"input_tokens": 100}}))
+    assert project_turn(events)["turn"]["metrics"]["provider_reported_cost_usd"] is None
+
+
+def test_provider_cost_survives_projection_and_deduplication():
+    from src.core.telemetry_projection import project_turn
+    from src.services.context_economics import observed_turn_cost
+    events = _events_from_ndjson(json.dumps({"type": "result", "total_cost_usd": 1.27,
+                                            "usage": {"input_tokens": 100}}))
+    turn = project_turn(events + events)["turn"]
+    assert observed_turn_cost(turn) == 1.27
+
+
+def test_natural_compaction_replay_measures_capacity_and_exact_model_scenario():
+    from src.core.telemetry_projection import project_turn
+    from src.services.context_economics import compaction_outcome
+    events = _events_from_ndjson((FIXTURE_DIR.parent.parent / "context_economics" / "natural_compaction.ndjson").read_text(), model="claude-opus-5-5")
+    metrics = project_turn(events)["turn"]["metrics"]
+    boundary = metrics["compactions"][0]
+    outcome = compaction_outcome("natural", "completed", boundary["before_tokens"], boundary["after_tokens"], "claude-opus-5-5", None)
+    assert outcome.before_tokens == 206931
+    assert outcome.after_tokens == 57016
+    assert outcome.reclaimed_tokens == 149915
+    assert outcome.reclaimed_ratio == .724469
+    assert outcome.avoided_read_usd_per_request == .029983
+    assert outcome.avoided_write_usd_per_request == .749575
+    assert metrics["context_used_ratio"] is None  # source never reported the window
+    assert outcome.break_even_warm_requests is None  # no invented compaction cost
+
+
+def test_cost_only_result_keeps_explicit_recorded_zero():
+    from src.core.telemetry_projection import project_turn
+    from src.services.context_economics import observed_turn_cost
+    turn = project_turn(_events_from_ndjson('{"type":"result","total_cost_usd":0,"usage":{}}'))["turn"]
+    assert observed_turn_cost(turn) == 0

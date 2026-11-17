@@ -266,6 +266,7 @@ export interface SessionActivityTimeline {
   generatedAt: string;
   coverage: Record<string, string>;
   contextFill: ContextFill;
+  contextEconomics?: SessionContextEconomics;
 }
 
 /**
@@ -277,3 +278,28 @@ export interface SessionActivityTimeline {
  *   - Task `progressPct` → use state + elapsed time.
  * Do not re-add these without a backend move that produces them.
  */
+
+export interface SessionContextEconomics {
+  recoveryCoverage?: string;
+  recommendation: string;
+  threshold: number;
+  coldWriteUsd: number | null;
+  warmReadUsd: number | null;
+  compactions: {
+    taskId: string;
+    status: string;
+    reclaimedTokens: number | null;
+    reclaimedRatio: number | null;
+    avoidedReadUsdPerRequest: number | null;
+    observedCompactionUsd: number | null;
+    breakEvenWarmRequests: number | null;
+  }[];
+  recoveries: { taskId: string; status: string; observedUsd: number | null;
+    priorSessionId?: string | null; sessionId?: string | null; coldResumeUsd?: number | null;
+    inputTokens?: number | null; outputTokens?: number | null; cacheReadTokens?: number | null;
+    cacheCreationTokens?: number | null; contextUsedRatio?: number | null;
+  }[];
+  proposals: { approvalId: string; status: string; coldResumeUsd: number | null;
+    contextTokens?: number | null; contextUsedRatio?: number | null;
+  }[];
+}

@@ -55,6 +55,7 @@ def test_session_usage_distinguishes_unknown_from_recorded_zero(client, monkeypa
         read_snapshot=nullcontext,
         get_session_token_totals=lambda ids: {"usage-session": totals} if totals else {},
         live_task_sessions=lambda ids: {"usage-session"} if active else set(),
+        session_provider_cost=lambda sid: {"usd": None, "priced_turns": 0, "turns": 0, "coverage": "partial"},
     )
     monkeypatch.setattr(control_api, "_db", lambda: db)
     response = client.get("/api/sessions/usage-session/usage", headers=_auth())
@@ -1067,3 +1068,31 @@ def test_home_reads_report_database_failure_per_request(client, monkeypatch, tmp
     monkeypatch.setattr(home_status, 'codex_usage', unavailable)
     assert client.get('/api/nodes?activity=true', headers=_auth()).status_code == 503
     assert client.get('/api/quota-windows', headers=_auth()).status_code == 503
+
+
+def test_timeline_rejects_excess_reads_and_oversized_identity(client):
+    from src.control.routes.sessions import _USAGE_READ_SLOTS
+    assert client.get(f"/api/sessions/{'x' * 129}/timeline", headers=_auth()).status_code == 422
+    for _ in range(4):
+        assert _USAGE_READ_SLOTS.acquire(blocking=False)
+    try:
+        assert client.get("/api/sessions/s/timeline", headers=_auth()).status_code == 429
+    finally:
+        for _ in range(4):
+            _USAGE_READ_SLOTS.release()
+
+
+def test_timeline_snapshot_failure_returns_structured_unavailable(client, monkeypatch):
+    import sqlite3
+    from contextlib import contextmanager
+    from types import SimpleNamespace
+
+    @contextmanager
+    def unavailable():
+        raise sqlite3.OperationalError("disk unavailable")
+        yield
+
+    monkeypatch.setattr(control_api, "_db", lambda: SimpleNamespace(read_snapshot=unavailable))
+    response = client.get("/api/sessions/s/timeline", headers=_auth())
+    assert response.status_code == 503
+    assert response.json()["detail"] == "session_timeline_unavailable"

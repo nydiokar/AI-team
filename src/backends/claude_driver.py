@@ -1075,7 +1075,7 @@ class _SDKSession:
         """
         if self._client is None:
             return
-        from claude_agent_sdk import AssistantMessage, ResultMessage, TextBlock, ToolUseBlock, ThinkingBlock
+        from claude_agent_sdk import AssistantMessage, ResultMessage, SystemMessage, TextBlock, ToolUseBlock, ThinkingBlock
         # [A82 Stage 3 rework 4] Replayed user-message echoes carry the uuid of
         # the prompt that begins a turn (managed correlation). Import defensively.
         try:
@@ -1132,10 +1132,10 @@ class _SDKSession:
                             elif isinstance(block, TextBlock) and block.text:
                                 progress_cb("writing")
                     usage = _plain_usage_dict(getattr(msg, "usage", None))
-                    if usage is not None:
+                    if usage is not None and not getattr(msg, "parent_tool_use_id", None):
                         message_id = getattr(msg, "message_id", None) or ""
                         acc.ndjson_lines.append(json.dumps({"type": "assistant", "message": {
-                            "usage": usage, "id": message_id,
+                            "usage": usage, "id": message_id, "model": getattr(msg, "model", None),
                         }}))
                         # Only the echoed owner can receive this usage. An
                         # unsolicited continuation or subagent is not our turn.
@@ -1185,6 +1185,11 @@ class _SDKSession:
                     status = getattr(msg, "status", None)
                     if tid and status:
                         self._bg_task_status[str(tid)] = str(status)
+                elif isinstance(msg, SystemMessage) and msg.subtype == "compact_boundary":
+                    metadata = msg.data.get("compact_metadata") or msg.data.get("compactMetadata")
+                    if isinstance(metadata, dict):
+                        acc.ndjson_lines.append(json.dumps({"type": "system", "subtype": "compact_boundary",
+                            "compact_metadata": {key: metadata.get(key) for key in ("pre_tokens", "preTokens", "trigger")}}))
                 elif UserMessage and isinstance(msg, UserMessage):
                     # [A82 Stage 3 rework 4] A replayed echo of a prompt the CLI
                     # is now beginning a turn for. If its uuid is one of OUR
@@ -1292,10 +1297,19 @@ class _SDKSession:
         if subtype:
             result_line["subtype"] = subtype
         result_line["is_error"] = is_error
+        reported_cost = getattr(msg, "total_cost_usd", None)
+        if type(reported_cost) in (int, float):
+            result_line["total_cost_usd"] = reported_cost
         if stop_reason:
             result_line["stop_reason"] = stop_reason
         if usage is not None:
             result_line["usage"] = usage
+        model_usage = getattr(msg, "model_usage", None)
+        if isinstance(model_usage, dict):
+            result_line["modelUsage"] = {
+                model: {"contextWindow": counters.get("contextWindow")}
+                for model, counters in model_usage.items() if isinstance(counters, dict)
+            }
         if result_text:
             result_line["result"] = result_text
         if isinstance(errors, list) and errors:

@@ -18,7 +18,7 @@
  *      directly. Both modes stay on the SAME Case:
  *        • in place      — one turn into the existing session (full history,
  *                          pays the cache rewrite)
- *        • fresh Manager — a new Manager rebuilt from the Case ledger (cheap;
+ *        • fresh Manager — a new Manager rebuilt from the Case ledger (new boot;
  *                          the only option when the old session is gone)
  *
  * The resume itself is single-flight server-side, so pressing this while the
@@ -76,7 +76,11 @@ function estimateLine(estimate: RawCaseResumeEstimate | null): string {
     return `Resume cost unknown (${estimate.reason || "no telemetry"}).`;
   }
   const tokens = (estimate.cache_creation_tokens ?? 0).toLocaleString();
-  return `In place rewrites the prompt cache: ~${tokens} tokens ≈ $${(estimate.usd ?? 0).toFixed(2)} (this session's largest cache write). Fresh Manager avoids that — it rebuilds from the ledger.`;
+  const basis = estimate.basis === "latest_request_context" ? "latest measured context" : "historical cache-write proxy; may be stale";
+  const ratio = estimate.economics?.context_used_ratio;
+  const fill = ratio == null ? "" : ` · ${(ratio * 100).toFixed(1)}% of context`;
+  const warm = estimate.economics?.warm_read_usd;
+  return `Cold in-place estimate: ${tokens} tokens${fill} ≈ $${(estimate.usd ?? 0).toFixed(3)} (${basis}, 5-minute cache write).${warm == null ? "" : ` Warm read ≈ $${warm.toFixed(3)}.`} Fresh Manager boot cost is unknown until recorded. API equivalents exclude new input and output.`;
 }
 
 const REASON_COPY: Record<string, string> = {
@@ -239,7 +243,7 @@ export function CaseResumePanel({ caseId }: { caseId: string }) {
                     }
                     size="sm"
                     disabled={resume.isPending || resolveApproval.isPending}
-                    title="New Manager on the SAME Case, rebuilt from the ledger (cheap)"
+                    title="New Manager on the SAME Case, rebuilt from the ledger; boot cost measured after execution"
                     onClick={() => void run("fresh_manager")}
                   >
                     Fresh Manager

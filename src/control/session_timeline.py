@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+from bisect import bisect_left, bisect_right
 from datetime import datetime, timezone
 from typing import Any, Literal
 
@@ -67,6 +68,7 @@ class SessionTimelineResponse(BaseModel):
     generated_at: str
     coverage: dict[str, str]
     context_fill: dict[str, Any]
+    context_economics: dict[str, Any] = Field(default_factory=dict)
     # [A83] The session's derived secondary reason, surfaced at the response
     # level too (the pillow needs it even when the item page is empty). None ⇒
     # no reason derived.
@@ -280,6 +282,7 @@ def build_session_timeline(
                     "reversible": bool(approval.get("reversible")),
                     "requested_by": approval.get("requested_by"),
                     "resolved_by": approval.get("resolved_by"),
+                    "proposal": _recovery_proposal(approval),
                 },
                 raw_refs={"approval_id": approval_id},
             )
@@ -314,6 +317,11 @@ def build_session_timeline(
                 reason=session_reason,
             ),
         )
+    economics = _session_context_economics(turns, tasks, approvals)
+    if db is not None and callable(getattr(db, "session_recovery_evidence", None)):
+        recovery_rows, recovery_coverage = _load_list("recovery_evidence", lambda: db.session_recovery_evidence(session_id))
+        economics["recovery_coverage"] = recovery_coverage
+        economics["recoveries"] = _recovery_evidence(recovery_rows)
     # Single honest ordering pass over ALL items (incl. the session head).
     items.sort(key=lambda item: item.timestamp, reverse=True)
     page: list[SessionTimelineItem] = items[offset : offset + bounded_limit]
@@ -324,6 +332,7 @@ def build_session_timeline(
         generated_at=generated_at,
         coverage=coverage,
         context_fill=_context_fill_summary(turns[0] if turns else None),
+        context_economics=economics,
         reason=session_reason,
     )
 
@@ -491,3 +500,145 @@ def _context_fill_summary(latest_turn: dict[str, object] | None) -> dict[str, An
         "context_remaining_tokens": metrics.get("context_remaining_tokens"),
         "context_window_source": "known",
     }
+
+
+def _loads_dict(raw: object) -> dict[str, Any]:
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, str):
+        try:
+            value = json.loads(raw)
+            return value if isinstance(value, dict) else {}
+        except (ValueError, TypeError):
+            pass
+    return {}
+
+
+def _session_context_economics(
+    turns: list[dict[str, object]], tasks: list[dict[str, object]], approvals: list[dict[str, object]],
+) -> dict[str, Any]:
+    from src.services.context_economics import (
+        compaction_outcome,
+        context_economics,
+        observed_turn_cost,
+        turn_model,
+    )
+
+    latest = turns[0] if turns else {}
+    metrics = _loads_dict(latest.get("metrics"))
+    result = context_economics(
+        metrics.get("turn_exit_context_tokens"), metrics.get("context_window_tokens"),
+        turn_model(latest),
+    ).model_dump()
+    ordered = sorted(turns, key=lambda row: _text(row.get("started_at") or row.get("created_at")))
+    by_task = {str(row.get("task_id") or row.get("turn_id")): row for row in turns}
+    start_times = [_text(row.get("started_at") or row.get("created_at")) for row in ordered]
+    completed = sorted((row for row in turns if row.get("ended_at")), key=lambda row: _text(row.get("ended_at")))
+    end_times = [_text(row.get("ended_at")) for row in completed]
+    compactions = sorted(
+        (row for row in tasks if row.get("turn_kind") == "compaction" or row.get("action") == "compact_session"),
+        key=lambda row: _text(row.get("started_at") or row.get("created_at")),
+    )
+    outcomes: list[dict[str, Any]] = []
+    compact_task_ids = {str(task.get("id")) for task in compactions}
+    for index, task in enumerate(compactions):
+        start = _text(task.get("started_at") or task.get("created_at"))
+        end = _text(task.get("completed_at"))
+        next_start = (_text(compactions[index + 1].get("started_at") or compactions[index + 1].get("created_at"))
+                      if index + 1 < len(compactions) else "")
+        compact_turn = by_task.get(str(task.get("id")))
+        if _loads_dict((compact_turn or {}).get("metrics")).get("compactions"):
+            continue  # the native boundary below is the same intervention
+        before_index = bisect_right(end_times, start) - 1
+        after_index = bisect_left(start_times, end) if end else len(ordered)
+        before = completed[before_index] if before_index >= 0 else None
+        after = ordered[after_index] if after_index < len(ordered) else None
+        if after and ((next_start and _text(after.get("started_at")) >= next_start)
+                      or _loads_dict(after.get("metrics")).get("compactions")):
+            after = None  # another intervention makes attribution ambiguous
+        # A native session replacement cannot prove the compactor's effect.
+        if before and after and (not before.get("backend_session_id_end") or before.get("backend_session_id_end") != after.get("backend_session_id_start")):
+            after = None
+        before_tokens = _loads_dict((before or {}).get("metrics")).get("turn_exit_context_tokens")
+        after_tokens = _loads_dict((after or {}).get("metrics")).get("turn_entry_context_tokens")
+        outcome = compaction_outcome(
+            str(task.get("id")), str(task.get("status") or "unknown"), before_tokens, after_tokens,
+            turn_model(after or before or {}), observed_turn_cost(by_task.get(str(task.get("id")))),
+        ).model_dump()
+        outcome["observed_at"] = end or start
+        outcome["measurement"] = "observed" if after_tokens is not None else "awaiting_next_context_observation"
+        outcomes.append(outcome)
+    for turn in ordered:
+        for boundary in _loads_dict(turn.get("metrics")).get("compactions", []):
+            outcome = compaction_outcome(
+                str(boundary.get("event_id")), "completed", boundary.get("before_tokens"),
+                boundary.get("after_tokens"), turn_model(turn),
+                observed_turn_cost(turn) if str(turn.get("task_id") or turn.get("turn_id")) in compact_task_ids else None,
+            ).model_dump()
+            outcome["observed_at"] = boundary.get("observed_at") or turn.get("started_at") or turn.get("created_at") or ""
+            outcome["measurement"] = "native_boundary_observed"
+            outcome["trigger"] = boundary.get("trigger")
+            outcomes.append(outcome)
+    result["compactions"] = sorted(outcomes, key=lambda row: str(row.get("observed_at") or ""), reverse=True)[:20]
+    result["recoveries"] = [
+        {"task_id": task.get("id"), "kind": task.get("turn_kind"), "status": task.get("status"),
+         "observed_usd": observed_turn_cost(by_task.get(str(task.get("id")))),
+         "tokens": _loads_dict((by_task.get(str(task.get("id"))) or {}).get("metrics")),
+         "cost_basis": "recorded_tokens_api_equivalent"}
+        for task in tasks if task.get("turn_kind") in ("respawn", "retry")
+    ][:20]
+    result["proposals"] = [
+        {"approval_id": row.get("id"), "status": row.get("status"), "created_at": row.get("created_at"),
+         "action": row.get("action"), "estimate": _recovery_proposal(row).get("estimate"),
+         "cost_scope": _recovery_proposal(row).get("cost_scope")}
+        for row in approvals if row.get("action") in ("case_manager_respawn", "case_resume")
+    ][:20]
+    result["history_limit"] = 500
+    return result
+
+
+def _recovery_proposal(row: dict[str, object]) -> dict[str, Any]:
+    if row.get("action") not in ("case_manager_respawn", "case_resume"):
+        return {}
+    payload = _loads_dict(row.get("payload"))
+    estimate = _loads_dict(payload.get("estimate"))
+    bounded_estimate = {
+        key: value for key, value in estimate.items()
+        if key in ("known", "usd", "cache_creation_tokens", "basis", "context_quality", "observed_at", "reason", "session_id", "model")
+        and isinstance(value, (str, int, float, bool, type(None)))
+        and (not isinstance(value, str) or len(value) <= 128)
+    }
+    bounded_estimate = {"known": False, "reason": "no_recorded_estimate", "session_id": row.get("session_id"),
+                        "model": None, "cache_creation_tokens": None, "usd": None, "basis": "unknown", **bounded_estimate}
+    economics = _loads_dict(estimate.get("economics"))
+    bounded_estimate["economics"] = {
+        key: value if type(value) in (int, float) else None
+        for key, value in ((key, economics.get(key)) for key in ("context_used_ratio", "warm_read_usd", "cold_premium_usd"))
+    }
+    return {
+        "mode": str(payload.get("mode") or "")[:32],
+        "cost_scope": str(payload.get("cost_scope") or "")[:128],
+        "estimate": bounded_estimate,
+    }
+
+
+
+def _recovery_evidence(rows: list[dict[str, object]]) -> list[dict[str, Any]]:
+    from src.services.context_economics import observed_turn_cost
+
+    result: list[dict[str, Any]] = []
+    for row in rows:
+        turn = {**row, "metrics": _loads_dict(row.get("metrics_json")),
+                "coverage": _loads_dict(row.get("coverage_json")),
+                "observed_models": _loads_list(row.get("observed_models"))}
+        estimate = _recovery_proposal({"action": "case_resume", "payload": row.get("payload")}).get("estimate")
+        result.append({"task_id": row.get("task_id"), "status": row.get("status"),
+                       "session_id": row.get("session_id"), "prior_session_id": row.get("prior_session_id"),
+                       "kind": row.get("turn_kind"), "observed_usd": observed_turn_cost(turn),
+                       "estimate": estimate, "cost_basis": (
+                           "provider_reported" if turn["metrics"].get("provider_reported_cost_usd") is not None
+                           else "recorded_tokens_api_equivalent_5m_write"),
+                       "tokens": {key: turn["metrics"].get(key) for key in (
+                           "input_tokens", "output_tokens", "cache_read_tokens", "cache_creation_tokens",
+                           "turn_entry_context_tokens", "turn_exit_context_tokens", "context_used_ratio")}})
+    return result

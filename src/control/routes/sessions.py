@@ -7,10 +7,10 @@ Mounted by ``control_api.build_control_api``; route map: docs/backend/ARCHITECTU
 """
 from __future__ import annotations
 
-from contextlib import nullcontext
-
 import asyncio
+import sqlite3
 import threading
+from contextlib import nullcontext
 from typing import Any, Callable, Dict, Literal, Optional
 
 from fastapi import (
@@ -28,7 +28,6 @@ from fastapi import (
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict
 
-from src.control.routes._responses import CommandResult, TokenTotals
 from src.control import control_api as core
 from src.control.control_api import (
     _ID_STR_MAX,
@@ -45,7 +44,7 @@ from src.control.control_api import (
     ModelBody,
     logger,
 )
-
+from src.control.routes._responses import CommandResult, TokenTotals
 
 _SESSIONS_READ_SLOTS = threading.BoundedSemaphore(4)
 _USAGE_READ_SLOTS = threading.BoundedSemaphore(4)
@@ -139,6 +138,7 @@ class TimelineOut(BaseModel):
     generated_at: str
     coverage: dict
     context_fill: dict
+    context_economics: dict
     reason: Optional[dict] = None
 
 
@@ -160,6 +160,7 @@ class UsageOut(BaseModel):
     model: Optional[str] = None
     tokens: TokenTotals
     cost: CostEstimate
+    provider_cost: dict
     usage_state: Literal["pending", "partial", "recorded", "unavailable"]
 
 
@@ -337,48 +338,57 @@ def build_router(
                          "description": "Paginated session timeline with coverage/context-fill."}},
     )
     def api_session_timeline(
-        session_id: str,
+        session_id: str = Path(min_length=1, max_length=_ID_STR_MAX),
         limit: int = Query(50, ge=1, le=200),
-        cursor: Optional[str] = Query(default=None),
+        cursor: Optional[str] = Query(default=None, max_length=64),
     ) -> JSONResponse:
         """Durable, bounded session activity timeline.
 
         Service boundary checklist:
-        - concurrency: read-only bounded DB queries; no scarce resource held
-          beyond the request.
+        - concurrency: four shared usage/timeline slots through serialization;
+          at N=100 four execute, the rest receive 429.
         - memory: per-source reads are capped, endpoint limit is 1..200.
         - request size: path id plus bounded query params only.
-        - timeout/degraded: no filesystem scans or SSE log parsing; DB/telemetry
+        - timeout/degraded: shared ten-second cooperative SQLite budget;
+          native IO/socket deadline deferral remains in CONTEXT.md. DB/telemetry
           failures degrade through coverage fields, not fabricated states.
         - malformed input: bad cursors normalize to the first page.
         - backing resources: unavailable DB returns empty durable response with
           unavailable coverage.
         """
-        db = core._db()
-        session = orchestrator.session_service.store.get(session_id)
-        session_row = core._session_payload(session) if session is not None else None
-        # [A83] Derive the session's secondary reason on the read path (batched;
-        # zero reads for BUSY/terminal — never on a timer, #145/#147) and attach
-        # it to the timeline head + response.
-        session_reason = None
-        if db is not None and session is not None:
-            try:
-                from src.core.session_reason import derive_session_reasons
-                derived = derive_session_reasons(db, [session]).get(session_id)
-                session_reason = derived.to_dict() if derived is not None else None
-            except Exception as e:
-                logger.warning("control_api_timeline_reason_failed err=%s", e)
-        from src.control.session_timeline import build_session_timeline
-        response = build_session_timeline(
-            db=db,
-            telemetry_store=core._telemetry_store(),
-            session_id=session_id,
-            session_row=session_row,
-            session_reason=session_reason,
-            limit=limit,
-            cursor=cursor,
-        )
-        return JSONResponse(response.model_dump(mode="json"))
+        if not _USAGE_READ_SLOTS.acquire(blocking=False):
+            raise HTTPException(status_code=429, detail="session_timeline_busy")
+        try:
+            db = core._db()
+            with db.read_snapshot() if db is not None else nullcontext():
+                session = orchestrator.session_service.store.get(session_id)
+                session_row = core._session_payload(session) if session is not None else None
+                # [A83] Derive the session's secondary reason on the read path (batched;
+                # zero reads for BUSY/terminal — never on a timer, #145/#147) and attach
+                # it to the timeline head + response.
+                session_reason = None
+                if db is not None and session is not None:
+                    try:
+                        from src.core.session_reason import derive_session_reasons
+                        derived = derive_session_reasons(db, [session]).get(session_id)
+                        session_reason = derived.to_dict() if derived is not None else None
+                    except Exception as e:
+                        logger.warning("control_api_timeline_reason_failed err=%s", e)
+                from src.control.session_timeline import build_session_timeline
+                response = build_session_timeline(
+                    db=db,
+                    telemetry_store=core._telemetry_store(),
+                    session_id=session_id,
+                    session_row=session_row,
+                    session_reason=session_reason,
+                    limit=limit,
+                    cursor=cursor,
+                )
+                return JSONResponse(response.model_dump(mode="json"))
+        except sqlite3.Error:
+            raise HTTPException(status_code=503, detail="session_timeline_unavailable") from None
+        finally:
+            _USAGE_READ_SLOTS.release()
 
     @router.get(
         "/api/sessions/{session_id}/usage",
@@ -413,6 +423,7 @@ def build_router(
                     raise RuntimeError("usage store unavailable")
                 with db.read_snapshot():
                     raw = db.get_session_token_totals([session_id]).get(session_id, {})
+                    provider_cost = db.session_provider_cost(session_id)
                     active = session_id in db.live_task_sessions([session_id])
                     session = orchestrator.session_service.store.get(session_id)
                     view = core._session_payload(session) if session is not None else None
@@ -433,7 +444,7 @@ def build_router(
             cost = estimate_cost(model if raw else None, totals)
             return JSONResponse({
                 "session_id": session_id, "model": model, "usage_state": state,
-                "tokens": totals.model_dump(), "cost": cost.model_dump(),
+                "tokens": totals.model_dump(), "cost": cost.model_dump(), "provider_cost": provider_cost,
             })
         finally:
             _USAGE_READ_SLOTS.release()

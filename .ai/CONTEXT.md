@@ -107,6 +107,18 @@ Only jobs that are genuinely open. Everything merged/done is in git and the disp
 
 ## Recent shift notes
 
+**2026-11-16 — Issue #144 context/recovery economics (unshipped checkpoint).**
+Claude request context is separated from invocation spend; provider USD and observed
+model/window survive SDK telemetry. Durable recovery snapshots/receipts link both sessions;
+compaction advice at 80% has measured native/manual outcomes and honest unknowns.
+Continuation: A117 (`AGENT_117_TELEMETRY_CONTEXT_ECONOMICS.md`).
+Evidence and exact limits: `docs/cost_monitoring_audit.md` §9. Natural replay reclaimed
+149,915 tokens (72.4469%); no realized USD savings or calibrated threshold claim.
+Four shared timeline/usage permits, bounded scalar evidence and ten-second cooperative
+SQLite reads apply; existing native IO/Python/socket/history-byte deferrals remain.
+Worker activation requires operator authorization and a natural receipt; no worker restarted.
+
+
 **2026-11-15 — Python dependency modernization merged (PR #286, `9bbdd35`; #282 absorbed).**
 Verification and rollout limits live in `DEPENDENCY_UPGRADE_REPORT.md`.
 Both final CI jobs pass; production-copy Sessions/Jobs/Affiliations/Cost JSON is

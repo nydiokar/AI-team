@@ -191,3 +191,31 @@ def test_context_fill_surfaces_ratio_when_window_known() -> None:
     assert turn_item.detail["metrics"]["context_used_ratio"] == 0.42
     assert turn_item.detail["metrics"]["context_window_tokens"] == 200000
     assert turn_item.detail["metrics"]["context_remaining_tokens"] == 116000
+
+
+def test_compaction_measures_context_reclaimed_without_claiming_realized_savings():
+    class DB(_EmptyDB):
+        def list_tasks(self, **kwargs):
+            return [{"id": "compact-1", "turn_kind": "compaction", "status": "completed",
+                     "started_at": "2026-11-16T10:01:00Z", "completed_at": "2026-11-16T10:02:00Z"}]
+
+    class Store:
+        def list_turns(self, **kwargs):
+            return [
+                {"turn_id": "after", "started_at": "2026-11-16T10:03:00Z", "observed_models": ["opus"],
+                 "backend_session_id_start": "native", "metrics": {
+                     "turn_entry_context_tokens": 40000, "turn_exit_context_tokens": 45000,
+                     "context_window_tokens": 200000}},
+                {"turn_id": "before", "started_at": "2026-11-16T10:00:00Z", "ended_at": "2026-11-16T10:00:30Z",
+                 "backend_session_id_end": "native", "observed_models": ["opus"], "metrics": {
+                     "turn_exit_context_tokens": 160000, "context_window_tokens": 200000}},
+            ]
+
+    response = build_session_timeline(db=DB(), telemetry_store=Store(), session_id="sess")
+    outcome = response.context_economics["compactions"][0]
+    assert outcome["reclaimed_tokens"] == 120000
+    assert outcome["reclaimed_ratio"] == .75
+    assert outcome["avoided_read_usd_per_request"] == .06
+    assert outcome["observed_compaction_usd"] is None
+    assert outcome["break_even_warm_requests"] is None
+    assert response.context_economics["recommendation"] == "continue"

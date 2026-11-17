@@ -24,6 +24,7 @@ duck-typed ``self`` — no paid CLI, no live backend, no network.
 """
 
 import asyncio
+import json
 import socket
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
@@ -588,6 +589,7 @@ def test_approving_the_proposal_runs_the_resume(tmp_path, monkeypatch):
     db = _mk_db(tmp_path, monkeypatch)
     orch = _Orch(_FakeStore(_FakeSession("mgr-1")), snapshots=_restored_snapshot())
     case_id = _case(db, "mgr-1")
+    _record_cache_write(db, "mgr-1", 20000)
     _pause(orch, db, case_id, "mgr-1")
     asyncio.run(orch._handle_quota_paused_case(db, case_id))
     approval_id = orch.approval_service.list(status="pending", limit=50)[0]["id"]
@@ -605,6 +607,7 @@ def test_auto_resume_fires_without_asking_when_enabled(tmp_path, monkeypatch):
     db = _mk_db(tmp_path, monkeypatch)
     orch = _Orch(_FakeStore(_FakeSession("mgr-1")), snapshots=_restored_snapshot())
     case_id = _case(db, "mgr-1")
+    _record_cache_write(db, "mgr-1", 20000)
     _pause(orch, db, case_id, "mgr-1")
 
     assert asyncio.run(orch._handle_quota_paused_case(db, case_id)) is True
@@ -909,7 +912,7 @@ def test_resume_state_reports_pause_quota_estimate_and_decision(tmp_path, monkey
     assert state["paused"] is True
     assert state["manager_session_id"] == "mgr-1"
     assert state["manager_session_status"] == SessionStatus.AWAITING_INPUT.value
-    assert state["recommended_mode"] == "in_place"
+    assert state["recommended_mode"] == "fresh_manager"
     assert state["quota"]["exhausted"] is True
     assert state["estimate"]["known"] is True
     assert state["pending_approval"] is None
@@ -1253,9 +1256,8 @@ def test_worded_reset_parser_handles_the_clock_forms():
 # 12. Resume mode is decided by the prompt cache, not by taste                 #
 # --------------------------------------------------------------------------- #
 
-def test_mode_is_in_place_while_the_cache_is_still_warm(tmp_path, monkeypatch):
-    """Inside the provider's ~1h cache TTL a resume re-writes nothing, so the
-    live session wins however fat it is."""
+def test_recent_pause_does_not_prove_cache_warmth(tmp_path, monkeypatch):
+    """A 20-minute pause can exceed a 5-minute cache TTL; no free-hit assumption."""
     _flags(monkeypatch)
     db = _mk_db(tmp_path, monkeypatch)
     orch = _Orch(_FakeStore(_FakeSession("mgr-1")))
@@ -1263,7 +1265,7 @@ def test_mode_is_in_place_while_the_cache_is_still_warm(tmp_path, monkeypatch):
 
     assert orch._recommended_resume_mode(
         "mgr-1", paused_at=_iso(_now() - timedelta(minutes=20)),
-    ) == "in_place"
+    ) == "fresh_manager"
 
 
 def test_mode_is_fresh_manager_for_a_cold_fat_session(tmp_path, monkeypatch):
@@ -1425,3 +1427,20 @@ def test_a_notification_failure_never_undoes_the_proposal(tmp_path, monkeypatch)
     assert asyncio.run(orch._handle_quota_paused_case(db, case_id)) is True
     assert len([a for a in orch.approval_service.list(limit=50)
                 if a["action"] == CASE_RESUME_APPROVAL_ACTION]) == 1
+
+
+def test_latest_context_replaces_historical_write_and_uses_its_model(tmp_path, monkeypatch):
+    _flags(monkeypatch)
+    db = _mk_db(tmp_path, monkeypatch)
+    orch = _Orch(_FakeStore(_FakeSession("mgr-1")))
+    _record_cache_write(db, "mgr-1", 250000)
+    with db._write() as conn:
+        conn.execute("UPDATE llm_turns SET metrics_json=?, observed_models=? WHERE session_id=?", (
+            json.dumps({"turn_exit_context_tokens": 40000, "context_window_tokens": 200000}),
+            '["sonnet"]', "mgr-1"))
+    estimate = orch.estimate_case_resume_cost("mgr-1")
+    assert estimate["basis"] == "latest_request_context"
+    assert estimate["model"] == "sonnet"
+    assert estimate["usd"] == .15
+    assert estimate["economics"]["context_used_ratio"] == .2
+    assert orch._recommended_resume_mode("mgr-1") == "in_place"
