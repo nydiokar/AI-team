@@ -108,6 +108,22 @@ Only jobs that are genuinely open. Everything merged/done is in git and the disp
 
 ## Recent shift notes
 
+**2026-11-17 — Codex worker startup recovery.** Kanebra restart drained zero active
+tasks; the first native `initialize` exceeded its 30s deadline and a later runtime
+start succeeded. The initiating native stall is unproven: prior startup cleanup
+discarded its stderr. Startup now retries that handshake once under the existing
+runtime lock, only after complete teardown and before publishing the client; no
+session/turn RPC is replayed. Interrupts also clean the unpublished child. Failure
+logs retain exception type, PID, exit code and bounded stderr byte count, never
+raw native stderr. Existing 32-request/4 MiB frame/16 MiB event-buffer bounds and
+request deadlines remain; no new endpoint/DB change. Two attempts permit up to
+60s handshake waiting plus existing cleanup/optional account-read budgets; no hard
+native process-creation/pipe-close deadline is claimed. Worker promotion is pending:
+live Kanebra runs the older feature checkout on Python 3.11, whereas current main
+requires Python 3.12. Do not switch its checkout or upgrade its shared venv under
+active sessions. The four expired telemetry batches and pre-existing Claude
+prewarm failures are separate observations, not repaired by this startup patch.
+
 **2026-11-15 — Python dependency modernization merged (PR #286, `9bbdd35`; #282 absorbed).**
 Verification and rollout limits live in `DEPENDENCY_UPGRADE_REPORT.md`.
 Both final CI jobs pass; production-copy Sessions/Jobs/Affiliations/Cost JSON is
