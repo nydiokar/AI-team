@@ -108,6 +108,15 @@ Only jobs that are genuinely open. Everything merged/done is in git and the disp
 
 ## Recent shift notes
 
+**2026-11-17 — Python runtime enforcement and CI timing.** Runtime package imports
+reject Python <3.12 before loading service modules; workers advertise their Python
+version in existing heartbeat state. CI already selects 3.12. Docker verification
+adds GHA BuildKit caches for both image targets and 15 slowest-test timings while
+retaining the complete credential-free offline suite. PR #296 measured 6m24s:
+87s test-image build, 207s tests (3,244 passed/41 skipped), 48s worker-image build
+and 29s native control smoke; no hang established. Warm-cache benefit remains
+unmeasured until later runs; initial cache export can add time.
+
 **2026-11-17 — Codex worker startup recovery.** Kanebra restart drained zero active
 tasks; the first native `initialize` exceeded its 30s deadline and a later runtime
 start succeeded. The initiating native stall is unproven: prior startup cleanup
@@ -118,10 +127,14 @@ logs retain exception type, PID, exit code and bounded stderr byte count, never
 raw native stderr. Existing 32-request/4 MiB frame/16 MiB event-buffer bounds and
 request deadlines remain; no new endpoint/DB change. Two attempts permit up to
 60s handshake waiting plus existing cleanup/optional account-read budgets; no hard
-native process-creation/pipe-close deadline is claimed. Worker promotion is pending:
-live Kanebra runs the older feature checkout on Python 3.11, whereas current main
-requires Python 3.12. Do not switch its checkout or upgrade its shared venv under
-active sessions. The four expired telemetry batches and pre-existing Claude
+native process-creation/pipe-close deadline is claimed. Operator authorized native worker promotion on 2026-11-17: Kanebra now runs
+merged `e51795f` on isolated Python 3.12.16, with a new incarnation, zero active
+tasks and successful Codex discovery. `.venv` now points to that runtime; the
+old quota feature branch and Python 3.11 venv are retained for recovery. The
+original divergent local main was preserved as `archive/main-pre-python312-20261117`;
+the primary checkout is current main. Never switch its source during worker startup.
+Gateway Python promotion, remaining external-client MCP helpers and remote Horse
+verification are tracked separately until observed. The four expired telemetry batches and pre-existing Claude
 prewarm failures are separate observations, not repaired by this startup patch.
 
 **2026-11-15 — Python dependency modernization merged (PR #286, `9bbdd35`; #282 absorbed).**
