@@ -1,6 +1,6 @@
 # AI-Team Gateway — Hot Context
 
-**Last Updated:** 2026-11-16
+**Last Updated:** 2026-11-17
 **Branch policy:** `main` for docs-only; `feat/<slug>` + PR + self-merge for any `src/` or config
 change. Restart the **gateway** freely when deploying merged code. Never restart a worker/node-carrier
 without surfacing it to the operator first.
@@ -54,10 +54,10 @@ is sized for broader use. S1 pagination, S2 retirement and S4 extra indexes are
 optional and not justified by present measurements. No worker restarted.
 
 1. **A111 — dependable delegation + trustworthy acceptance.** Operator-requested staged
-   dispatch: `dispatch/AGENT_111_INTENT_ALIGNED_VERIFIED_CLOSURE.md`. Start P0's writer/bypass
-   map and offline reproductions, then preserve owner intent/revisions, enforce evidence-bound
+   dispatch: `dispatch/AGENT_111_INTENT_ALIGNED_VERIFIED_CLOSURE.md`. Start P0's failure/friction
+   and writer/bypass maps, then inherit owner context automatically and enforce evidence-bound
    acceptance in existing `record_review`/`close_case`, integrate the existing Scientific Governor,
-   calibrate with the operator and demonstrate useful hands-off work. Execution completion stays
+   measure quality/friction and demonstrate useful hands-off work. Execution completion stays
    separate from objective acceptance. One queue/inbox/closer; retire the activity-count gate.
    Engineering can start without S1; model quality, domain labels and production activation are
    distinct gates. Packet authored, implementation not started; no paid run or worker restart.
@@ -86,7 +86,7 @@ Only jobs that are genuinely open. Everything merged/done is in git and the disp
 |---|---|---|---|---|
 | **A116** | `AGENT_116_TRUSTWORTHY_ARCHITECTURE_AUDIT.md` | none; coordinate A111 | **ready — operator-approved 2026-11-16; issue #290** | Repair authoritative review/membership reads and make architecture-audit execution, coverage, counts and evaluation failure-honest; autonomous implementation, independent verification and scoped certification required. |
 | **A114** | `AGENT_114_CONSEQUENTIAL_DECISION_INTEGRATION.md` | A113 proven; coordinate A111/A71/A75 | ready | Finish declared SDK-budget control at actual worker/SDK process creation: verified owner authority, immutable consumed boot specification, recovery/visibility and safe rollout. A113's offline palette proof is complete; production enforcement remains unactivated. |
-| **A111** | `AGENT_111_INTENT_ALIGNED_VERIFIED_CLOSURE.md` | staged gates in packet | **ready** — plan authored; implementation not started | P0–P6: original intent → evidence/authority → one closure gate → existing independent reviewer → recovery/bounds → owner calibration → useful hands-off production acceptance. Reuses A102/A105/A94–96; ORACLE evidence remains external. |
+| **A111** | `AGENT_111_INTENT_ALIGNED_VERIFIED_CLOSURE.md` | staged gates in packet | **ready — operator-approved; issue #292** — implementation not started | P0–P6: failure/friction traces → inherited intent → evidence-bound closure → existing reviewer → recovery/bounds → measured quality/usability → useful hands-off proof. Coordinates A114/A116; reserved activation gates remain. |
 | **A105** | `AGENT_105_CROSS_PROCESS_TURN_SIGNAL.md` | A104 ✅ | **active** — PRs #280/#281 merged; live `7d39020`; natural acceptance pending | Shared bounded HTTP turn signal wakes scheduler, effects and inbox; polls remain recovery. Await three natural eligible completions ≤2s and 24h observation; no paid proof turn. |
 | **A102** | `AGENT_102_UNIFY_BACKEND_PATHWAYS.md` | — | **blocked** — S2 merged + gateway live (`7c6d01a`); worker promotion and natural S3 acceptance pending | One carrier-owned `TurnControl` and natural backend operations; shims, rollout gates and dead gateway session execution removed. Worker restart needs the operator decision and drain/ancestry checks; no paid proof turn. |
 | **A94** | `AGENT_94_SYSTEM_ONE_CORE_DELIVERY_SCORECARD.md` | — | ready (Level 3) | S1 core + decision log + replay baseline + advisory wake scorecard. Operator inputs: read-only controller DB copy, `TYPESAFE_API_KEY`. |
