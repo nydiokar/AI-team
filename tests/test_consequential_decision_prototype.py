@@ -554,3 +554,22 @@ def test_grant_cannot_approve_another_current_packet(pilot) -> None:
     with pytest.raises(Blocked, match="approval missing"):
         consumer.publish(agent, "wrong-grant", revision=revision)
     assert not rows(consumer, "artifacts")
+
+
+@pytest.mark.parametrize("invalidation", ["expiry", "configuration"])
+def test_historical_packet_remains_readable_without_authorizing_new_use(
+    pilot, invalidation
+) -> None:
+    consumer, _, agent, _, clock = pilot
+    revision = approved(pilot)
+    original_packet = consumer.render(revision)
+    receipt = consumer.publish(agent, "original", revision=revision)
+    if invalidation == "expiry":
+        clock[0] = 2000
+    else:
+        change(pilot, accent="#003300")
+    assert consumer.render(revision) == original_packet
+    assert consumer.publish(agent, "original", revision=revision) == receipt
+    with pytest.raises(Blocked, match="expired|stale"):
+        consumer.publish(agent, "new", revision=revision)
+    assert [row[0] for row in rows(consumer, "artifacts")] == ["original"]

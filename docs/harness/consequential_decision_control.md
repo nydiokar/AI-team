@@ -88,6 +88,9 @@ Proposals, decisions and evaluations are immutable through the API and survive r
 Each decision records actor, revision, grant, outcome and timestamp. Raw SQLite failures
 propagate; successful return occurs only after commit. Audit links to Cases are not used as
 enforcement. Output artifacts retain revision, value and actual CSS bytes.
+Historical packet rendering checks stored integrity without requiring current eligibility;
+expired/stale explanations remain inspectable. Resolution and new publication still perform
+all live checks. A readable packet or old receipt is not permission for a new effect.
 
 ## Current architecture and natural integration
 
@@ -110,12 +113,18 @@ runtime store. Production decision metadata belongs in MeshDB next to the existi
 Case references; approvals may carry attention links only after their durability/identity
 contract is made honest. No second queue, closer, scheduler or reviewer is proposed.
 
-The next consumer is **new Claude SDK process creation for an opted-in project with a declared
+The next consumer is **Claude SDK use for an opted-in project with a declared
 `CLAUDE_SDK_MAX_BUDGET_USD` decision**. Use the existing canonical budget resolver, including null
 and precedence. Bind authorization to the immutable boot specification that the worker actually
 consumes. Worker snapshot staleness, fallback and broad exception handling must not erase a
 configured requirement. An unconfigured project retains existing behavior; existing live SDK
-processes are not silently restarted or retrofitted. A111 consumes decision/evaluation receipts
+processes are not silently restarted or retrofitted. Before sending new protected work to a warm
+process, verify compatible boot revision and current authority; otherwise hold that work.
+The registry override is global and fallback env is worker-local, so project opt-in is a use
+declaration, not another value source. A controller-side fallback approval cannot certify a
+different worker fallback. A71 node identity and A75 token exposure are not owner authorization.
+This budget pilot proves neither aggregate spending limits nor scientific/visual choices.
+A111 consumes decision/evaluation receipts
 as evidence; it does not infer objective acceptance from them. This is a design, not proof that
 the worker/controller identity, remote revision and launch seams are already integrated.
 
@@ -153,11 +162,17 @@ No live activation, production setting mutation or restart occurs in A113.
 
 ## Proof, challenge cases and limits
 
-Run from a checkout with the repo's normal `.venv` dev setup:
+Run from a checkout with the repo's normal **Python 3.12+** `.venv` dev setup (current
+`pyproject.toml`, `constraints.txt` and `docs/README.md`). Do not reuse a live Python 3.11
+worker venv or upgrade it to run these tests:
 
 ```bash
 .venv/bin/pytest tests/test_consequential_decision_prototype.py --tb=short
 ```
+
+The existing `python-tests` Docker target is an alternative isolated setup. Build it using
+the repository Dockerfile when needed, then run the same targeted test with `--network none`
+and this checkout mounted at `/workspace`; do not accept the image's default full-suite CMD.
 
 Every run creates fresh temporary DBs. It includes the counterexample, actual persisted CSS,
 positive/negative controls, source overrides, stale revisions, corruption, scope/revocation,

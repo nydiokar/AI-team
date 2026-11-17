@@ -335,3 +335,30 @@ def test_driver_without_registry_row_is_byte_identical_config_read(monkeypatch):
     monkeypatch.setattr(_config_pkg.config.claude, "sdk_max_budget_usd", 3.0, raising=False)
     sess = _boot_driver_session(monkeypatch)
     assert (sess.kwargs["max_turns"], sess.kwargs["max_budget_usd"]) == (12, 3.0)
+
+
+def test_warm_sdk_reuse_keeps_original_budget_in_actual_options(monkeypatch) -> None:
+    """A114 baseline: a boot-only guard cannot certify later protected turns."""
+    import src.backends.claude_driver as cd
+
+    launches: list[str] = []
+    monkeypatch.setattr(cd._SDKSession, "start", lambda sdk: launches.append(sdk.session_key))
+    driver = cd.ClaudeSDKClientDriver()
+    monkeypatch.setattr(driver, "_role_boot", lambda session: (None, []))
+    session = Session(
+        session_id="a114-warm-baseline",
+        backend="claude",
+        repo_path="/repo",
+        status=SessionStatus.IDLE,
+        created_at="2026-11-17T00:00:00",
+        updated_at="2026-11-17T00:00:00",
+    )
+    _install_worker_snapshot(CLAUDE_SDK_MAX_BUDGET_USD="3.0")
+    cold = driver._get_or_create(session, model=None, effort=None, proc_env={})
+    assert cold._sdk_options().max_budget_usd == 3.0
+    _install_worker_snapshot(CLAUDE_SDK_MAX_BUDGET_USD="1.0")
+    assert db_mod.sdk_governor_ceilings()["sdk_max_budget_usd"] == 1.0
+    warm = driver._get_or_create(session, model=None, effort=None, proc_env={})
+    assert warm is cold
+    assert warm._sdk_options().max_budget_usd == 3.0
+    assert launches == ["a114-warm-baseline"]
