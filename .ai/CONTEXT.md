@@ -114,8 +114,9 @@ version in existing heartbeat state. CI already selects 3.12. Docker verificatio
 adds GHA BuildKit caches for both image targets and 15 slowest-test timings while
 retaining the complete credential-free offline suite. PR #296 measured 6m24s:
 87s test-image build, 207s tests (3,244 passed/41 skipped), 48s worker-image build
-and 29s native control smoke; no hang established. Warm-cache benefit remains
-unmeasured until later runs; initial cache export can add time. Slow-test output
+and 29s native control smoke; no hang established. PR #297 warm test-image
+build measured 32s. Total remained 6m27s because the first worker-cache export
+added 47.5s; no whole-job warm-cache speedup is claimed yet. Slow-test output
 exposed a false-positive offline-node test: only memory was marked offline, so the
 DB-authoritative path enqueued work and waited 30s; its timeout text satisfied the
 weak assertion. The test now marks the canonical DB offline, checks the exact
@@ -133,23 +134,23 @@ raw native stderr. Existing 32-request/4 MiB frame/16 MiB event-buffer bounds an
 request deadlines remain; no new endpoint/DB change. Two attempts permit up to
 60s handshake waiting plus existing cleanup/optional account-read budgets; no hard
 native process-creation/pipe-close deadline is claimed. Operator authorized native worker promotion on 2026-11-17: Kanebra now runs
-merged `e51795f` on isolated Python 3.12.16, with a new incarnation, zero active
+merged `3f0f27f` (PRs #296/#297) on isolated Python 3.12.16, with a new incarnation, zero active
 tasks and successful Codex discovery. `.venv` now points to that runtime; the
 old quota feature branch and Python 3.11 venv are retained for recovery. The
 original divergent local main was preserved as `archive/main-pre-python312-20261117`;
 the primary checkout is current main. Never switch its source during worker startup.
-Gateway/task-server `e51795f` are healthy on Python 3.12.16, schema 49
+Gateway/task-server `3f0f27f` are healthy on Python 3.12.16, schema 49
 unchanged. The host process scan found no Python 3.11 processes after retiring
 idle external-client MCP helpers and fixing the OpenCode interpreter command.
-Remote Horse interpreter verification remains pending under the Linux-only rule. The four expired telemetry batches and pre-existing Claude
-prewarm failures are separate observations, not repaired by this startup patch.
+Remote Horse interpreter verification remains pending under the Linux-only rule.
+The four expired telemetry batches and pre-existing Claude prewarm failures are separate observations, not repaired by this startup patch.
 
 **2026-11-15 — Python dependency modernization merged (PR #286, `9bbdd35`; #282 absorbed).**
 Verification and rollout limits live in `DEPENDENCY_UPGRADE_REPORT.md`.
 Both final CI jobs pass; production-copy Sessions/Jobs/Affiliations/Cost JSON is
-identical. Production promotion remains pending: main checkout `9152240` contains
-unrelated work and fails deploy preflight; host workers need Python 3.12 and an
-operator-authorized drain/restart. No services or live environments are changed.
+identical. Promotion was completed on 2026-11-17 for the gateway, task server and Kanebra
+(see the notes above); remote Horse remains unverified. The prior divergent main
+and quota branch were preserved before restoring the canonical main checkout.
 SDK stdout resynchronization retains
 the existing 16 Mi-character per-stream limit, now checked before decoding complete
 frames too; this is not a process-RSS bound (Unicode and decoded objects add memory).
