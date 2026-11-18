@@ -1,8 +1,8 @@
 # Codex quota observation — design and implementation
 
 Date: 2026-11-15. Reviewed: 2026-11-18. Status: PR #288 merged as `8a026a2`;
-gateway/task-server deployed and verified. Worker activation and natural
-production observation remain separate rollout gates.
+gateway/task-server deployed and verified. Kanebra worker activation and natural
+production refresh are verified in §10; Codex warming remains a separate change.
 Scope: the Home quota panels and the provider-neutral observation path behind
 `/api/quota-windows`. No model turn, no new database, no UI layout change.
 
@@ -326,9 +326,9 @@ were rebuilt/recreated from merge `8a026a2`; both report healthy, schema 49 is
 unchanged, and both workers reconnected. Authenticated `/api/quota-windows`
 returns 200 with observation enabled. Live ingest rejects missing authorization
 with 401, invalid JSON with 422 and a 16,385-byte body with 413. No accepted test
-observation was sent. Codex's persisted adapter remains unavailable until a
-promoted worker supplies observations; natural timer-driven refresh is not
-claimed. No worker was restarted by this review. Rollback image:
+observation was sent. At that controller-only deployment, Codex's persisted
+adapter remained unavailable pending worker promotion; §10 supersedes that
+activation limit. No worker was restarted during the original PR review. Rollback image:
 `ai-team:pre-8a026a2`; verified deploy tag: `deploy/20261118T1213Z-8a026a2`.
 
 ## 8. Acceptance criteria
@@ -355,3 +355,78 @@ claimed. No worker was restarted by this review. Rollback image:
 - Should the 15-minute `model.session_usage` fallback be removed once the
   coordinator has run for a full release cycle? It is retained now as a
   low-risk bridge.
+
+## 10. Worker activation and future Codex warming handoff (2026-11-18)
+
+The operator explicitly authorized the local worker restart. Kanebra was idle,
+with no tasks, pooled sessions or logins, and did not host the caller. Its PM2
+environment and Python 3.12 runtime were preserved. PID changed from `3297713`
+to `204919`, incarnation from `baaca395…` to `0ee6a600…`, and loaded build from
+`3f0f27f` to `d3b5673` (which contains PR #288). The existing worker observation
+interval is 60 seconds.
+
+Natural controller-persisted Codex samples, without an agent message:
+
+| Observation UTC | 5-hour used | 7-day used | 5-hour reset UTC | 7-day reset UTC |
+|---|---|---|---|---|
+| 2026-11-18 12:24:44.394752 | 78% | 70% | 2026-11-18 15:26:55 | 2026-11-18 22:07:08 |
+| 2026-11-18 12:33:06.390348 | 82% | 71% | 2026-11-18 15:26:55 | 2026-11-18 22:07:08 |
+
+Both buckets are `current` / `authoritative`, sourced from
+`codex_app_server_rate_limits`; adapter status is `ready`. A real mobile browser
+read matched the canonical API at 82% / 71%, with no browser writes or page
+errors. These are provider-reported **used** values, not estimated remaining
+quota. They can change as the account is used by other applications.
+
+Two activation follow-ups preserve truthfulness: Home describes worker polling
+instead of requiring a session observation; the read model recognizes the
+existing hash of `principal_unknown` as unknown, matching the adapter's principal
+label and existing prewarmer guard without rewriting identities or history.
+Regressions first reproduced both gaps. Targeted verification: 127 Python tests,
+25 Home/usage tests and TypeScript/production build passed.
+
+### Remote worker rollout
+
+The observer runs on **any Codex-capable worker**, not necessarily the controller
+host. Fetch/update that worker's checkout by fast-forward, retain its node
+identity and credentials, authenticate its native Codex CLI to the intended
+account, and restart its daemon after draining work. It needs `codex` in
+`WORKER_BACKENDS`, a reachable current controller and observation enabled:
+`WORKER_QUOTA_OBSERVE=1`, or worker environment
+`QUOTA_COORDINATOR_ENABLED=1` with an observable backend. This startup decision
+uses the worker environment; a controller registry flag alone does not change
+an old worker's loaded configuration. The same authenticated HTTP ingest works
+without shared filesystems. Distinct accounts need distinct verified
+`CODEX_QUOTA_PRINCIPAL_KEY` bindings; an empty key deliberately remains unknown.
+
+### Extension contract for Codex prewarming
+
+The observation foundation is available through the existing quota store,
+provider registry, reset history and coordinator read model. **Observation ready
+does not mean automation ready.** The following must be proved before warming:
+
+1. Bind the activation-capable runtime to the same verified account as its
+   observations. A hash of an unknown principal is not account verification.
+2. Prove the relevant window's reset/first-use semantics from provider behavior;
+   a 300-minute duration alone does not establish an anchored window. Keep
+   `window_semantics_unclassified` until supported by evidence.
+3. Supply honest active-user/account-use detection or an explicitly approved
+   policy for unknown state. Idle worker slots do not establish account-wide
+   inactivity. Current Codex detection returns unknown.
+4. Add a bounded, explicitly authorized Codex activation method on the owning
+   worker's runtime, then re-read provider limits to verify the actual effect.
+   The current Codex adapter deliberately has no `activate()` method.
+5. Reuse `QuotaWindowPrewarmer`: it already accepts a provider and selects only
+   an activation-capable adapter. Its five-hour bucket selector/activation still
+   uses Claude's `five_hour`; parameterize it for `codex_five_hour`, and wire the
+   worker factory to its owned Codex reader/activator. Keep the controller
+   ingest-only; do not restore a controller-side Codex observer placeholder.
+6. Retain daily/interval limits, measured utilization deltas, before/after reset
+   verification, circuit breakers and durable outcome visibility. Do not infer
+   zero usage, known identity, inactivity or an opened window from missing data.
+
+Current Codex `automation_ready` remains false, with explicit identity, window
+classification and active-session blockers. No Codex warming was enabled.
+Claude's existing `QUOTA_PREWARM_ENABLED` registry setting was already true;
+its existing activation attempts report failures. That is a separate warming
+investigation, not proof that Claude or Codex warming is production-accepted.

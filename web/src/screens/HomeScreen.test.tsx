@@ -119,6 +119,12 @@ it("renders accounts/usage meters and an honest dash when unknown", () => {
   expect(container.textContent).toContain("—"); // 7d unknown — never a fake 0%
 });
 
+it("describes worker polling without claiming an agent message is needed", () => {
+  render();
+  expect(container.textContent).toContain("Codex limits are polled on the worker");
+  expect(container.textContent).not.toContain("latest session observation");
+});
+
 it("flags a near-limit window", () => {
   hooks.quota = { data: quotaWith(31, 81) };
   render();

@@ -1300,7 +1300,10 @@ def _window_state_for(
         blockers.append("window_semantics_unclassified")
     elif semantics != WindowSemantics.ANCHORED.value:
         blockers.append(f"window_semantics_{semantics}")
-    if not principal_hash or principal_hash.endswith(":unknown"):
+    if (
+        not principal_hash or principal_hash.endswith(":unknown")
+        or principal_hash == _principal_hash(provider, "principal_unknown")
+    ):
         blockers.append("principal_unknown")
     if active_session_state == "unknown":
         blockers.append("active_session_state_unknown")

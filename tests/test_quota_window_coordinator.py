@@ -606,6 +606,26 @@ async def test_codex_worker_readings_expire_despite_local_adaptive_schedule(tmp_
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("principal_key", ["", "test-account"])
+async def test_codex_read_model_preserves_unknown_principal_blocker(tmp_path, monkeypatch, principal_key):
+    monkeypatch.delenv("CODEX_QUOTA_PRINCIPAL_KEY", raising=False)
+    now = datetime(2026, 11, 18, 12, 0, tzinfo=timezone.utc)
+    db_path = str(tmp_path / "quota.db")
+    await ingest_worker_quota_observation(
+        provider="codex", node_id="n", principal_key=principal_key,
+        limits=_codex_limits(now=now), observed_at=utc_iso(now), db_path=db_path,
+    )
+    states = QuotaWindowStore(db_path).status(now=now)["window_states"]
+    assert len(states) == 2
+    for state in states:
+        assert state["telemetry_state"] == "current"
+        assert ("principal_unknown" in state["blockers"]) is (not principal_key)
+        assert state["automation_ready"] is False
+    adapter = CodexRateLimitsQuotaAdapter()
+    assert not callable(getattr(adapter, "activate", None))
+
+
+@pytest.mark.asyncio
 async def test_undeclared_quota_provider_is_rejected_loudly(tmp_path):
     result = await ingest_worker_quota_observation(
         provider="mystery",
