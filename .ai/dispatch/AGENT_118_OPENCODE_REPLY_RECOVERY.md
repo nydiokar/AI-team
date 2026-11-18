@@ -1,12 +1,12 @@
 ```yaml
 job_id: AGENT_118_OPENCODE_REPLY_RECOVERY
 created_at: "2026-11-18T10:34:10.981364+00:00"        # CANONICAL — set once at dispatch, never derive again
-status: ready              # ready | active | blocked | done | dead
+status: active              # ready | active | blocked | done | dead
 owner: ""
 depends_on: []
 results_ref: DISPATCH_LOG.md#A118             # -> DISPATCH_LOG.md section with the verdict prose
 evidence: []                  # artifact paths that PROVE it ran (checked to exist)
-updated_at: "2026-11-18T10:36:10.187634+00:00"
+updated_at: "2026-11-18T10:45:01.322497+00:00"
 ```
 
 # DISPATCH — A118 · OpenCode managed-turn reply recovery and correlation audit
@@ -98,6 +98,60 @@ This work changes a backend entry point consuming external/native OpenCode proto
 - Existing related historical fix: GitHub issue/PR #197, which established terminal-only response selection; inspect as context, not as proof that the current incident has the same cause.
 - Original incident DB rows are absent from this checkout's `state/mesh.db` and `logs/carrier_state/opencode-native-sessions.sqlite3` as checked on 2026-11-18.
 - Add issue link and proof paths here after authoring/implementation. Do not create a sibling report unless evidence genuinely needs a separate artifact under `.ai/dispatch/evidence/`.
+
+### P0 investigation — 2026-11-18
+
+**Incident evidence remains unavailable.** The local ledger, carrier-state database and
+session logs do not contain the reported IDs; the running gateway's session endpoint
+returned 404. The gateway health reports build `3f0f27f`; that identifies the current
+gateway, not the incident worker build. The locally installed OpenCode package is
+1.18.32, but the incident worker version is unverified. Consequently the reported
+native answer, provider status, duration, mapping and deployed source cannot be
+independently confirmed. No production records were changed.
+
+**Confirmed structural defect, not a proven incident cause.** In OpenCode
+[v1.18.32 compaction source](https://github.com/anomalyco/opencode/blob/v1.18.32/packages/opencode/src/session/compaction.ts),
+automatic continuation creates a fresh user message without a parent ID and marks
+its text part synthetic with `compaction_continue`; the source explicitly says the
+marker is not a stable plugin contract. The assistant is parented to that new user
+message, whereas this gateway only accepts an assistant directly parented to its
+deterministic managed prompt. Thus a real continuation can be missed. The same
+ownership assumption makes cancellation fail closed after such a continuation.
+This evidence does not establish that the particular incident followed that path.
+
+**Trace and alternatives.** The carrier supplies a turn UUID; `_send_message`
+submits its derived message ID. While busy, `_await_reply` waits; when idle it reads
+at most 100 messages and checks direct parent IDs. After three idle polls with the
+prompt present it returns the latest direct step or an empty object; the latter
+becomes the no-reply banner and releases ownership. A stall or hard-cap expiry
+instead produces `recovery_required` and can start the late watcher; elapsed time
+alone cannot establish either. An uncorrelated provider error is also missed, so
+quota/provider failure cannot be excluded without incident records. History window
+truncation, transport loss and wrong mappings likewise remain unverified. A selected
+response is parsed into `ExecutionResult`, then the carrier sends bounded output and
+usage in its result envelope; late capture uses turn UUID and the result spool.
+The full persisted-result-to-conversation projection has not yet been verified.
+
+**Independent review and plan gate.** A separate reviewer checked the code and
+versioned upstream sources, challenged timeout/quota, manual concurrent traffic,
+history truncation and regression scope, and rejected attribution by proximity or
+the synthetic marker alone. OpenCode's
+[prompt implementation](https://github.com/anomalyco/opencode/blob/v1.18.32/packages/opencode/src/session/prompt.ts)
+persists a new user message before entering the session loop; the carrier's local
+lock does not fence other native clients. No reviewed implementation plan yet
+establishes safe ownership across those clients, restarts and incomplete history.
+Do not start production code on the assumption that the marker proves ownership.
+
+Next: locate the authoritative incident worker and read-only native/ledger records;
+investigate a native-supported provenance or exclusive-writer/fencing contract,
+including compatibility and restart behavior. If neither is available, design a
+failure-honest recovery state that preserves potentially generated work without
+attributing foreign content, and independently review its downstream and lifecycle
+semantics before implementation. Test at the managed-turn and late-result seams,
+including direct replies, continuation, intervening manual prompts, multiple
+continuations, window loss, provider errors and durable visible projection. Do not
+change timeout or quota policy absent causal evidence. No tests, paid turns, worker
+restarts or deployment were performed during this investigation.
 
 ## Milestone
 
