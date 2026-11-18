@@ -306,7 +306,8 @@ def test_context_telemetry_excludes_child_usage_and_preserves_window_and_boundar
         sess.close()
 
 
-def test_sdk_cost_only_compact_receipt_survives_without_usage() -> None:
+@pytest.mark.parametrize("pre_key", ["pre_tokens", "preTokens"])
+def test_sdk_cost_only_compact_receipt_survives_without_usage(pre_key: str) -> None:
     from claude_agent_sdk import SystemMessage
     from src.core.telemetry import TelemetryContext
     from src.core.telemetry_adapters.claude_stream_json import ClaudeStreamJsonAdapter
@@ -317,7 +318,7 @@ def test_sdk_cost_only_compact_receipt_survives_without_usage() -> None:
     result.usage = {}
     result.total_cost_usd = 0
     fake.replies["/compact"] = [SystemMessage(subtype="compact_boundary", data={
-        "compact_metadata": {"pre_tokens": 180000, "trigger": "manual"}}), result]
+        "compact_metadata": {pre_key: 180000, "trigger": "manual"}}), result]
     sess = _start_fake_session(fake)
     try:
         outcome = sess.send("/compact", turn=turn_control("cost-only-compact"))

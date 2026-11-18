@@ -204,7 +204,12 @@ feature checkout and `PYTHONPATH=/workspace`, invoking `python -m pytest` with `
 `test_turn_queue_respawn_crash_safety`, `test_turn_queue_respawn_revalidation`,
 `test_telemetry_contract`, `test_telemetry_privacy`, `test_telemetry_store`, `test_claude_driver`,
 `test_claude_driver_manager_tools`, `test_turn_queue_sdk_ownership` (each under `tests/`, `.py`).
-The final **362-test run passed in 36.77s**, including four additional failed-compaction cases.
+The final **363-test run passed in 36.79s**, including failed-compaction cases and both native
+boundary counter spellings (a null snake-case field must not mask a valid camel-case field).
+CI additionally exposed an incomplete fake SDK (`SystemMessage` absent) and a historical-repair
+assertion pinned to v3; their fixtures now reflect the actual SDK/current projector contract.
+`pytest tests/test_backend_activity.py tests/test_job_review_regressions.py --tb=short`
+passes **13 tests in 3.34s** in the same offline Docker environment; no runtime workaround was added.
 Related vitest: **41 passed across eight files**. `pnpm --dir web typecheck` passes; production
 build passes with a separate writable output directory (the old `web/dist` is root-owned).
 

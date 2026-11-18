@@ -292,7 +292,7 @@ Recovery proposal → approval payload; execution snapshot → canonical produce
 turn/idempotency link → provider receipt, visible from both sessions. Read-time compatibility
 rejects v3 Claude context without reprojecting history or changing billing buckets.
 
-Fresh proof includes 362 targeted Python tests (36.77s), including the failed-manual status
+Fresh proof includes 363 targeted Python tests (36.79s), including both SDK boundary spellings and the failed-manual status
 matrix; 41 related frontend tests; typecheck and production build. Exact final run is recorded
 in audit §9.1. Existing root-owned `web/dist` prevented cleanup, so production compilation used
 `pnpm --dir web build --outDir /tmp/ai-team-a117-web-final-20261118`; no artifact ownership was changed.

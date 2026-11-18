@@ -12,6 +12,7 @@ from starlette.requests import Request
 from src.control import task_server
 from src.control.telemetry_store import TelemetryStore
 from src.core.telemetry import build_event
+from src.core.telemetry_projection import PROJECTION_VERSION
 from tests.test_telemetry_store import _events
 from tests.test_turn_queue_4d import _env
 from tests.test_job_completion_reliability import _register
@@ -48,7 +49,7 @@ def test_bad_historical_event_is_flagged_without_starving_other_repairs(tmp_path
         conn.execute("UPDATE llm_turns SET projection_version=2")
     assert store.repair_turn_lifecycle(limit=5) == 2
     assert "lifecycle_repair_invalid_events" in store.get_turn("bad-history")["data_quality"]
-    assert store.get_turn("good-history")["projection_version"] == 3
+    assert store.get_turn("good-history")["projection_version"] == PROJECTION_VERSION
     assert store.repair_turn_lifecycle(limit=5) == 0
 
 

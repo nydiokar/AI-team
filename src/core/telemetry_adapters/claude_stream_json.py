@@ -210,7 +210,8 @@ class ClaudeStreamJsonAdapter:
             events = self._flush_compaction(event_time=event_time)
             metadata = payload.get("compact_metadata") or payload.get("compactMetadata")
             if isinstance(metadata, dict):
-                self._compaction_before = _int_or_none(metadata.get("pre_tokens", metadata.get("preTokens")))
+                before = metadata.get("pre_tokens")
+                self._compaction_before = _int_or_none(before if before is not None else metadata.get("preTokens"))
                 trigger = metadata.get("trigger")
                 self._compaction_trigger = trigger if trigger in ("auto", "manual") else "unknown"
             self._live_last_context = None
