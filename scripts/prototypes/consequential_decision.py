@@ -216,13 +216,18 @@ class PaletteConsumer:
             )
             return revision
 
-    def packet(self, db: sqlite3.Connection, revision: str) -> Packet:
+    def stored_packet(self, db: sqlite3.Connection, revision: str) -> Packet:
+        """Read immutable evidence even after eligibility expires or changes."""
         row = db.execute("SELECT body FROM proposals WHERE revision=?", (revision,)).fetchone()
         if row is None:
             block("missing proposal")
         packet = Packet.model_validate_json(row[0])
         if digest(packet) != revision:
             block("corrupt proposal")
+        return packet
+
+    def packet(self, db: sqlite3.Connection, revision: str) -> Packet:
+        packet = self.stored_packet(db, revision)
         if self.clock() >= packet.expires_at:
             block("expired proposal")
         current = self.snapshot(
@@ -237,8 +242,9 @@ class PaletteConsumer:
         return packet
 
     def render(self, revision: str) -> str:
+        """Render historical evidence; resolution/publication separately check eligibility."""
         with self.transaction() as db:
-            return self.packet(db, revision).model_dump_json(indent=2)
+            return self.stored_packet(db, revision).model_dump_json(indent=2)
 
     def delegate(self, owner: Principal, actor: Principal, revision: str, until: float) -> str:
         self.owner(owner)

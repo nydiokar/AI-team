@@ -13,17 +13,23 @@ updated_at: "2026-11-09T22:26:45.559708+00:00"
 
 **Level:** 3 (agent authority, DB invariants, distributed recovery, service boundaries).
 **Type:** staged engineering + empirical review calibration + production acceptance.
-**Authored:** 2026-11-10, Europe/Vilnius. **Packet:** ready; implementation not started.
+**Authored:** 2026-11-10, Europe/Vilnius. **Revised:** 2026-11-17.
+**Packet:** ready for staged execution; implementation not started.
+**Issue:** [#292](https://github.com/nydiokar/AI-team/issues/292) — execution entry point; this packet owns scope/state/evidence.
+**Authorization:** operator-requested autonomous implementation, verification and shipping
+within this packet and the repository workflow. Make routine engineering decisions and
+finish each stage without renewed permission; reserved empirical/operational decisions
+below still apply. This preparation turn revises the job; it does not run its pilots.
 **Depends on:** no prerequisite for P0/P1. Later gates below name their actual dependencies.
-**Branch:** this planning change is docs-only on `main`. Each implementation stage uses one
+**Branch:** packet revisions are docs-only on `main`. Each implementation stage uses one
 `feat/a111-<stage>` branch, PR, self-merge and gateway deployment where required. Finish each
 stage before starting the next branch. Do not carry another loop's changes.
 
 > The operator needs useful delegation: a Manager carries a bounded objective to an honest
 > conclusion without rescue prompts, without quietly substituting a narrower question, proxy
 > measurement, or easier deliverable. A technically correct substep is not objective closure.
-> The requested deliverable in this authoring turn is this executable dispatch plan, not a
-> claim that runtime enforcement or hands-off acceptance has already been implemented.
+> The executor's deliverable is a working, measured delegation loop and honest acceptance,
+> with deployed evidence where authorized. An updated packet or issue alone does not close it.
 
 ## Why (intent)
 
@@ -43,6 +49,12 @@ whole-loop production acceptance remain incomplete. This is not evidence of inte
 
 Success is fewer invalid acceptances AND less operator rescue at acceptable cost. A gate that
 creates endless reviews, blocks sound negative research, or demands ritual rework also fails.
+
+**Adapt the interface to the agent.** For each reproduced failure, identify what the harness
+can resolve, preserve, validate or explain automatically at an existing tool boundary.
+More role instructions alone do not satisfy this job. The closure gaps below explain how
+unsupported acceptance is possible; they do not prove where a historical scientific
+misunderstanding began. Trace the first divergence before choosing its repair.
 
 ## CONTEXT — verified baseline and limits
 
@@ -101,6 +113,13 @@ Store the Manager's interpretation separately. Link the immediate task to its Ca
 versioned project-goal reference; include accepted prior evidence and constraints. Do not infer
 missing ORACLE goals or silently treat a summary as the owner's words.
 
+The controller attaches this binding context, current criteria/revision, constraints, prior
+evidence references and remaining parent obligations to dispatch, review and recovery. The
+Manager supplies the subtask's contribution and choices, without manually rewriting owner
+context. Resolve caller identity and coherent assignment/role/tools/membership from canonical
+records; reject conflicting scope. Keep payloads bounded through stable references and
+on-demand reads, with visible omissions; never silently truncate binding requirements.
+
 Use stable criterion IDs, not only matching strings. For each criterion record what observable
 result or knowledge would satisfy it, its required evidence, material assumptions, and scope.
 For research, record the scientific question/object, population/denominator, intervention or
@@ -122,6 +141,11 @@ inside otherwise well-formed work still needs evidence review; deterministic fie
 cannot discover every misleading interpretation. Put a review checkpoint before an expensive
 or irreversible experiment when its formulation is load-bearing, rather than discovering a
 wrong measurement framework only at final closure. Reuse the same reviewer/receipt machinery.
+Expose the resolved question/population/information timing/operation/evaluation/decision and
+material differences before that experiment. Routine plan refinements use existing authority;
+material changes use the revision path. This is a checkpoint in the same flow, not a new
+classifier or an approval prompt for every tool call. Refusals return the unmet obligation,
+supporting evidence/current revision and permitted next actions; retries preserve identity.
 
 ### C. Evidence submissions and independent challenge
 
@@ -189,6 +213,8 @@ lost response, concurrent close and crash between review and close cannot create
 | Existing work | Ownership under A111 |
 |---|---|
 | A102, A105 | Keep their deployment/natural acceptance gates in their packets. P4/P6 consume their evidence. |
+| A114 | Owns declared SDK-budget admission and actual boot consumption. A111 consumes its receipts and adds only bounded Case-level accounting/admission needed for this loop. No second policy or boot gate. |
+| A116 | Owns authoritative review/membership reader repairs and audit-tool validity. Recheck its merged evidence; A111 owns current per-obligation acceptance and tests the integration, without redoing those repairs. |
 | A94 | Sole S1 client, battery runtime, decision log and replay work; scores are advisory and are not ground truth. Rebase stale two-wake/continuation assumptions onto A104. |
 | A95 | Sole semantic dispatch preflight, after A94 qualifies. Deterministic contract/authority checks in P1/P2 do not depend on a classifier. |
 | A96 | Optional cheap rework routing only after its existing precision/live gates; never acceptance authority and never a second repair loop. Not on A111's mandatory critical path. |
@@ -200,7 +226,7 @@ lost response, concurrent close and crash between review and close cannot create
 
 ## TASK — ordered stages and verifiable exits
 
-### P0 — Baseline, bypass map and benchmark contract (first implementation PR)
+### P0 — Failure traces, bypass map and evaluation contract (first implementation PR)
 
 Read the named seams and trace every successful/unsuccessful terminal writer and projection:
 Case close/state/cleanup, review and waiver, direct DB update helpers, Manager invocation,
@@ -214,19 +240,34 @@ closure without a required independent receipt; and normal valid/cancel/recovery
 Use real temp DB/API/MCP seams, with fake agents and no live dispatch. Each claimed gap must be
 confirmed or corrected against the tree, not preserved merely because this packet predicts it.
 
-Freeze the initial benchmark/label protocol and P1 schema/API shapes in the existing
-`scientific_governor_contract.md`; capture the owner's exact request for new protected Cases.
-Do not retrofit reconstructed owner intent as immutable historical fact. P0 exit: reproductions,
-writer map, traceability inventory and explicit implementation scope. No open-ended redesign.
+Build a small failure/friction map alongside the bypass map: intended outcome → context
+actually received → first divergence → tool behavior → minimal adaptation → regression.
+Use accessible real delegation traces where authorized; mark missing incidents unavailable
+and illustrative cases synthetic. Missing ORACLE artifacts do not block generic engineering.
+Include wrong identity/scope, lost parent intent, late scientific mismatch, and successful
+first-pass/negative controls where evidence permits. Record manual context/ID reconstruction,
+protocol retries, late mismatches and rescue touches on fixed comparable tasks.
+
+Prepare artifact-backed development/held-out cases and owner-label questions now. Run a
+small reviewer feasibility evaluation before freezing the interface when model/data/budget
+authority exists; otherwise build the offline runner and name the exact pending decision.
+P5 remains the held-out activation gate. Keep held-out answer keys out of reviewer input.
+Capture initial P1 schema/API shapes in `scientific_governor_contract.md`; keep them minimal
+and revise on evidence. Never reconstruct historical owner intent as immutable fact.
+Exit: source-backed reproductions, compact writer/friction maps, evaluation protocol and
+bounded implementation scope. Continue authorized stages; no new routine approval gate.
 
 ### P1 — Durable intent, evidence and authority (depends on P0)
 
 Implement B/D in the existing invocation/Case/dispatch/review surfaces, using typed Pydantic
 structures and one additive migration with upgrade/rollback posture. Bind submissions and
 reviews to immutable contract/evidence versions; implement scoped review authority and operator
-revision/override attribution. Preserve current execution states and result transport.
+revision/override attribution. Implement B's automatic context inheritance in existing
+dispatch/brief/boot and review paths, including fresh/reused sessions and context replacement.
+Preserve current execution states and result transport.
 
-Test author self-accept, forged role/caller, wrong Case, expired capability, stale revision,
+Test inherited context/role/scope, early material-change detection and actionable refusal;
+author self-accept, forged role/caller, wrong Case, expired capability, stale revision,
 artifact replacement, lost response, duplicate requests, DB unavailable and migration/restart.
 Bound storage growth and retention of raw request/evidence references without deleting canonical
 session fallbacks. Do not put credentials or bulk transcripts in event payloads.
@@ -264,6 +305,8 @@ S1 outage merely omits advisory scores. Preserve review budget and stop controls
 Evolve `tests/test_scientific_governor.py` fixtures into an executable artifact-backed benchmark
 with hidden labels. Existing fake SHAs and explicit "this is a proxy" prose are wiring fixtures,
 not historical proof. Test polished misleading summaries and sound results in matched pairs.
+Reuse P0's runner/cases; assemble the reviewer assignment and six-question role through
+the controller, without requiring the Manager to reproduce the reviewer protocol.
 Use real checked-in artifacts for offline challenge execution; separately evaluate actual model
 judgments under an authorized bounded run. Replace the always-skip placeholder with an actual
 opt-in runner, while keeping ordinary pytest entirely offline.
@@ -280,13 +323,15 @@ Exit: deterministic checks reject missing/stale/forged evidence; model benchmark
 reports critical-mismatch recall, unsupported-accept rate, false blockers, localization, cost,
 latency and abstention. No pretend live test or synthetic fixture count can close the empirical gate.
 
-### P4 — Complete deployed loop and cross-layer truth (depends on P3; A102/A105 gates apply)
+### P4 — Integrate loop and cross-layer truth (after P3; protected activation requires P5)
 
 Reconcile actual controller/worker builds, active capabilities and runtime flags. Consume A102
 promotion evidence and A105 natural latency/observation evidence without changing their criteria
 or manufacturing paid proof turns. Worker promotion requires the operator's decision plus drain
 and ancestry checks. Gateway deploy follows the existing Docker workflow, never a global lock.
 
+Consume A114's current budget/boot receipts and A116's authoritative-reader evidence where
+applicable; unresolved dependencies block the affected activation claim, not unrelated stages.
 Prove round, per-turn, time and resource budgets at the owning layer; distinguish SDK API-dollar
 ceilings from subscription cost and whole-Case spend. Existing round caps/null SDK ceilings are
 not a verified all-backend Case budget. Reuse canonical usage and admission/cancellation for
@@ -304,7 +349,7 @@ session, reviewer interruption, quota pause, controller restart and Manager cont
 Same Case/lineage, no lost obligation, duplicate spend or false success; all promised backends
 covered or explicitly unavailable, not silently dropped from the claim.
 
-### P5 — Calibrate useful judgment with the operator (depends on P3; can precede P4 rollout)
+### P5 — Confirm useful judgment (prepare in P0; final evaluation after P3, before activation)
 
 Engineering correctness does not settle scientific relevance. Use an owner-labelled development
 set and a held-out matched set; reviewers never see answer keys. Labels identify the actual
@@ -324,6 +369,13 @@ evaluation cycle, then escalate a specific unresolved issue. Optimize escaped de
 turns + false blockers + cost per verified objective, not acceptance rate or number of reviews.
 If S1 qualifies through A94/A95, reuse its one runtime and replay output; if it fails, leave it
 off and continue the mandatory evidence gate. A96 remains optional with its original gates.
+Compare P0's fixed tasks against the revised agent-facing flow: report per-task/manual context
+and ID reconstruction, protocol retries, mismatches caught before spend versus at closure,
+rescue/reserved touches, false blockers and cost/latency per verified objective. Exercise a
+fresh session and context replacement. Distinguish deterministic replay from actual model
+behavior; do not claim a causal improvement from unmatched work or changing models.
+Acceptance requires automatic authoritative-context inheritance, actionable recovery and no
+ritual extra dispatch on controls; report measured gains/regressions and sample limits.
 Exit: explicit owner calibration decision, measured verdict and bounded pilot budget. A failed
 classifier experiment may close A94 but cannot close A111's unmet objective.
 
@@ -407,10 +459,13 @@ full suite, paid CLI or real e2e to validate these stages. Existing test guards 
    outcomes cannot silently satisfy acceptance. Fresh DB reconstructions preserve obligations.
 5. Real discriminating checks distinguish objective satisfaction from correct-looking substitution;
    valid first-pass, negative and equivalent-prior-work controls pass without ritual extra work.
-6. Deterministic fault/race/migration checks pass; separately measured reviewer behavior meets the
+6. P0 failure traces have corresponding tool-boundary fixes and regressions; authoritative
+   context/identity is inherited, material changes surface before consequential runs, and
+   recovery explains next actions. P5 reports friction/rescue and quality against baseline.
+7. Deterministic fault/race/migration checks pass; separately measured reviewer behavior meets the
    owner-agreed P5 thresholds. Offline wiring tests are never presented as model-quality evidence.
-7. P6 useful-work observations demonstrate the original hands-off objective and honest bounds.
-8. Single closer/queue/inbox/reviewer/S1 runtime; old count heuristic retired; projections and
+8. P6 useful-work observations demonstrate the original hands-off objective and honest bounds.
+9. Single closer/queue/inbox/reviewer/S1 runtime; old count heuristic retired; projections and
    existing specs agree. Failed optional S1 work creates no duplicate mechanism or closure blocker.
 
 ## RESERVED DECISIONS — engineering vs creative/empirical
@@ -431,11 +486,12 @@ evidence, then escalate a material disagreement instead of looping reviewers.
 
 ## TYPE / SCOPE OUT
 
-The current change authors and registers this plan only. Runtime implementation is the staged
-work above, with normal code PRs and checks. No speculative outer Governor/campaign runtime,
+Execute the staged runtime work above with normal code PRs, review and checks. The
+2026-11-17 preparation revision updates the packet and issue only; it is not runtime proof.
+No speculative outer Governor/campaign runtime,
 new message bus, scheduler, job-status store, generic role factory, model-selection classifier,
 ORACLE research, hidden historical relabelling, or claim of infallible semantic verification.
-No cross-project files are available or presumed. No worker restart, paid run or production
+Domain artifacts/access must be explicitly supplied or authorized. No worker restart, paid run or production
 activation is authorized merely by creating this packet.
 
 ## End-state contract
@@ -482,14 +538,23 @@ ready until implementation starts and cannot become done merely because the plan
 - No ORACLE incident artifacts were supplied during authoring. Existing illustrative fixtures
   and the user's examples do not become verified historical cases through inclusion here.
 
+### Preparation verification — 2026-11-17
+
+- Revised scope and issue #292 retain P0–P6, canonical YAML identity/state and the architecture
+  contract; stage dependencies, authority reservations and acceptance numbering checked.
+- Documentation diff/whitespace checks pass. Dispatch audit reads A111 as ready; no A111
+  state/proof gap. Audit used an existing working Python/PyYAML environment because this
+  checkout's Windows venv exposes an incomplete `yaml` module. No dependencies were changed.
+- This verifies job preparation only; implementation, model measurements and pilots remain open.
+
 ## Milestone (burndown)
 
-- [ ] P0: complete writer/bypass map; baseline failures and valid controls; benchmark contract.
-- [ ] P1: immutable provenance, authorized revisions, typed evidence, scoped authority, migration.
+- [ ] P0: writer/bypass and failure/friction maps; baseline/valid controls; early evaluation preparation.
+- [ ] P1: provenance/revisions, inherited assignment context, typed evidence/authority, migration and recovery guidance.
 - [ ] P2: atomic current-evidence acceptance/closure; per-obligation rework; bypass tests; old heuristic retired.
 - [ ] P3: independent existing reviewer integrated; artifact-backed challenges; actual opt-in model runner.
 - [ ] P4: deployed build/capability reconciliation; A102/A105 evidence; truthful UI and verified limits/recovery.
-- [ ] P5: owner labels, held-out measured judgment, bounded tuning and activation decision.
+- [ ] P5: held-out judgment and baseline friction/rescue comparison, bounded tuning and activation decision.
 - [ ] P6: two useful objectives, no rescue dependency; separate isolated fault evidence; 24h observation.
 - [ ] Final: architecture check, targeted tests, deployments, known limits and operator touches reconciled.
 

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -133,8 +134,12 @@ def test_resolved_oversize_artifacts_are_evicted_oldest_first_within_budget(
     spool = ManagedResultSpool(tmp_path)
     first = spool.preserve_oversize("turn-a", "tok-a", {"output": "a" * 100})
     spool.resolve_oversize(first)
+    # Fast filesystems may give consecutive writes identical mtimes. Establish
+    # the ordering this test asserts instead of relying on clock resolution.
+    os.utime(first.with_name(first.name + ".resolved"), (1700000000, 1700000000))
     second = spool.preserve_oversize("turn-b", "tok-b", {"output": "b" * 100})
     spool.resolve_oversize(second)
+    os.utime(second.with_name(second.name + ".resolved"), (1700000010, 1700000010))
     third = spool.preserve_oversize("turn-c", "tok-c", {"output": "c" * 100})
     oversize_dir: Path = spool.dir / "oversize"
     total: int = sum(p.stat().st_size for p in oversize_dir.iterdir() if p.is_file())

@@ -1,6 +1,7 @@
 # Codex quota observation — design and implementation
 
-Date: 2026-11-15. Status: 🔵 design + implementation in review (PR, not merged).
+Date: 2026-11-15. Reviewed: 2026-11-18. Status: implementation reviewed in PR #288;
+worker activation and natural production observation remain separate rollout gates.
 Scope: the Home quota panels and the provider-neutral observation path behind
 `/api/quota-windows`. No model turn, no new database, no UI layout change.
 
@@ -200,6 +201,12 @@ coordinator window.
   coordinator look healthy, or hide a broken one behind 15-minute data.
   Mitigation: coordinator numeric values win; adapter status and reason remain
   visible in `/api/quota-windows`; the coverage test is the structural guard.
+  The 2026-11-18 adversarial review reproduced stale numeric coordinator data
+  suppressing a fresh turn reading. Only current Codex coordinator numbers now
+  take precedence; stale/partial/expired readings become unknown and permit the
+  fresh fallback. Claude's display behavior is preserved. Worker-only providers
+  use the existing 15-minute age bound, independently of the controller's
+  adaptive local-observer schedule; reading status cannot renew their freshness.
 - **No-overwrite on error.** A transient app-server failure must not look like
   "no quota". Mitigation: error observations update adapter status and do not
   overwrite the last good snapshots.
@@ -208,6 +215,31 @@ coordinator window.
 - **Payload trust.** The controller accepts only the allowlisted Codex shape;
   unknown fields are dropped, malformed windows reject, and the provider string
   must be declared.
+  Counters and durations use strict numeric types; reset timestamps are bounded
+  to the representable UTC range. Invalid input preserves the last good rows.
+
+### 5.1 Ingest service boundary (2026-11-18)
+
+- **Concurrency / memory:** four permits cover body reading, parsing and actual
+  database completion. Excess concurrent requests get 429. Cancelling the HTTP
+  waiter cannot release a running mutation's permit. At 100 concurrent calls,
+  at most four execute; admitted raw body buffers total at most 64 KiB before
+  parser, ASGI and native SQLite overhead. Regression tests exercise 100 refused
+  calls while a cancelled waiter's mutation retains its permit.
+- **Size / timeout:** 16 KiB streamed body cap (including chunked requests),
+  five-second total body deadline, fixed small response, worker HTTP socket
+  timeout 15 seconds. Codex metadata RPC timeout is five seconds; lazy runtime
+  initialization retains the existing bounded startup/retry lifecycle and is
+  outside that individual RPC deadline.
+- **Malformed input:** invalid JSON/schema returns 422; invalid Codex windows
+  return `accepted=false` / `invalid_limits` without replacing snapshots.
+- **Resource failure:** SQLite/filesystem errors return 503 per request. Database
+  work runs off the event loop, with existing five-second SQLite busy waits.
+- **Deferred:** no hard native database/COMMIT or Python write-lock deadline,
+  exact native RSS bound, or per-node account authentication is claimed. Four
+  permits remain held through actual completion, containing stalled work. Retain
+  the existing trusted-worker/shared-token assumption; A71 owns node credential
+  isolation. Worker loss is handled by snapshot expiry, not process restarts.
 
 ## 6. Implementation map
 
@@ -237,6 +269,8 @@ Targeted only; no full suite, no e2e, no paid provider turn.
   stale reset, successful ingest, error does not overwrite, undeclared and
   unsupported providers, no local Codex adapter.
 - `tests/test_codex_app_server.py` — `read_rate_limits()` allowlisted shape.
+  A timed-out metadata request cannot poison the shared runtime or its next RPC;
+  late replies are drained and all fake processes/reader threads are cleaned up.
 - `tests/test_codex_native.py` — `read_account_rate_limits()` reuses the runtime
   without a turn.
 - `tests/test_docker_boundary.py` — Codex-only enables observation; an
@@ -244,6 +278,36 @@ Targeted only; no full suite, no e2e, no paid provider turn.
 - `web/src/lib/homeUsage.test.ts` — coordinator beats turn event; unknown does
   not.
 - Existing `tests/test_control_api.py` and Home screen tests remain green.
+- `tests/test_quota_observation_boundary.py` — authenticated HTTP to real quota
+  persistence, partial windows, invalid/chunked/slow bodies, dependency failure,
+  cancellation and retained concurrency permits. No provider process is spawned.
+
+Review verification on 2026-11-18 (Python 3.12.16, current main integrated):
+
+```bash
+.review-venv/bin/python -m pytest tests/test_quota_provider_coverage.py tests/test_worker_quota_observation.py tests/test_quota_window_coordinator.py tests/test_quota_observation_boundary.py tests/test_codex_app_server.py tests/test_codex_native.py tests/test_docker_boundary.py tests/test_control_api.py tests/test_codex_managed_turns.py tests/test_codex_managed_carrier_integration.py tests/test_worker_managed_turns_default.py tests/test_a102_carrier_contract.py tests/test_backend_activity.py tests/test_model_picker.py tests/test_turn_queue_sender.py --tb=short -n 4
+# 351 passed, 1 skipped in 73.74s
+.review-venv/bin/python -m pytest tests/test_quota_observation_boundary.py tests/test_quota_window_coordinator.py --tb=short
+# 81 passed in 27.83s after the final HTTP-schema preservation change
+pnpm --dir web exec vitest run src/lib/homeUsage.test.ts src/screens/HomeScreen.test.tsx
+# 24 passed
+pnpm --dir web build
+# TypeScript check and production build passed
+```
+
+The isolated review environment used the declared `dev,test,dispatch` extras and
+`constraints.txt`; `pip check` passed. Sandbox asyncio thread wakeups stalled, so
+Python results above were obtained outside the sandbox with bounded runner
+lifetimes. No paid turn or e2e suite was run. Ruff passes for the new provider
+registry and HTTP-boundary tests; the legacy coordinator/task-server modules
+retain existing lint debt and are not claimed lint-clean.
+
+The installed Codex CLI 0.169.0 generated the matching account-rate-limit JSON
+schema. A real metadata-only `CodexBackend.read_account_rate_limits()` probe
+returned primary 300-minute and secondary 10,080-minute windows. Its isolated
+owned app-server and reader threads were verified closed afterward; model turns
+sent: zero. This proves the native read, not scheduled worker activation or
+natural production refresh after deployment.
 
 ## 8. Acceptance criteria
 

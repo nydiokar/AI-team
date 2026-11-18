@@ -116,7 +116,8 @@ invalidation, provisional-output isolation and crash/retry recovery. Tests inspe
 and persisted records, including failure before commit. This is an executable simulation;
 production authentication, worker consumption and objective fitness remain unproven. It is
 not a new approval queue or an active gateway policy. The natural next integration is the
-canonical SDK budget resolver through new SDK process creation, coordinated with A111.
+canonical SDK budget resolver through protected turn admission and SDK creation/reuse,
+coordinated with A111. A boot-only check misses new work on an existing warm process.
 
 **References (checked 2026-11-10):**
 

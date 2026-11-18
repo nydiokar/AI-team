@@ -39,12 +39,12 @@ full process and HTTP surface.
 
 ## Quick start (Linux)
 
-Prerequisites: Python 3.11+, a supported local agent CLI, and pnpm for building
+Prerequisites: Python 3.12+, a supported local agent CLI, and pnpm for building
 the web UI. Telegram is optional.
 
 ```bash
-python -m venv .venv
-.venv/bin/pip install -e ".[dev,telegram]"
+python3.12 -m venv .venv
+.venv/bin/pip install -e ".[dev,telegram]" -c constraints.txt
 cp .env.example .env
 ```
 

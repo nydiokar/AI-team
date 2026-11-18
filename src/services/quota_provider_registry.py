@@ -12,8 +12,9 @@ and the coverage test keeps the declaration exhaustive.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Iterable, Optional
+from collections.abc import Iterable
+
+from pydantic import BaseModel, ConfigDict
 
 CLAUDE_OBSERVER = "claude_get_usage"
 CODEX_OBSERVER = "codex_account_rate_limits"
@@ -24,8 +25,9 @@ CODEX_OBSERVER = "codex_account_rate_limits"
 SUPPORTED_OBSERVERS = frozenset({CLAUDE_OBSERVER, CODEX_OBSERVER})
 
 
-@dataclass(frozen=True)
-class QuotaProviderSpec:
+class QuotaProviderSpec(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
     provider: str
     observer: str = ""
     unsupported_reason: str = ""
@@ -69,7 +71,7 @@ def provider_for_backend(backend: str) -> str:
     return BACKEND_TO_QUOTA_PROVIDER.get(name, name)
 
 
-def spec_for_provider(provider: str) -> Optional[QuotaProviderSpec]:
+def spec_for_provider(provider: str) -> QuotaProviderSpec | None:
     return QUOTA_PROVIDER_SPECS.get((provider or "").strip().lower())
 
 

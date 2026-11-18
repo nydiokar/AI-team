@@ -2805,6 +2805,7 @@ class WorkerAgent:
             # Commit this worker process loaded; the task-server compares it
             # with its own build to surface gateway/worker version skew.
             "build_sha": build_info().git_sha,
+            "python_version": sys.version.split()[0],
         }
         mem = self._memory_watchdog_sample()
         if mem is not None:

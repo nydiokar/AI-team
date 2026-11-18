@@ -1,6 +1,6 @@
 # AI-Team Gateway — Hot Context
 
-**Last Updated:** 2026-11-10
+**Last Updated:** 2026-11-17
 **Branch policy:** `main` for docs-only; `feat/<slug>` + PR + self-merge for any `src/` or config
 change. Restart the **gateway** freely when deploying merged code. Never restart a worker/node-carrier
 without surfacing it to the operator first.
@@ -54,10 +54,10 @@ is sized for broader use. S1 pagination, S2 retirement and S4 extra indexes are
 optional and not justified by present measurements. No worker restarted.
 
 1. **A111 — dependable delegation + trustworthy acceptance.** Operator-requested staged
-   dispatch: `dispatch/AGENT_111_INTENT_ALIGNED_VERIFIED_CLOSURE.md`. Start P0's writer/bypass
-   map and offline reproductions, then preserve owner intent/revisions, enforce evidence-bound
+   dispatch: `dispatch/AGENT_111_INTENT_ALIGNED_VERIFIED_CLOSURE.md`. Start P0's failure/friction
+   and writer/bypass maps, then inherit owner context automatically and enforce evidence-bound
    acceptance in existing `record_review`/`close_case`, integrate the existing Scientific Governor,
-   calibrate with the operator and demonstrate useful hands-off work. Execution completion stays
+   measure quality/friction and demonstrate useful hands-off work. Execution completion stays
    separate from objective acceptance. One queue/inbox/closer; retire the activity-count gate.
    Engineering can start without S1; model quality, domain labels and production activation are
    distinct gates. Packet authored, implementation not started; no paid run or worker restart.
@@ -84,8 +84,10 @@ Only jobs that are genuinely open. Everything merged/done is in git and the disp
 
 | Job | Packet | Depends on | Status | What it is |
 |---|---|---|---|---|
-| **A114** | `AGENT_114_CONSEQUENTIAL_DECISION_INTEGRATION.md` | A113 proven; coordinate A111/A71/A75 | ready | Finish declared SDK-budget control at actual worker/SDK process creation: verified owner authority, immutable consumed boot specification, recovery/visibility and safe rollout. A113's offline palette proof is complete; production enforcement remains unactivated. |
-| **A111** | `AGENT_111_INTENT_ALIGNED_VERIFIED_CLOSURE.md` | staged gates in packet | **ready** — plan authored; implementation not started | P0–P6: original intent → evidence/authority → one closure gate → existing independent reviewer → recovery/bounds → owner calibration → useful hands-off production acceptance. Reuses A102/A105/A94–96; ORACLE evidence remains external. |
+| **A117** | `AGENT_117_TELEMETRY_CONTEXT_ECONOMICS.md` | — | **ready** — engineering authorized; checkpoint `4f1c61c` unshipped | Finish issue #144: trustworthy context/advice, durable recovery deal and provider-cost receipts; final verification, review and shipping remain. Worker activation/natural acceptance are explicit gates. |
+| **A116** | `AGENT_116_TRUSTWORTHY_ARCHITECTURE_AUDIT.md` | none; coordinate A111 | **ready — operator-approved 2026-11-16; issue #290** | Repair authoritative review/membership reads and make architecture-audit execution, coverage, counts and evaluation failure-honest; autonomous implementation, independent verification and scoped certification required. |
+| **A114** | `AGENT_114_CONSEQUENTIAL_DECISION_INTEGRATION.md` | A113 proven; coordinate A111/A71/A75 | ready for offline implementation | Protect declared SDK-budget use at turn admission and SDK creation/reuse; prove owner authority, target-worker resolved inputs, recovery and visibility. Launch-only guards miss warm sends. A113 is an offline palette proof; production enforcement remains unactivated. |
+| **A111** | `AGENT_111_INTENT_ALIGNED_VERIFIED_CLOSURE.md` | staged gates in packet | **ready — operator-approved; issue #292** — implementation not started | P0–P6: failure/friction traces → inherited intent → evidence-bound closure → existing reviewer → recovery/bounds → measured quality/usability → useful hands-off proof. Coordinates A114/A116; reserved activation gates remain. |
 | **A105** | `AGENT_105_CROSS_PROCESS_TURN_SIGNAL.md` | A104 ✅ | **active** — PRs #280/#281 merged; live `7d39020`; natural acceptance pending | Shared bounded HTTP turn signal wakes scheduler, effects and inbox; polls remain recovery. Await three natural eligible completions ≤2s and 24h observation; no paid proof turn. |
 | **A102** | `AGENT_102_UNIFY_BACKEND_PATHWAYS.md` | — | **blocked** — S2 merged + gateway live (`7c6d01a`); worker promotion and natural S3 acceptance pending | One carrier-owned `TurnControl` and natural backend operations; shims, rollout gates and dead gateway session execution removed. Worker restart needs the operator decision and drain/ancestry checks; no paid proof turn. |
 | **A94** | `AGENT_94_SYSTEM_ONE_CORE_DELIVERY_SCORECARD.md` | — | ready (Level 3) | S1 core + decision log + replay baseline + advisory wake scorecard. Operator inputs: read-only controller DB copy, `TYPESAFE_API_KEY`. |
@@ -105,6 +107,69 @@ Only jobs that are genuinely open. Everything merged/done is in git and the disp
 ---
 
 ## Recent shift notes
+
+**2026-11-18 — Codex quota PR #288 review.** Worker metadata → bounded controller
+ingest → existing quota store → Home; strict counters/timestamps, fixed-cadence
+expiry and fresh-data precedence have offline regression coverage. Ingest admits
+four actual mutations (permits survive HTTP cancellation), caps bodies at 16 KiB
+and body reads at five seconds; SQLite busy wait remains five seconds. Deferred:
+no hard native DB/COMMIT/Python write-lock deadline or exact native RSS bound;
+four retained permits contain stalled work under the existing trusted-worker
+assumption. A71 owns node/account authority. Worker activation and natural
+refresh without an active turn still require a separately authorized worker
+promotion; no worker restart or paid proof turn is part of PR certification.
+Evidence and full boundary: `docs/CODEX_QUOTA_OBSERVATION_DESIGN.md` §5.1 and §7.
+
+**2026-11-17 — Python runtime enforcement and CI timing.** Runtime package imports
+reject Python <3.12 before loading service modules; workers advertise their Python
+version in existing heartbeat state. CI already selects 3.12. Docker verification
+adds GHA BuildKit caches for both image targets and 15 slowest-test timings while
+retaining the complete credential-free offline suite. PR #296 measured 6m24s:
+87s test-image build, 207s tests (3,244 passed/41 skipped), 48s worker-image build
+and 29s native control smoke; no hang established. PR #297 warm test-image
+build measured 32s. Total remained 6m27s because the first worker-cache export
+added 47.5s; no whole-job warm-cache speedup is claimed yet. Slow-test output
+exposed a false-positive offline-node test: only memory was marked offline, so the
+DB-authoritative path enqueued work and waited 30s; its timeout text satisfied the
+weak assertion. The test now marks the canonical DB offline, checks the exact
+refusal and asserts no queued task. Actions use current Node 24 runtimes; native
+Python dependencies also have a pip cache.
+
+**2026-11-17 — Codex worker startup recovery.** Kanebra restart drained zero active
+tasks; the first native `initialize` exceeded its 30s deadline and a later runtime
+start succeeded. The initiating native stall is unproven: prior startup cleanup
+discarded its stderr. Startup now retries that handshake once under the existing
+runtime lock, only after complete teardown and before publishing the client; no
+session/turn RPC is replayed. Interrupts also clean the unpublished child. Failure
+logs retain exception type, PID, exit code and bounded stderr byte count, never
+raw native stderr. Existing 32-request/4 MiB frame/16 MiB event-buffer bounds and
+request deadlines remain; no new endpoint/DB change. Two attempts permit up to
+60s handshake waiting plus existing cleanup/optional account-read budgets; no hard
+native process-creation/pipe-close deadline is claimed. Operator authorized native worker promotion on 2026-11-17: Kanebra now runs
+merged `3f0f27f` (PRs #296/#297) on isolated Python 3.12.16, with a new incarnation, zero active
+tasks and successful Codex discovery. `.venv` now points to that runtime; the
+old quota feature branch and Python 3.11 venv are retained for recovery. The
+original divergent local main was preserved as `archive/main-pre-python312-20261117`;
+the primary checkout is current main. Never switch its source during worker startup.
+Gateway/task-server `3f0f27f` are healthy on Python 3.12.16, schema 49
+unchanged. The host process scan found no Python 3.11 processes after retiring
+idle external-client MCP helpers and fixing the OpenCode interpreter command.
+Remote Horse interpreter verification remains pending under the Linux-only rule.
+The four expired telemetry batches and pre-existing Claude prewarm failures are separate observations, not repaired by this startup patch.
+
+**2026-11-15 — Python dependency modernization merged (PR #286, `9bbdd35`; #282 absorbed).**
+Verification and rollout limits live in `DEPENDENCY_UPGRADE_REPORT.md`.
+Both final CI jobs pass; production-copy Sessions/Jobs/Affiliations/Cost JSON is
+identical. Promotion was completed on 2026-11-17 for the gateway, task server and Kanebra
+(see the notes above); remote Horse remains unverified. The prior divergent main
+and quota branch were preserved before restoring the canonical main checkout.
+SDK stdout resynchronization retains
+the existing 16 Mi-character per-stream limit, now checked before decoding complete
+frames too; this is not a process-RSS bound (Unicode and decoded objects add memory).
+Existing carrier admission/session ownership remain authoritative. A 100-session
+native-process/RSS bound is deferred: that workload is not sized or certified by
+this migration; keep the existing trusted-operator workload assumption. Offline
+SDK protocol peers and actual MCP adapters are tested without paid model calls.
 
 **2026-11-09 — Stop-turn cancellation correction (session `9fd6defe12e7`).**
 Ledger evidence on 2026-11-08: stop 23:49:18.360 UTC → Horse control claim

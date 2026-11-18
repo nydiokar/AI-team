@@ -78,6 +78,11 @@ export function summarizeProviderUsage(
   // observation is only a fallback for a provider/window the coordinator has
   // not reported yet; it must never overwrite a fresh poll with a turn event.
   const coordinatorWindows = new Set<string>();
+  const usablePercent = (provider: string, used: number | null, resetAt: string | null, unavailable: boolean): number | null => {
+    if (provider === "codex" &&
+        (unavailable || (resetAt != null && Date.parse(resetAt) <= Date.now()))) return null;
+    return clampPercent(used);
+  };
   const markCoordinator = (provider: string, durationSeconds: number | null, used: number | null) => {
     if (used != null) coordinatorWindows.add(`${provider}:${windowLabel(durationSeconds)}`);
   };
@@ -122,13 +127,15 @@ export function summarizeProviderUsage(
           ? s.telemetry_state || s.classification_status || "unavailable"
           : null;
       const duration = bucket?.window_duration_seconds ?? null;
-      markCoordinator(s.provider, duration, s.used_percent);
+      const used = usablePercent(s.provider, s.used_percent, s.window_end_at,
+        !["current", "ok"].includes(s.telemetry_state));
+      markCoordinator(s.provider, duration, used);
       push(
         s.provider,
         s.principal_hash,
         duration,
-        s.used_percent,
-        unknown,
+        used,
+        unknown ?? s.telemetry_state,
         s.window_end_at,
       );
     }
@@ -139,12 +146,15 @@ export function summarizeProviderUsage(
         snap.used_percent == null ? snap.unavailable_reason || snap.raw_status || "unavailable" : null;
       const duration =
         snap.window_duration_seconds ?? bucketById.get(snap.bucket_id)?.window_duration_seconds ?? null;
-      markCoordinator(snap.provider, duration, snap.used_percent);
+      const used = usablePercent(snap.provider, snap.used_percent, snap.reset_at,
+        ["unavailable", "malformed", "unsupported", "partial"].includes(snap.telemetry_quality) ||
+        (snap.observed_at !== "" && Date.now() - Date.parse(snap.observed_at) > 900_000));
+      markCoordinator(snap.provider, duration, used);
       push(
         snap.provider,
         snap.principal_hash,
         duration,
-        snap.used_percent,
+        used,
         unknown,
         snap.reset_at,
       );

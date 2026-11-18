@@ -568,6 +568,44 @@ async def test_codex_worker_error_does_not_overwrite_last_good_snapshot(tmp_path
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("field,value", [
+    ("resets_at", 10**30), ("resets_at", True),
+    ("window_minutes", "300"), ("used_percent", True),
+])
+async def test_codex_malformed_window_preserves_last_good_snapshot(tmp_path, field, value):
+    db_path = str(tmp_path / "quota.db")
+    await ingest_worker_quota_observation(
+        provider="codex", node_id="n", limits=_codex_limits(), db_path=db_path,
+    )
+    store = QuotaWindowStore(db_path)
+    before = store.latest_snapshots()
+    limits = _codex_limits()
+    limits["primary"][field] = value
+    result = await ingest_worker_quota_observation(
+        provider="codex", node_id="n", limits=limits, db_path=db_path,
+    )
+    assert result["accepted"] is False
+    assert result["reason"] == "invalid_limits"
+    assert store.latest_snapshots() == before
+
+
+@pytest.mark.asyncio
+async def test_codex_worker_readings_expire_despite_local_adaptive_schedule(tmp_path):
+    now = datetime(2026, 11, 18, 0, 0, tzinfo=timezone.utc)
+    db_path = str(tmp_path / "quota.db")
+    await ingest_worker_quota_observation(
+        provider="codex", node_id="n", limits=_codex_limits(now=now),
+        observed_at=utc_iso(now), db_path=db_path,
+    )
+    coordinator = QuotaWindowCoordinator(
+        store=QuotaWindowStore(db_path), adapters=[], enabled=True,
+        now=lambda: now + timedelta(hours=1),
+    )
+    states = coordinator.read_status()["window_states"]
+    assert all(s["telemetry_state"] == "stale" for s in states)
+
+
+@pytest.mark.asyncio
 async def test_undeclared_quota_provider_is_rejected_loudly(tmp_path):
     result = await ingest_worker_quota_observation(
         provider="mystery",

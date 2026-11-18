@@ -4,7 +4,7 @@ A self-hosted control plane for local coding agents. Run Claude Code, Codex, or 
 on your own machines; control them from a web UI or Telegram; let a manager agent coordinate
 parallel workers and review their output — all without leaving your infrastructure.
 
-Python 3.11+ · FastAPI · SQLite · React 19 · MIT
+Python 3.12+ · FastAPI · SQLite · React 19 · MIT
 
 ---
 
@@ -49,7 +49,7 @@ so it mirrors the code rather than drifting from it.
 
 ## Getting started
 
-Prerequisites: Python 3.11+, pnpm (for the web UI), and at least one supported agent CLI
+Prerequisites: Python 3.12+, pnpm (for the web UI), and at least one supported agent CLI
 (Claude Code, Codex, or OpenCode).
 
 ```bash
@@ -133,7 +133,7 @@ Full inventory: [`docs/backend/ENV_FEATURE_FLAGS.md`](docs/backend/ENV_FEATURE_F
 
 ## Tech stack
 
-**Gateway** — Python 3.11+, FastAPI, Uvicorn, Pydantic v2, `claude-agent-sdk`, anyio,
+**Gateway** — Python 3.12+, FastAPI, Uvicorn, Pydantic v2, `claude-agent-sdk`, anyio,
 SQLite (WAL, versioned migrations), MCP over stdio, PM2.
 
 **Web UI** — React 19, TypeScript, Vite, Tailwind v4, TanStack Query, Zustand, Radix, Vitest.

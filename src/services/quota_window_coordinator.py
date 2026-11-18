@@ -1239,6 +1239,11 @@ def _window_state_for(
     used_percent = snapshot.get("used_percent")
     reason = str(snapshot.get("unavailable_reason") or "")
     duration = snapshot.get("window_duration_seconds") or (bucket.get("window_duration_seconds") if bucket else None)
+    spec = spec_for_provider(provider)
+    if spec is not None and spec.observable and not spec.local_observer:
+        # Worker observations use a fixed timer, not this process's adaptive
+        # schedule. A read must not extend the life of a vanished worker's data.
+        next_observe_due_at = None
     # Threaded from the adapter at observation time (A78 §1); absent on old
     # rows and error snapshots ⇒ "unknown", which blocks automation honestly.
     active_session_state = str(snapshot.get("active_session_state") or "unknown")
@@ -1701,9 +1706,9 @@ def _slug(value: str) -> str:
 
 
 class CodexRateLimitWindow(BaseModel):
-    used_percent: float = Field(ge=0, le=100, allow_inf_nan=False)
-    window_minutes: int = Field(gt=0, le=525600)
-    resets_at: int = Field(gt=0)
+    used_percent: float = Field(ge=0, le=100, allow_inf_nan=False, strict=True)
+    window_minutes: int = Field(gt=0, le=525600, strict=True)
+    resets_at: int = Field(gt=0, le=253402300799, strict=True)
 
 
 class CodexRateLimitsObservation(BaseModel):
