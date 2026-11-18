@@ -120,10 +120,11 @@ four actual mutations (permits survive HTTP cancellation), caps bodies at 16 KiB
 and body reads at five seconds; SQLite busy wait remains five seconds. Deferred:
 no hard native DB/COMMIT/Python write-lock deadline or exact native RSS bound;
 four retained permits contain stalled work under the existing trusted-worker
-assumption. A71 owns node/account authority. Worker activation and natural
-refresh without an active turn still require a separately authorized worker
-promotion; no worker restart or paid proof turn is part of PR certification.
-Evidence and full boundary: `docs/CODEX_QUOTA_OBSERVATION_DESIGN.md` §5.1 and §7.
+assumption. A71 owns node/account authority. The operator-authorized Kanebra
+promotion is complete. PR #299 deployed `8c05949` to both controllers. A natural
+post-deploy worker sample at 20:27 UTC matched mobile Home; the API kept the
+unknown account, unclassified window and unknown activity as automation blockers.
+Evidence and full boundary are in `docs/CODEX_QUOTA_OBSERVATION_DESIGN.md` §5.1, §7 and §10.
 
 **2026-11-18 — Issue #144 context/recovery economics (PR #293).**
 Claude request context is separated from invocation spend; SDK USD estimates and observed
