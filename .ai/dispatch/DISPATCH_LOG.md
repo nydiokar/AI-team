@@ -36,10 +36,12 @@ rollout; a separate investigation job does not gate starting the build.
 <a id="A113"></a>
 <a id="A114"></a>
 <a id="A116"></a>
+<a id="A118"></a>
 
 | # | Dispatch | Date | Level | Status | One-line |
 |---|---|---|---|---|---|
 | A117 | `AGENT_117_TELEMETRY_CONTEXT_ECONOMICS.md` | 2026-11-17 | 3 | ready — engineering authorized; unshipped checkpoint `4f1c61c`; worker activation gated | **Finish issue #144 with measured proof.** Resume existing context/recovery economics, refresh final checks/review, ship and reconcile natural compaction/recovery receipts; no fabricated savings or threshold calibration. |
+| A118 | `AGENT_118_OPENCODE_REPLY_RECOVERY.md` | 2026-11-18 | 3 | dispatched — ready; [issue #298](https://github.com/nydiokar/AI-team/issues/298) | **Diagnose and repair OpenCode managed-turn reply loss.** Reconstruct the incident and test whether strict prompt-parent correlation structurally misses compaction continuations; review the root-cause plan before code, then recover only provably owned replies and verify persistence/user visibility. |
 | A116 | `AGENT_116_TRUSTWORTHY_ARCHITECTURE_AUDIT.md` | 2026-11-16 | 3 | ready — operator-approved for autonomous implementation; issue #290 | **Trustworthy architecture audit + ledger readers.** Fix stale latest-review and truncated membership projections, fail-open analysis/coverage, SQL attribution and misleading scoring; certify CLI/report/browser/dispatch behavior against frozen defects and benign controls before closure. |
 | A114 | `AGENT_114_CONSEQUENTIAL_DECISION_INTEGRATION.md` | 2026-11-13 | 3 | ready for offline implementation — reviewed 2026-11-17; activation needs verified owner authority | **Finish real consequential-decision integration.** Guard protected turns and SDK creation/reuse against exact target-worker inputs; prove zero forbidden launches/sends, recovery, visibility and ordinary compatibility. No production activation claimed. |
 | A113 | `AGENT_113_CONSEQUENTIAL_DECISION_CONTROL_PROTOTYPE.md` | 2026-11-10 | 3 | done — offline prototype proven, PR #285 | **Guard consequential publication.** Immutable informed decisions, scoped authority, exact CSS snapshot consumption, separate evaluation and crash/retry/promotion tests pass; production identity/SDK integration remains A114. |
