@@ -691,6 +691,7 @@ export interface RawSessionTimelineResponse {
   coverage: Record<string, string>;
   context_fill: RawContextFill;
   context_economics?: {
+    compaction_coverage?: string;
     recovery_coverage?: string;
     recommendation: string;
     threshold: number;
@@ -701,7 +702,7 @@ export interface RawSessionTimelineResponse {
       reclaimed_ratio: number | null; avoided_read_usd_per_request: number | null;
       observed_compaction_usd: number | null; break_even_warm_requests: number | null;
     }[];
-    recoveries: { task_id: string; status: string; observed_usd: number | null;
+    recoveries: { task_id: string; status: string; observed_usd: number | null; cost_basis?: string;
       prior_session_id?: string | null; session_id?: string | null; estimate?: RawCaseResumeEstimate | null;
       tokens?: { input_tokens: number | null; output_tokens: number | null; cache_read_tokens: number | null;
         cache_creation_tokens: number | null; context_used_ratio: number | null };

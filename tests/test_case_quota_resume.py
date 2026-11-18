@@ -636,6 +636,33 @@ def test_auto_resume_holds_back_above_the_usd_ceiling(tmp_path, monkeypatch):
                 if a["action"] == CASE_RESUME_APPROVAL_ACTION]) == 1
 
 
+@pytest.mark.parametrize("tokens,measured,expected_deliveries", [
+    (160000, True, 0),  # a cheap old-context alternative never prices a fresh boot
+    (20000, False, 0),  # a legacy proxy cannot authorize a bounded automatic spend
+    (20000, True, 1),
+])
+def test_positive_auto_ceiling_requires_measured_in_place_cost(
+    tmp_path, monkeypatch, tokens: int, measured: bool, expected_deliveries: int,
+) -> None:
+    _flags(monkeypatch, auto="1", ceiling="2.0")
+    db = _mk_db(tmp_path, monkeypatch)
+    orch = _Orch(_FakeStore(_FakeSession("mgr-1")), snapshots=_restored_snapshot())
+    case_id = _case(db, "mgr-1")
+    _record_cache_write(db, "mgr-1", tokens)
+    if measured:
+        with db._write() as conn:
+            conn.execute("UPDATE llm_turns SET metrics_json=?,projection_version=4 WHERE session_id=?", (
+                json.dumps({"turn_exit_context_tokens": tokens, "context_window_tokens": 200000}), "mgr-1"))
+    _pause(orch, db, case_id, "mgr-1")
+    assert asyncio.run(orch._handle_quota_paused_case(db, case_id)) is True
+    assert len(orch.deliveries) == expected_deliveries
+    approvals = [row for row in orch.approval_service.list(limit=50)
+                 if row["action"] == CASE_RESUME_APPROVAL_ACTION]
+    assert len(approvals) == 1 - expected_deliveries
+    if approvals:
+        assert json.loads(approvals[0]["payload"])["estimate"]["cache_creation_tokens"] == tokens
+
+
 # --------------------------------------------------------------------------- #
 # 5. One leased resume — two entry points cannot make two Managers             #
 # --------------------------------------------------------------------------- #
@@ -1435,7 +1462,7 @@ def test_latest_context_replaces_historical_write_and_uses_its_model(tmp_path, m
     orch = _Orch(_FakeStore(_FakeSession("mgr-1")))
     _record_cache_write(db, "mgr-1", 250000)
     with db._write() as conn:
-        conn.execute("UPDATE llm_turns SET metrics_json=?, observed_models=? WHERE session_id=?", (
+        conn.execute("UPDATE llm_turns SET metrics_json=?, observed_models=?,projection_version=4 WHERE session_id=?", (
             json.dumps({"turn_exit_context_tokens": 40000, "context_window_tokens": 200000}),
             '["sonnet"]', "mgr-1"))
     estimate = orch.estimate_case_resume_cost("mgr-1")

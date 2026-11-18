@@ -484,7 +484,7 @@ def test_native_auto_compaction_keeps_boundary_without_content():
     assert "DO_NOT_RECORD" not in str(events)
 
 
-@pytest.mark.parametrize("cost", [-1, "secret", True, float("inf")])
+@pytest.mark.parametrize("cost", [-1, "secret", True, float("inf"), 10**400, 1e308])
 def test_invalid_provider_cost_is_not_a_recorded_price(cost):
     from src.core.telemetry_projection import project_turn
     events = _events_from_ndjson(json.dumps({"type": "result", "total_cost_usd": cost,
@@ -523,3 +523,60 @@ def test_cost_only_result_keeps_explicit_recorded_zero():
     from src.services.context_economics import observed_turn_cost
     turn = project_turn(_events_from_ndjson('{"type":"result","total_cost_usd":0,"usage":{}}'))["turn"]
     assert observed_turn_cost(turn) == 0
+
+
+def test_zero_cache_counters_survive_final_receipt() -> None:
+    from src.core.telemetry_projection import project_turn
+
+    events = _events_from_ndjson(json.dumps({"type": "result", "usage": {
+        "input_tokens": 0, "output_tokens": 0,
+        "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0,
+    }}))
+    metrics = project_turn(events)["turn"]["metrics"]
+    assert metrics["cache_read_tokens"] == 0
+    assert metrics["cache_creation_tokens"] == 0
+
+
+@pytest.mark.parametrize("message_id,usage", [
+    ("", {"input_tokens": 200}),
+    ("x" * 513, {"input_tokens": 200}),
+    ("overflow", {"input_tokens": 2**63 - 1}),
+])
+def test_rejected_latest_sample_cannot_reuse_previous_context(message_id, usage) -> None:
+    from src.core.telemetry_projection import project_turn
+
+    adapter = _adapter()
+    events = adapter.observe_assistant_usage({"input_tokens": 100}, "first")
+    events += adapter.observe_assistant_usage(usage, message_id)
+    events += adapter.consume_line('{"type":"result","usage":{"input_tokens":200}}')
+    assert project_turn(events)["turn"]["metrics"]["turn_exit_context_tokens"] is None
+
+
+def test_cost_only_compaction_keeps_boundary_and_invalidates_old_context() -> None:
+    from src.core.telemetry_projection import project_turn
+
+    events = _events_from_ndjson("\n".join(json.dumps(item) for item in [
+        {"type": "assistant", "message": {"id": "before", "usage": {"input_tokens": 180000}}},
+        {"type": "system", "subtype": "compact_boundary", "compact_metadata": {
+            "pre_tokens": 180000, "trigger": "manual"}},
+        {"type": "result", "total_cost_usd": 0, "usage": {}},
+    ]))
+    metrics = project_turn(events)["turn"]["metrics"]
+    assert metrics["turn_exit_context_tokens"] is None
+    assert len(metrics["compactions"]) == 1
+    assert metrics["compactions"][0]["before_tokens"] == 180000
+    assert metrics["compactions"][0]["after_tokens"] is None
+
+
+def test_child_stream_message_cannot_replace_parent_context_or_model() -> None:
+    from src.core.telemetry_projection import project_turn
+
+    events = _events_from_ndjson("\n".join(json.dumps(item) for item in [
+        {"type": "assistant", "message": {"id": "parent", "model": "opus", "usage": {"input_tokens": 100}}},
+        {"type": "assistant", "parent_tool_use_id": "tool", "message": {
+            "id": "child", "model": "haiku", "usage": {"input_tokens": 1000}}},
+        {"type": "result", "usage": {"input_tokens": 1100}},
+    ]))
+    turn = project_turn(events)["turn"]
+    assert turn["observed_models"] == ["opus"]
+    assert turn["metrics"]["turn_exit_context_tokens"] == 100

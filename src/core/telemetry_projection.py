@@ -402,7 +402,7 @@ def project_turn(events: Iterable[TelemetryEvent | Dict[str, Any]]) -> Dict[str,
                 reported_cost = attrs.get("provider_reported_cost_usd")
                 request["provider_reported_cost_usd"] = (
                     float(reported_cost) if type(reported_cost) in (int, float)
-                    and math.isfinite(reported_cost) and reported_cost >= 0 else None
+                    and 0 <= reported_cost <= 2**63 - 1 and math.isfinite(reported_cost) else None
                 )
                 request["usage_granularity"] = granularity
                 request["usage_source"] = attrs.get("usage_source")
@@ -500,7 +500,8 @@ def project_turn(events: Iterable[TelemetryEvent | Dict[str, Any]]) -> Dict[str,
             continue
         attrs = event.get("attributes") or {}
         before, after = attrs.get("before_tokens"), attrs.get("after_tokens")
-        if any(type(value) is not int or not 0 <= value <= 2**63 - 1 for value in (before, after)):
+        if (type(before) is not int or not 0 <= before <= 2**63 - 1
+                or (after is not None and (type(after) is not int or not 0 <= after <= 2**63 - 1))):
             turn_flags.append("invalid_compaction_context")
             continue
         trigger = attrs.get("trigger")

@@ -113,7 +113,7 @@ alone.
 
 ## 9. Issue #144 — context and recovery economics (2026-11-16)
 
-**Delivery status:** unshipped implementation checkpoint. [A117](../.ai/dispatch/AGENT_117_TELEMETRY_CONTEXT_ECONOMICS.md) owns fresh verification, final review, shipping and live acceptance. The measurements below are prior-run evidence, not production activation.
+**Delivery status (2026-11-18):** PR #293 final corrections verified; shipping in progress. [A117](../.ai/dispatch/AGENT_117_TELEMETRY_CONTEXT_ECONOMICS.md) owns deployment and live acceptance. Original measurements below are prior-run evidence; fresh verification follows in §9.1. Worker activation is not claimed.
 
 The original adapter incorrectly called Claude's uncached input inclusive-cache.
 Invocation totals also could not establish a current context size. The corrected
@@ -178,3 +178,67 @@ attribution, unbounded proposal display, query scans and misleading zero/error d
 threshold; historical aggregates cannot recover a missing window/context; provider SDK
 activation needs an authorized worker rollout and a natural new receipt. Gateway deployment
 alone cannot update an already-running worker. No worker restart is implied by these tests.
+
+### 9.1 Fresh completion and adversarial review — 2026-11-18
+
+Resumed checkpoint `4f1c61c` and merged current main `30f1f53` using merge commit
+`d7e3e17`. No feature rewrite, schema migration, flag activation or historical replay.
+The final self-adversarial pass traced native input through the actual SDK types, SQLite,
+HTTP response, TypeScript adapter and display, plus proposal→producer→managed-turn lineage.
+
+| Finding | Resolution and regression |
+|---|---|
+| **P1:** persisted v3 Claude metrics and UI aggregate fallback could present old/unknown context as measured; recovery could accept that measurement | Read-time projection-version guard shared by telemetry reads and recovery estimates; explicit unknown final context stops UI fallback. `test_legacy_claude_context_is_unavailable_without_rewriting_receipts`, `test_positive_auto_ceiling_requires_measured_in_place_cost`, frontend unknown-final regression. Canonical stored metrics remain unchanged. |
+| **P1:** native `/compact` with boundary + cost-only result discarded its intervention | Flush unmatched boundaries with unknown after-context; retain explicit zero cost; join only an unambiguous subsequent native-session sample. Real SDK-reader cost-only regression plus manual/native completed/failed/session-replacement/intervening matrix. |
+| Zero/unknown, malformed identities/counter overflow and child model contamination | Six new adapter regressions first failed against checkpoint and pass after correction. Explicit zero cache buckets survive; rejected samples invalidate context; child messages cannot replace parent model/context. Invalid/non-finite/oversized USD is rejected. |
+| Failure-honesty and provenance | Unavailable compaction/recovery evidence remains visible; transport retains cost basis and distinguishes provider-reported versus token-derived cost. Foreign cache writes cannot borrow Claude's premium. Unknown reclaimed fractions remain unknown. |
+
+No P0 found; no unresolved P1 in the reviewed implementation. This pass is a self-review,
+not a newly delegated independent review. Production/calibration gates below remain open.
+
+Fresh checks use Python 3.12.16, `ai-team:dependency-closure-tests`, `--network none`, mounted
+feature checkout and `PYTHONPATH=/workspace`, invoking `python -m pytest` with `--tb=short` on:
+`test_context_economics`, `test_claude_telemetry_adapter`, `test_session_timeline`,
+`test_case_quota_resume`, `test_telemetry_projection`, `test_case_respawn`, `test_control_api`,
+`test_sdk_driver_proactive`, `test_pricing`, `test_watched_job_consumption`,
+`test_turn_queue_respawn_crash_safety`, `test_turn_queue_respawn_revalidation`,
+`test_telemetry_contract`, `test_telemetry_privacy`, `test_telemetry_store`, `test_claude_driver`,
+`test_claude_driver_manager_tools`, `test_turn_queue_sdk_ownership` (each under `tests/`, `.py`).
+The final **362-test run passed in 36.77s**, including four additional failed-compaction cases.
+Related vitest: **41 passed across eight files**. `pnpm --dir web typecheck` passes; production
+build passes with a separate writable output directory (the old `web/dist` is root-owned).
+
+The native-stream→SQLite→HTTP integration reproduces **165,200 current-context tokens,
+82.6% fill, 325,330 cumulative token work and $0.47 provider cost**. A separate durable
+recovery test reconciles both session identities and the cold-alternative estimate. Transport
+and render regressions preserve proposal tokens/fraction, execution receipt, zero and unknown.
+Natural fixture assertions still reproduce **149,915 reclaimed tokens (72.4469%)** without
+inventing a window or net savings. The added Opus 5.5 rates match the
+[Anthropic pricing page](https://platform.claude.com/docs/en/about-claude/pricing), checked 2026-11-18.
+
+Reproduce maximum-cardinality measurement with the same offline image and
+`pytest tests/test_context_economics.py -k maximum -s --tb=short`: **500 turns × 32 native
+boundaries + 500 manual tasks**, **2,978.599 ms** under tracemalloc, **9,923,724 peak traced
+Python bytes**, **10,268 JSON bytes**, **20 returned outcomes**. Inputs/imports, complete
+history allocation, native memory and sockets are excluded. Tracemalloc timing is instrumented,
+not a production latency claim. Query-plan regression verifies the existing session/child/task
+indexes and no automatic index; a fresh read-only production plan confirms indexed task,
+session and telemetry primary-key joins. Ten empty-result reads for the most recently updated
+production session measured first **0.811 ms**, warm median **0.026 ms**; this is not a cold
+disk or populated recovery-history benchmark and does not supersede the prior populated measurement.
+
+Service-boundary review: four shared permits span snapshot, projection and serialization;
+at N=100, at most four execute and excess readers get 429. Serialization failure releases the
+permit (regression); synchronous handlers keep it until actual work returns even if an HTTP
+caller disconnects. Worst measured incremental projection at four admissions is about **40 MB**;
+absolute RSS/history/native/socket bounds retain CONTEXT's trusted-operator deferral. Identity
+128, cursor 64, item page 1–200, sources 500, native boundaries 32/turn, outcomes 20, child sessions
+100; no new request body. Existing ten-second cooperative SQLite budget and per-lock timeout
+apply; no hard Python/native IO/response socket deadline is claimed. Parameter validation and
+structured 429/503 cover malformed/failed requests; individual evidence failures mark coverage
+unavailable. Provider USD is finite, nonnegative and at most signed-64-bit maximum. No new DB,
+endpoint, background loop, queue or worker restart.
+
+Reserved acceptance remains: authorized worker promotion, natural linked recovery/compaction
+receipts, and an adequacy evaluation using actually reported windows. Eighty percent is advisory
+policy, not proven optimal calibration; keep issue #144 open for those observations.

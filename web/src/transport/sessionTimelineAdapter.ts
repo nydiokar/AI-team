@@ -62,6 +62,7 @@ export function toSessionActivityTimeline(
     coverage: raw.coverage ?? {},
     contextFill: toContextFill(raw.context_fill),
     ...(raw.context_economics ? { contextEconomics: {
+      compactionCoverage: raw.context_economics.compaction_coverage,
       recoveryCoverage: raw.context_economics.recovery_coverage,
       recommendation: raw.context_economics.recommendation,
       threshold: raw.context_economics.threshold,
@@ -73,7 +74,7 @@ export function toSessionActivityTimeline(
         observedCompactionUsd: row.observed_compaction_usd, breakEvenWarmRequests: row.break_even_warm_requests,
       })),
       recoveries: raw.context_economics.recoveries.map(row => ({
-        taskId: row.task_id, status: row.status, observedUsd: row.observed_usd,
+        taskId: row.task_id, status: row.status, observedUsd: row.observed_usd, costBasis: row.cost_basis,
         priorSessionId: row.prior_session_id, sessionId: row.session_id, coldResumeUsd: row.estimate?.usd,
         inputTokens: row.tokens?.input_tokens, outputTokens: row.tokens?.output_tokens,
         cacheReadTokens: row.tokens?.cache_read_tokens, cacheCreationTokens: row.tokens?.cache_creation_tokens,

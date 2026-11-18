@@ -304,3 +304,32 @@ def test_context_telemetry_excludes_child_usage_and_preserves_window_and_boundar
         assert metrics["provider_reported_cost_usd"] == 1.27
     finally:
         sess.close()
+
+
+def test_sdk_cost_only_compact_receipt_survives_without_usage() -> None:
+    from claude_agent_sdk import SystemMessage
+    from src.core.telemetry import TelemetryContext
+    from src.core.telemetry_adapters.claude_stream_json import ClaudeStreamJsonAdapter
+    from src.core.telemetry_projection import project_turn
+
+    fake = _FakeClient()
+    result = _result("compacted")
+    result.usage = {}
+    result.total_cost_usd = 0
+    fake.replies["/compact"] = [SystemMessage(subtype="compact_boundary", data={
+        "compact_metadata": {"pre_tokens": 180000, "trigger": "manual"}}), result]
+    sess = _start_fake_session(fake)
+    try:
+        outcome = sess.send("/compact", turn=turn_control("cost-only-compact"))
+        adapter = ClaudeStreamJsonAdapter(TelemetryContext(
+            turn_id="compact", invocation_id="inv", node_id="node", backend="claude",
+        ), emitter_process_instance_id="proc")
+        events = [event for line in outcome.raw_ndjson.splitlines() for event in adapter.consume_line(line)]
+        metrics = project_turn(events)["turn"]["metrics"]
+        assert metrics["provider_reported_cost_usd"] == 0
+        assert metrics["input_tokens"] is None
+        assert metrics["turn_exit_context_tokens"] is None
+        assert metrics["compactions"][0]["after_tokens"] is None
+        assert metrics["compactions"][0]["before_tokens"] == 180000
+    finally:
+        sess.close()

@@ -1,12 +1,12 @@
 ```yaml
 job_id: AGENT_117_TELEMETRY_CONTEXT_ECONOMICS
 created_at: "2026-11-17T09:37:34.631774+00:00"        # CANONICAL — set once at dispatch, never derive again
-status: ready              # ready | active | blocked | done | dead
-owner: ""
+status: active              # ready | active | blocked | done | dead
+owner: Codex
 depends_on: []
 results_ref: DISPATCH_LOG.md#A117             # -> DISPATCH_LOG.md section with the verdict prose
-evidence: []                  # artifact paths that PROVE it ran (checked to exist)
-updated_at: "2026-11-17T09:37:36.047561+00:00"
+evidence: ["docs/cost_monitoring_audit.md", "tests/test_context_economics.py", "tests/test_claude_telemetry_adapter.py"]                  # artifact paths that PROVE it ran (checked to exist)
+updated_at: "2026-11-18T10:41:25.600197+00:00"
 ```
 
 
@@ -275,9 +275,9 @@ retired: [RESUME_IN_PLACE_CACHE_WARM_SEC]
 
 - [x] Issue intent, scope, authority and known limits anchored in this packet.
 - [x] Existing implementation preserved as remote checkpoint `4f1c61c`.
-- [ ] P0: starting revision, current ownership and writer→consumer map verified.
-- [ ] P1: final correctness/compatibility gaps closed.
-- [ ] P2: final targeted checks, reproducible measurements and adversarial review pass.
+- [x] P0: clean feature worktree `/tmp/ai-team-issue144`, checkpoint `4f1c61c`; merged current main `30f1f53` as `d7e3e17`. Primary checkout remains on main; older checkout-divergence notes above are historical.
+- [x] P1: final correctness/compatibility gaps closed; see audit §9.1 and added failing-before-fix regressions.
+- [x] P2: targeted Python/frontend checks, reproducible measurements and final adversarial review pass; shipping CI remains separate.
 - [ ] P3: merge and gateway deployment complete.
 - [ ] R1: authorized worker activation complete.
 - [ ] Natural receipts and advice-adequacy evidence complete.
@@ -285,7 +285,25 @@ retired: [RESUME_IN_PLACE_CACHE_WARM_SEC]
 
 ## Closure
 
-**Not complete.** This packet is ready for an executor to resume the existing code and carry
-it through verification and shipping. Production worker activation and natural acceptance
-remain explicit external gates. Replace this paragraph with the evidence-bound closure only
-when every required acceptance item above is satisfied.
+**Engineering verified on 2026-11-18; shipping in progress.** Writer→consumer:
+SDK parent usage/boundary/result → adapter v2 → projection v4 → existing SQLite telemetry →
+session timeline/usage API → transport adapter → context/recovery panel and session costs.
+Recovery proposal → approval payload; execution snapshot → canonical producer token → managed
+turn/idempotency link → provider receipt, visible from both sessions. Read-time compatibility
+rejects v3 Claude context without reprojecting history or changing billing buckets.
+
+Fresh proof includes 362 targeted Python tests (36.77s), including the failed-manual status
+matrix; 41 related frontend tests; typecheck and production build. Exact final run is recorded
+in audit §9.1. Existing root-owned `web/dist` prevented cleanup, so production compilation used
+`pnpm --dir web build --outDir /tmp/ai-team-a117-web-final-20261118`; no artifact ownership was changed.
+
+Final adversarial review fixed two P1 paths: legacy context could masquerade as measured
+context at UI/recovery admission, and native cost-only compaction lost its boundary. Remaining
+corrections cover explicit zero, malformed/overflow counters/cost, child model contamination,
+ambiguous/failed compaction attribution, unavailable reads and lost cost provenance. No P0
+found and no unresolved P1 within this PR's engineering scope. See audit §9.1 for evidence and
+the explicit service-boundary review. No independent agent review is claimed for this pass.
+
+Production worker activation and natural receipt/advice adequacy remain open. Keep A117
+active and issue #144 open until the exact worker builds and naturally occurring recovery
+and compaction receipts reconcile through API/UI. No paid proof turn or worker restart.

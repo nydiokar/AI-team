@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 from bisect import bisect_left, bisect_right
 from datetime import datetime, timezone
 from typing import Any, Literal
@@ -318,6 +319,11 @@ def build_session_timeline(
             ),
         )
     economics = _session_context_economics(turns, tasks, approvals)
+    economics["compaction_coverage"] = (
+        "unavailable" if "unavailable" in (coverage["tasks"], coverage["telemetry"])
+        else "partial" if "partial" in (coverage["tasks"], coverage["telemetry"]) else "complete"
+    )
+    economics["recovery_coverage"] = "unavailable"
     if db is not None and callable(getattr(db, "session_recovery_evidence", None)):
         recovery_rows, recovery_coverage = _load_list("recovery_evidence", lambda: db.session_recovery_evidence(session_id))
         economics["recovery_coverage"] = recovery_coverage
@@ -540,6 +546,8 @@ def _session_context_economics(
         key=lambda row: _text(row.get("started_at") or row.get("created_at")),
     )
     outcomes: list[dict[str, Any]] = []
+    manual_after: dict[str, int | None] = {}
+    compact_tasks = {str(task.get("id")): task for task in compactions}
     compact_task_ids = {str(task.get("id")) for task in compactions}
     for index, task in enumerate(compactions):
         start = _text(task.get("started_at") or task.get("created_at"))
@@ -547,8 +555,7 @@ def _session_context_economics(
         next_start = (_text(compactions[index + 1].get("started_at") or compactions[index + 1].get("created_at"))
                       if index + 1 < len(compactions) else "")
         compact_turn = by_task.get(str(task.get("id")))
-        if _loads_dict((compact_turn or {}).get("metrics")).get("compactions"):
-            continue  # the native boundary below is the same intervention
+        native_boundaries = _loads_dict((compact_turn or {}).get("metrics")).get("compactions")
         before_index = bisect_right(end_times, start) - 1
         after_index = bisect_left(start_times, end) if end else len(ordered)
         before = completed[before_index] if before_index >= 0 else None
@@ -557,10 +564,16 @@ def _session_context_economics(
                       or _loads_dict(after.get("metrics")).get("compactions")):
             after = None  # another intervention makes attribution ambiguous
         # A native session replacement cannot prove the compactor's effect.
-        if before and after and (not before.get("backend_session_id_end") or before.get("backend_session_id_end") != after.get("backend_session_id_start")):
+        native_end = (compact_turn or {}).get("backend_session_id_end") or (before or {}).get("backend_session_id_end")
+        if after and (not native_end or native_end != after.get("backend_session_id_start")):
             after = None
         before_tokens = _loads_dict((before or {}).get("metrics")).get("turn_exit_context_tokens")
         after_tokens = _loads_dict((after or {}).get("metrics")).get("turn_entry_context_tokens")
+        if native_boundaries:
+            # A local /compact may report its boundary and cost without a model
+            # request. Join the next observation, retaining the native before value.
+            manual_after[str(task.get("id"))] = after_tokens if task.get("status") == "completed" else None
+            continue
         outcome = compaction_outcome(
             str(task.get("id")), str(task.get("status") or "unknown"), before_tokens, after_tokens,
             turn_model(after or before or {}), observed_turn_cost(by_task.get(str(task.get("id")))),
@@ -569,10 +582,15 @@ def _session_context_economics(
         outcome["measurement"] = "observed" if after_tokens is not None else "awaiting_next_context_observation"
         outcomes.append(outcome)
     for turn in ordered:
-        for boundary in _loads_dict(turn.get("metrics")).get("compactions", []):
+        boundaries = _loads_dict(turn.get("metrics")).get("compactions", [])
+        for index, boundary in enumerate(boundaries):
+            manual_task = compact_tasks.get(str(turn.get("task_id") or turn.get("turn_id")))
+            after_tokens = boundary.get("after_tokens")
+            if after_tokens is None and index == len(boundaries) - 1:
+                after_tokens = manual_after.get(str(turn.get("task_id") or turn.get("turn_id")))
             outcome = compaction_outcome(
-                str(boundary.get("event_id")), "completed", boundary.get("before_tokens"),
-                boundary.get("after_tokens"), turn_model(turn),
+                str(boundary.get("event_id")), str(manual_task.get("status")) if manual_task else "completed", boundary.get("before_tokens"),
+                after_tokens, turn_model(turn),
                 observed_turn_cost(turn) if str(turn.get("task_id") or turn.get("turn_id")) in compact_task_ids else None,
             ).model_dump()
             outcome["observed_at"] = boundary.get("observed_at") or turn.get("started_at") or turn.get("created_at") or ""
@@ -607,12 +625,13 @@ def _recovery_proposal(row: dict[str, object]) -> dict[str, Any]:
         if key in ("known", "usd", "cache_creation_tokens", "basis", "context_quality", "observed_at", "reason", "session_id", "model")
         and isinstance(value, (str, int, float, bool, type(None)))
         and (not isinstance(value, str) or len(value) <= 128)
+        and (type(value) not in (int, float) or (-2**63 <= value <= 2**63 - 1 and math.isfinite(value)))
     }
     bounded_estimate = {"known": False, "reason": "no_recorded_estimate", "session_id": row.get("session_id"),
                         "model": None, "cache_creation_tokens": None, "usd": None, "basis": "unknown", **bounded_estimate}
     economics = _loads_dict(estimate.get("economics"))
     bounded_estimate["economics"] = {
-        key: value if type(value) in (int, float) else None
+        key: value if type(value) in (int, float) and -2**63 <= value <= 2**63 - 1 and math.isfinite(value) else None
         for key, value in ((key, economics.get(key)) for key in ("context_used_ratio", "warm_read_usd", "cold_premium_usd"))
     }
     return {

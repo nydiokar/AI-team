@@ -280,6 +280,7 @@ export interface SessionActivityTimeline {
  */
 
 export interface SessionContextEconomics {
+  compactionCoverage?: string;
   recoveryCoverage?: string;
   recommendation: string;
   threshold: number;
@@ -294,7 +295,7 @@ export interface SessionContextEconomics {
     observedCompactionUsd: number | null;
     breakEvenWarmRequests: number | null;
   }[];
-  recoveries: { taskId: string; status: string; observedUsd: number | null;
+  recoveries: { taskId: string; status: string; observedUsd: number | null; costBasis?: string;
     priorSessionId?: string | null; sessionId?: string | null; coldResumeUsd?: number | null;
     inputTokens?: number | null; outputTokens?: number | null; cacheReadTokens?: number | null;
     cacheCreationTokens?: number | null; contextUsedRatio?: number | null;

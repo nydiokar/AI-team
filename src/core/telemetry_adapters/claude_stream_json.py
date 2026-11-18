@@ -116,7 +116,10 @@ class ClaudeStreamJsonAdapter:
         Memory is bounded to 4096 messages × four integer counters; overflow
         stops interim updates, while final result processing remains intact.
         """
-        if not isinstance(message_id, str) or not message_id or len(message_id) > 512 or self._result_usage_emitted:
+        if self._result_usage_emitted:
+            return []
+        if not isinstance(message_id, str) or not message_id or len(message_id) > 512:
+            self._live_last_context = None
             return []
         fields = ("input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")
         if any(field in usage and _int_or_none(usage[field]) is None for field in fields):
@@ -127,6 +130,7 @@ class ClaudeStreamJsonAdapter:
             if type(value := usage.get(field)) is int and 0 <= value <= 2**63 - 1
         }
         if not counters:
+            self._live_last_context = None
             return []
         if message_id not in self._live_messages and len(self._live_messages) >= 4096:
             self._live_last_context = None
@@ -137,6 +141,7 @@ class ClaudeStreamJsonAdapter:
             return []
         if any(self._live_totals.get(field, 0) + value - previous.get(field, 0) > 2**63 - 1
                for field, value in updated.items()):
+            self._live_last_context = None
             return []
         self._live_messages[message_id] = updated
         self._live_last_context = (
@@ -202,12 +207,14 @@ class ClaudeStreamJsonAdapter:
             # tool_result carries content (user/tool-produced text) — never store.
             return self._consume_tool_result(payload, event_time=event_time)
         if event_type == "system" and payload.get("subtype") == "compact_boundary":
+            events = self._flush_compaction(event_time=event_time)
             metadata = payload.get("compact_metadata") or payload.get("compactMetadata")
             if isinstance(metadata, dict):
-                self._compaction_before = _int_or_none(metadata.get("pre_tokens") or metadata.get("preTokens"))
+                self._compaction_before = _int_or_none(metadata.get("pre_tokens", metadata.get("preTokens")))
                 trigger = metadata.get("trigger")
                 self._compaction_trigger = trigger if trigger in ("auto", "manual") else "unknown"
-            return []
+            self._live_last_context = None
+            return events
         if event_type in ("system", "user"):
             # Structural scaffolding — no telemetry value, no sensitive content.
             return []
@@ -278,6 +285,7 @@ class ClaudeStreamJsonAdapter:
         Call this after processing all lines to ensure the usage event is emitted
         even when no ``type=result`` line appears (e.g. truncated stream on kill).
         """
+        events = self._flush_compaction(event_time=event_time)
         if self._pending_assistant_usage is not None and not self._result_usage_emitted:
             event = self._build_usage_event(
                 self._pending_assistant_usage,
@@ -290,8 +298,19 @@ class ClaudeStreamJsonAdapter:
                     "usage_coverage": "partial",
                 }})
             self._pending_assistant_usage = None
-            return [event]
-        return []
+            events.append(event)
+        return events
+
+    def _flush_compaction(self, *, event_time: Optional[datetime]) -> List[TelemetryEvent]:
+        """Retain a boundary even when the command has no next request sample."""
+        if self._compaction_before is None:
+            return []
+        event = self._event("context.compacted", event_time=event_time, attributes={
+            "before_tokens": self._compaction_before, "after_tokens": None,
+            "trigger": self._compaction_trigger,
+        })
+        self._compaction_before = None
+        return [event]
 
     # ------------------------------------------------------------------
     # Internal event consumers
@@ -305,6 +324,8 @@ class ClaudeStreamJsonAdapter:
     ) -> List[TelemetryEvent]:
         """Handle ``type=assistant``.  Store usage as pending; never emit yet."""
         events: List[TelemetryEvent] = []
+        if payload.get("parent_tool_use_id"):
+            return events
         message = payload.get("message")
         if isinstance(message, dict):
             model = message.get("model")
@@ -320,6 +341,7 @@ class ClaudeStreamJsonAdapter:
                                   if event.event_name == "context.compacted")
                     self._pending_assistant_usage = dict(self._live_totals) or None
                 else:
+                    self._live_last_context = None
                     self._pending_assistant_usage = usage
         # Never store message content (text blocks, tool_use arrays, etc.)
         return events
@@ -331,9 +353,9 @@ class ClaudeStreamJsonAdapter:
         event_time: Optional[datetime],
     ) -> List[TelemetryEvent]:
         """Handle ``type=result``.  Emit usage from here; discard assistant pending."""
-        events: List[TelemetryEvent] = []
+        events = self._flush_compaction(event_time=event_time)
         reported_cost = payload.get("total_cost_usd")
-        if type(reported_cost) in (int, float) and math.isfinite(reported_cost) and reported_cost >= 0:
+        if type(reported_cost) in (int, float) and 0 <= reported_cost <= 2**63 - 1 and math.isfinite(reported_cost):
             self._reported_cost = float(reported_cost)
         models = payload.get("modelUsage")
         if isinstance(models, dict):
@@ -437,10 +459,10 @@ class ClaudeStreamJsonAdapter:
         input_tokens = _int_or_none(usage.get("input_tokens"))
         output_tokens = _int_or_none(usage.get("output_tokens"))
         cache_read = _int_or_none(
-            usage.get("cache_read_input_tokens") or usage.get("cache_read_tokens")
+            usage.get("cache_read_input_tokens", usage.get("cache_read_tokens"))
         )
         cache_create = _int_or_none(
-            usage.get("cache_creation_input_tokens") or usage.get("cache_creation_tokens")
+            usage.get("cache_creation_input_tokens", usage.get("cache_creation_tokens"))
         )
 
         attributes: Dict[str, Any] = {

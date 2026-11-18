@@ -9367,7 +9367,7 @@ class MeshDB:
                       turn.session_id, turn.turn_kind, turn.status,
                       s.continued_from AS prior_session_id,
                       t.metrics_json, t.coverage_json, t.observed_models, t.requested_model,
-                      t.final_status
+                      t.final_status, t.backend, t.projection_version
                FROM recent turn
                JOIN sessions s ON s.session_id = turn.session_id
                JOIN mesh_tasks token ON token.id = turn.idempotency_key AND token.producer_turn_id = turn.id
@@ -9381,16 +9381,18 @@ class MeshDB:
     def latest_context_observation(self, session_id: str) -> Optional[Dict[str, Any]]:
         """Latest turn only: a missing measurement must not revive pre-compact context."""
         row = self._conn().execute(
-            """SELECT metrics_json, requested_model, observed_models, COALESCE(ended_at, started_at, created_at) AS observed_at
+            """SELECT metrics_json, requested_model, observed_models, backend, projection_version,
+                      COALESCE(ended_at, started_at, created_at) AS observed_at
                FROM llm_turns WHERE session_id = ? AND COALESCE(final_status, '') != 'withdrawn'
                ORDER BY COALESCE(started_at, created_at) DESC, turn_id DESC LIMIT 1""",
             (session_id,),
         ).fetchone()
         if row is None:
             return None
-        metrics = json.loads(row["metrics_json"] or "{}")
+        from src.services.context_economics import context_metrics
+        metrics = context_metrics({**dict(row), "metrics": json.loads(row["metrics_json"] or "{}")})
         models = json.loads(row["observed_models"] or "[]")
-        model = models[0] if len(models) == 1 else row["requested_model"]
+        model = models[0] if len(models) == 1 else None if models else row["requested_model"]
         return {"context_tokens": metrics.get("turn_exit_context_tokens"),
                 "context_window_tokens": metrics.get("context_window_tokens"),
                 "model": model, "observed_at": row["observed_at"]}

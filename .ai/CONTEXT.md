@@ -84,7 +84,7 @@ Only jobs that are genuinely open. Everything merged/done is in git and the disp
 
 | Job | Packet | Depends on | Status | What it is |
 |---|---|---|---|---|
-| **A117** | `AGENT_117_TELEMETRY_CONTEXT_ECONOMICS.md` | — | **ready** — engineering authorized; checkpoint `4f1c61c` unshipped | Finish issue #144: trustworthy context/advice, durable recovery deal and provider-cost receipts; final verification, review and shipping remain. Worker activation/natural acceptance are explicit gates. |
+| **A117** | `AGENT_117_TELEMETRY_CONTEXT_ECONOMICS.md` | — | **active** — PR #293 final corrections verified; shipping in progress | Context/advice, recovery lineage and provider receipts; worker activation/natural acceptance remain explicit gates. |
 | **A116** | `AGENT_116_TRUSTWORTHY_ARCHITECTURE_AUDIT.md` | none; coordinate A111 | **ready — operator-approved 2026-11-16; issue #290** | Repair authoritative review/membership reads and make architecture-audit execution, coverage, counts and evaluation failure-honest; autonomous implementation, independent verification and scoped certification required. |
 | **A114** | `AGENT_114_CONSEQUENTIAL_DECISION_INTEGRATION.md` | A113 proven; coordinate A111/A71/A75 | ready for offline implementation | Protect declared SDK-budget use at turn admission and SDK creation/reuse; prove owner authority, target-worker resolved inputs, recovery and visibility. Launch-only guards miss warm sends. A113 is an offline palette proof; production enforcement remains unactivated. |
 | **A111** | `AGENT_111_INTENT_ALIGNED_VERIFIED_CLOSURE.md` | staged gates in packet | **ready — operator-approved; issue #292** — implementation not started | P0–P6: failure/friction traces → inherited intent → evidence-bound closure → existing reviewer → recovery/bounds → measured quality/usability → useful hands-off proof. Coordinates A114/A116; reserved activation gates remain. |
@@ -108,15 +108,21 @@ Only jobs that are genuinely open. Everything merged/done is in git and the disp
 
 ## Recent shift notes
 
-**2026-11-16 — Issue #144 context/recovery economics (unshipped checkpoint).**
+**2026-11-18 — Issue #144 context/recovery economics (PR #293).**
 Claude request context is separated from invocation spend; provider USD and observed
 model/window survive SDK telemetry. Durable recovery snapshots/receipts link both sessions;
 compaction advice at 80% has measured native/manual outcomes and honest unknowns.
+Final review rejects legacy v3 Claude context on reads without rewriting receipts,
+preserves zero buckets and cost-only compact boundaries, and prevents UI fallbacks
+from reviving unknown final context. Production activation is not yet certified.
 Continuation: A117 (`AGENT_117_TELEMETRY_CONTEXT_ECONOMICS.md`).
 Evidence and exact limits: `docs/cost_monitoring_audit.md` §9. Natural replay reclaimed
 149,915 tokens (72.4469%); no realized USD savings or calibrated threshold claim.
 Four shared timeline/usage permits, bounded scalar evidence and ten-second cooperative
 SQLite reads apply; existing native IO/Python/socket/history-byte deferrals remain.
+Worst advertised incremental projection (500 turns × 32 boundaries + 500 tasks)
+measured 9,923,724 traced Python bytes; four admitted readers imply about 40 MB for
+that projection alone, excluding history, imports, native memory and socket buffers.
 Worker activation requires operator authorization and a natural receipt; no worker restarted.
 
 **2026-11-17 — Python runtime enforcement and CI timing.** Runtime package imports

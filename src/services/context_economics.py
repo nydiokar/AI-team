@@ -12,6 +12,19 @@ from src.services.pricing import TokenTotals, estimate_cost
 COMPACTION_THRESHOLD: float = 0.80
 
 
+def context_metrics(turn: dict[str, object]) -> dict[str, object]:
+    """Reject persisted pre-v4 Claude context without rewriting billing history."""
+    raw = turn.get("metrics")
+    metrics = raw if isinstance(raw, dict) else {}
+    version = turn.get("projection_version")
+    if turn.get("backend") in (None, "claude") and isinstance(version, int) and version < 4:
+        return {**metrics, **{key: None for key in (
+            "turn_entry_context_tokens", "turn_exit_context_tokens", "peak_context_tokens", "context_tokens",
+            "context_window_tokens", "context_used_ratio", "context_remaining_tokens",
+        )}}
+    return metrics
+
+
 class ContextEconomics(BaseModel):
     context_tokens: int | None = None
     context_window_tokens: int | None = None
@@ -90,8 +103,11 @@ def observed_turn_cost(turn: dict[str, object] | None) -> float | None:
     if isinstance(metrics, dict):
         from math import isfinite
         reported = metrics.get("provider_reported_cost_usd")
-        if type(reported) in (int, float) and isfinite(reported) and reported >= 0:
+        if type(reported) in (int, float) and 0 <= reported <= 2**63 - 1 and isfinite(reported):
             return float(reported)
+    version = turn.get("projection_version")
+    if turn.get("backend") in (None, "claude") and isinstance(version, int) and version < 4:
+        return None  # legacy uncached-input projection cannot price an observed turn
     if not isinstance(metrics, dict) or any(metrics.get(key) is None for key in (
         "input_tokens", "uncached_input_tokens", "output_tokens", "cache_read_tokens", "cache_creation_tokens",
     )) or turn.get("final_status") not in ("success", "failed", "completed", "cancelled"):
@@ -99,7 +115,10 @@ def observed_turn_cost(turn: dict[str, object] | None) -> float | None:
     usage_coverage = turn.get("coverage")
     if isinstance(usage_coverage, dict) and (usage_coverage.get("usage") or {}).get("coverage") == "partial":
         return None
-    cost = estimate_cost(turn_model(turn), TokenTotals(
+    model = turn_model(turn)
+    if metrics.get("cache_creation_tokens") and context_economics(0, None, model).cold_write_usd is None:
+        return None  # no provider-specific write policy; never borrow Claude's premium
+    cost = estimate_cost(model, TokenTotals(
         input=metrics.get("uncached_input_tokens") or 0,
         output=metrics.get("output_tokens") or 0,
         cache_read=metrics.get("cache_read_tokens") or 0,

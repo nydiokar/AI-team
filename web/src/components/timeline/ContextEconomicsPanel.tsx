@@ -12,17 +12,18 @@ export function ContextEconomicsPanel({ economics: e }: { economics: SessionCont
     {e.coldWriteUsd != null && <p>Current context: cold write {dollars(e.coldWriteUsd)};
       warm read {dollars(e.warmReadUsd)}. API equivalents, excluding new input and output.</p>}
     {e.recoveryCoverage === "unavailable" && <p role="status">Recovery evidence unavailable — refresh to retry.</p>}
+    {e.compactionCoverage === "unavailable" && <p role="status">Compaction evidence unavailable — refresh to retry.</p>}
     {(e.compactions.length > 0 || e.recoveries.length > 0 || e.proposals.length > 0) && <details>
       <summary>Context and recovery evidence (latest 500 turns/tasks)</summary>
       {e.compactions.map(row => <p key={row.taskId}>
         Compaction {row.taskId}: {row.status}. {row.reclaimedTokens == null
           ? "Benefit awaiting context evidence."
-          : `${compactTokens(row.reclaimedTokens)} tokens reclaimed (${((row.reclaimedRatio ?? 0) * 100).toFixed(1)}%); estimated avoided warm read ${dollars(row.avoidedReadUsdPerRequest)}/request.`}
+          : `${compactTokens(row.reclaimedTokens)} tokens reclaimed (${row.reclaimedRatio == null ? "percentage unknown" : `${(row.reclaimedRatio * 100).toFixed(1)}%`}); estimated avoided warm read ${dollars(row.avoidedReadUsdPerRequest)}/request.`}
         {" "}Recorded compaction cost: {dollars(row.observedCompactionUsd)}.
         {row.breakEvenWarmRequests != null && ` Estimated warm-read break-even, including retained rewrite: ${row.breakEvenWarmRequests} requests.`}
       </p>)}
       {e.recoveries.map(row => <p key={row.taskId}>Recovery {row.taskId}: {row.status};
-        recorded usage cost {dollars(row.observedUsd)}.
+        {row.costBasis === "provider_reported" ? "provider-reported cost" : "estimated usage cost (5-minute cache write)"} {dollars(row.observedUsd)}.
         {row.priorSessionId && <> Session {row.priorSessionId} → {row.sessionId}.</>}
         {row.coldResumeUsd != null && <> Old-context cold alternative: {dollars(row.coldResumeUsd)}.</>}
         {[row.inputTokens, row.outputTokens, row.cacheReadTokens, row.cacheCreationTokens].some(value => value != null) && <> Input {compactTokens(row.inputTokens)},
