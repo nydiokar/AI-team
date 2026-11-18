@@ -55,6 +55,7 @@ def test_session_usage_distinguishes_unknown_from_recorded_zero(client, monkeypa
         read_snapshot=nullcontext,
         get_session_token_totals=lambda ids: {"usage-session": totals} if totals else {},
         live_task_sessions=lambda ids: {"usage-session"} if active else set(),
+        session_provider_cost=lambda sid: {"usd": None, "priced_turns": 0, "turns": 0, "coverage": "partial"},
     )
     monkeypatch.setattr(control_api, "_db", lambda: db)
     response = client.get("/api/sessions/usage-session/usage", headers=_auth())
@@ -1067,3 +1068,90 @@ def test_home_reads_report_database_failure_per_request(client, monkeypatch, tmp
     monkeypatch.setattr(home_status, 'codex_usage', unavailable)
     assert client.get('/api/nodes?activity=true', headers=_auth()).status_code == 503
     assert client.get('/api/quota-windows', headers=_auth()).status_code == 503
+
+
+def test_timeline_rejects_excess_reads_and_oversized_identity(client):
+    from src.control.routes.sessions import _USAGE_READ_SLOTS
+    assert client.get(f"/api/sessions/{'x' * 129}/timeline", headers=_auth()).status_code == 422
+    for _ in range(4):
+        assert _USAGE_READ_SLOTS.acquire(blocking=False)
+    try:
+        assert client.get("/api/sessions/s/timeline", headers=_auth()).status_code == 429
+    finally:
+        for _ in range(4):
+            _USAGE_READ_SLOTS.release()
+
+
+def test_timeline_snapshot_failure_returns_structured_unavailable(client, monkeypatch):
+    import sqlite3
+    from contextlib import contextmanager
+    from types import SimpleNamespace
+
+    @contextmanager
+    def unavailable():
+        raise sqlite3.OperationalError("disk unavailable")
+        yield
+
+    monkeypatch.setattr(control_api, "_db", lambda: SimpleNamespace(read_snapshot=unavailable))
+    response = client.get("/api/sessions/s/timeline", headers=_auth())
+    assert response.status_code == 503
+    assert response.json()["detail"] == "session_timeline_unavailable"
+
+
+def test_timeline_retains_read_slot_through_serialization_failure(client, monkeypatch) -> None:
+    from src.control.routes import sessions
+
+    def fail_serialization(*args, **kwargs):
+        # Three other slots are free; this request must still own the fourth.
+        for _ in range(3):
+            assert sessions._USAGE_READ_SLOTS.acquire(blocking=False)
+        try:
+            assert not sessions._USAGE_READ_SLOTS.acquire(blocking=False)
+        finally:
+            for _ in range(3):
+                sessions._USAGE_READ_SLOTS.release()
+        raise ValueError("serialization failed")
+
+    monkeypatch.setattr(sessions, "JSONResponse", fail_serialization)
+    with pytest.raises(ValueError, match="serialization failed"):
+        client.get("/api/sessions/s/timeline", headers=_auth())
+    for _ in range(4):
+        assert sessions._USAGE_READ_SLOTS.acquire(blocking=False)
+    for _ in range(4):
+        sessions._USAGE_READ_SLOTS.release()
+
+
+def test_context_and_provider_cost_reconcile_from_native_stream_to_api(client, monkeypatch, tmp_path) -> None:
+    import json
+    from src.control.db import MeshDB
+    from src.control.telemetry_store import TelemetryStore
+    from src.core.telemetry import TelemetryContext
+    from src.core.telemetry_adapters.claude_stream_json import ClaudeStreamJsonAdapter
+
+    db = MeshDB(str(tmp_path / "native-api.db"))
+    store = TelemetryStore(db)
+    adapter = ClaudeStreamJsonAdapter(TelemetryContext(
+        turn_id="native-turn", invocation_id="inv", node_id="node", session_id="native-session",
+        backend="claude", model="opus",
+    ), emitter_process_instance_id="proc")
+    lines = [
+        {"type": "assistant", "message": {"id": "a", "model": "opus", "usage": {
+            "input_tokens": 100, "cache_read_input_tokens": 150000, "cache_creation_input_tokens": 10000}}},
+        {"type": "assistant", "message": {"id": "b", "model": "opus", "usage": {
+            "input_tokens": 200, "cache_read_input_tokens": 160000, "cache_creation_input_tokens": 5000}}},
+        {"type": "result", "turn_cost_usd": .47, "modelUsage": {"opus": {"contextWindow": 200000}},
+         "usage": {"input_tokens": 300, "output_tokens": 30, "cache_read_input_tokens": 310000,
+                   "cache_creation_input_tokens": 15000}},
+    ]
+    events = [event for line in lines for event in adapter.consume_line(json.dumps(line))]
+    store.insert_events(events)
+    monkeypatch.setattr(control_api, "_db", lambda: db)
+    monkeypatch.setattr(control_api, "_telemetry_store", lambda: store)
+    response = client.get("/api/sessions/native-session/timeline", headers=_auth())
+    assert response.status_code == 200
+    assert response.json()["context_fill"]["context_used_ratio"] == .826
+    assert response.json()["context_economics"]["context_tokens"] == 165200
+    assert response.json()["context_economics"]["recommendation"] == "compact"
+    usage = client.get("/api/sessions/native-session/usage", headers=_auth()).json()
+    assert usage["tokens"]["total"] == 325330
+    assert usage["provider_cost"] == {"usd": .47, "priced_turns": 1, "turns": 1, "coverage": "complete"}

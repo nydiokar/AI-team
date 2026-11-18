@@ -336,15 +336,8 @@ def _cache_heartbeat_evidence_sufficient(db: Any, session_id: str) -> bool:
 #: re-scope the objective.
 CASE_RESUME_MODES: Tuple[str, ...] = ("in_place", "fresh_manager")
 
-#: [quota-resume] When ``in_place`` is the ECONOMICALLY right resume, despite the
-#: cache-rewrite risk. Either condition is sufficient:
-#:   * the pause is younger than the provider's prompt-cache TTL (~1h) ⇒ the cache
-#:     is still warm, so resuming the live session re-writes nothing;
-#:   * the session's recent cache writes are small ⇒ even a cold rewrite is cheap,
-#:     and keeping the full conversation is worth more than the tokens.
-#: Otherwise ``fresh_manager`` — rebuilt from the Case brief, which is the whole
-#: reason that mode exists.
-RESUME_IN_PLACE_CACHE_WARM_SEC: int = 3600
+#: Prefer retaining a small conversation. No observed cache-expiry evidence is
+#: available here, so pause age must not imply a free/warm resume.
 RESUME_IN_PLACE_MAX_CACHE_TOKENS: int = 100_000
 
 
@@ -2698,23 +2691,12 @@ class TaskOrchestrator(ITaskOrchestrator):
             )
 
     def estimate_case_resume_cost(self, session_id: Optional[str]) -> Dict[str, Any]:
-        """[quota-resume] What resuming THIS session is likely to cost, and how we
-        know — the number that turns "resume?" into a decision.
+        """Cold in-place cache-write scenario, excluding new prompt and output.
 
-        The dominant cost of resuming hours later is the prompt-cache REWRITE:
-        the provider's cache TTL (~1h) has long expired, so the entire
-        conversation is billed again at the cache-write rate. We do not have
-        per-request context telemetry (``usage_granularity='invocation_total'``,
-        ``usage_coverage='aggregate_only'``), so the context size is NOT directly
-        observable. What IS observed is the largest ``cache_creation_tokens``
-        this session ever wrote (whole-session, not a recent slice — the fat
-        early context load is the true resume cost) — see
-        ``MeshDB.recent_cache_write``. That is used as the estimate and labelled
-        as such (``basis='max_session_turn_cache_creation'``), never dressed up
-        as a measurement.
-
-        Honesty rules: an unpriceable model or absent telemetry yields
-        ``known=False`` + a reason, never a fabricated number.
+        Prefer the latest measured request context and its observed model/time.
+        Legacy invocation aggregates cannot recover context; the largest past
+        cache write remains a labelled proxy that may be stale after compaction.
+        This is not the price of a fresh Manager or a full future turn.
         """
         out: Dict[str, Any] = {
             "known": False, "reason": "no_telemetry", "session_id": session_id,
@@ -2732,16 +2714,27 @@ class TaskOrchestrator(ITaskOrchestrator):
                 out["reason"] = "db_unavailable"
                 return out
             row = db.recent_cache_write(session_id)
-            session = self.session_store.get(session_id)
-            model = getattr(session, "model", None) if session is not None else None
-            out["model"] = model
             if row is None:
                 out["reason"] = "no_recorded_turn"
                 return out
-            tokens = int(row.get("cache_creation") or 0)
+            observation = db.latest_context_observation(session_id)
+            observed_context = (observation or {}).get("context_tokens")
+            basis_row = observation if isinstance(observed_context, int) else row
+            model = basis_row.get("model")
+            out["model"] = model
+            tokens = int(observed_context) if isinstance(observed_context, int) else int(row.get("cache_creation") or 0)
+            out["basis"] = "latest_request_context" if isinstance(observed_context, int) else "max_session_turn_cache_creation"
+            out["context_quality"] = "observed_request" if isinstance(observed_context, int) else "historical_proxy_may_be_stale"
+            from src.services.context_economics import context_economics
+            out["economics"] = context_economics(
+                tokens, (observation or {}).get("context_window_tokens"), model,
+            ).model_dump()
             out["cache_creation_tokens"] = tokens
-            out["observed_at"] = row.get("observed_at")
-            cost = estimate_cost(model or row.get("model"), TokenTotals(cache_creation=tokens))
+            out["observed_at"] = basis_row.get("observed_at")
+            if out["economics"]["cold_write_usd"] is None:
+                out["reason"] = "unsupported_cold_cache_policy_or_pricing"
+                return out
+            cost = estimate_cost(model, TokenTotals(cache_creation=tokens))
             if not getattr(cost, "known", False):
                 out["reason"] = getattr(cost, "reason", "model_not_priced") or "model_not_priced"
                 return out
@@ -2763,34 +2756,22 @@ class TaskOrchestrator(ITaskOrchestrator):
         closed, cancelled, errored) — a dead session must be reconstructed from
         the ledger, there is nothing to decide.
 
-        For a LIVE session the choice is economic, and the deciding quantity is
-        the prompt cache. Resuming ``in_place`` costs nothing extra while the
-        provider's cache is still warm (~1h TTL), and stays cheap for a small
-        conversation even after it goes cold. It becomes the expensive mode
-        exactly when a fat session is resumed hours later — the 200-300k-token
-        rewrite this seam exists to avoid. So: in_place when the pause is younger
-        than the cache TTL **or** the session's recent cache writes are small;
-        otherwise fresh_manager, rebuilt from the Case brief.
-
-        ``paused_at`` is the pause's ledger timestamp; without it (an ordinary
-        operator poke, no pause) only the size rule applies.
+        For a live session use measured size (or a labelled legacy proxy).
+        Pause age does not prove a cache hit: provider caches can have 5-minute
+        or 1-hour TTLs and may be invalidated. Fresh reconstruction also has a
+        boot cost, so this is a size policy, not proof of net monetary savings.
         """
         session = self.session_store.get(session_id) if session_id else None
         if session is None or session.status in (
             SessionStatus.CLOSED, SessionStatus.CANCELLED, SessionStatus.ERROR,
         ):
             return "fresh_manager"
-        paused_dt = _parse_iso_utc(paused_at)
-        if paused_dt is not None:
-            age_sec = (datetime.now(timezone.utc) - paused_dt).total_seconds()
-            if 0 <= age_sec < RESUME_IN_PLACE_CACHE_WARM_SEC:
-                return "in_place"          # cache still warm — nothing to rewrite
         tokens = self.estimate_case_resume_cost(session_id).get("cache_creation_tokens")
         if isinstance(tokens, int) and tokens > RESUME_IN_PLACE_MAX_CACHE_TOKENS:
             return "fresh_manager"         # cold + fat ⇒ the expensive case
         if tokens is None:
             # Unmeasured session: assume the expensive case rather than spend on
-            # an unknown. fresh_manager loses transcript detail, never money.
+            # an unknown. Fresh boot cost remains unmeasured until execution.
             return "fresh_manager"
         return "in_place"
 
@@ -2990,7 +2971,8 @@ class TaskOrchestrator(ITaskOrchestrator):
             ceiling = case_quota_resume_auto_max_usd()
             usd = estimate.get("usd")
             under_ceiling = (
-                ceiling <= 0 or (isinstance(usd, (int, float)) and usd <= ceiling)
+                ceiling <= 0 or (mode == "in_place" and estimate.get("basis") == "latest_request_context"
+                                 and isinstance(usd, (int, float)) and usd <= ceiling)
             )
             if case_quota_resume_auto() and under_ceiling:
                 await self.resume_case(
@@ -3017,8 +2999,10 @@ class TaskOrchestrator(ITaskOrchestrator):
             result = self.approval_service.request(
                 action=CASE_RESUME_APPROVAL_ACTION, risk="medium", reversible=True,
                 requested_by="system", case_id=case_id,
-                expires_at=_case_approval_expiry(),
+                expires_at=_case_approval_expiry(), session_id=pause.get("session_id"),
                 payload={
+                    "estimate": estimate,
+                    "cost_scope": "old_context_cold_resume_alternative_fresh_boot_cost_unknown",
                     "case_id": case_id,
                     "paused_task_id": paused_task_id,
                     "session_id": pause.get("session_id"),
@@ -3220,6 +3204,11 @@ class TaskOrchestrator(ITaskOrchestrator):
 
         token = await asyncio.to_thread(db.get_task, token_id)
         if token is None:
+            if token_action in ("manager_respawn", "manager_quota_resume"):
+                token_payload = dict(token_payload, estimate=await asyncio.to_thread(
+                    TaskOrchestrator.estimate_case_resume_cost, self,
+                    token_payload.get("dead_session_id") or session_id,
+                ))
             await asyncio.to_thread(
                 lambda: db.enqueue_task(
                     token_id, session_id=None, machine_id=CONTINUATION_MACHINE_SENTINEL,
@@ -3701,8 +3690,11 @@ class TaskOrchestrator(ITaskOrchestrator):
                 pass
             result = self.approval_service.request(
                 action=action, risk="medium", reversible=True, requested_by="system",
-                case_id=case_id, expires_at=_case_approval_expiry(),
+                case_id=case_id, session_id=dead_session_id, expires_at=_case_approval_expiry(),
                 payload={
+                    "estimate": self.estimate_case_resume_cost(dead_session_id),
+                    "mode": "fresh_manager",
+                    "cost_scope": "old_context_cold_resume_alternative_fresh_boot_cost_unknown",
                     "case_id": case_id, "generation": generation,
                     "dead_session_id": dead_session_id, "cause": cause,
                     "error_class": error_class, "objective_excerpt": objective_excerpt,

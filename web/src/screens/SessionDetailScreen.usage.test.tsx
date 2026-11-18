@@ -45,3 +45,14 @@ it("shows read errors and keeps stale known usage explicitly labeled", () => {
   expect(container.textContent).toContain("Last recorded totals");
   expect(container.querySelector("button")?.textContent).toBe("Retry");
 });
+
+
+it("shows provider cost and priced-turn coverage separately from estimates", () => {
+  read.mockReturnValue({ data: {
+    usage_state: "recorded", tokens: { total: 100, input: 100, output: 0, cache_read: 0, cache_creation: 0 },
+    cost: { known: false }, provider_cost: { usd: .47, priced_turns: 1, turns: 2, coverage: "partial" },
+  }, isError: false, isLoading: false, refetch: vi.fn() });
+  act(() => root.render(<SessionCostPanel sessionId="s" />));
+  expect(container.textContent).toContain("SDK-reported estimate (1/2 turns)");
+  expect(container.textContent).toContain("0.47");
+});

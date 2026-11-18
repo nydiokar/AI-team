@@ -264,3 +264,109 @@ def test_stream_eof_before_result_is_typed_and_diagnostic():
         assert "normal EOF" in exc.value.reason
     finally:
         sess.close()
+
+
+def test_context_telemetry_excludes_child_usage_and_preserves_window_and_boundary():
+    import json
+    from claude_agent_sdk import SystemMessage
+    from src.core.telemetry import TelemetryContext
+    from src.core.telemetry_adapters.claude_stream_json import ClaudeStreamJsonAdapter
+    from src.core.telemetry_projection import project_turn
+
+    fake = _FakeClient()
+    parent = _assistant("parent")
+    parent.usage = {"input_tokens": 100, "cache_read_input_tokens": 39900,
+                    "cache_creation_input_tokens": 0, "output_tokens": 10}
+    child = _assistant("child")
+    child.message_id = "child"
+    child.parent_tool_use_id = "tool-1"
+    child.usage = {"input_tokens": 1000, "cache_read_input_tokens": 0,
+                   "cache_creation_input_tokens": 0, "output_tokens": 20}
+    result = _result("done")
+    result.usage = parent.usage
+    result.total_cost_usd = 1.27
+    result.model_usage = {"claude-opus-4": {"contextWindow": 200000}}
+    fake.replies["work"] = [SystemMessage(subtype="compact_boundary", data={
+        "compact_metadata": {"pre_tokens": 180000, "trigger": "auto"}}), parent, child, result]
+    sess = _start_fake_session(fake)
+    try:
+        outcome = sess.send("work", turn=turn_control("ctx-test"))
+        lines = [json.loads(line) for line in outcome.raw_ndjson.splitlines()]
+        assert len([line for line in lines if line["type"] == "assistant"]) == 1
+        adapter = ClaudeStreamJsonAdapter(TelemetryContext(
+            turn_id="turn-ctx", invocation_id="inv-ctx", node_id="node", backend="claude", model="claude-opus-4",
+        ), emitter_process_instance_id="proc")
+        events = [event for line in outcome.raw_ndjson.splitlines() for event in adapter.consume_line(line)]
+        metrics = project_turn(events)["turn"]["metrics"]
+        assert metrics["turn_exit_context_tokens"] == 40000
+        assert metrics["context_used_ratio"] == .2
+        assert metrics["compactions"][0]["before_tokens"] == 180000
+        assert metrics["provider_reported_cost_usd"] == 1.27
+    finally:
+        sess.close()
+
+
+@pytest.mark.parametrize("pre_key", ["pre_tokens", "preTokens"])
+def test_sdk_cost_only_compact_receipt_survives_without_usage(pre_key: str) -> None:
+    from claude_agent_sdk import SystemMessage
+    from src.core.telemetry import TelemetryContext
+    from src.core.telemetry_adapters.claude_stream_json import ClaudeStreamJsonAdapter
+    from src.core.telemetry_projection import project_turn
+
+    fake = _FakeClient()
+    result = _result("compacted")
+    result.usage = {}
+    result.total_cost_usd = 0
+    fake.replies["/compact"] = [SystemMessage(subtype="compact_boundary", data={
+        "compact_metadata": {pre_key: 180000, "trigger": "manual"}}), result]
+    sess = _start_fake_session(fake)
+    try:
+        outcome = sess.send("/compact", turn=turn_control("cost-only-compact"))
+        adapter = ClaudeStreamJsonAdapter(TelemetryContext(
+            turn_id="compact", invocation_id="inv", node_id="node", backend="claude",
+        ), emitter_process_instance_id="proc")
+        events = [event for line in outcome.raw_ndjson.splitlines() for event in adapter.consume_line(line)]
+        metrics = project_turn(events)["turn"]["metrics"]
+        assert metrics["provider_reported_cost_usd"] == 0
+        assert metrics["input_tokens"] is None
+        assert metrics["turn_exit_context_tokens"] is None
+        assert metrics["compactions"][0]["after_tokens"] is None
+        assert metrics["compactions"][0]["before_tokens"] == 180000
+    finally:
+        sess.close()
+
+
+@pytest.mark.parametrize("resume,totals,expected", [
+    (None, [1.0, 1.47], [1.0, .47]),
+    ("sid-1", [5.0, 5.47], [None, .47]),
+    (None, [1.0, None, 1.47, 1.67], [1.0, None, None, .20]),
+    (None, [1.0, .5, .6], [1.0, None, None]),
+])
+def test_sdk_cumulative_cost_is_never_summed_as_turn_cost(resume, totals, expected) -> None:
+    import json
+    from src.backends.claude_driver import _TurnAccumulator
+
+    session = _SDKSession("costs", "/tmp", None, {}, resume=resume)
+    observed: list[float | None] = []
+    for total in totals:
+        message = _result("done")
+        message.total_cost_usd = total
+        outcome = session._outcome_from_result(_TurnAccumulator(), message)
+        row = json.loads(outcome.raw_ndjson)
+        observed.append(row.get("turn_cost_usd"))
+    assert observed == expected
+
+
+def test_sdk_crash_zero_and_native_identity_change_do_not_invent_cost_deltas() -> None:
+    import json
+    from src.backends.claude_driver import _TurnAccumulator
+
+    session = _SDKSession("costs", "/tmp", None, {})
+    observed: list[float | None] = []
+    for sid, cost, error in [("a", 1.0, False), ("a", 0, True), ("a", 1.47, False),
+                             ("b", .8, False), ("b", 1.0, False)]:
+        message = _result("done", sid=sid, is_error=error)
+        message.total_cost_usd = cost
+        row = json.loads(session._outcome_from_result(_TurnAccumulator(), message).raw_ndjson)
+        observed.append(row.get("turn_cost_usd"))
+    assert observed == [1.0, None, None, None, .2]

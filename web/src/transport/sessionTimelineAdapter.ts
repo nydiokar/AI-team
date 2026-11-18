@@ -61,5 +61,29 @@ export function toSessionActivityTimeline(
     generatedAt: raw.generated_at,
     coverage: raw.coverage ?? {},
     contextFill: toContextFill(raw.context_fill),
+    ...(raw.context_economics ? { contextEconomics: {
+      compactionCoverage: raw.context_economics.compaction_coverage,
+      recoveryCoverage: raw.context_economics.recovery_coverage,
+      recommendation: raw.context_economics.recommendation,
+      threshold: raw.context_economics.threshold,
+      coldWriteUsd: raw.context_economics.cold_write_usd,
+      warmReadUsd: raw.context_economics.warm_read_usd,
+      compactions: raw.context_economics.compactions.map(row => ({
+        taskId: row.task_id, status: row.status, reclaimedTokens: row.reclaimed_tokens,
+        reclaimedRatio: row.reclaimed_ratio, avoidedReadUsdPerRequest: row.avoided_read_usd_per_request,
+        observedCompactionUsd: row.observed_compaction_usd, breakEvenWarmRequests: row.break_even_warm_requests,
+      })),
+      recoveries: raw.context_economics.recoveries.map(row => ({
+        taskId: row.task_id, status: row.status, observedUsd: row.observed_usd, costBasis: row.cost_basis,
+        priorSessionId: row.prior_session_id, sessionId: row.session_id, coldResumeUsd: row.estimate?.usd,
+        inputTokens: row.tokens?.input_tokens, outputTokens: row.tokens?.output_tokens,
+        cacheReadTokens: row.tokens?.cache_read_tokens, cacheCreationTokens: row.tokens?.cache_creation_tokens,
+        contextUsedRatio: row.tokens?.context_used_ratio,
+      })),
+      proposals: raw.context_economics.proposals.map(row => ({
+        approvalId: row.approval_id, status: row.status, coldResumeUsd: row.estimate?.usd ?? null,
+        contextTokens: row.estimate?.cache_creation_tokens, contextUsedRatio: row.estimate?.economics?.context_used_ratio,
+      })),
+    }} : {}),
   };
 }

@@ -51,6 +51,10 @@ def _family(input_usd: float, output_usd: float) -> PriceRates:
 # families used by the Claude Code and Codex backends today.
 _PRICE_TABLE: Dict[str, PriceRates] = {
     "opus": _family(5.0, 25.0),
+    # Exact observed model; official platform pricing verified 2026-11-16:
+    # https://platform.claude.com/docs/en/about-claude/pricing
+    "opus-5-5": PriceRates(input=4.0, output=20.0, cache_write=5.0, cache_read=0.2),
+    "opus-5.5": PriceRates(input=4.0, output=20.0, cache_write=5.0, cache_read=0.2),
     "sonnet": _family(3.0, 15.0),
     "haiku": _family(1.0, 5.0),
     # Claude Fable 5 (Mythos class) — platform.claude.com pricing, 2026-08-03.
