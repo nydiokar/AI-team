@@ -277,25 +277,48 @@ retired: [RESUME_IN_PLACE_CACHE_WARM_SEC]
 - [x] Existing implementation preserved as remote checkpoint `4f1c61c`.
 - [x] P0: clean feature worktree `/tmp/ai-team-issue144`, checkpoint `4f1c61c`; merged current main `30f1f53` as `d7e3e17`. Primary checkout remains on main; older checkout-divergence notes above are historical.
 - [x] P1: final correctness/compatibility gaps closed; see audit §9.1 and added failing-before-fix regressions.
-- [x] P2: targeted Python/frontend checks, reproducible measurements and final adversarial review pass; shipping CI remains separate.
-- [ ] P3: merge and gateway deployment complete.
+- [x] P2: 384 targeted Python/41 web checks, reproducible measurements and final adversarial review pass; both final CI jobs pass.
+- [x] P3: PR #293 merged `05fad0a`; gateway/task-server deployed and live API/mobile checks pass.
 - [ ] R1: authorized worker activation complete.
 - [ ] Natural receipts and advice-adequacy evidence complete.
 - [ ] Full closure recorded consistently in packet, ledger, CONTEXT and issue.
 
 ## Closure
 
-**Engineering verified on 2026-11-18; shipping in progress.** Writer→consumer:
+**Engineering merged and gateway deployed on 2026-11-18.** Final code commit `ec52556`,
+PR head CI run `44290186725`, merge/deployed build `05fad0a`. Writer→consumer:
 SDK parent usage/boundary/result → adapter v2 → projection v4 → existing SQLite telemetry →
 session timeline/usage API → transport adapter → context/recovery panel and session costs.
 Recovery proposal → approval payload; execution snapshot → canonical producer token → managed
-turn/idempotency link → provider receipt, visible from both sessions. Read-time compatibility
+turn/idempotency link → normalized SDK estimate, visible from both sessions. Read-time compatibility
 rejects v3 Claude context without reprojecting history or changing billing buckets.
 
 Fresh proof includes 384 targeted Python tests (38.23s), including both SDK boundary spellings and the failed-manual status
 matrix; 41 related frontend tests; typecheck and production build. Exact final run is recorded
 in audit §9.1. Existing root-owned `web/dist` prevented cleanup, so production compilation used
-`pnpm --dir web build --outDir /tmp/ai-team-a117-web-final-20261118`; no artifact ownership was changed.
+`pnpm --dir web build --outDir /tmp/ai-team-a117-release-20261118`; no artifact ownership was changed.
+
+Final CI: native **3,305 passed / 38 skipped**, isolated **3,302 passed / 41 skipped**;
+native control/cleanup smoke passes with **zero model turns**. Both jobs green before self-merge.
+Deploy preflight GO, main clean, schema **49→49**, Compose build/recreate of both containers.
+Online SQLite backup: `/home/cifran/ai-team-data/backups/mesh-pre-05fad0a-20261118T1104Z.db`.
+Rollback image: `ai-team:pre-05fad0a`; live image `ai-team:prod-05fad0a`.
+Verified/pushed deployment tag: `deploy/20261118T1104Z-05fad0a`.
+
+Read-only production check at 2026-11-18T11:08Z: both containers healthy, build `05fad0a`,
+schema 49, 2/2 workers online, coverage true, no startup traceback/error. Real historical
+Claude session `7b8753ec1b2e`: **39,959,728** token work, SDK estimate **unknown (0/4 turns)**,
+legacy context/window/fill **unknown**, no fabricated compaction advice. Recovery source read
+complete with zero linked rows; compaction coverage partial. Mobile Chromium (390×844)
+conversation and Info views render with **zero page errors and zero mutation requests**.
+No synthetic production data, history replay, flag change or model turn was used.
+
+Worker gate snapshot at 2026-11-18T11:08:04Z: Kanebra is busy on this caller's
+`task_3f420143` (Codex, started 10:26:42Z), PM2 `ai-team-worker-kanebra`, PID 3297713,
+loaded `3f0f27f`, zero pooled sessions/logins. Horse is idle, zero tasks/pooled sessions,
+loaded `30f1f53`; remote host process inspection remains separate. Neither worker restarted.
+An authorized Kanebra promotion must drain this caller and use a supervised handoff;
+do not restart it from its own child. Natural new receipts/calibration remain unobserved.
 
 Final adversarial review fixed three P1 paths: legacy context could masquerade as measured
 context at UI/recovery admission, native cost-only compaction lost its boundary, and cumulative

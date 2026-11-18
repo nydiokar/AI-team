@@ -113,7 +113,7 @@ alone.
 
 ## 9. Issue #144 — context and recovery economics (2026-11-16)
 
-**Delivery status (2026-11-18):** PR #293 final corrections verified; shipping in progress. [A117](../.ai/dispatch/AGENT_117_TELEMETRY_CONTEXT_ECONOMICS.md) owns deployment and live acceptance. Original measurements below are prior-run evidence; fresh verification follows in §9.1. Worker activation is not claimed.
+**Delivery status (2026-11-18):** PR #293 merged; gateway/task-server live on `05fad0a`, schema 49 unchanged. [A117](../.ai/dispatch/AGENT_117_TELEMETRY_CONTEXT_ECONOMICS.md) records exact CI/deployment/backup/rollback/browser evidence and owns worker/natural acceptance. Original measurements below are prior-run evidence; fresh verification follows in §9.1. Worker activation is not claimed.
 
 The original adapter incorrectly called Claude's uncached input inclusive-cache.
 Invocation totals also could not establish a current context size. The corrected

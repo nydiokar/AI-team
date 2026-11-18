@@ -84,7 +84,7 @@ Only jobs that are genuinely open. Everything merged/done is in git and the disp
 
 | Job | Packet | Depends on | Status | What it is |
 |---|---|---|---|---|
-| **A117** | `AGENT_117_TELEMETRY_CONTEXT_ECONOMICS.md` | — | **active** — PR #293 final corrections verified; shipping in progress | Context/advice, recovery lineage and provider receipts; worker activation/natural acceptance remain explicit gates. |
+| **A117** | `AGENT_117_TELEMETRY_CONTEXT_ECONOMICS.md` | — | **active** — PR #293 merged; gateway/task-server live `05fad0a` | Context/advice, recovery lineage and SDK estimates verified; worker activation/natural acceptance remain explicit gates. |
 | **A118** | `AGENT_118_OPENCODE_REPLY_RECOVERY.md` | — | **ready** — issue #298; implementation follows evidence/plan review | Reconstruct the reported OpenCode missing-reply incident, determine whether managed-turn ownership/correlation is structurally wrong, and repair the proven cause with end-to-end attribution and visibility regressions. |
 | **A116** | `AGENT_116_TRUSTWORTHY_ARCHITECTURE_AUDIT.md` | none; coordinate A111 | **ready — operator-approved 2026-11-16; issue #290** | Repair authoritative review/membership reads and make architecture-audit execution, coverage, counts and evaluation failure-honest; autonomous implementation, independent verification and scoped certification required. |
 | **A114** | `AGENT_114_CONSEQUENTIAL_DECISION_INTEGRATION.md` | A113 proven; coordinate A111/A71/A75 | ready for offline implementation | Protect declared SDK-budget use at turn admission and SDK creation/reuse; prove owner authority, target-worker resolved inputs, recovery and visibility. Launch-only guards miss warm sends. A113 is an offline palette proof; production enforcement remains unactivated. |
@@ -113,6 +113,8 @@ Only jobs that are genuinely open. Everything merged/done is in git and the disp
 Claude request context is separated from invocation spend; SDK USD estimates and observed
 model/window survive SDK telemetry. Durable recovery snapshots/receipts link both sessions;
 compaction advice at 80% has measured native/manual outcomes and honest unknowns.
+Merged PR #293; gateway/task-server healthy on `05fad0a`, schema 49 unchanged.
+Read-only mobile conversation/Info and API checks pass; both workers remain online.
 Final review rejects legacy v3 Claude context on reads without rewriting receipts,
 preserves zero buckets and cost-only compact boundaries, and prevents UI fallbacks
 from reviving unknown final context. Production activation is not yet certified.
