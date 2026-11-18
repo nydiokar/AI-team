@@ -5,8 +5,8 @@ status: done              # ready | active | blocked | done | dead
 owner: ""
 depends_on: []
 results_ref: DISPATCH_LOG.md#A113             # -> DISPATCH_LOG.md section with the verdict prose
-evidence: ["scripts/prototypes/consequential_decision.py", "tests/test_consequential_decision_prototype.py", "docs/harness/consequential_decision_control.md"]                  # artifact paths that PROVE it ran (checked to exist)
-updated_at: "2026-11-13T13:40:19.238775+00:00"
+evidence: ["scripts/prototypes/consequential_decision.py", "tests/test_consequential_decision_prototype.py", "tests/test_runtime_flag_typed.py", "docs/harness/consequential_decision_control.md"]                  # artifact paths that PROVE it ran (checked to exist)
+updated_at: "2026-11-17T09:43:36.456642+00:00"
 ```
 
 # DISPATCH — A113 · Design and prove a consequential-decision control prototype
@@ -406,3 +406,62 @@ A114 is authored only, not implemented in this session.
 
 **Delivery:** implementation commit `a7f7cd6` and final review/type-annotation follow-up on
 `feat/a113-decision-control`, [PR #285](https://github.com/nydiokar/AI-team/pull/285).
+
+## Final adversarial review — 2026-11-17
+
+Re-grounded against `origin/main` `21d8307` in a separate worktree; the original checkout is
+on another active feature branch and is not switched, stashed or changed by this review.
+An independent reviewer inspected the implementation, regressions, real SDK path and revised
+A114 contract. This review found a real missed audit-read defect and an important continuation
+scope/proof gap; the earlier completion was not evidence of production readiness.
+
+- **Medium, repaired:** `render()` enforced live freshness, so stale/expired decisions could
+  retain published receipts while losing their explanatory read surface. Both new regression
+  cases failed before the fix. `stored_packet()` now checks immutable schema/digest integrity;
+  historical render uses it, while resolution, delegation, evaluation and new publication
+  retain live checks. Tests verify readable history, identical retry receipt and exactly one
+  artifact after the forbidden new-publication attempt. This is a small read-path correction,
+  not another decision store, approval system or production endpoint.
+- **High integration-proof gap, corrected in A114:** a boot-only guard can miss new work sent to
+  an existing warm SDK process. The new real-driver characterization suppresses only native
+  start, then inspects actual `ClaudeAgentOptions`: resolved budget changes 3.0 → 1.0, while
+  the reused process retains 3.0 and start count stays one. A114 now requires current protected
+  turn admission and zero forbidden sends/queries as well as launches, including enrollment
+  after boot, revocation and mismatched scope. It holds new work without silently restarting
+  workers or interrupting unrelated in-flight work. This review does not implement A114.
+- **Scope/authority assumptions corrected:** registry budget overrides are global, fallback
+  env/config is worker-local, and project opt-in gates use rather than creating another value
+  source. Controller-only fallback approval does not certify worker consumption. A71 node auth
+  and A75 token exposure do not establish owner authority. A114 must prove that boundary,
+  first-contact enrollment, immutable admission/replay semantics and actual consumer effects.
+  SDK option correctness is not a total-spend/subscription limit or scientific-choice proof.
+
+**Verification:** host `.venv` is Python 3.11 while current main requires 3.12+; the initial
+host run failed during setup before exercising the prototype. Used the existing isolated
+`python-tests` image instead, without upgrading a live venv or disabling test guards.
+Image `ai-team:dependency-closure-tests`, ID
+`sha256:a815afc56036a3c4f8e9a05de4e3a7e1ad67f3cebd8bfa13f207a902840a8bb9`, Python 3.12.
+
+```bash
+docker run --rm --network none --cpus 2 -v "$PWD:/workspace" ai-team:dependency-closure-tests tests/test_consequential_decision_prototype.py tests/test_runtime_flag_typed.py tests/test_approval_service.py --tb=short
+```
+
+The existing image is a setup prerequisite, not a new production dependency. Equivalent
+setup is the repository's `python-tests` Docker target or its documented Python 3.12+ dev
+venv. Explicit targets are mandatory; the image's default CMD runs the full suite.
+
+Final fixed-source repeat: **96 passed in 10.95s**. Prior repeat after the correction:
+**96 passed in 15.36s**; prototype/flags-only pass before that:
+**88 passed in 15.62s**. The two historical regressions first produced **2 failed, 51 deselected
+in 2.49s**. A pytest-asyncio configuration deprecation warning is unrelated to this change.
+No network, paid/model execution, live data changes, service restart or production deployment.
+Ruff and mypy checks pass on the prototype; Black checks cover the prototype and its test module.
+
+**Independent disposition:** approved for the stated correction and offline A114 handoff;
+no remaining critical/high finding in the reviewed prototype scope. Production authority,
+worker admission, recovery and rollout are explicit unimplemented integration requirements.
+The repaired local prototype and its engineering handoff are ready; production is not certified.
+Execution handoff: [A114 / GitHub #294](https://github.com/nydiokar/AI-team/issues/294).
+It includes the findings, measured baseline, implementation order and consumer-level acceptance.
+Strict dispatch audit still reports only the existing A67 private-evidence proof-path gap;
+no missing job state or new proof gap was introduced. The correction PR records delivery.

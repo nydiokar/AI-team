@@ -6,16 +6,19 @@ owner: ""
 depends_on: [113]
 results_ref: DISPATCH_LOG.md#A114             # -> DISPATCH_LOG.md section with the verdict prose
 evidence: []                  # artifact paths that PROVE it ran (checked to exist)
-updated_at: "2026-11-13T13:38:00.360547+00:00"
+updated_at: "2026-11-17T09:40:09.742215+00:00"
 ```
 
-# DISPATCH — A114 · Integrate consequential decisions into actual SDK budget consumption
+# DISPATCH — A114 · Integrate consequential decisions into actual SDK use
 
 **Level:** 3. **Type:** production integration and consumer-level verification.
-**Authored:** 2026-11-13, Europe/Vilnius. **Status:** ready; do not implement during A113.
+**Authored:** 2026-11-13, Europe/Vilnius. **Reviewed:** 2026-11-17.
+**Status:** ready for offline implementation; production authority/activation are unproven.
+**Execution issue:** [GitHub #294](https://github.com/nydiokar/AI-team/issues/294).
 **Branch:** one `feat/a114-decision-integration` branch/worktree, PR and self-merge.
 **Depends on:** A113's proven prototype; coordinate A111's authority/evidence contract and
-A71/A75's credential boundaries. Engineering may start offline; activation is gated below.
+A71/A75's credential boundaries. A71 authenticates nodes and A75 changes token exposure;
+neither supplies an owner principal. Engineering may start offline; activation is gated below.
 
 ## Read this first
 
@@ -33,10 +36,24 @@ A71/A75's credential boundaries. Engineering may start offline; activation is ga
 
 A113 proves a local transactional control, not an active protection in AI-Team. Finish the
 engineering obligation by protecting **one real declared consequential setting**:
-`CLAUDE_SDK_MAX_BUDGET_USD` for new Claude SDK processes in explicitly opted-in projects.
-An unauthorized or stale decision must cause no native SDK launch. An authorized boot must
+`CLAUDE_SDK_MAX_BUDGET_USD` for SDK work in explicitly opted-in projects, including warm reuse.
+An unauthorized or stale decision must cause no native SDK launch **or prompt/query send**.
+An authorized boot must
 use exactly the approved effective budget, including explicit null if intentionally chosen.
 The ordinary unconfigured workflow stays compatible. Do not build another prototype phase.
+
+**Scope of value versus scope of protection:** registry overrides are global; fallback config/env
+is worker-process local (`sdk_governor_ceilings()` has no project argument). A project declaration
+controls use of that existing source, not a new per-project budget override. Derive project/Case/
+target-carrier scope from canonical session/routing records, not caller body fields. Bind the
+decision to the target worker's actual resolved value/source, including its fallback environment;
+the controller's own fallback is not proof of worker consumption. Test different controller and
+worker env values and all affected enrolled projects when a shared override changes.
+
+This pilot completes one real integration path for FM-1. It does not certify scientific loss
+choices, palette quality, aggregate project spending, plan quota or actual dollar-limit enforcement.
+Fake SDK tests prove arguments and admission; native budget semantics need separately authorized
+evidence before claiming an economic bound. Other domains keep explicit consumer/evaluator adapters.
 
 A113 already proved immutable explained packets, current scoped/revocable authority,
 material generations, separate deterministic evaluation, same-transaction consumer effects,
@@ -60,16 +77,25 @@ references. The simulation DB and host-capability registry are not production de
    establish admission or successful execution. Enrollment cannot disappear on malformed policy,
    unavailable store/controller, task override or a configuration exception.
 
-2. **Guard new process creation with one immutable admitted boot specification.** Resolve the
+2. **Guard protected turn admission and process creation with one immutable boot specification.** Resolve the
    actual effective budget once through the existing canonical precedence; bind its source,
    project/objective/policy/value generations, explanation, authority and evaluation plan.
    Hand that admitted value/revision through the existing carrier path to the exact
    `ClaudeAgentOptions(max_budget_usd=...)` consumer. The worker must reject missing, stale,
    replayed-for-another-scope or mismatched receipts and cannot re-resolve a different value.
-   Respect warm-process boot semantics: describe existing-process behavior explicitly; do not
-   restart workers or alter a running session to manufacture freshness. Reuse durable turn/
+   A warm process is not an exemption: before each new protected prompt/query, verify its boot
+   value/revision and current scoped authorization are compatible with the admitted work. On
+   newly enrolled, stale, revoked, differently scoped or unknown warm state, hold the new work
+   with a clear reason; no silent reuse, automatic restart, or unrelated in-flight interruption.
+   Check before any automatic close/respawn side effect too. Preserve explicit stop/cancel and
+   recovery controls. Unconfigured warm sessions retain existing behavior. Reuse durable turn/
    session ownership and reconciliation for crash/unknown outcomes, rather than adding a queue.
    No claim of exactly-once native process launch without a tested identity/recovery mechanism.
+   Specify one durable admission point: expiry/revocation/material change before admission blocks;
+   an already admitted immutable operation may finish or follow an explicit cancellation protocol.
+   Replaying a completed receipt only reads history; it cannot launch or send again. A new turn
+   is a new admission even when its process is reused. Test change/revocation at each side of
+   admission and lost acknowledgements; do not mix historical receipts with live eligibility.
    Sandbox work may create a provisional boot plan and evaluate it offline; it cannot launch
    paid/native work under the authoritative project without satisfying the same admission gate.
    Evaluation can check configured cost bounds; economic sufficiency is explicit N/A with reason
@@ -87,8 +113,10 @@ references. The simulation DB and host-capability registry are not production de
 ## Acceptance — actual consumer proof
 
 - Offline tests drive the real API/config → MeshDB → controller/worker → SDK-options creation
-  path using a fake SDK **only at the native process boundary**. Assert launch count zero when
-  blocked and inspect the exact budget/revision passed when allowed. A mock gate returning
+  path using a fake SDK **only at the native process boundary**. Assert launch **and send/query**
+  counts zero when blocked, including previously booted sessions, enrollment after boot and
+  warm reuse following policy/value changes or revocation. Inspect actual `ClaudeAgentOptions`
+  and the admitted revision/process identity when allowed. A mock gate returning
   `blocked` or a stored approval alone is insufficient.
 - Exercise registry override, env fallback, compiled/default/null semantics; changes and
   reversions, unrelated settings, alternate direct boots, worker snapshot/controller failure,
@@ -102,6 +130,9 @@ references. The simulation DB and host-capability registry are not production de
   inspectable after restart. A111 closure stays separate from decision authorization.
 - Unconfigured projects retain existing native SDK arguments, normal turn/retry and warm reuse.
   Ordinary config updates do not force unrelated approvals. Invalid opted-in state fails closed.
+  Shared-override changes invalidate affected enrolled use only. Missing controller state cannot
+  turn an enrolled project into opt-out, even on a worker that has never seen its declaration.
+  Show how enrollment is durably known or conservatively held across that first-contact seam.
 - Exposed handlers have concurrency limits retained until actual work ends, bounded payloads,
   N=100 memory bounds, caller/server timeouts, structured errors and explicit DB/controller
   outage behavior. Use repo patterns and document any native-I/O limitation in CONTEXT.
@@ -133,6 +164,15 @@ gate, semantic classifier, new role/closer/queue, credential framework, palette 
 historical approval synthesis or silent production activation. Strategic expansion is separate.
 
 ## Trail / milestone
+
+**Review evidence (2026-11-17):** independent review and executable tests confirmed the warm path
+returns its original process/options after the resolved budget changes (3.0 → 1.0; one native
+start, reused options still 3.0). See
+`tests/test_runtime_flag_typed.py::test_warm_sdk_reuse_keeps_original_budget_in_actual_options`.
+This is expected current behavior, not a newly introduced production gate. It makes launch-only
+acceptance inadequate. A113's historical packet-rendering defect was separately reproduced and
+repaired; protected operations still reject the stale/expired revision. Final proof/results and
+the executable GitHub handoff are recorded in A113's final adversarial review section.
 
 - [ ] Map real writers/consumers and close the authority boundary.
 - [ ] Persist and carry an immutable authorized boot specification through existing pathways.

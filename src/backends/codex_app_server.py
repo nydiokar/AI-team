@@ -8,6 +8,7 @@ knowledge. Unknown backend notifications are intentionally ignored here.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import queue
 import signal
@@ -23,6 +24,7 @@ MAX_BUFFER = 16 * 1024 * 1024
 MAX_PENDING = 32
 RPC_TIMEOUT = 30.0
 INTERRUPT_TIMEOUT = 5.0
+logger = logging.getLogger(__name__)
 # [A82 step 4 rework, M1] Ids of requests whose caller stopped waiting: their
 # late reply is routed (or dropped) instead of failing the shared client.
 MAX_LATE = 256
@@ -176,8 +178,16 @@ class CodexAppServerClient:
                 self._set_rate_limits(result.get("rateLimits"))
             except CodexProtocolError:
                 pass
-        except Exception:
+        except BaseException as exc:
+            process = self.process
             self.close()
+            # Never copy native stderr (may contain credentials or prompts) to
+            # the shared log. Preserve bounded diagnostic facts before discard.
+            logger.warning(
+                "event=codex_startup_failed error_type=%s pid=%s exit_code=%s stderr_bytes=%d",
+                type(exc).__name__, process.pid if process else None,
+                process.returncode if process else None, len(self.stderr),
+            )
             raise
 
     def check(self) -> None:
