@@ -382,8 +382,9 @@ Two activation follow-ups preserve truthfulness: Home describes worker polling
 instead of requiring a session observation; the read model recognizes the
 existing hash of `principal_unknown` as unknown, matching the adapter's principal
 label and existing prewarmer guard without rewriting identities or history.
-Regressions first reproduced both gaps. Targeted verification: 127 Python tests,
-25 Home/usage tests and TypeScript/production build passed.
+Ingest takes the account key from the observing worker's payload. A blank key
+stays unknown even when the controller has a local account key configured.
+Existing rows retain their normal expiry behavior.
 
 ### Remote worker rollout
 
