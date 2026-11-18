@@ -31,6 +31,7 @@
 import asyncio
 import json
 import logging
+import math
 import os
 import re
 import threading
@@ -813,6 +814,10 @@ class _SDKSession:
         self.model = model
         self.effort = effort
         self.resume = resume
+        # SDK result USD is cumulative, including spend restored on resume.
+        # A fresh process has a zero baseline; a resumed first turn is unknown.
+        self._cost_baseline: float | None = None if resume else 0.0
+        self._cost_session_id: str | None = resume
         self.proc_env = proc_env
         # Explicit CLI binary for this session. None ⇒ the SDK's bundled
         # claude executable (the legacy path). Set it to run workers on a
@@ -1298,8 +1303,20 @@ class _SDKSession:
             result_line["subtype"] = subtype
         result_line["is_error"] = is_error
         reported_cost = getattr(msg, "total_cost_usd", None)
-        if type(reported_cost) in (int, float):
+        if sid and self._cost_session_id and sid != self._cost_session_id:
+            self._cost_baseline = None
+        self._cost_session_id = sid or self._cost_session_id
+        if (type(reported_cost) in (int, float) and 0 <= reported_cost <= 2**63 - 1
+                and math.isfinite(reported_cost) and not (is_error and reported_cost == 0)):
             result_line["total_cost_usd"] = reported_cost
+            if sid and self._cost_baseline is not None and reported_cost >= self._cost_baseline:
+                result_line["turn_cost_usd"] = round(reported_cost - self._cost_baseline, 8)
+            self._cost_baseline = (
+                float(reported_cost) if sid and (self._cost_baseline is None or reported_cost >= self._cost_baseline)
+                else None
+            )
+        else:
+            self._cost_baseline = None
         if stop_reason:
             result_line["stop_reason"] = stop_reason
         if usage is not None:

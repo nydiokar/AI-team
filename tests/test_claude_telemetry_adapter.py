@@ -487,7 +487,7 @@ def test_native_auto_compaction_keeps_boundary_without_content():
 @pytest.mark.parametrize("cost", [-1, "secret", True, float("inf"), 10**400, 1e308])
 def test_invalid_provider_cost_is_not_a_recorded_price(cost):
     from src.core.telemetry_projection import project_turn
-    events = _events_from_ndjson(json.dumps({"type": "result", "total_cost_usd": cost,
+    events = _events_from_ndjson(json.dumps({"type": "result", "turn_cost_usd": cost,
                                             "usage": {"input_tokens": 100}}))
     assert project_turn(events)["turn"]["metrics"]["provider_reported_cost_usd"] is None
 
@@ -495,7 +495,7 @@ def test_invalid_provider_cost_is_not_a_recorded_price(cost):
 def test_provider_cost_survives_projection_and_deduplication():
     from src.core.telemetry_projection import project_turn
     from src.services.context_economics import observed_turn_cost
-    events = _events_from_ndjson(json.dumps({"type": "result", "total_cost_usd": 1.27,
+    events = _events_from_ndjson(json.dumps({"type": "result", "turn_cost_usd": 1.27,
                                             "usage": {"input_tokens": 100}}))
     turn = project_turn(events + events)["turn"]
     assert observed_turn_cost(turn) == 1.27
@@ -521,7 +521,7 @@ def test_natural_compaction_replay_measures_capacity_and_exact_model_scenario():
 def test_cost_only_result_keeps_explicit_recorded_zero():
     from src.core.telemetry_projection import project_turn
     from src.services.context_economics import observed_turn_cost
-    turn = project_turn(_events_from_ndjson('{"type":"result","total_cost_usd":0,"usage":{}}'))["turn"]
+    turn = project_turn(_events_from_ndjson('{"type":"result","turn_cost_usd":0,"usage":{}}'))["turn"]
     assert observed_turn_cost(turn) == 0
 
 
@@ -559,7 +559,7 @@ def test_cost_only_compaction_keeps_boundary_and_invalidates_old_context() -> No
         {"type": "assistant", "message": {"id": "before", "usage": {"input_tokens": 180000}}},
         {"type": "system", "subtype": "compact_boundary", "compact_metadata": {
             "pre_tokens": 180000, "trigger": "manual"}},
-        {"type": "result", "total_cost_usd": 0, "usage": {}},
+        {"type": "result", "turn_cost_usd": 0, "usage": {}},
     ]))
     metrics = project_turn(events)["turn"]["metrics"]
     assert metrics["turn_exit_context_tokens"] is None
@@ -580,3 +580,12 @@ def test_child_stream_message_cannot_replace_parent_context_or_model() -> None:
     turn = project_turn(events)["turn"]
     assert turn["observed_models"] == ["opus"]
     assert turn["metrics"]["turn_exit_context_tokens"] == 100
+
+
+def test_raw_cumulative_sdk_cost_is_retained_without_becoming_a_turn_receipt() -> None:
+    from src.core.telemetry_projection import project_turn
+
+    events = _events_from_ndjson('{"type":"result","total_cost_usd":5.47,"usage":{}}')
+    metrics = project_turn(events)["turn"]["metrics"]
+    assert metrics["sdk_cumulative_cost_usd"] == 5.47
+    assert metrics["provider_reported_cost_usd"] is None

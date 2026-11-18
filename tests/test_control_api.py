@@ -1139,7 +1139,7 @@ def test_context_and_provider_cost_reconcile_from_native_stream_to_api(client, m
             "input_tokens": 100, "cache_read_input_tokens": 150000, "cache_creation_input_tokens": 10000}}},
         {"type": "assistant", "message": {"id": "b", "model": "opus", "usage": {
             "input_tokens": 200, "cache_read_input_tokens": 160000, "cache_creation_input_tokens": 5000}}},
-        {"type": "result", "total_cost_usd": .47, "modelUsage": {"opus": {"contextWindow": 200000}},
+        {"type": "result", "turn_cost_usd": .47, "modelUsage": {"opus": {"contextWindow": 200000}},
          "usage": {"input_tokens": 300, "output_tokens": 30, "cache_read_input_tokens": 310000,
                    "cache_creation_input_tokens": 15000}},
     ]

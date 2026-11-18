@@ -180,7 +180,7 @@ EVENT_ATTRIBUTE_ALLOWLIST: Dict[str, frozenset[str]] = {
         "output_tokens", "cache_read_tokens", "cache_creation_tokens",
         "reasoning_tokens", "context_tokens", "input_token_semantics",
         "usage_granularity", "usage_source", "usage_coverage",
-        "counter_semantics", "context_window_tokens", "context_entry_tokens", "adapter_version", "provider_reported_cost_usd",
+        "counter_semantics", "context_window_tokens", "context_entry_tokens", "adapter_version", "provider_reported_cost_usd", "sdk_cumulative_cost_usd",
     }),
     "model.session_usage": frozenset({
         "input_tokens", "output_tokens", "cache_read_tokens",

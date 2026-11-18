@@ -12,7 +12,7 @@ describe("sessionTimelineAdapter - durable read model", () => {
         recommendation: "compact", threshold: .8, cold_write_usd: 1, warm_read_usd: .08,
         recovery_coverage: "complete", compaction_coverage: "unavailable", compactions: [],
         recoveries: [{ task_id: "receipt", status: "completed", observed_usd: 0,
-          cost_basis: "provider_reported", prior_session_id: "old", session_id: "new",
+          cost_basis: "sdk_reported_estimate", prior_session_id: "old", session_id: "new",
           tokens: { input_tokens: 100, output_tokens: null, cache_read_tokens: 0,
             cache_creation_tokens: null, context_used_ratio: .1 } }],
         proposals: [{ approval_id: "proposal", status: "approved", estimate: {
@@ -24,7 +24,7 @@ describe("sessionTimelineAdapter - durable read model", () => {
     };
     const economics = toSessionActivityTimeline(raw).contextEconomics!;
     expect(economics.compactionCoverage).toBe("unavailable");
-    expect(economics.recoveries[0]).toMatchObject({ observedUsd: 0, costBasis: "provider_reported",
+    expect(economics.recoveries[0]).toMatchObject({ observedUsd: 0, costBasis: "sdk_reported_estimate",
       priorSessionId: "old", sessionId: "new", outputTokens: null, cacheReadTokens: 0 });
     expect(economics.proposals[0]).toMatchObject({ coldResumeUsd: 1, contextTokens: 160000, contextUsedRatio: .8 });
   });

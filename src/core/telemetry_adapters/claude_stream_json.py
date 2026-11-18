@@ -104,6 +104,7 @@ class ClaudeStreamJsonAdapter:
         self._context_window: int | None = None
         self._observed_model: str | None = None
         self._reported_cost: float | None = None
+        self._cumulative_cost: float | None = None
         self._compaction_before: int | None = None
         self._compaction_trigger: str = "unknown"
 
@@ -355,9 +356,12 @@ class ClaudeStreamJsonAdapter:
     ) -> List[TelemetryEvent]:
         """Handle ``type=result``.  Emit usage from here; discard assistant pending."""
         events = self._flush_compaction(event_time=event_time)
-        reported_cost = payload.get("total_cost_usd")
+        reported_cost = payload.get("turn_cost_usd")
         if type(reported_cost) in (int, float) and 0 <= reported_cost <= 2**63 - 1 and math.isfinite(reported_cost):
             self._reported_cost = float(reported_cost)
+        cumulative = payload.get("total_cost_usd")
+        if type(cumulative) in (int, float) and 0 <= cumulative <= 2**63 - 1 and math.isfinite(cumulative):
+            self._cumulative_cost = float(cumulative)
         models = payload.get("modelUsage")
         if isinstance(models, dict):
             selected = models.get(self._observed_model or self.context.model)
@@ -368,7 +372,7 @@ class ClaudeStreamJsonAdapter:
             if isinstance(selected, dict):
                 self._context_window = _int_or_none(selected.get("contextWindow"))
         usage = payload.get("usage")
-        if (isinstance(usage, dict) and usage) or self._reported_cost is not None:
+        if (isinstance(usage, dict) and usage) or self._reported_cost is not None or self._cumulative_cost is not None:
             usage = usage if isinstance(usage, dict) else {}
             # This is the authoritative final aggregate; discard any pending
             # assistant usage to avoid double-counting.
@@ -479,6 +483,7 @@ class ClaudeStreamJsonAdapter:
             "context_window_tokens": self._context_window,
             "adapter_version": ADAPTER_VERSION,
             "provider_reported_cost_usd": self._reported_cost,
+            "sdk_cumulative_cost_usd": self._cumulative_cost,
             "input_token_semantics": "excludes_cache",
             "usage_granularity": "invocation_total",
             "usage_source": usage_source,

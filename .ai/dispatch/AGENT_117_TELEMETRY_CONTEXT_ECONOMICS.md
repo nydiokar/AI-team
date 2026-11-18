@@ -292,13 +292,16 @@ Recovery proposal → approval payload; execution snapshot → canonical produce
 turn/idempotency link → provider receipt, visible from both sessions. Read-time compatibility
 rejects v3 Claude context without reprojecting history or changing billing buckets.
 
-Fresh proof includes 363 targeted Python tests (36.79s), including both SDK boundary spellings and the failed-manual status
+Fresh proof includes 384 targeted Python tests (38.23s), including both SDK boundary spellings and the failed-manual status
 matrix; 41 related frontend tests; typecheck and production build. Exact final run is recorded
 in audit §9.1. Existing root-owned `web/dist` prevented cleanup, so production compilation used
 `pnpm --dir web build --outDir /tmp/ai-team-a117-web-final-20261118`; no artifact ownership was changed.
 
-Final adversarial review fixed two P1 paths: legacy context could masquerade as measured
-context at UI/recovery admission, and native cost-only compaction lost its boundary. Remaining
+Final adversarial review fixed three P1 paths: legacy context could masquerade as measured
+context at UI/recovery admission, native cost-only compaction lost its boundary, and cumulative
+SDK estimates could be summed as per-turn receipts. Cumulative snapshots are now retained
+separately; only baselined deltas enter turn/session estimates, with explicit unknowns after
+resume/reset/missing or anomalous samples. UI labels identify SDK estimates rather than billing. Remaining
 corrections cover explicit zero, malformed/overflow counters/cost, child model contamination,
 ambiguous/failed compaction attribution, unavailable reads and lost cost provenance. No P0
 found and no unresolved P1 within this PR's engineering scope. See audit §9.1 for evidence and

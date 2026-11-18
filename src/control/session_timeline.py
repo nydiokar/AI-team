@@ -655,7 +655,7 @@ def _recovery_evidence(rows: list[dict[str, object]]) -> list[dict[str, Any]]:
                        "session_id": row.get("session_id"), "prior_session_id": row.get("prior_session_id"),
                        "kind": row.get("turn_kind"), "observed_usd": observed_turn_cost(turn),
                        "estimate": estimate, "cost_basis": (
-                           "provider_reported" if turn["metrics"].get("provider_reported_cost_usd") is not None
+                           "sdk_reported_estimate" if turn["metrics"].get("provider_reported_cost_usd") is not None
                            else "recorded_tokens_api_equivalent_5m_write"),
                        "tokens": {key: turn["metrics"].get(key) for key in (
                            "input_tokens", "output_tokens", "cache_read_tokens", "cache_creation_tokens",

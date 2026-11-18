@@ -110,12 +110,14 @@ Only jobs that are genuinely open. Everything merged/done is in git and the disp
 ## Recent shift notes
 
 **2026-11-18 — Issue #144 context/recovery economics (PR #293).**
-Claude request context is separated from invocation spend; provider USD and observed
+Claude request context is separated from invocation spend; SDK USD estimates and observed
 model/window survive SDK telemetry. Durable recovery snapshots/receipts link both sessions;
 compaction advice at 80% has measured native/manual outcomes and honest unknowns.
 Final review rejects legacy v3 Claude context on reads without rewriting receipts,
 preserves zero buckets and cost-only compact boundaries, and prevents UI fallbacks
 from reviving unknown final context. Production activation is not yet certified.
+Native cumulative SDK cost is retained separately from normalized turn estimates;
+unknown resumed baselines remain partial. SDK figures are not authoritative billing.
 Continuation: A117 (`AGENT_117_TELEMETRY_CONTEXT_ECONOMICS.md`).
 Evidence and exact limits: `docs/cost_monitoring_audit.md` §9. Natural replay reclaimed
 149,915 tokens (72.4469%); no realized USD savings or calibrated threshold claim.

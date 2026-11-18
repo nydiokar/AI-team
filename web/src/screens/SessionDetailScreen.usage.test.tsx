@@ -53,6 +53,6 @@ it("shows provider cost and priced-turn coverage separately from estimates", () 
     cost: { known: false }, provider_cost: { usd: .47, priced_turns: 1, turns: 2, coverage: "partial" },
   }, isError: false, isLoading: false, refetch: vi.fn() });
   act(() => root.render(<SessionCostPanel sessionId="s" />));
-  expect(container.textContent).toContain("Provider-reported cost (1/2 turns)");
+  expect(container.textContent).toContain("SDK-reported estimate (1/2 turns)");
   expect(container.textContent).toContain("0.47");
 });

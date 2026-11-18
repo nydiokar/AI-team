@@ -404,6 +404,11 @@ def project_turn(events: Iterable[TelemetryEvent | Dict[str, Any]]) -> Dict[str,
                     float(reported_cost) if type(reported_cost) in (int, float)
                     and 0 <= reported_cost <= 2**63 - 1 and math.isfinite(reported_cost) else None
                 )
+                cumulative = attrs.get("sdk_cumulative_cost_usd")
+                request["sdk_cumulative_cost_usd"] = (
+                    float(cumulative) if type(cumulative) in (int, float)
+                    and 0 <= cumulative <= 2**63 - 1 and math.isfinite(cumulative) else None
+                )
                 request["usage_granularity"] = granularity
                 request["usage_source"] = attrs.get("usage_source")
                 request["usage_coverage"] = attrs.get("usage_coverage") or "partial"
@@ -847,6 +852,7 @@ def _turn_metrics(
             round(sum(row["provider_reported_cost_usd"] for row in usage_rows), 8)
             if usage_rows and all(row.get("provider_reported_cost_usd") is not None for row in usage_rows) else None
         ),
+        "sdk_cumulative_cost_usd": final_requests[-1].get("sdk_cumulative_cost_usd") if final_requests else None,
         "aggregate_input_tokens": aggregate_usage.get("input_tokens"),
         "aggregate_output_tokens": aggregate_usage.get("output_tokens"),
         "aggregate_cache_read_tokens": aggregate_usage.get("cache_read_tokens"),

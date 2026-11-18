@@ -334,3 +334,39 @@ def test_sdk_cost_only_compact_receipt_survives_without_usage(pre_key: str) -> N
         assert metrics["compactions"][0]["before_tokens"] == 180000
     finally:
         sess.close()
+
+
+@pytest.mark.parametrize("resume,totals,expected", [
+    (None, [1.0, 1.47], [1.0, .47]),
+    ("sid-1", [5.0, 5.47], [None, .47]),
+    (None, [1.0, None, 1.47, 1.67], [1.0, None, None, .20]),
+    (None, [1.0, .5, .6], [1.0, None, None]),
+])
+def test_sdk_cumulative_cost_is_never_summed_as_turn_cost(resume, totals, expected) -> None:
+    import json
+    from src.backends.claude_driver import _TurnAccumulator
+
+    session = _SDKSession("costs", "/tmp", None, {}, resume=resume)
+    observed: list[float | None] = []
+    for total in totals:
+        message = _result("done")
+        message.total_cost_usd = total
+        outcome = session._outcome_from_result(_TurnAccumulator(), message)
+        row = json.loads(outcome.raw_ndjson)
+        observed.append(row.get("turn_cost_usd"))
+    assert observed == expected
+
+
+def test_sdk_crash_zero_and_native_identity_change_do_not_invent_cost_deltas() -> None:
+    import json
+    from src.backends.claude_driver import _TurnAccumulator
+
+    session = _SDKSession("costs", "/tmp", None, {})
+    observed: list[float | None] = []
+    for sid, cost, error in [("a", 1.0, False), ("a", 0, True), ("a", 1.47, False),
+                             ("b", .8, False), ("b", 1.0, False)]:
+        message = _result("done", sid=sid, is_error=error)
+        message.total_cost_usd = cost
+        row = json.loads(session._outcome_from_result(_TurnAccumulator(), message).raw_ndjson)
+        observed.append(row.get("turn_cost_usd"))
+    assert observed == [1.0, None, None, None, .2]

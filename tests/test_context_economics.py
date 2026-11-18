@@ -28,7 +28,7 @@ def test_respawn_cost_is_linked_on_both_sessions_and_session_cost_is_complete(tm
     adapter = ClaudeStreamJsonAdapter(TelemetryContext(
         turn_id="recovery", invocation_id="inv", node_id="node", session_id="new", backend="claude", model="opus",
     ), emitter_process_instance_id="proc")
-    events = adapter.consume_line(json.dumps({"type": "result", "total_cost_usd": .47,
+    events = adapter.consume_line(json.dumps({"type": "result", "turn_cost_usd": .47,
         "modelUsage": {"claude-opus-5-5": {"contextWindow": 200000}},
         "usage": {"input_tokens": 100, "output_tokens": 1000,
                   "cache_read_input_tokens": 0, "cache_creation_input_tokens": 10000}}))
@@ -41,7 +41,7 @@ def test_respawn_cost_is_linked_on_both_sessions_and_session_cost_is_complete(tm
         assert row["session_id"] == "new"
         assert row["estimate"]["usd"] == 1.0
         assert row["observed_usd"] == .47
-        assert row["cost_basis"] == "provider_reported"
+        assert row["cost_basis"] == "sdk_reported_estimate"
     assert db.session_provider_cost("new") == {"usd": .47, "priced_turns": 1, "turns": 1, "coverage": "complete"}
 
 
@@ -172,3 +172,30 @@ def test_recovery_query_plan_uses_existing_indexes(tmp_path) -> None:
     assert any("idx_mesh_tasks_session_created" in plan for plan in plans)
     assert any("idx_llm_turns_session" in plan for plan in plans)
     assert not any("AUTOMATIC" in plan for plan in plans)
+
+
+@pytest.mark.parametrize("resume,totals,usd,priced", [
+    (None, [1.0, 1.47], 1.47, 2),
+    ("native", [5.0, 5.47], .47, 1),
+])
+def test_cumulative_sdk_results_reconcile_to_bounded_session_estimates(tmp_path, resume, totals, usd, priced) -> None:
+    from claude_agent_sdk import ResultMessage
+    from src.backends.claude_driver import _SDKSession, _TurnAccumulator
+
+    db = MeshDB(str(tmp_path / "cumulative.db"))
+    store = TelemetryStore(db)
+    session = _SDKSession("s", "/tmp", None, {}, resume=resume)
+    for i, total in enumerate(totals):
+        message = ResultMessage(subtype="success", duration_ms=1, duration_api_ms=1,
+                                is_error=False, num_turns=1, session_id="native", total_cost_usd=total)
+        outcome = session._outcome_from_result(_TurnAccumulator(), message)
+        adapter = ClaudeStreamJsonAdapter(TelemetryContext(
+            turn_id=f"turn-{i}", invocation_id=f"inv-{i}", node_id="node", session_id="s", backend="claude",
+        ), emitter_process_instance_id="proc")
+        store.insert_events([event for line in outcome.raw_ndjson.splitlines() for event in adapter.consume_line(line)])
+    cost = db.session_provider_cost("s")
+    assert cost["usd"] == pytest.approx(usd)
+    assert cost["priced_turns"] == priced
+    assert cost["turns"] == 2
+    assert cost["coverage"] == ("complete" if priced == 2 else "partial")
+    assert store.get_turn("turn-1")["metrics"]["sdk_cumulative_cost_usd"] == totals[-1]

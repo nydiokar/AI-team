@@ -439,7 +439,7 @@ export function SessionCostPanel({ sessionId }: { sessionId: string }) {
         <CostRow label="Cache write" value={compactTokens(t.cache_creation)} />
         <CostRow label="Cache read" value={compactTokens(t.cache_read)} />
         {usage.provider_cost?.usd != null && <CostRow
-          label={`Provider-reported cost (${usage.provider_cost.priced_turns}/${usage.provider_cost.turns} turns)`}
+          label={`SDK-reported estimate (${usage.provider_cost.priced_turns}/${usage.provider_cost.turns} turns)`}
           value={formatUsd(usage.provider_cost.usd)} strong
         />}
         {cost.known ? (

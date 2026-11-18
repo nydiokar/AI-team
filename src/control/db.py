@@ -9338,7 +9338,7 @@ class MeshDB:
         return out
 
     def session_provider_cost(self, session_id: str) -> Dict[str, Any]:
-        """Constant-size full-session provider cost with honest partial coverage."""
+        """Sum normalized per-turn SDK estimates with honest partial coverage."""
         row = self._conn().execute(
             """SELECT COUNT(*) AS turns,
                       COUNT(json_extract(metrics_json, '$.provider_reported_cost_usd')) AS priced_turns,
