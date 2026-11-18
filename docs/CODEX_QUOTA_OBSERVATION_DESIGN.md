@@ -1,7 +1,8 @@
 # Codex quota observation — design and implementation
 
-Date: 2026-11-15. Reviewed: 2026-11-18. Status: implementation reviewed in PR #288;
-worker activation and natural production observation remain separate rollout gates.
+Date: 2026-11-15. Reviewed: 2026-11-18. Status: PR #288 merged as `8a026a2`;
+gateway/task-server deployed and verified. Worker activation and natural
+production observation remain separate rollout gates.
 Scope: the Home quota panels and the provider-neutral observation path behind
 `/api/quota-windows`. No model turn, no new database, no UI layout change.
 
@@ -318,6 +319,17 @@ ten-second wait (354 passed, 1 failed, 1 skipped). Clean main's quota module
 passed 63/63; the full final two-worker selection passed without changing that
 test or relaxing its timeout. This is recorded as an observed intermittent wait
 timeout, not asserted to be a pre-existing failure.
+
+PR #288 closed on 2026-11-18 after both CI jobs passed on final head `eea01d0`
+(run `44296899146`, including the isolated native-control smoke). Controllers
+were rebuilt/recreated from merge `8a026a2`; both report healthy, schema 49 is
+unchanged, and both workers reconnected. Authenticated `/api/quota-windows`
+returns 200 with observation enabled. Live ingest rejects missing authorization
+with 401, invalid JSON with 422 and a 16,385-byte body with 413. No accepted test
+observation was sent. Codex's persisted adapter remains unavailable until a
+promoted worker supplies observations; natural timer-driven refresh is not
+claimed. No worker was restarted by this review. Rollback image:
+`ai-team:pre-8a026a2`; verified deploy tag: `deploy/20261118T1213Z-8a026a2`.
 
 ## 8. Acceptance criteria
 

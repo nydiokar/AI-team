@@ -109,7 +109,11 @@ Only jobs that are genuinely open. Everything merged/done is in git and the disp
 
 ## Recent shift notes
 
-**2026-11-18 — Codex quota PR #288 review.** Worker metadata → bounded controller
+**2026-11-18 — Codex quota PR #288 merged and controller-live (`8a026a2`).**
+Both controllers healthy, schema 49 unchanged, both workers online; quota GET
+200 and ingest rejection probes 401/422/413 pass with no injected observations.
+355 targeted Python tests/24 frontend tests, production build and both PR CI
+jobs pass. Worker metadata → bounded controller
 ingest → existing quota store → Home; strict counters/timestamps, fixed-cadence
 expiry and fresh-data precedence have offline regression coverage. Ingest admits
 four actual mutations (permits survive HTTP cancellation), caps bodies at 16 KiB
