@@ -20,6 +20,7 @@ from src.services.quota_window_coordinator import (
     TelemetryQuality,
     UnsupportedQuotaAdapter,
     WindowSemantics,
+    _principal_hash,
     build_default_quota_adapters,
     ingest_worker_quota_observation,
     utc_iso,
@@ -606,6 +607,27 @@ async def test_codex_worker_readings_expire_despite_local_adaptive_schedule(tmp_
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("principal_key", ["", "test-account"])
+async def test_codex_read_model_preserves_unknown_principal_blocker(tmp_path, monkeypatch, principal_key):
+    monkeypatch.setenv("CODEX_QUOTA_PRINCIPAL_KEY", "controller-account")
+    now = datetime(2026, 11, 18, 12, 0, tzinfo=timezone.utc)
+    db_path = str(tmp_path / "quota.db")
+    await ingest_worker_quota_observation(
+        provider="codex", node_id="n", principal_key=principal_key,
+        limits=_codex_limits(now=now), observed_at=utc_iso(now), db_path=db_path,
+    )
+    states = QuotaWindowStore(db_path).status(now=now)["window_states"]
+    assert len(states) == 2
+    for state in states:
+        assert state["telemetry_state"] == "current"
+        assert state["principal_hash"] == _principal_hash("codex", principal_key)
+        assert ("principal_unknown" in state["blockers"]) is (not principal_key)
+        assert state["automation_ready"] is False
+    adapter = CodexRateLimitsQuotaAdapter()
+    assert not callable(getattr(adapter, "activate", None))
+
+
+@pytest.mark.asyncio
 async def test_undeclared_quota_provider_is_rejected_loudly(tmp_path):
     result = await ingest_worker_quota_observation(
         provider="mystery",
@@ -1094,18 +1116,27 @@ async def test_active_session_state_threaded_into_read_model(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_automation_ready_reachable_when_no_blockers(tmp_path):
-    """A78 §1: automation_ready is a reachable state, not dead code."""
+@pytest.mark.parametrize(
+    "principal, expected_blockers",
+    [
+        ("principal", []),
+        ("fake:unknown", ["principal_unknown"]),
+        (_principal_hash("fake", "principal_unknown"), ["principal_unknown"]),
+    ],
+)
+async def test_automation_readiness_requires_known_principal(
+    tmp_path, principal: str, expected_blockers: list[str],
+) -> None:
     now = datetime(2026, 8, 21, 8, 0, tzinfo=timezone.utc)
     store = _store(tmp_path)
     adapter = FakeQuotaAdapter(
         provider="fake",
-        principal_hash="principal",
-        buckets=[_anchored_bucket(principal="principal")],
+        principal_hash=principal,
+        buckets=[_anchored_bucket(principal=principal)],
         snapshots={
             "five-hour": [
                 _snapshot(
-                    principal="principal",
+                    principal=principal,
                     observed=now,
                     used=12.0,
                     reset=datetime(2026, 8, 21, 13, 0, tzinfo=timezone.utc),
@@ -1119,8 +1150,8 @@ async def test_automation_ready_reachable_when_no_blockers(tmp_path):
     state = coord.read_status()["window_states"][0]
     assert state["telemetry_state"] == "current"
     assert state["window_known"] is True
-    assert state["automation_ready"] is True
-    assert state["blockers"] == []
+    assert state["automation_ready"] is (not expected_blockers)
+    assert state["blockers"] == expected_blockers
 
 
 def test_schedule_aware_staleness_current_until_next_probe_overdue(tmp_path):

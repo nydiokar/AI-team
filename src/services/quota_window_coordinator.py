@@ -1300,7 +1300,10 @@ def _window_state_for(
         blockers.append("window_semantics_unclassified")
     elif semantics != WindowSemantics.ANCHORED.value:
         blockers.append(f"window_semantics_{semantics}")
-    if not principal_hash or principal_hash.endswith(":unknown"):
+    if (
+        not principal_hash or principal_hash.endswith(":unknown")
+        or principal_hash == _principal_hash(provider, "principal_unknown")
+    ):
         blockers.append("principal_unknown")
     if active_session_state == "unknown":
         blockers.append("active_session_state_unknown")
@@ -1752,11 +1755,11 @@ class CodexRateLimitsQuotaAdapter:
         self._cached_at = 0.0
 
     async def identify_principal(self) -> QuotaPrincipal:
-        key = self.principal_key or os.getenv("CODEX_QUOTA_PRINCIPAL_KEY", "").strip()
-        label = key or "principal_unknown"
+        # Only the observing worker can supply the key for its runtime account.
+        label = self.principal_key or "principal_unknown"
         return QuotaPrincipal(
             provider=self.provider,
-            principal_hash=_principal_hash(self.provider, key or label),
+            principal_hash=_principal_hash(self.provider, label),
             label=label,
             authentication_mode="codex_app_server_rate_limits",
         )

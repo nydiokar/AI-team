@@ -81,7 +81,7 @@ function BackendAccounts({ onOpen }: { onOpen: (backend: AccountBackend) => void
         </div>;
       })}
     </div>
-    <p className="mt-2 text-[10px] leading-relaxed text-ink-muted">Plan limits, separate from session context. Codex reflects the latest session observation (up to 15 min). OpenCode limits depend on its provider.</p>
+    <p className="mt-2 text-[10px] leading-relaxed text-ink-muted">Plan limits, separate from session context. Codex limits are polled on the worker without an agent message; fresh session observations provide a fallback. OpenCode limits depend on its provider.</p>
   </section>;
 }
 
