@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import inspect
 import json
 import logging
 import os
@@ -21,6 +22,16 @@ from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Dict, Generator, Iterable, List, Optional, Protocol
+
+from pydantic import BaseModel, Field, ValidationError
+
+from src.services.quota_provider_registry import (
+    CLAUDE_OBSERVER,
+    CODEX_OBSERVER,
+    QUOTA_PROVIDER_SPECS,
+    local_observable_providers,
+    spec_for_provider,
+)
 
 logger = logging.getLogger(__name__)
 _SNAPSHOT_STALE_AFTER = timedelta(minutes=15)
@@ -1228,6 +1239,11 @@ def _window_state_for(
     used_percent = snapshot.get("used_percent")
     reason = str(snapshot.get("unavailable_reason") or "")
     duration = snapshot.get("window_duration_seconds") or (bucket.get("window_duration_seconds") if bucket else None)
+    spec = spec_for_provider(provider)
+    if spec is not None and spec.observable and not spec.local_observer:
+        # Worker observations use a fixed timer, not this process's adaptive
+        # schedule. A read must not extend the life of a vanished worker's data.
+        next_observe_due_at = None
     # Threaded from the adapter at observation time (A78 §1); absent on old
     # rows and error snapshots ⇒ "unknown", which blocks automation honestly.
     active_session_state = str(snapshot.get("active_session_state") or "unknown")
@@ -1689,6 +1705,189 @@ def _slug(value: str) -> str:
     return "_".join(part for part in "".join(chars).split("_") if part) or "scoped"
 
 
+class CodexRateLimitWindow(BaseModel):
+    used_percent: float = Field(ge=0, le=100, allow_inf_nan=False, strict=True)
+    window_minutes: int = Field(gt=0, le=525600, strict=True)
+    resets_at: int = Field(gt=0, le=253402300799, strict=True)
+
+
+class CodexRateLimitsObservation(BaseModel):
+    plan_type: Optional[str] = Field(default=None, max_length=40)
+    primary: Optional[CodexRateLimitWindow] = None
+    secondary: Optional[CodexRateLimitWindow] = None
+
+
+class CodexRateLimitsQuotaAdapter:
+    """Canonical Codex plan quota reader for app-server account rate limits.
+
+    The app-server read is account metadata, not a turn. This adapter only maps
+    the allowlisted primary/secondary windows to the same 5-hour / 7-day store
+    contract Claude uses. It deliberately has no ``activate`` method: Codex quota
+    is observed, never warmed.
+    """
+
+    provider = "codex"
+    adapter_version = "codex-app-server-rate-limits-v1"
+    schema_version = "codex-app-server-rate-limits-v1"
+
+    # bucket_id -> (native window, provider minutes, store seconds, display name)
+    _BUCKETS: Dict[str, tuple[str, int, int, str]] = {
+        "codex_five_hour": ("primary", 300, 5 * 60 * 60, "Codex 5-hour limit"),
+        "codex_seven_day": ("secondary", 10080, 7 * 24 * 60 * 60, "Codex 7-day limit"),
+    }
+
+    def __init__(
+        self,
+        *,
+        principal_key: str = "",
+        read_limits: Optional[Callable[[], Any]] = None,
+        cache_ttl_sec: float = 60.0,
+        now: Callable[[], datetime] = utc_now,
+    ) -> None:
+        self.principal_key = principal_key.strip()
+        self._read_limits = read_limits
+        self.cache_ttl_sec = max(1.0, float(cache_ttl_sec))
+        self._now = now
+        self._cached: Optional[CodexRateLimitsObservation] = None
+        self._cached_at = 0.0
+
+    async def identify_principal(self) -> QuotaPrincipal:
+        key = self.principal_key or os.getenv("CODEX_QUOTA_PRINCIPAL_KEY", "").strip()
+        label = key or "principal_unknown"
+        return QuotaPrincipal(
+            provider=self.provider,
+            principal_hash=_principal_hash(self.provider, key or label),
+            label=label,
+            authentication_mode="codex_app_server_rate_limits",
+        )
+
+    async def discover_buckets(self) -> list[QuotaBucket]:
+        principal = await self.identify_principal()
+        return [
+            QuotaBucket(
+                provider=self.provider,
+                bucket_id=bucket_id,
+                bucket_name=name,
+                principal_hash=principal.principal_hash,
+                # Provider exposes duration and reset, not anchored-vs-sliding.
+                window_semantics=WindowSemantics.UNKNOWN,
+                telemetry_quality=TelemetryQuality.AUTHORITATIVE,
+                window_duration_seconds=seconds,
+            )
+            for bucket_id, (_, _, seconds, name) in self._BUCKETS.items()
+        ]
+
+    async def observe(self, bucket_id: str) -> QuotaSnapshot:
+        principal = await self.identify_principal()
+        observed_at = self._now()
+        limits, read_reason = await self._read_limits_snapshot()
+        window = None
+        duration: Optional[int] = None
+        if bucket_id in self._BUCKETS and limits is not None:
+            native_name, minutes, seconds, _ = self._BUCKETS[bucket_id]
+            window = getattr(limits, native_name, None)
+            duration = seconds
+            if window is not None and window.window_minutes != minutes:
+                # A provider window whose duration changed is not the bucket we
+                # declared. Keep it out rather than mislabel it as 5h/7d.
+                reason = f"codex_window_duration_mismatch:{window.window_minutes}"
+                return self._unavailable(
+                    principal, bucket_id, observed_at, reason,
+                    TelemetryQuality.PARTIAL,
+                )
+        elif bucket_id not in self._BUCKETS:
+            return self._unavailable(
+                principal, bucket_id, observed_at, "unknown_codex_bucket",
+                TelemetryQuality.UNAVAILABLE,
+            )
+        if window is None:
+            return self._unavailable(
+                principal, bucket_id, observed_at,
+                read_reason or "quota_bucket_incomplete",
+                TelemetryQuality.UNAVAILABLE if limits is None else TelemetryQuality.PARTIAL,
+                duration=duration,
+            )
+
+        reset_at = _coerce_reset_at(window.resets_at)
+        quality = TelemetryQuality.AUTHORITATIVE
+        reason = ""
+        if _is_stale_reset(reset_at, observed_at):
+            reset_at = None
+            quality = TelemetryQuality.PARTIAL
+            reason = "reset_at_stale"
+        return QuotaSnapshot(
+            provider=self.provider,
+            principal_hash=principal.principal_hash,
+            bucket_id=bucket_id,
+            observed_at=observed_at,
+            telemetry_quality=quality,
+            used_percent=window.used_percent,
+            reset_at=reset_at,
+            limit_reached=window.used_percent >= 100.0,
+            window_duration_seconds=duration,
+            raw_status="codex_app_server_rate_limits",
+            unavailable_reason=reason,
+        )
+
+    def _unavailable(
+        self,
+        principal: QuotaPrincipal,
+        bucket_id: str,
+        observed_at: datetime,
+        reason: str,
+        quality: TelemetryQuality,
+        *,
+        duration: Optional[int] = None,
+    ) -> QuotaSnapshot:
+        return QuotaSnapshot(
+            provider=self.provider,
+            principal_hash=principal.principal_hash,
+            bucket_id=bucket_id,
+            observed_at=observed_at,
+            telemetry_quality=quality,
+            window_duration_seconds=duration,
+            raw_status="codex_app_server_rate_limits",
+            unavailable_reason=reason,
+        )
+
+    async def _read_limits_snapshot(
+        self,
+    ) -> tuple[Optional[CodexRateLimitsObservation], str]:
+        now = time.monotonic()
+        if self._cached is not None and now - self._cached_at < self.cache_ttl_sec:
+            return self._cached, ""
+        if self._read_limits is None:
+            return None, "codex_rate_limits_unavailable:no_reader"
+        try:
+            raw = self._read_limits()
+            if inspect.isawaitable(raw):
+                raw = await raw
+            limits = CodexRateLimitsObservation.model_validate(raw)
+            if limits.primary is None and limits.secondary is None:
+                raise ValueError("no_rate_limit_windows")
+        except (ValidationError, ValueError, TypeError) as exc:
+            return None, f"codex_rate_limits_unavailable:{type(exc).__name__}"
+        except Exception as exc:
+            return None, f"codex_rate_limits_unavailable:{type(exc).__name__}"
+        self._cached = limits
+        self._cached_at = now
+        return limits, ""
+
+    async def detect_active_user_session(self) -> bool | None:
+        return None
+
+    async def capabilities(self) -> AdapterCapability:
+        return AdapterCapability(
+            provider=self.provider,
+            adapter_version=self.adapter_version,
+            schema_version=self.schema_version,
+            can_observe=True,
+            supports_active_session_detection=False,
+            telemetry_quality=TelemetryQuality.AUTHORITATIVE,
+            notes="Codex app-server account/rateLimits/read (metadata only; no turn)",
+        )
+
+
 class FakeQuotaAdapter:
     """Deterministic test adapter; no method sends a model request."""
 
@@ -2097,20 +2296,47 @@ def _safe_dict(value: Any) -> Dict[str, Any]:
 
 
 def build_default_quota_adapters() -> list[QuotaAdapter]:
+    """Build adapters this process may observe WITHOUT a remote worker.
+
+    Codex is intentionally absent: its quota is observed harness-side and
+    ingested from the worker. A local placeholder here would overwrite the
+    worker's healthy adapter status on every local observe cycle. Providers with
+    no observer at all keep an explicit unsupported declaration.
+    """
     from config import config
 
     quota_cfg = getattr(config, "quota", None)
-    return [
-        UnsupportedQuotaAdapter("codex", "codex_quota_telemetry_not_validated_phase1"),
-        ClaudeGetUsageQuotaAdapter(
-            principal_key=getattr(quota_cfg, "claude_principal_key", ""),
-            cwd=getattr(getattr(config, "claude", None), "base_cwd", None),
-            cli_path=getattr(getattr(config, "claude", None), "sdk_cli_path", None),
-            timeout_sec=getattr(quota_cfg, "claude_get_usage_timeout_sec", 60.0),
-            activation_model=getattr(quota_cfg, "prewarm_model", "haiku"),
-        ),
-        UnsupportedQuotaAdapter("opencode", "opencode_is_provider_router_no_phase1_quota_owner"),
-    ]
+    adapters: list[QuotaAdapter] = []
+    for provider in local_observable_providers():
+        spec = spec_for_provider(provider)
+        if spec is None:
+            continue
+        if spec.observer == CLAUDE_OBSERVER:
+            adapters.append(
+                ClaudeGetUsageQuotaAdapter(
+                    principal_key=getattr(quota_cfg, "claude_principal_key", ""),
+                    cwd=getattr(getattr(config, "claude", None), "base_cwd", None),
+                    cli_path=getattr(getattr(config, "claude", None), "sdk_cli_path", None),
+                    timeout_sec=getattr(quota_cfg, "claude_get_usage_timeout_sec", 60.0),
+                    activation_model=getattr(quota_cfg, "prewarm_model", "haiku"),
+                )
+            )
+        else:
+            adapters.append(
+                UnsupportedQuotaAdapter(
+                    provider,
+                    f"quota_local_observer_not_implemented:{spec.observer}",
+                )
+            )
+    for provider, spec in QUOTA_PROVIDER_SPECS.items():
+        if spec.observable:
+            continue
+        adapters.append(
+            UnsupportedQuotaAdapter(
+                provider, spec.unsupported_reason or "quota_provider_unsupported",
+            )
+        )
+    return adapters
 
 
 def build_quota_coordinator_from_config(
@@ -2187,18 +2413,22 @@ async def ingest_worker_quota_observation(
     claude_code_version: Optional[str] = None,
     observed_at: Optional[str] = None,
     usage: Optional[Dict[str, Any]] = None,
+    limits: Optional[Dict[str, Any]] = None,
     error: str = "",
     db_path: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Persist a worker-originated quota observation through the existing store.
 
-    Observation is done harness-side; this only validates and writes — NO Claude
-    process is ever spawned here. On success it reuses
-    ``QuotaWindowCoordinator.observe_once`` with a ``read_usage``-injected adapter,
-    so the persisted rows match the pre-Docker in-process observer. On ``error``
-    (or missing usage) it records the harness as adapter-unavailable WITHOUT
-    overwriting the last good snapshots — so a transient harness failure surfaces
-    as an explicit unavailable adapter, not as a flapped/empty window.
+    Observation is done harness-side; this only validates and writes — NO provider
+    process is ever spawned here. Provider coverage comes from the ONE registry:
+    a declared observer is dispatched to its implementation, an explicit
+    unsupported provider is recorded with its reason, and an undeclared provider
+    is rejected loudly rather than silently ignored.
+
+    On a successful Claude observation the persisted rows match the pre-Docker
+    in-process observer. On ``error`` (or a missing payload) the harness is
+    recorded as adapter-unavailable WITHOUT overwriting the last good snapshots —
+    a transient harness failure is not a valid empty window.
     """
     from config import config
 
@@ -2206,41 +2436,156 @@ async def ingest_worker_quota_observation(
         db_path = getattr(getattr(config, "quota", None), "db_path", "state/quota_windows.db")
     store = _ingest_store(db_path)
     now = normalize_utc(observed_at) or utc_now()
+    provider = (provider or "").strip().lower()
 
-    if provider != "claude":
+    spec = spec_for_provider(provider)
+    if spec is None:
         store.add_event(
             "quota.worker_observation_ignored",
             provider=provider,
-            reason="unsupported_provider",
+            reason="quota_capability_not_declared",
             payload={"node_id": node_id},
         )
-        return {"accepted": False, "reason": "unsupported_provider", "provider": provider}
+        return {
+            "accepted": False,
+            "reason": "quota_capability_not_declared",
+            "provider": provider,
+        }
 
-    if error or usage is None:
-        reason = f"worker_harness_unavailable:{error or 'no_usage_payload'}"
+    if not spec.observable:
+        reason = spec.unsupported_reason or "quota_provider_unsupported"
         store.set_adapter_status(
             QuotaAdapterStatus(
-                provider="claude",
-                enabled=True,
-                status="unavailable",
+                provider=provider,
+                enabled=False,
+                status="unsupported",
                 reason=reason,
-                adapter_version=ClaudeGetUsageQuotaAdapter.adapter_version,
-                schema_version=ClaudeGetUsageQuotaAdapter.schema_version,
                 last_checked_at=now,
             )
         )
         store.add_event(
-            "quota.worker_observation_error",
-            provider="claude",
+            "quota.worker_observation_ignored",
+            provider=provider,
             reason=reason,
             payload={"node_id": node_id},
         )
-        try:
-            from src.core.observability import emit_event
+        return {
+            "accepted": False,
+            "reason": "unsupported_provider",
+            "detail": reason,
+            "provider": provider,
+        }
 
-            emit_event("quota.worker_observation_error", provider="claude", node_id=node_id, reason=reason)
-        except Exception:
-            pass
+    if spec.observer == CLAUDE_OBSERVER:
+        return await _ingest_claude_quota_observation(
+            store=store,
+            provider=provider,
+            node_id=node_id,
+            principal_key=principal_key,
+            sdk_version=sdk_version,
+            claude_code_version=claude_code_version,
+            now=now,
+            usage=usage,
+            error=error,
+        )
+    if spec.observer == CODEX_OBSERVER:
+        return await _ingest_codex_quota_observation(
+            store=store,
+            provider=provider,
+            node_id=node_id,
+            principal_key=principal_key,
+            now=now,
+            limits=limits,
+            error=error,
+        )
+
+    reason = f"quota_observer_not_implemented:{spec.observer}"
+    store.set_adapter_status(
+        QuotaAdapterStatus(
+            provider=provider,
+            enabled=False,
+            status="unsupported",
+            reason=reason,
+            last_checked_at=now,
+        )
+    )
+    store.add_event(
+        "quota.worker_observation_ignored",
+        provider=provider,
+        reason=reason,
+        payload={"node_id": node_id},
+    )
+    return {
+        "accepted": False,
+        "reason": "observer_not_implemented",
+        "detail": reason,
+        "provider": provider,
+    }
+
+
+def _record_worker_observation_error(
+    *,
+    store: QuotaWindowStore,
+    provider: str,
+    node_id: str,
+    now: datetime,
+    reason: str,
+    adapter_version: str,
+    schema_version: str,
+) -> None:
+    store.set_adapter_status(
+        QuotaAdapterStatus(
+            provider=provider,
+            enabled=True,
+            status="unavailable",
+            reason=reason,
+            adapter_version=adapter_version,
+            schema_version=schema_version,
+            last_checked_at=now,
+        )
+    )
+    store.add_event(
+        "quota.worker_observation_error",
+        provider=provider,
+        reason=reason,
+        payload={"node_id": node_id},
+    )
+    try:
+        from src.core.observability import emit_event
+
+        emit_event(
+            "quota.worker_observation_error",
+            provider=provider,
+            node_id=node_id,
+            reason=reason,
+        )
+    except Exception:
+        pass
+
+
+async def _ingest_claude_quota_observation(
+    *,
+    store: QuotaWindowStore,
+    provider: str,
+    node_id: str,
+    principal_key: str,
+    sdk_version: Optional[str],
+    claude_code_version: Optional[str],
+    now: datetime,
+    usage: Optional[Dict[str, Any]],
+    error: str,
+) -> Dict[str, Any]:
+    if error or usage is None:
+        reason = f"worker_harness_unavailable:{error or 'no_usage_payload'}"
+        _record_worker_observation_error(
+            store=store,
+            provider=provider,
+            node_id=node_id,
+            now=now,
+            reason=reason,
+            adapter_version=ClaudeGetUsageQuotaAdapter.adapter_version,
+            schema_version=ClaudeGetUsageQuotaAdapter.schema_version,
+        )
         return {"accepted": False, "reason": "harness_error", "detail": reason}
 
     async def _read_usage() -> Dict[str, Any]:
@@ -2256,14 +2601,79 @@ async def ingest_worker_quota_observation(
     await coordinator.observe_once()
     store.add_event(
         "quota.worker_observation_ingested",
-        provider="claude",
+        provider=provider,
         reason="",
         payload={"node_id": node_id, "sdk_version": sdk_version or ""},
     )
     try:
         from src.core.observability import emit_event
 
-        emit_event("quota.worker_observation_ingested", provider="claude", node_id=node_id)
+        emit_event("quota.worker_observation_ingested", provider=provider, node_id=node_id)
     except Exception:
         pass
-    return {"accepted": True, "provider": "claude", "node_id": node_id}
+    return {"accepted": True, "provider": provider, "node_id": node_id}
+
+
+async def _ingest_codex_quota_observation(
+    *,
+    store: QuotaWindowStore,
+    provider: str,
+    node_id: str,
+    principal_key: str,
+    now: datetime,
+    limits: Optional[Dict[str, Any]],
+    error: str,
+) -> Dict[str, Any]:
+    if error or limits is None:
+        reason = f"worker_harness_unavailable:{error or 'no_limits_payload'}"
+        _record_worker_observation_error(
+            store=store,
+            provider=provider,
+            node_id=node_id,
+            now=now,
+            reason=reason,
+            adapter_version=CodexRateLimitsQuotaAdapter.adapter_version,
+            schema_version=CodexRateLimitsQuotaAdapter.schema_version,
+        )
+        return {"accepted": False, "reason": "harness_error", "detail": reason}
+
+    try:
+        parsed = CodexRateLimitsObservation.model_validate(limits)
+        if parsed.primary is None and parsed.secondary is None:
+            raise ValueError("no_rate_limit_windows")
+    except (ValidationError, ValueError, TypeError) as exc:
+        reason = f"codex_invalid_limits:{type(exc).__name__}"
+        _record_worker_observation_error(
+            store=store,
+            provider=provider,
+            node_id=node_id,
+            now=now,
+            reason=reason,
+            adapter_version=CodexRateLimitsQuotaAdapter.adapter_version,
+            schema_version=CodexRateLimitsQuotaAdapter.schema_version,
+        )
+        return {"accepted": False, "reason": "invalid_limits", "detail": reason}
+
+    async def _read_limits() -> Dict[str, Any]:
+        return limits
+
+    adapter = CodexRateLimitsQuotaAdapter(
+        principal_key=principal_key or "",
+        read_limits=_read_limits,
+        now=lambda: now,
+    )
+    coordinator = QuotaWindowCoordinator(store=store, adapters=[adapter], enabled=True)
+    await coordinator.observe_once()
+    store.add_event(
+        "quota.worker_observation_ingested",
+        provider=provider,
+        reason="",
+        payload={"node_id": node_id},
+    )
+    try:
+        from src.core.observability import emit_event
+
+        emit_event("quota.worker_observation_ingested", provider=provider, node_id=node_id)
+    except Exception:
+        pass
+    return {"accepted": True, "provider": provider, "node_id": node_id}

@@ -2298,22 +2298,34 @@ class WorkerAgent:
     # ------------------------------------------------------------------
 
     async def _quota_observe_loop(self) -> None:
-        """Observe Claude subscription quota where the harness lives and ship a
-        typed observation to the controller over the explicit HTTP interface.
+        """Observe provider plan quota where each harness lives and ship typed
+        observations to the controller over the explicit HTTP interface.
 
-        The controller container has no Claude binary or OAuth credentials by
+        The controller container has no provider binaries or credentials by
         design, so quota telemetry MUST be read here and crossed to the
-        controller — never spawned controller-side. This uses the ``get_usage``
-        control request, which is free (not a model turn); prewarm is a separate,
-        deliberately-OFF concern and is not touched here.
+        controller — never spawned controller-side. Claude uses the free
+        ``get_usage`` control request; Codex uses ``account/rateLimits/read``.
+        Neither starts a model turn. Prewarm is a separate, deliberately-OFF
+        concern and is not touched here.
+
+        Provider names come from the coverage registry, not a hardcoded
+        ``claude`` check. Each provider is isolated: one failure never suppresses
+        another provider's observation.
         """
         if not self.cfg.quota_observe_enabled:
             logger.info("event=quota_observe_disabled node_id=%s", self.cfg.node_id)
             return
+        providers = self._quota_observation_providers()
+        if not providers:
+            logger.info(
+                "event=quota_observe_no_observable_provider node_id=%s backends=%s",
+                self.cfg.node_id, ",".join(self.cfg.backends),
+            )
+            return
         interval = max(30, int(self.cfg.quota_observe_interval_sec))
         logger.info(
-            "event=quota_observe_enabled node_id=%s interval_sec=%d",
-            self.cfg.node_id, interval,
+            "event=quota_observe_enabled node_id=%s interval_sec=%d providers=%s",
+            self.cfg.node_id, interval, ",".join(providers),
         )
         while not self._shutdown.is_set():
             await self._observe_quota_once()
@@ -2322,58 +2334,122 @@ class WorkerAgent:
             except asyncio.TimeoutError:
                 pass
 
-    async def _observe_quota_once(self) -> None:
-        """One harness-side read + ship. Never raises: a failed read ships an
-        explicit error observation so the controller can surface
-        harness-unavailable (distinct from a valid empty window)."""
-        provider = "claude"
-        observed_at = datetime.now(tz=timezone.utc).isoformat().replace("+00:00", "Z")
-        try:
-            from config import config as _config
-            from src.services.claude_usage_control import (
-                _sdk_version,
-                claude_code_version,
-                read_claude_usage_raw_with_new_client,
-            )
+    def _quota_observation_providers(self) -> Tuple[str, ...]:
+        from src.services.quota_provider_registry import (
+            coverage_gaps,
+            observable_providers_for_backends,
+        )
 
-            quota_cfg = getattr(_config, "quota", None)
-            claude_cfg = getattr(_config, "claude", None)
-            cli_path = getattr(claude_cfg, "sdk_cli_path", None)
-            timeout = float(getattr(quota_cfg, "claude_get_usage_timeout_sec", 60.0))
-            raw = await read_claude_usage_raw_with_new_client(cli_path=cli_path, timeout=timeout)
-            body = {
-                "node_id": self.cfg.node_id,
-                "provider": provider,
-                "principal_key": getattr(quota_cfg, "claude_principal_key", "") or "",
-                "sdk_version": _sdk_version(),
-                "claude_code_version": claude_code_version(cli_path=cli_path, timeout_sec=2.0),
-                "observed_at": observed_at,
-                "usage": raw,
-            }
-            await asyncio.to_thread(self._http.post, "/telemetry/quota-observation", body, 15)
-            logger.debug("event=quota_observation_shipped node_id=%s", self.cfg.node_id)
-        except Exception as e:
+        gaps = coverage_gaps(self.cfg.backends)
+        if gaps:
             logger.warning(
-                "event=quota_observation_failed node_id=%s err_class=%s",
-                self.cfg.node_id, type(e).__name__,
+                "event=quota_provider_coverage_missing node_id=%s backends=%s",
+                self.cfg.node_id, ",".join(gaps),
             )
+        return observable_providers_for_backends(self.cfg.backends)
+
+    async def _observe_quota_once(self) -> None:
+        """One harness-side read + ship per observable provider. Never raises: a
+        failed read ships an explicit error observation so the controller can
+        surface harness-unavailable (distinct from a valid empty window)."""
+        for provider in self._quota_observation_providers():
+            observed_at = datetime.now(tz=timezone.utc).isoformat().replace("+00:00", "Z")
             try:
+                body = await self._build_quota_observation(provider, observed_at)
                 await asyncio.to_thread(
-                    self._http.post,
-                    "/telemetry/quota-observation",
-                    {
-                        "node_id": self.cfg.node_id,
-                        "provider": provider,
-                        "observed_at": observed_at,
-                        "error": type(e).__name__,
-                    },
-                    15,
+                    self._http.post, "/telemetry/quota-observation", body, 15,
                 )
-            except Exception as post_err:
+                logger.debug(
+                    "event=quota_observation_shipped node_id=%s provider=%s",
+                    self.cfg.node_id, provider,
+                )
+            except Exception as e:
                 logger.warning(
-                    "event=quota_observation_error_report_failed node_id=%s err_class=%s",
-                    self.cfg.node_id, type(post_err).__name__,
+                    "event=quota_observation_failed node_id=%s provider=%s err_class=%s",
+                    self.cfg.node_id, provider, type(e).__name__,
                 )
+                await self._post_quota_error(provider, observed_at, type(e).__name__)
+
+    async def _build_quota_observation(self, provider: str, observed_at: str) -> Dict[str, Any]:
+        from src.services.quota_provider_registry import (
+            CLAUDE_OBSERVER,
+            CODEX_OBSERVER,
+            spec_for_provider,
+        )
+
+        spec = spec_for_provider(provider)
+        if spec is None or not spec.observable:
+            raise RuntimeError("quota_provider_not_observable")
+        if spec.observer == CLAUDE_OBSERVER:
+            return await self._build_claude_quota_observation(observed_at)
+        if spec.observer == CODEX_OBSERVER:
+            return await self._build_codex_quota_observation(observed_at)
+        raise RuntimeError(f"quota_observer_not_implemented:{spec.observer}")
+
+    async def _build_claude_quota_observation(self, observed_at: str) -> Dict[str, Any]:
+        from config import config as _config
+        from src.services.claude_usage_control import (
+            _sdk_version,
+            claude_code_version,
+            read_claude_usage_raw_with_new_client,
+        )
+
+        quota_cfg = getattr(_config, "quota", None)
+        claude_cfg = getattr(_config, "claude", None)
+        cli_path = getattr(claude_cfg, "sdk_cli_path", None)
+        timeout = float(getattr(quota_cfg, "claude_get_usage_timeout_sec", 60.0))
+        raw = await read_claude_usage_raw_with_new_client(cli_path=cli_path, timeout=timeout)
+        return {
+            "node_id": self.cfg.node_id,
+            "provider": "claude",
+            "principal_key": getattr(quota_cfg, "claude_principal_key", "") or "",
+            "sdk_version": _sdk_version(),
+            "claude_code_version": claude_code_version(cli_path=cli_path, timeout_sec=2.0),
+            "observed_at": observed_at,
+            "usage": raw,
+        }
+
+    async def _build_codex_quota_observation(self, observed_at: str) -> Dict[str, Any]:
+        from config import config as _config
+
+        backend = (self._backends or {}).get("codex")
+        if backend is None:
+            raise RuntimeError("codex_backend_unavailable")
+        read_limits = getattr(backend, "read_account_rate_limits", None)
+        if not callable(read_limits):
+            raise RuntimeError("codex_quota_reader_unavailable")
+        limits = await asyncio.to_thread(read_limits, 5.0)
+        if not isinstance(limits, dict) or not (
+            limits.get("primary") or limits.get("secondary")
+        ):
+            raise RuntimeError("codex_rate_limits_unavailable")
+        quota_cfg = getattr(_config, "quota", None)
+        return {
+            "node_id": self.cfg.node_id,
+            "provider": "codex",
+            "principal_key": getattr(quota_cfg, "codex_principal_key", "") or "",
+            "observed_at": observed_at,
+            "limits": limits,
+        }
+
+    async def _post_quota_error(self, provider: str, observed_at: str, reason: str) -> None:
+        try:
+            await asyncio.to_thread(
+                self._http.post,
+                "/telemetry/quota-observation",
+                {
+                    "node_id": self.cfg.node_id,
+                    "provider": provider,
+                    "observed_at": observed_at,
+                    "error": reason,
+                },
+                15,
+            )
+        except Exception as post_err:
+            logger.warning(
+                "event=quota_observation_error_report_failed node_id=%s provider=%s err_class=%s",
+                self.cfg.node_id, provider, type(post_err).__name__,
+            )
 
     # ------------------------------------------------------------------
     # Window warming (harness-side)

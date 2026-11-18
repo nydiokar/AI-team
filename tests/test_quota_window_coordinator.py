@@ -9,6 +9,7 @@ import pytest
 from src.services.quota_window_coordinator import (
     AdapterCapability,
     ClaudeGetUsageQuotaAdapter,
+    CodexRateLimitsQuotaAdapter,
     FakeQuotaAdapter,
     QuotaBucket,
     QuotaAdapterError,
@@ -20,6 +21,7 @@ from src.services.quota_window_coordinator import (
     UnsupportedQuotaAdapter,
     WindowSemantics,
     build_default_quota_adapters,
+    ingest_worker_quota_observation,
     utc_iso,
 )
 
@@ -435,6 +437,203 @@ async def test_claude_get_usage_adapter_rate_limits_unavailable_is_not_zero(tmp_
     assert snapshot.reset_at is None
     assert snapshot.telemetry_quality == TelemetryQuality.UNAVAILABLE
     assert snapshot.unavailable_reason == "claude_rate_limits_unavailable_or_empty"
+
+
+def _codex_limits(*, five=36.0, seven=21.0, now=None):
+    now = now or datetime(2026, 11, 15, 12, 0, tzinfo=timezone.utc)
+    result = {
+        "plan_type": "plus",
+        "primary": {
+            "used_percent": five,
+            "window_minutes": 300,
+            "resets_at": int((now + timedelta(hours=2)).timestamp()),
+        },
+    }
+    if seven is not None:
+        result["secondary"] = {
+            "used_percent": seven,
+            "window_minutes": 10080,
+            "resets_at": int((now + timedelta(days=6)).timestamp()),
+        }
+    return result
+
+
+@pytest.mark.asyncio
+async def test_codex_rate_limits_adapter_maps_primary_and_secondary():
+    now = datetime(2026, 11, 15, 12, 0, tzinfo=timezone.utc)
+    limits = _codex_limits(now=now)
+
+    async def read_limits():
+        return limits
+
+    adapter = CodexRateLimitsQuotaAdapter(read_limits=read_limits, now=lambda: now)
+    buckets = await adapter.discover_buckets()
+    assert {b.bucket_id: b.window_duration_seconds for b in buckets} == {
+        "codex_five_hour": 18_000,
+        "codex_seven_day": 604_800,
+    }
+
+    five = await adapter.observe("codex_five_hour")
+    assert five.used_percent == 36.0
+    assert five.window_duration_seconds == 18_000
+    assert five.reset_at is not None
+    assert five.telemetry_quality == TelemetryQuality.AUTHORITATIVE
+    assert five.limit_reached is False
+
+    seven = await adapter.observe("codex_seven_day")
+    assert seven.used_percent == 21.0
+    assert seven.window_duration_seconds == 604_800
+
+
+@pytest.mark.asyncio
+async def test_codex_rate_limits_adapter_unknown_is_not_zero():
+    now = datetime(2026, 11, 15, 12, 0, tzinfo=timezone.utc)
+    limits = _codex_limits(seven=None, now=now)
+
+    async def read_limits():
+        return limits
+
+    adapter = CodexRateLimitsQuotaAdapter(read_limits=read_limits, now=lambda: now)
+    seven = await adapter.observe("codex_seven_day")
+    assert seven.used_percent is None
+    assert seven.telemetry_quality == TelemetryQuality.PARTIAL
+    assert seven.unavailable_reason == "quota_bucket_incomplete"
+
+
+@pytest.mark.asyncio
+async def test_codex_rate_limits_adapter_flags_stale_reset():
+    now = datetime(2026, 11, 15, 12, 0, tzinfo=timezone.utc)
+    limits = _codex_limits(now=now)
+    limits["primary"]["resets_at"] = int((now - timedelta(hours=1)).timestamp())
+
+    async def read_limits():
+        return limits
+
+    adapter = CodexRateLimitsQuotaAdapter(read_limits=read_limits, now=lambda: now)
+    five = await adapter.observe("codex_five_hour")
+    assert five.reset_at is None
+    assert five.telemetry_quality == TelemetryQuality.PARTIAL
+    assert five.unavailable_reason == "reset_at_stale"
+
+
+@pytest.mark.asyncio
+async def test_codex_worker_observation_ingests_into_shared_store(tmp_path):
+    db_path = str(tmp_path / "quota.db")
+    now = "2026-11-15T12:00:00Z"
+
+    result = await ingest_worker_quota_observation(
+        provider="codex",
+        node_id="kanebra",
+        limits=_codex_limits(),
+        observed_at=now,
+        db_path=db_path,
+    )
+    assert result["accepted"] is True
+    assert result["provider"] == "codex"
+
+    store = QuotaWindowStore(db_path)
+    latest = {row["bucket_id"]: row for row in store.latest_snapshots()}
+    assert latest["codex_five_hour"]["used_percent"] == 36.0
+    assert latest["codex_five_hour"]["provider"] == "codex"
+    assert latest["codex_five_hour"]["telemetry_quality"] == "authoritative"
+    assert latest["codex_seven_day"]["used_percent"] == 21.0
+
+
+@pytest.mark.asyncio
+async def test_codex_worker_error_does_not_overwrite_last_good_snapshot(tmp_path):
+    db_path = str(tmp_path / "quota.db")
+    await ingest_worker_quota_observation(
+        provider="codex",
+        node_id="kanebra",
+        limits=_codex_limits(),
+        observed_at="2026-11-15T12:00:00Z",
+        db_path=db_path,
+    )
+    err = await ingest_worker_quota_observation(
+        provider="codex",
+        node_id="kanebra",
+        limits=None,
+        error="CodexProtocolError",
+        db_path=db_path,
+    )
+    assert err["accepted"] is False
+    assert err["reason"] == "harness_error"
+
+    store = QuotaWindowStore(db_path)
+    adapters = {a["provider"]: a for a in store.status()["adapters"]}
+    assert adapters["codex"]["status"] == "unavailable"
+    assert "worker_harness_unavailable:CodexProtocolError" in adapters["codex"]["reason"]
+    latest = {row["bucket_id"]: row for row in store.latest_snapshots()}
+    assert latest["codex_five_hour"]["used_percent"] == 36.0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("field,value", [
+    ("resets_at", 10**30), ("resets_at", True),
+    ("window_minutes", "300"), ("used_percent", True),
+])
+async def test_codex_malformed_window_preserves_last_good_snapshot(tmp_path, field, value):
+    db_path = str(tmp_path / "quota.db")
+    await ingest_worker_quota_observation(
+        provider="codex", node_id="n", limits=_codex_limits(), db_path=db_path,
+    )
+    store = QuotaWindowStore(db_path)
+    before = store.latest_snapshots()
+    limits = _codex_limits()
+    limits["primary"][field] = value
+    result = await ingest_worker_quota_observation(
+        provider="codex", node_id="n", limits=limits, db_path=db_path,
+    )
+    assert result["accepted"] is False
+    assert result["reason"] == "invalid_limits"
+    assert store.latest_snapshots() == before
+
+
+@pytest.mark.asyncio
+async def test_codex_worker_readings_expire_despite_local_adaptive_schedule(tmp_path):
+    now = datetime(2026, 11, 18, 0, 0, tzinfo=timezone.utc)
+    db_path = str(tmp_path / "quota.db")
+    await ingest_worker_quota_observation(
+        provider="codex", node_id="n", limits=_codex_limits(now=now),
+        observed_at=utc_iso(now), db_path=db_path,
+    )
+    coordinator = QuotaWindowCoordinator(
+        store=QuotaWindowStore(db_path), adapters=[], enabled=True,
+        now=lambda: now + timedelta(hours=1),
+    )
+    states = coordinator.read_status()["window_states"]
+    assert all(s["telemetry_state"] == "stale" for s in states)
+
+
+@pytest.mark.asyncio
+async def test_undeclared_quota_provider_is_rejected_loudly(tmp_path):
+    result = await ingest_worker_quota_observation(
+        provider="mystery",
+        node_id="n",
+        usage={},
+        db_path=str(tmp_path / "quota.db"),
+    )
+    assert result["accepted"] is False
+    assert result["reason"] == "quota_capability_not_declared"
+
+
+@pytest.mark.asyncio
+async def test_declared_unsupported_provider_reports_its_reason(tmp_path):
+    result = await ingest_worker_quota_observation(
+        provider="opencode",
+        node_id="n",
+        usage={},
+        db_path=str(tmp_path / "quota.db"),
+    )
+    assert result["accepted"] is False
+    assert result["reason"] == "unsupported_provider"
+    assert "provider_router" in result["detail"]
+
+
+def test_default_local_adapters_do_not_claim_codex():
+    """A local placeholder would overwrite the worker's healthy ingest status."""
+    adapters = build_default_quota_adapters()
+    assert not any(getattr(adapter, "provider", "") == "codex" for adapter in adapters)
 
 
 def test_default_claude_quota_adapter_is_get_usage_not_statusline(monkeypatch):

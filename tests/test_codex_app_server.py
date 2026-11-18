@@ -21,6 +21,7 @@ if "--version" in sys.argv:
     sys.exit(99)
 def emit(value):
     print(json.dumps(value),flush=True)
+limits_reads=0
 for line in sys.stdin:
     request=json.loads(line)
     if "id" not in request: continue
@@ -30,6 +31,8 @@ for line in sys.stdin:
         emit({"id":request["id"],"result":{"codexHome":"/tmp","platformFamily":"unix","platformOs":"linux","userAgent":"codex/test"}})
         continue
     if method=="account/rateLimits/read":
+        limits_reads+=1
+        if limits_reads > 1: time.sleep(float(os.getenv("LIMITS_DELAY", "0")))
         emit({"id":request["id"],"result":{"rateLimits":{"limitId":"codex","planType":"plus","primary":{"usedPercent":31,"windowDurationMins":300,"resetsAt":2000000000}}}})
         continue
     mode=request["params"].get("threadId", "")
@@ -198,6 +201,29 @@ def test_account_limits_are_sanitized_and_updated_without_thread_id(server):
     client.request('turn/interrupt', {'threadId': 'rate-limits', 'turnId': 'turn'})
     assert client.rate_limits['primary']['used_percent'] == 45
     assert not client.failure
+
+
+def test_read_rate_limits_returns_allowlisted_shape(server):
+    client = server()
+    client.start()
+
+    limits = client.read_rate_limits(timeout=2.0)
+
+    assert limits["plan_type"] == "plus"
+    assert limits["primary"]["used_percent"] == 31.0
+    assert limits["primary"]["window_minutes"] == 300
+    assert "credits" not in limits
+
+
+def test_quota_timeout_does_not_fail_shared_runtime_or_next_rpc(server) -> None:
+    client = server(LIMITS_DELAY="0.1")
+    client.start()
+    with pytest.raises(CodexRPCTimeout):
+        client.read_rate_limits(timeout=0.01)
+    assert not client.failure
+    assert client.request("thread/read", {"threadId": "existing"}, timeout=2) == {}
+    assert client.pending == {} and client.late == {}
+    assert client.read_rate_limits(timeout=2)["primary"]["used_percent"] == 31
 
 
 @pytest.mark.parametrize("timeouts", [1, 2])

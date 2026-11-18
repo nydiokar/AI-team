@@ -322,7 +322,14 @@ class CodexBackend(CodingBackend):
             logger.info("event=codex_app_server_ready pid=%s", client.process.pid)
             return client
 
+    def read_account_rate_limits(self, timeout: float = 5.0) -> dict[str, JsonValue]:
+        """Read plan limits from the owned app-server without a model turn.
 
+        Reuses the live runtime (and its startup read/cache) when it exists. A
+        lazy start here uses the SAME carrier process later used for sessions,
+        not a parallel app-server.
+        """
+        return self._runtime().read_rate_limits(timeout=timeout)
 
     def create_session(self, session: Session, *, turn: TurnControl,
                         telemetry_context=None, telemetry_sink=None) -> ExecutionResult:

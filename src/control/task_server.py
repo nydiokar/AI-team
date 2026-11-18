@@ -50,6 +50,8 @@ _MESH_HEALTH_SAMPLE_SECONDS = 30.0
 _JOB_COMPLETION_READ_SLOTS = threading.BoundedSemaphore(4)
 _JOBS_LIST_READ_SLOTS = threading.BoundedSemaphore(4)
 _JOB_RESULT_SLOTS = threading.BoundedSemaphore(4)
+_QUOTA_OBSERVATION_SLOTS = threading.BoundedSemaphore(4)
+_QUOTA_OBSERVATION_BODY_TIMEOUT_SEC = 5.0
 
 # --- Deferred telemetry projection ------------------------------------------
 # Raw telemetry events insert synchronously (fast, indexed). The CPU-bound turn
@@ -527,16 +529,17 @@ class ActivityPayload(BaseModel):
 
 
 class QuotaObservationPayload(BaseModel):
-    """A worker-originated Claude quota observation.
+    """A worker-originated provider quota observation.
 
-    The controller container has no Claude binary or OAuth credentials by design,
-    so quota telemetry is read harness-side (on the worker) and shipped here as
-    the provider's raw ``get_usage`` response plus provenance. The controller
-    validates and persists it through the existing quota store/coordinator path,
-    so the quota API/UI contract is unchanged. A non-empty ``error`` means the
-    worker reached us but its harness read failed — recorded as
-    adapter-unavailable, which is DISTINCT from a valid observation with no open
-    window (never collapse transport/harness failure into an empty window).
+    The controller container has no provider binaries or credentials by design,
+    so quota telemetry is read harness-side (on the worker) and shipped here.
+    Claude sends the raw ``get_usage`` response; Codex sends allowlisted
+    ``account/rateLimits/read`` windows. The controller validates and persists
+    it through the existing quota store/coordinator path, so the quota API/UI
+    contract is unchanged. A non-empty ``error`` means the worker reached us but
+    its harness read failed — recorded as adapter-unavailable, which is DISTINCT
+    from a valid observation with no open window (never collapse
+    transport/harness failure into an empty window).
     """
     node_id: str = Field(min_length=1, max_length=128)
     provider: str = Field(default="claude", max_length=32)
@@ -545,6 +548,7 @@ class QuotaObservationPayload(BaseModel):
     claude_code_version: Optional[str] = Field(default=None, max_length=128)
     observed_at: Optional[str] = Field(default=None, max_length=64)
     usage: Optional[Dict[str, Any]] = None
+    limits: Optional[Dict[str, Any]] = None
     error: str = Field(default="", max_length=200)
 
 
@@ -713,31 +717,61 @@ def submit_activity(payload: ActivityPayload) -> Dict[str, Any]:
     return {"accepted": True}
 
 
-@app.post("/telemetry/quota-observation", dependencies=[Depends(_require_auth)])
-async def submit_quota_observation(payload: QuotaObservationPayload) -> Dict[str, Any]:
+@app.post(
+    "/telemetry/quota-observation", dependencies=[Depends(_require_auth)],
+    openapi_extra={"requestBody": {"required": True, "content": {
+        "application/json": {"schema": QuotaObservationPayload.model_json_schema()},
+    }}},
+)
+async def submit_quota_observation(request: Request) -> Dict[str, Any]:
     """Ingest a worker-originated quota observation into the shared quota store.
 
     Observation happens harness-side (worker); the controller only validates and
-    persists — it never spawns Claude. Reuses the existing coordinator
-    observe→persist pipeline (with an injected ``read_usage``), so the stored rows
-    are identical to the pre-Docker in-process observer, minus the local spawn.
-    The gateway process reads the same ``state/quota_windows.db`` for
-    ``/api/quota-windows`` (both controller services share ``controller/state``),
-    exactly like ``/telemetry/batches`` shares ``mesh.db``.
+    persists — it never spawns a provider. Reuses the existing coordinator
+    observe→persist pipeline with provider-neutral ingest, so stored rows match
+    the in-process observer without a local spawn. The gateway process reads the
+    same ``state/quota_windows.db`` for ``/api/quota-windows`` (both controller
+    services share ``controller/state``), exactly like ``/telemetry/batches``
+    shares ``mesh.db``.
     """
     from src.services.quota_window_coordinator import ingest_worker_quota_observation
 
-    result = await ingest_worker_quota_observation(
-        provider=payload.provider or "claude",
-        node_id=payload.node_id,
-        principal_key=payload.principal_key or "",
-        sdk_version=payload.sdk_version,
-        claude_code_version=payload.claude_code_version,
-        observed_at=payload.observed_at,
-        usage=payload.usage,
-        error=payload.error or "",
-    )
-    return {"accepted": bool(result.get("accepted")), **result}
+    if not _QUOTA_OBSERVATION_SLOTS.acquire(blocking=False):
+        raise HTTPException(status_code=429, detail="quota_observation_busy")
+    release_here = True
+    try:
+        body = bytearray()
+        async with asyncio.timeout(_QUOTA_OBSERVATION_BODY_TIMEOUT_SEC):
+            async for chunk in request.stream():
+                if len(body) + len(chunk) > 16 * 1024:
+                    raise HTTPException(status_code=413, detail="quota_observation_body_too_large")
+                body.extend(chunk)
+        try:
+            payload = QuotaObservationPayload.model_validate_json(body)
+        except (ValidationError, ValueError):
+            raise HTTPException(status_code=422, detail="invalid_quota_observation") from None
+
+        def ingest() -> Dict[str, Any]:
+            return asyncio.run(ingest_worker_quota_observation(**payload.model_dump()))
+
+        future = asyncio.get_running_loop().run_in_executor(None, ingest)
+
+        def finished(done: asyncio.Future[Dict[str, Any]]) -> None:
+            _QUOTA_OBSERVATION_SLOTS.release()
+            if not done.cancelled():
+                done.exception()
+
+        future.add_done_callback(finished)
+        release_here = False
+        result = await asyncio.shield(future)
+        return {"accepted": bool(result.get("accepted")), **result}
+    except TimeoutError:
+        raise HTTPException(status_code=408, detail="quota_observation_body_timeout") from None
+    except (sqlite3.Error, OSError):
+        raise HTTPException(status_code=503, detail="quota_observation_unavailable") from None
+    finally:
+        if release_here:
+            _QUOTA_OBSERVATION_SLOTS.release()
 
 
 # ---------------------------------------------------------------------------

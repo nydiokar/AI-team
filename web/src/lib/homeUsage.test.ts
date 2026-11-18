@@ -39,7 +39,7 @@ const state = (bucket_id: string, used: number | null) => ({
   window_start_at: null,
   window_start_inferred_at: null,
   window_start_source: "",
-  window_end_at: "2026-10-22T20:00:00Z",
+  window_end_at: new Date(Date.now() + 3600000).toISOString(),
   active_session_state: "false",
   window_known: true,
   automation_ready: false,
@@ -146,4 +146,49 @@ it("uses fresh native Codex plan observations independently of the Claude coordi
   expect(summarizeProviderUsage(data)[0]?.accountHint).toBeNull();
   expect(summarizeProviderUsage(resp({ observed_usage: [{ ...observation, observed_at: new Date(Date.now() - 960000).toISOString() }] }))).toEqual([]);
   expect(summarizeProviderUsage(resp({ observed_usage: [{ ...observation, reset_at: new Date(Date.now() - 1).toISOString() }] }))).toEqual([]);
+});
+
+it("prefers a numeric coordinator Codex window over a turn observation", () => {
+  const observation = { provider: "codex", node_id: "node", observed_at: new Date().toISOString(), used_percent: 80, window_duration_seconds: 18000, reset_at: new Date(Date.now() + 3600000).toISOString(), plan_type: "plus" };
+  const data = resp({
+    buckets: [bucket("codex_five_hour", 18000)],
+    window_states: [{ ...state("codex_five_hour", 20), provider: "codex" }],
+    observed_usage: [observation],
+  });
+  expect(summarizeProviderUsage(data)[0]?.windows[0]?.usedPercent).toBe(20);
+});
+
+it("lets a fresh turn observation fill an unknown coordinator Codex window", () => {
+  const observation = { provider: "codex", node_id: "node", observed_at: new Date().toISOString(), used_percent: 12, window_duration_seconds: 18000, reset_at: new Date(Date.now() + 3600000).toISOString(), plan_type: "plus" };
+  const data = resp({
+    buckets: [bucket("codex_five_hour", 18000)],
+    window_states: [{ ...state("codex_five_hour", null), provider: "codex" }],
+    observed_usage: [observation],
+  });
+  expect(summarizeProviderUsage(data)[0]?.windows[0]?.usedPercent).toBe(12);
+});
+
+it.each(["stale", "partial", "unavailable"])("does not let a %s coordinator number hide fresh Codex usage", (telemetry_state) => {
+  const observation = { provider: "codex", node_id: "node", observed_at: new Date().toISOString(), used_percent: 12, window_duration_seconds: 18000, reset_at: new Date(Date.now() + 3600000).toISOString(), plan_type: "plus" };
+  const data = resp({
+    buckets: [bucket("codex_five_hour", 18000)],
+    window_states: [{ ...state("codex_five_hour", 95), provider: "codex", telemetry_state }],
+    observed_usage: [observation],
+  });
+  expect(summarizeProviderUsage(data)[0]?.windows[0]?.usedPercent).toBe(12);
+  expect(summarizeProviderUsage({ ...data, observed_usage: [] })[0]?.windows[0]?.usedPercent).toBeNull();
+});
+
+it("expires numeric Codex snapshot fallback data when no rich state is available", () => {
+  const snapshot = {
+    snapshot_id: "codex-old", provider: "codex", principal_hash: "account",
+    bucket_id: "codex_five_hour", observed_at: new Date(Date.now() - 960000).toISOString(),
+    telemetry_quality: "authoritative", used_percent: 95,
+    reset_at: new Date(Date.now() + 3600000).toISOString(), limit_reached: 0,
+    window_duration_seconds: 18000, raw_status: "codex_app_server_rate_limits",
+    unavailable_reason: "", created_at: "",
+  };
+  expect(summarizeProviderUsage(resp({ latest_snapshots: [snapshot] }))[0]?.windows[0]?.usedPercent).toBeNull();
+  const observation = { provider: "codex", node_id: "node", observed_at: new Date().toISOString(), used_percent: 12, window_duration_seconds: 18000, reset_at: snapshot.reset_at, plan_type: "plus" };
+  expect(summarizeProviderUsage(resp({ latest_snapshots: [snapshot], observed_usage: [observation] }))[0]?.windows[0]?.usedPercent).toBe(12);
 });
