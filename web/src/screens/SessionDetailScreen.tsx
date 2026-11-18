@@ -40,6 +40,7 @@ import { copyTextToClipboard } from "../lib/clipboard";
 import { useForkStore } from "../stores/forkStore";
 import { useManagerBootStore } from "../stores/managerBootStore";
 import { SessionTurns } from "../components/timeline/SessionTurns";
+import { ContextEconomicsPanel } from "../components/timeline/ContextEconomicsPanel";
 import { ContextFillGauge } from "../components/timeline/ContextFillGauge";
 import { Composer } from "../components/timeline/Composer";
 import { JobRow, JobsReadNotice } from "../components/system/JobsPanel";
@@ -437,6 +438,10 @@ export function SessionCostPanel({ sessionId }: { sessionId: string }) {
         <CostRow label="Output" value={compactTokens(t.output)} />
         <CostRow label="Cache write" value={compactTokens(t.cache_creation)} />
         <CostRow label="Cache read" value={compactTokens(t.cache_read)} />
+        {usage.provider_cost?.usd != null && <CostRow
+          label={`SDK-reported estimate (${usage.provider_cost.priced_turns}/${usage.provider_cost.turns} turns)`}
+          value={formatUsd(usage.provider_cost.usd)} strong
+        />}
         {cost.known ? (
           <CostRow
             label={`Est. cost${cost.model_priced ? ` (${cost.model_priced})` : ""}`}
@@ -1400,6 +1405,8 @@ export function SessionDetailScreen() {
         {id && !closed && session?.currentCaseId && session.caseRole === "manager" && (
           <CaseResumePanel caseId={session.currentCaseId} />
         )}
+
+        {activity?.contextEconomics && <ContextEconomicsPanel economics={activity.contextEconomics} />}
 
         {/* Composer pinned outside the scroll container so it always sits at the true bottom */}
         {id && !closed ? (

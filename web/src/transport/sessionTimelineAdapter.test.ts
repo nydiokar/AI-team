@@ -3,6 +3,32 @@ import { toContextFill, toSessionActivityTimeline } from "./sessionTimelineAdapt
 import type { RawSessionTimelineResponse } from "./rawApi";
 
 describe("sessionTimelineAdapter - durable read model", () => {
+  it("preserves proposal, execution receipt, unknown counters and coverage through transport", () => {
+    const raw: RawSessionTimelineResponse = {
+      items: [], next_cursor: null, generated_at: "2026-11-18T10:00:00Z", coverage: {},
+      context_fill: { context_used_ratio: null, context_window_tokens: null,
+        context_remaining_tokens: null, context_window_source: "unknown" },
+      context_economics: {
+        recommendation: "compact", threshold: .8, cold_write_usd: 1, warm_read_usd: .08,
+        recovery_coverage: "complete", compaction_coverage: "unavailable", compactions: [],
+        recoveries: [{ task_id: "receipt", status: "completed", observed_usd: 0,
+          cost_basis: "sdk_reported_estimate", prior_session_id: "old", session_id: "new",
+          tokens: { input_tokens: 100, output_tokens: null, cache_read_tokens: 0,
+            cache_creation_tokens: null, context_used_ratio: .1 } }],
+        proposals: [{ approval_id: "proposal", status: "approved", estimate: {
+          known: true, reason: "", session_id: "old", model: "opus", basis: "latest_request_context",
+          cache_creation_tokens: 160000, usd: 1,
+          economics: { context_used_ratio: .8, warm_read_usd: .08, cold_premium_usd: .92 },
+        } }],
+      },
+    };
+    const economics = toSessionActivityTimeline(raw).contextEconomics!;
+    expect(economics.compactionCoverage).toBe("unavailable");
+    expect(economics.recoveries[0]).toMatchObject({ observedUsd: 0, costBasis: "sdk_reported_estimate",
+      priorSessionId: "old", sessionId: "new", outputTokens: null, cacheReadTokens: 0 });
+    expect(economics.proposals[0]).toMatchObject({ coldResumeUsd: 1, contextTokens: 160000, contextUsedRatio: .8 });
+  });
+
   it("maps backend snake_case fields without dropping authority metadata", () => {
     const raw: RawSessionTimelineResponse = {
       generated_at: "2026-07-01T10:00:00Z",

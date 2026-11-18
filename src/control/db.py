@@ -9337,6 +9337,66 @@ class MeshDB:
             out[d["session_id"]] = d
         return out
 
+    def session_provider_cost(self, session_id: str) -> Dict[str, Any]:
+        """Sum normalized per-turn SDK estimates with honest partial coverage."""
+        row = self._conn().execute(
+            """SELECT COUNT(*) AS turns,
+                      COUNT(json_extract(metrics_json, '$.provider_reported_cost_usd')) AS priced_turns,
+                      SUM(json_extract(metrics_json, '$.provider_reported_cost_usd')) AS usd
+               FROM llm_turns WHERE session_id = ? AND COALESCE(final_status, '') != 'withdrawn'""",
+            (session_id,),
+        ).fetchone()
+        return {"usd": row["usd"], "priced_turns": row["priced_turns"], "turns": row["turns"],
+                "coverage": "complete" if row["turns"] and row["turns"] == row["priced_turns"] else "partial"}
+
+    def session_recovery_evidence(self, session_id: str) -> List[Dict[str, Any]]:
+        """One bounded join links old/new sessions, durable estimates and actual turns."""
+        rows = self._conn().execute(
+            """WITH related(session_id) AS MATERIALIZED (
+                   SELECT ? UNION SELECT session_id FROM (
+                       SELECT session_id FROM sessions INDEXED BY idx_sessions_continued_from
+                       WHERE continued_from = ? AND continued_from IS NOT NULL LIMIT 100
+                   )
+               ), recent AS MATERIALIZED (
+                   SELECT turn.* FROM related r
+                   CROSS JOIN mesh_tasks turn INDEXED BY idx_mesh_tasks_session_created
+                   WHERE turn.session_id = r.session_id AND turn.turn_kind IN ('respawn', 'retry')
+                   ORDER BY turn.created_at DESC LIMIT 20
+               )
+               SELECT token.id AS token_id, token.payload, turn.id AS task_id,
+                      turn.session_id, turn.turn_kind, turn.status,
+                      s.continued_from AS prior_session_id,
+                      t.metrics_json, t.coverage_json, t.observed_models, t.requested_model,
+                      t.final_status, t.backend, t.projection_version
+               FROM recent turn
+               JOIN sessions s ON s.session_id = turn.session_id
+               JOIN mesh_tasks token ON token.id = turn.idempotency_key AND token.producer_turn_id = turn.id
+               LEFT JOIN llm_turns t ON t.turn_id = turn.id
+               WHERE token.action IN (?, ?)
+               ORDER BY turn.created_at DESC LIMIT 20""",
+            (session_id, session_id, RESPAWN_ACTION, QUOTA_RESUME_ACTION),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def latest_context_observation(self, session_id: str) -> Optional[Dict[str, Any]]:
+        """Latest turn only: a missing measurement must not revive pre-compact context."""
+        row = self._conn().execute(
+            """SELECT metrics_json, requested_model, observed_models, backend, projection_version,
+                      COALESCE(ended_at, started_at, created_at) AS observed_at
+               FROM llm_turns WHERE session_id = ? AND COALESCE(final_status, '') != 'withdrawn'
+               ORDER BY COALESCE(started_at, created_at) DESC, turn_id DESC LIMIT 1""",
+            (session_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        from src.services.context_economics import context_metrics
+        metrics = context_metrics({**dict(row), "metrics": json.loads(row["metrics_json"] or "{}")})
+        models = json.loads(row["observed_models"] or "[]")
+        model = models[0] if len(models) == 1 else None if models else row["requested_model"]
+        return {"context_tokens": metrics.get("turn_exit_context_tokens"),
+                "context_window_tokens": metrics.get("context_window_tokens"),
+                "model": model, "observed_at": row["observed_at"]}
+
     def recent_cache_write(
         self, session_id: str, turns: Optional[int] = None,
     ) -> Optional[Dict[str, Any]]:

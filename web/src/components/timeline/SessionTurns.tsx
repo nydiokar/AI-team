@@ -44,8 +44,9 @@ function statusClass(status: string): string {
 }
 
 export function contextTokens(m: RawTurnMetrics): number | null {
+  // An explicitly unknown final request must not revive an earlier/aggregate value.
+  if ("turn_exit_context_tokens" in m) return m.turn_exit_context_tokens ?? null;
   return (
-    m.turn_exit_context_tokens ??
     m.peak_context_tokens ??
     m.context_tokens ??
     null

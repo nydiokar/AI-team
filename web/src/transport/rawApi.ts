@@ -87,6 +87,7 @@ export interface RawSessionReason {
 
 // GET /api/sessions/{id}/usage → per-session token totals + approx USD cost.
 export interface RawSessionUsage {
+  provider_cost?: { usd: number | null; priced_turns: number; turns: number; coverage: "complete" | "partial" };
   session_id: string;
   usage_state?: "pending" | "partial" | "recorded" | "unavailable";
   model: string | null;
@@ -689,6 +690,25 @@ export interface RawSessionTimelineResponse {
   generated_at: string;
   coverage: Record<string, string>;
   context_fill: RawContextFill;
+  context_economics?: {
+    compaction_coverage?: string;
+    recovery_coverage?: string;
+    recommendation: string;
+    threshold: number;
+    cold_write_usd: number | null;
+    warm_read_usd: number | null;
+    compactions: {
+      task_id: string; status: string; reclaimed_tokens: number | null;
+      reclaimed_ratio: number | null; avoided_read_usd_per_request: number | null;
+      observed_compaction_usd: number | null; break_even_warm_requests: number | null;
+    }[];
+    recoveries: { task_id: string; status: string; observed_usd: number | null; cost_basis?: string;
+      prior_session_id?: string | null; session_id?: string | null; estimate?: RawCaseResumeEstimate | null;
+      tokens?: { input_tokens: number | null; output_tokens: number | null; cache_read_tokens: number | null;
+        cache_creation_tokens: number | null; context_used_ratio: number | null };
+    }[];
+    proposals: { approval_id: string; status: string; estimate: RawCaseResumeEstimate | null }[];
+  };
 }
 
 // ── Work / Case read model (A27) ───────────────────────────────────────────
@@ -909,6 +929,8 @@ export interface RawCaseResumeEstimate {
   usd: number | null;
   basis: string;
   observed_at?: string | null;
+  context_quality?: string;
+  economics?: { context_used_ratio: number | null; warm_read_usd: number | null; cold_premium_usd: number | null };
 }
 
 export interface RawCaseResumeState {

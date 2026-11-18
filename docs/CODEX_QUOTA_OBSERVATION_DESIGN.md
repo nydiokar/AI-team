@@ -309,6 +309,16 @@ owned app-server and reader threads were verified closed afterward; model turns
 sent: zero. This proves the native read, not scheduled worker activation or
 natural production refresh after deployment.
 
+Final main refresh: integrated `8fdf5a0` (A117 telemetry delivery) without source
+conflicts or changes to its telemetry/session economics code. The same targeted
+pytest command with `-n 2` passed **355 tests, 1 skipped in 70.06s**; Home tests
+still passed 24/24 and the typecheck/production build passed. During an earlier
+parallel build/four-worker run, the unchanged concurrent SQLite test exceeded its
+ten-second wait (354 passed, 1 failed, 1 skipped). Clean main's quota module
+passed 63/63; the full final two-worker selection passed without changing that
+test or relaxing its timeout. This is recorded as an observed intermittent wait
+timeout, not asserted to be a pre-existing failure.
+
 ## 8. Acceptance criteria
 
 - With `QUOTA_COORDINATOR_ENABLED=1` and a Codex-capable worker, Home shows

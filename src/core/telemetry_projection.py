@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import math
 from datetime import datetime
 from typing import Any, Dict, Iterable, List, Optional
 
 from src.core.telemetry import TelemetryEvent
 
-PROJECTION_VERSION = 3
+PROJECTION_VERSION = 4
 
 
 def _as_dict(event: TelemetryEvent | Dict[str, Any]) -> Dict[str, Any]:
@@ -71,6 +72,17 @@ def normalize_context_tokens(
     if input_token_semantics == "excludes_cache":
         return input_tokens + (cache_read_tokens or 0) + (cache_creation_tokens or 0)
     return None
+
+
+def _input_work(row: Dict[str, Any]) -> Optional[int]:
+    if str(row.get("usage_source") or "").startswith("claude."):
+        semantics = "excludes_cache"
+    else:
+        semantics = row.get("input_token_semantics") or "unknown"
+    return normalize_context_tokens(
+        input_tokens=row.get("input_tokens"), cache_read_tokens=row.get("cache_read_tokens"),
+        cache_creation_tokens=row.get("cache_creation_tokens"), input_token_semantics=semantics,
+    )
 
 
 def _event_sort_key(event: Dict[str, Any]) -> tuple:
@@ -357,6 +369,7 @@ def project_turn(events: Iterable[TelemetryEvent | Dict[str, Any]]) -> Dict[str,
                 request["started_at"] = event_time
                 request["status"] = "running"
             elif name == "model.request.usage":
+                request["model"] = event.get("model") or request["model"]
                 if request["started_at"] is None:
                     request["started_at"] = event_time
                 for field in (
@@ -372,13 +385,30 @@ def project_turn(events: Iterable[TelemetryEvent | Dict[str, Any]]) -> Dict[str,
                 request["input_token_semantics"] = attrs.get(
                     "input_token_semantics"
                 ) or request["input_token_semantics"]
-                if request["context_tokens"] is None:
+                claude_aggregate = str(attrs.get("usage_source") or "").startswith("claude.") and granularity != "request"
+                if claude_aggregate:
+                    # v1 labels are wrong, and invocation sums cannot recover a
+                    # request context. Never promote legacy aggregates to context.
+                    if attrs.get("adapter_version") != "claude-stream-json-v2":
+                        request["context_tokens"] = None
+                    request["context_entry_tokens"] = _non_negative_int(attrs.get("context_entry_tokens"), flags, "context_entry_tokens")
+                if request["context_tokens"] is None and not claude_aggregate:
                     request["context_tokens"] = normalize_context_tokens(
                         input_tokens=request["input_tokens"],
                         cache_read_tokens=request["cache_read_tokens"],
                         cache_creation_tokens=request["cache_creation_tokens"],
                         input_token_semantics=request["input_token_semantics"],
                     )
+                reported_cost = attrs.get("provider_reported_cost_usd")
+                request["provider_reported_cost_usd"] = (
+                    float(reported_cost) if type(reported_cost) in (int, float)
+                    and 0 <= reported_cost <= 2**63 - 1 and math.isfinite(reported_cost) else None
+                )
+                cumulative = attrs.get("sdk_cumulative_cost_usd")
+                request["sdk_cumulative_cost_usd"] = (
+                    float(cumulative) if type(cumulative) in (int, float)
+                    and 0 <= cumulative <= 2**63 - 1 and math.isfinite(cumulative) else None
+                )
                 request["usage_granularity"] = granularity
                 request["usage_source"] = attrs.get("usage_source")
                 request["usage_coverage"] = attrs.get("usage_coverage") or "partial"
@@ -433,6 +463,8 @@ def project_turn(events: Iterable[TelemetryEvent | Dict[str, Any]]) -> Dict[str,
     ]
     all_usage_rows = [row for row in model_requests.values() if not row["is_duplicate"]]
     usage_rows = request_rows if request_rows else all_usage_rows
+    if all_usage_rows:
+        turn["observed_models"] = sorted({row["model"] for row in all_usage_rows if row.get("model")})
     for invocation_id, invocation in invocations.items():
         _duration_ms(
             invocation.get("started_at"),
@@ -467,6 +499,22 @@ def project_turn(events: Iterable[TelemetryEvent | Dict[str, Any]]) -> Dict[str,
         event_count=len(ordered),
         flags=turn_flags,
     )
+    metrics["compactions"] = []
+    for event in ordered:
+        if event.get("event_name") != "context.compacted":
+            continue
+        attrs = event.get("attributes") or {}
+        before, after = attrs.get("before_tokens"), attrs.get("after_tokens")
+        if (type(before) is not int or not 0 <= before <= 2**63 - 1
+                or (after is not None and (type(after) is not int or not 0 <= after <= 2**63 - 1))):
+            turn_flags.append("invalid_compaction_context")
+            continue
+        trigger = attrs.get("trigger")
+        metrics["compactions"].append({"event_id": event.get("event_id"),
+            "before_tokens": before, "after_tokens": after,
+            "trigger": trigger if trigger in ("auto", "manual") else "unknown",
+            "observed_at": event.get("event_time")})
+    metrics["compactions"] = metrics["compactions"][-32:]
     turn["metrics"] = metrics
     turn["data_quality"] = sorted(set(turn_flags))
 
@@ -533,11 +581,11 @@ def _turn_metrics(
     request_work: List[int] = []
     all_work_known = bool(usage_rows)
     for row in usage_rows:
-        if row["context_tokens"] is None:
+        if _input_work(row) is None:
             all_work_known = False
             continue
         request_work.append(
-            row["context_tokens"]
+            (_input_work(row) or 0)
             + (row["output_tokens"] or 0)
             + (row["reasoning_tokens"] or 0)
         )
@@ -552,11 +600,11 @@ def _turn_metrics(
     for row in usage_rows:
         if row["invocation_id"] in duplicate_invocation_ids:
             continue
-        if row["context_tokens"] is None:
+        if _input_work(row) is None:
             deduplicated_work_known = False
             continue
         deduplicated_work_values.append(
-            row["context_tokens"]
+            (_input_work(row) or 0)
             + (row["output_tokens"] or 0)
             + (row["reasoning_tokens"] or 0)
         )
@@ -568,29 +616,21 @@ def _turn_metrics(
         largest = max(request_work)
         work_amplification = round(total_token_work / largest, 4) if largest else None
 
-    request_contexts = [
-        row["context_tokens"] for row in request_rows if row["context_tokens"] is not None
-    ]
-    request_windows = [
-        row["context_window_tokens"]
-        for row in request_rows
-        if row.get("context_window_tokens") is not None
-    ]
-    ordered_requests = sorted(
-        request_rows, key=lambda row: (row["started_at"] or "", row["sequence"])
-    )
-    entry_context = ordered_requests[0]["context_tokens"] if ordered_requests else None
+    request_contexts = [row["context_tokens"] for row in request_rows if row.get("context_tokens") is not None]
+    ordered_usage = sorted(all_usage_rows, key=lambda row: (row["started_at"] or "", row["sequence"]))
+    entry_context = None
+    if ordered_usage:
+        entry_context = ordered_usage[0].get("context_entry_tokens")
+        if entry_context is None:
+            entry_context = ordered_usage[0]["context_tokens"]
     final_invocation = turn.get("final_invocation_id")
-    final_requests = [
-        row for row in ordered_requests if row["invocation_id"] == final_invocation
-    ]
-    if not final_requests:
-        final_requests = ordered_requests
+    final_requests = ([row for row in ordered_usage if row["invocation_id"] == final_invocation]
+                      if final_invocation else ordered_usage)
     exit_context = final_requests[-1]["context_tokens"] if final_requests else None
-    context_window = request_windows[-1] if request_windows else usage.get("context_window_tokens")
+    context_window = final_requests[-1].get("context_window_tokens") if final_requests else None
 
     cache_ratio = None
-    context_total = usage.get("context_tokens")
+    context_total = sum(_input_work(row) or 0 for row in usage_rows) if usage_rows else None
     cache_total = usage.get("cache_read_tokens")
     if context_total and cache_total is not None:
         cache_ratio = cache_total / context_total
@@ -711,7 +751,7 @@ def _turn_metrics(
 
     unattributed_token_count = sum(
         (
-            (row["context_tokens"] or 0)
+            (_input_work(row) or 0)
             + (row["output_tokens"] or 0)
             + (row["reasoning_tokens"] or 0)
         )
@@ -727,13 +767,13 @@ def _turn_metrics(
     token_work_by_category: Dict[str, int] = {}
     category_complete = True
     for row in usage_rows:
-        if row["context_tokens"] is None:
+        if _input_work(row) is None:
             category_complete = False
             continue
         category = row.get("work_category") or "unknown"
         token_work_by_category[category] = (
             token_work_by_category.get(category, 0)
-            + row["context_tokens"]
+            + (_input_work(row) or 0)
             + (row["output_tokens"] or 0)
             + (row["reasoning_tokens"] or 0)
         )
@@ -744,9 +784,12 @@ def _turn_metrics(
     if usage.get("input_tokens") is not None:
         uncached_input_tokens = max(
             0,
-            usage["input_tokens"]
-            - (usage.get("cache_read_tokens") or 0)
-            - (usage.get("cache_creation_tokens") or 0),
+            sum(
+                max(0, row["input_tokens"] - (row.get("cache_read_tokens") or 0) - (row.get("cache_creation_tokens") or 0))
+                if row.get("input_token_semantics") == "includes_cache" and not str(row.get("usage_source") or "").startswith("claude.")
+                else (row.get("input_tokens") or 0)
+                for row in usage_rows if row.get("input_tokens") is not None
+            ),
         )
 
     latest_session_usage: Dict[str, Any] = {}
@@ -805,6 +848,11 @@ def _turn_metrics(
     return {
         **usage,
         "uncached_input_tokens": uncached_input_tokens,
+        "provider_reported_cost_usd": (
+            round(sum(row["provider_reported_cost_usd"] for row in usage_rows), 8)
+            if usage_rows and all(row.get("provider_reported_cost_usd") is not None for row in usage_rows) else None
+        ),
+        "sdk_cumulative_cost_usd": final_requests[-1].get("sdk_cumulative_cost_usd") if final_requests else None,
         "aggregate_input_tokens": aggregate_usage.get("input_tokens"),
         "aggregate_output_tokens": aggregate_usage.get("output_tokens"),
         "aggregate_cache_read_tokens": aggregate_usage.get("cache_read_tokens"),
@@ -894,8 +942,8 @@ def _turn_metrics(
         "coverage_score": coverage_score,
         "cache_read_ratio": round(cache_ratio, 6) if cache_ratio is not None else None,
         "output_to_input_ratio": (
-            round(usage["output_tokens"] / usage["context_tokens"], 6)
-            if usage.get("context_tokens") and usage.get("output_tokens") is not None
+            round(usage["output_tokens"] / context_total, 6)
+            if context_total and usage.get("output_tokens") is not None
             else None
         ),
         "wall_time_ms": wall_time_ms,

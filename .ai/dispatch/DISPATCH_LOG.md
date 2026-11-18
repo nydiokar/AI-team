@@ -37,10 +37,12 @@ rollout; a separate investigation job does not gate starting the build.
 <a id="A114"></a>
 <a id="A115"></a>
 <a id="A116"></a>
+<a id="A118"></a>
 
 | # | Dispatch | Date | Level | Status | One-line |
 |---|---|---|---|---|---|
-| A117 | `AGENT_117_TELEMETRY_CONTEXT_ECONOMICS.md` | 2026-11-17 | 3 | ready — engineering authorized; unshipped checkpoint `4f1c61c`; worker activation gated | **Finish issue #144 with measured proof.** Resume existing context/recovery economics, refresh final checks/review, ship and reconcile natural compaction/recovery receipts; no fabricated savings or threshold calibration. |
+| A117 | `AGENT_117_TELEMETRY_CONTEXT_ECONOMICS.md` | 2026-11-17 | 3 | active — PR #293 merged `05fad0a`; gateway/task-server live; worker activation gated | **Issue #144 context/recovery economics.** Three P1 corrections; 384 targeted Python/41 web checks plus both CI jobs pass. Read-only production API/mobile check passes. Native worker activation, receipts and calibration remain open. |
+| A118 | `AGENT_118_OPENCODE_REPLY_RECOVERY.md` | 2026-11-18 | 3 | active — P0 investigation; [issue #298](https://github.com/nydiokar/AI-team/issues/298) | **Diagnose and repair OpenCode managed-turn reply loss.** Structural attribution gap confirmed; incident evidence and a safe reviewed ownership contract remain open. |
 | A116 | `AGENT_116_TRUSTWORTHY_ARCHITECTURE_AUDIT.md` | 2026-11-16 | 3 | ready — operator-approved for autonomous implementation; issue #290 | **Trustworthy architecture audit + ledger readers.** Fix stale latest-review and truncated membership projections, fail-open analysis/coverage, SQL attribution and misleading scoring; certify CLI/report/browser/dispatch behavior against frozen defects and benign controls before closure. |
 | A115 | `A115_AGENT_DISCOVERY_FOR_DELEGATION.md` | 2026-11-15 | 3 | ready — implementation must re-verify assessment and current runtime before widening sender use | **Make same-Case agent delegation discoverable.** Add a bounded, caller-scoped roster for already-existing eligible sessions and a discover→select→send flow over the current durable turn queue; no worker spawn, cross-Case discovery, or broad mesh authority. |
 | A114 | `AGENT_114_CONSEQUENTIAL_DECISION_INTEGRATION.md` | 2026-11-13 | 3 | ready for offline implementation — reviewed 2026-11-17; activation needs verified owner authority | **Finish real consequential-decision integration.** Guard protected turns and SDK creation/reuse against exact target-worker inputs; prove zero forbidden launches/sends, recovery, visibility and ordinary compatibility. No production activation claimed. |

@@ -1144,6 +1144,7 @@ class TelemetryStore:
 
     @staticmethod
     def _decode_turn(row: Dict[str, Any]) -> Dict[str, Any]:
+        from src.services.context_economics import context_metrics
         for key, default in (
             ("observed_models", []),
             ("metrics_json", {}),
@@ -1157,4 +1158,5 @@ class TelemetryStore:
         row["metrics"] = row.pop("metrics_json")
         row["coverage"] = row.pop("coverage_json")
         row["data_quality"] = row.pop("data_quality_json")
+        row["metrics"] = context_metrics(row)
         return row

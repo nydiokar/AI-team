@@ -99,7 +99,7 @@ def test_terminal_classification_uses_exact_owner_cancel(cancel_requested, is_er
     from types import SimpleNamespace
     from src.backends.claude_driver import _TurnAccumulator
 
-    session = _SDKSession.__new__(_SDKSession)
+    session = _SDKSession("ownership", "/tmp", None, {})
     session._turn_owner = SimpleNamespace(cancel_requested=cancel_requested)
     acc = _TurnAccumulator(backend_session_id="sid-1")
     message = _result("[ede_diagnostic] result_type=user", is_error=is_error)

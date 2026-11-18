@@ -112,9 +112,13 @@ def test_claude_sdk_stream_maps_fake_content_blocks_without_copying_text(monkeyp
     class ResultMessage:
         pass
 
+    class SystemMessage:
+        pass
+
     sdk = SimpleNamespace(
         AssistantMessage=AssistantMessage,
         ResultMessage=ResultMessage,
+        SystemMessage=SystemMessage,
         TextBlock=TextBlock,
         ToolUseBlock=ToolUseBlock,
         ThinkingBlock=ThinkingBlock,
