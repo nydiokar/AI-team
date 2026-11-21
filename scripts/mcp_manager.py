@@ -921,7 +921,9 @@ def _reconcile_waits(args: Dict[str, Any]) -> str:
         lines.append(f"    ✓ {r.get('task_id')} → outcome={r.get('outcome')!r} — review it (record_review task_id=…)")
     for p in pending:
         lines.append(f"    … {p.get('task_id')} still running — its completion will wake you; just return control")
-    if not resolved and not pending:
+    jobs = result.get("watched_jobs") or []
+    lines.extend(_watched_job_wait_lines(jobs))
+    if not resolved and not pending and not jobs:
         lines.append("  (nothing waiting.)")
     return "\n".join(lines)
 
@@ -937,6 +939,28 @@ def _arm_wait_group(args: Dict[str, Any]) -> str:
     completions in ONE wake when the last one finishes. ``ANY`` is the default
     behaviour (each completion as it lands)."""
     case_id = _bounded_text(args.get("case_id"), "case_id", _MAX_ID_CHARS, required=True)
+    if "job_id" in args:
+        if any(field in args for field in ("wait_group_id", "condition", "member_task_ids")):
+            raise ValueError("job_id must be supplied with case_id alone")
+        job_id = _bounded_text(args.get("job_id"), "job_id", _MAX_ID_CHARS, required=True)
+        caller = _self_session_id()
+        if not caller:
+            return "arm_wait_group: could not resolve your Manager session identity."
+        result = _api_request(
+            "POST", f"/api/cases/{urllib.parse.quote(case_id, safe='')}/job-watches/"
+            f"{urllib.parse.quote(job_id, safe='')}?{urllib.parse.urlencode({'session_id': caller})}",
+        )
+        if not result.get("ok"):
+            return f"Job watch refused for {job_id} on Case {case_id}: {result.get('reason')}."
+        state = result.get("state")
+        detail = {
+            "watching": "Return control for a wake after process exit.",
+            "pending": "The process has exited. Return control for inbox delivery.",
+            "delivered": "The wake has been queued or started.",
+            "acked": "The wake completed.",
+            "dead": "Inbox delivery ended. Inspect System > Jobs for the result.",
+        }.get(state, "")
+        return f"Watched job {job_id} on Case {case_id} is {state}. {detail}".strip()
     group_id = _bounded_text(args.get("wait_group_id"), "wait_group_id", _MAX_ID_CHARS, required=True)
     condition = (_bounded_text(args.get("condition"), "condition", 16, required=False) or "ANY").upper()
     if condition not in ("ANY", "ALL", "NAMED"):
@@ -1267,6 +1291,14 @@ def _whoami(args: Dict[str, Any]) -> str:
 # Tool: check_inbox  (the caller's outbox/inbox — what is waiting for ME)
 # ---------------------------------------------------------------------------
 
+def _watched_job_wait_lines(jobs: list[Dict[str, Any]]) -> list[str]:
+    return [
+        f"    • watched job {job['job_id']} → {job.get('outcome') or job['state']}"
+        f" ({job['state']}, Case {job['case_id']})"
+        for job in jobs[:50]
+    ]
+
+
 def _check_inbox(args: Dict[str, Any]) -> str:
     """What is waiting for the CALLER right now (read-only over the agent inbox).
 
@@ -1286,7 +1318,8 @@ def _check_inbox(args: Dict[str, Any]) -> str:
     result = _api_request("GET", f"/api/agent/inbox?session_id={urllib.parse.quote(sid)}")
     resolved = result.get("resolved") or []
     pending = result.get("pending") or []
-    if not resolved and not pending:
+    jobs = result.get("watched_jobs") or []
+    if not resolved and not pending and not jobs:
         return f"Inbox for {sid} is empty — nothing waiting, no dispatched work in flight."
     lines = [f"Inbox for {sid}:"]
     if resolved:
@@ -1298,6 +1331,9 @@ def _check_inbox(args: Dict[str, Any]) -> str:
         lines.append(f"  pending ({len(pending)}) — dispatched work still running:")
         for m in pending[:50]:
             lines.append(f"    • task {m.get('task_id')}")
+    if jobs:
+        lines.append(f"  watched jobs ({len(jobs)}):")
+        lines.extend(_watched_job_wait_lines(jobs))
     return "\n".join(lines)
 
 
@@ -1858,20 +1894,22 @@ _TOOLS = [
     {
         "name": "arm_wait_group",
         "description": (
-            "OPTIONAL delivery filter. You do NOT need this to be woken: every worker completion "
-            "already lands in your inbox and wakes you once. Use condition ALL (or NAMED) only to "
-            "hold a parallel batch so its completions arrive together in ONE wake when the last "
-            "member finishes. ANY is the default behaviour."
+            "Wait for a worker's detached process in your own Case using case_id and its watch_job "
+            "job_id alone. The harness wakes you after process exit, including when the capture "
+            "log is empty. Return control after subscribing. For ordinary worker turns, completion "
+            "already wakes you. Use wait_group_id, member_task_ids and condition ALL (or NAMED) "
+            "to hold a batch of worker completions until its last member finishes."
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
                 "case_id": {"type": "string", "description": "The Manager's OWN Case id the group belongs to."},
+                "job_id": {"type": "string", "description": "The detached job ID returned by watch_job. Supply only case_id with this field."},
                 "wait_group_id": {"type": "string", "description": "A name for this group (e.g. 'batch-1'). Arming the same group id again is idempotent."},
                 "condition": {"type": "string", "description": "ANY | ALL | NAMED. Default ANY (good for a single worker or 'wake me on each completion')."},
                 "member_task_ids": {"type": "array", "items": {"type": "string"}, "description": "The dispatched worker task_ids that make up the group."},
             },
-            "required": ["case_id", "wait_group_id", "member_task_ids"],
+            "required": ["case_id"],
         },
     },
     {

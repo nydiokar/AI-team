@@ -321,26 +321,19 @@ def test_IB09_completion_is_addressed_by_the_persisted_requester_only(tmp_path, 
 
 
 # IB10 ---------------------------------------------------------------------- #
-def test_IB10_migration_keeps_every_outbox_row(tmp_path):
+def test_IB10_migration_keeps_every_outbox_row(tmp_path, historical_mesh_db):
     """A DB at schema 44 with outbox rows: opening it migrates every row into the
     inbox (delivered → acked; undelivered → dead(unaddressed_pre_inbox), to be
     re-seeded by the Phase 4 migration) — nothing is dropped."""
     path = str(tmp_path / "mesh.db")
-    db = MeshDB(path)
+    db = historical_mesh_db(path, 44)
     with db._write() as conn:
-        conn.execute("DELETE FROM agent_inbox")
-        conn.execute("DELETE FROM schema_version WHERE version >= 45")
-        # A faithful schema-44 fixture must also remove J2 migration-47 objects.
-        conn.execute("DROP INDEX IF EXISTS idx_jobs_completions")
-        conn.execute("DROP TABLE IF EXISTS job_completion_effects")
-        conn.execute("ALTER TABLE jobs DROP COLUMN completion_enrolled")
         for tid, delivered in (("t-a", None), ("t-b", "2026-10-09T15:00:00+00:00")):
             conn.execute(
                 "INSERT INTO completion_outbox (child_task_id, case_id, outcome, created_at, delivered_at, delivery_reason) "
                 "VALUES (?, 'case-1', 'success', '2026-10-09T14:00:00+00:00', ?, ?)",
                 (tid, delivered, "wake" if delivered else None))
-        conn.execute("DROP TABLE IF EXISTS inbox_wait_filters")
-        conn.execute("DROP TABLE agent_inbox")
+    db.close()
     reopened = MeshDB(path)
     rows = {r["about_task_id"]: dict(r) for r in reopened._conn().execute("SELECT * FROM agent_inbox")}
     assert set(rows) == {"t-a", "t-b"}

@@ -7,14 +7,21 @@ monkeypatch ``control_api`` keep reaching these handlers.
 """
 from __future__ import annotations
 
+import asyncio
+import sqlite3
+import threading
 from typing import Any, Callable, Optional
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query
+from fastapi import APIRouter, Depends, Header, HTTPException, Path, Query, Request
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+from starlette.requests import ClientDisconnect
 
+from config import config
 from src.control import control_api as core
 from src.control.routes._responses import CommandResult
+from src.control.turn_queue import TurnQueueError
+from src.control.turn_scheduler import notify_turn_queue_changed
 from src.control.control_api import (
     _REASON_STATUS,
     CaseCloseBody,
@@ -69,6 +76,13 @@ class PendingTask(BaseModel):
     task_id: str
 
 
+class WatchedJobWait(BaseModel):
+    job_id: str
+    case_id: str
+    state: str
+    outcome: str | None = None
+
+
 class ReviewSummary(BaseModel):
     verdict: str
     reason: Optional[str]
@@ -85,6 +99,7 @@ class ManagerInvokeOut(CommandResult):
 class ReconcileWorkerWaitsOut(CommandResult):
     resolved: list[WaitOutcome]
     pending: list[PendingTask]
+    watched_jobs: list[WatchedJobWait] = Field(default_factory=list)
 
 
 class InboxResolvedEntry(BaseModel):
@@ -97,10 +112,15 @@ class AgentInboxOut(CommandResult):
     session_id: str
     resolved: list[InboxResolvedEntry]
     pending: list[PendingTask]
+    watched_jobs: list[WatchedJobWait] = Field(default_factory=list)
 
 
 class ArmWaitGroupOut(CommandResult):
     event_id: Optional[int] = None
+
+
+class JobWatchOut(CommandResult):
+    state: str | None = None
 
 
 class PublishArtifactOut(CommandResult):
@@ -242,6 +262,7 @@ def build_router(
     idem_guard_async: Callable[..., Any],
 ) -> APIRouter:
     router = APIRouter(dependencies=[Depends(require_auth)])
+    job_watch_slots = threading.BoundedSemaphore(4)
 
     @router.post(
         "/api/manager",
@@ -438,6 +459,59 @@ def build_router(
             case_id, body.wait_group_id, cond, body.member_task_ids, actor="manager",
         )
         return JSONResponse(result)
+
+    @router.post("/api/cases/{case_id}/job-watches/{job_id}", response_model=JobWatchOut)
+    async def api_watch_case_job(
+        request: Request,
+        case_id: str = Path(pattern=r"^[A-Za-z0-9_-]{1,128}$"),
+        job_id: str = Path(pattern=r"^[A-Za-z0-9_-]{1,128}$"),
+        session_id: str = Query(pattern=r"^[A-Za-z0-9_-]{1,128}$"),
+    ) -> JSONResponse:
+        """Subscribe the current Manager to a watched job in its own Case."""
+        from src.control.db import get_db
+
+        if config.mesh.jobs_read_mode != "controller":
+            raise HTTPException(status_code=503, detail="job_watch_requires_shared_controller")
+        interval = int(getattr(config.mesh, "case_continuation_tick_interval_sec", 30) or 0)
+        if not config.mesh.enabled or interval <= 0:
+            raise HTTPException(status_code=503, detail="job_watch_dispatcher_disabled")
+        if not job_watch_slots.acquire(blocking=False):
+            raise HTTPException(status_code=429, detail="job_watch_busy")
+        release_here = True
+        try:
+            if request.headers.get("content-length") not in (None, "0"):
+                raise HTTPException(status_code=413, detail="job_watch_body_not_empty")
+            async with asyncio.timeout(1):
+                async for chunk in request.stream():
+                    if chunk:
+                        raise HTTPException(status_code=413, detail="job_watch_body_not_empty")
+
+            def subscribe() -> JSONResponse:
+                db = get_db()
+                if db is None:
+                    raise HTTPException(status_code=503, detail="job_watch_unavailable")
+                result = db.watch_case_job(case_id, job_id, session_id)
+                if result.get("ok"):
+                    notify_turn_queue_changed()
+                return JSONResponse(result)
+
+            future = asyncio.get_running_loop().run_in_executor(None, subscribe)
+
+            def finished(done: asyncio.Future[JSONResponse]) -> None:
+                job_watch_slots.release()
+                if not done.cancelled():
+                    done.exception()
+
+            future.add_done_callback(finished)
+            release_here = False
+            return await asyncio.shield(future)
+        except (TimeoutError, ClientDisconnect):
+            raise HTTPException(status_code=408, detail="job_watch_body_incomplete") from None
+        except (sqlite3.Error, TurnQueueError):
+            raise HTTPException(status_code=503, detail="job_watch_unavailable") from None
+        finally:
+            if release_here:
+                job_watch_slots.release()
 
     @router.post(
         "/api/cases/{case_id}/artifacts",

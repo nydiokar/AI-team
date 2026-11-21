@@ -109,6 +109,19 @@ Only jobs that are genuinely open. Everything merged/done is in git and the disp
 
 ## Recent shift notes
 
+**2026-11-21 — #228 watched-job wake boundary.** The shared controller records launch
+Case on new jobs from running managed turns. A current Manager can subscribe to
+one of those jobs through the existing agent inbox. Legacy jobs without launch
+Case are ineligible, and federated job stores need a separate provenance contract.
+The two changed HTTP receivers admit four requests each through their actual DB
+work. The subscription has no body and a one-second body deadline. Terminal
+reports allow 32 KiB and a three-second body deadline. Both use the five-second
+SQLite lock budget, which cannot bound native filesystem stalls during commit.
+The shared bearer remains the trust boundary. Worker-side recovery cannot infer
+an exact exit code if the worker lost its process handle before reporting it.
+After a subscription is accepted, prefer a forward repair while any job watch
+is active. Pre-v50 gateways would render a ready job watch as a worker completion.
+
 **2026-11-18 — Codex quota PR #288 merged and controller-live (`8a026a2`).**
 Both controllers healthy, schema 49 unchanged, both workers online; quota GET
 200 and ingest rejection probes 401/422/413 pass with no injected observations.

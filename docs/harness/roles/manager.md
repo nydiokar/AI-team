@@ -154,6 +154,13 @@ Only if you need a parallel batch delivered **together** (a barrier before a syn
 `arm_wait_group(case_id, member_task_ids=[…], condition='ALL')`: the members' completions are held
 and arrive in ONE wake when the last one finishes. `ANY` is simply the default behaviour.
 
+When a worker launches a detached `watch_job` process and returns its job ID, subscribe with
+`arm_wait_group(case_id, job_id=…)` and return control. This schedules a separate inbox wake
+after the process exits, even if it writes only to a private log. The wake gives the process
+outcome and job ID. Inspect System > Jobs and the output artifacts before deciding how to
+continue the Case. `check_inbox` shows the watch while it is outstanding. A repeated
+subscription to the same job returns the existing delivery state.
+
 Crucially, **a wake never interrupts a live operator turn** — if you are mid-conversation the wake
 queues behind it, so you stay free to talk to the operator while workers run. Delivery is bounded:
 a wake that cannot be delivered is retried a few times with backoff, then surfaced to the operator.

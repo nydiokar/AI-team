@@ -95,7 +95,8 @@ def test_job_result_resolves_caller_and_uses_bounded_id(monkeypatch):
     calls = []
     monkeypatch.setenv("AI_TEAM_SESSION_ID", "current")
     monkeypatch.setenv("SESSION_ID", "stale")
-    monkeypatch.setenv("NODE_ID", "worker-a")
+    monkeypatch.setenv("NODE_ID", "stale-node")
+    monkeypatch.setenv("WORKER_NODE_ID", "worker-a")
 
     def post(payload, path="/jobs"):
         calls.append((payload, path))
@@ -114,10 +115,13 @@ def test_watch_job_prefers_canonical_identity_and_explains_consumption(monkeypat
 
     monkeypatch.setenv("AI_TEAM_SESSION_ID", "current")
     monkeypatch.setenv("SESSION_ID", "stale")
+    monkeypatch.setenv("NODE_ID", "stale-node")
+    monkeypatch.setenv("WORKER_NODE_ID", "worker-a")
     calls = []
     monkeypatch.setattr(mcp_jobs, "_post_job", lambda p: calls.append(p) or {"job_id": "job_123"})
     text = mcp_jobs._watch_job({"command": "echo test", "label": "test"})
     assert calls[0]["session_id"] == "current"
+    assert calls[0]["node_id"] == "worker-a"
     assert "job_result" in text
     description = next(t["description"] for t in mcp_jobs._TOOLS if t["name"] == "watch_job")
     assert "turn ends immediately" not in description

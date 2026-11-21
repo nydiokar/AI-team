@@ -32,7 +32,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import sqlite3
 import threading
 import time
 import types
@@ -215,33 +214,6 @@ def test_S8_03_legacy_execution_refused_at_insert_and_claim_unconditionally(tmp_
 # --------------------------------------------------------------------------- #
 # S8-04 — migration 43
 # --------------------------------------------------------------------------- #
-def _rewind_to_42(path: str) -> None:
-    """Make a migrated DB look exactly like schema 42 again (pre-cutover)."""
-    conn = sqlite3.connect(path)
-    conn.execute("DELETE FROM schema_version WHERE version >= 43")
-    # J2 migration 47 did not exist at schema 42; rewind its physical schema too.
-    conn.execute("DROP INDEX IF EXISTS idx_jobs_completions")
-    conn.execute("DROP TABLE IF EXISTS job_completion_effects")
-    conn.execute("ALTER TABLE jobs DROP COLUMN completion_enrolled")
-    conn.execute("DROP INDEX IF EXISTS idx_mesh_tasks_legacy_exec_live")
-    conn.execute("DROP INDEX IF EXISTS idx_mesh_tasks_effects_failed")
-    # A84 carry (o): migration 44 artifacts did not exist at schema 42 — strip
-    # them so a reopen re-applies 43 (and 44) cleanly from a faithful baseline.
-    conn.execute("DROP TABLE IF EXISTS completion_outbox")
-    # A104: migrations 45/46 (agent inbox) did not exist at schema 42 either.
-    conn.execute("DROP TABLE IF EXISTS agent_inbox")
-    conn.execute("DROP TABLE IF EXISTS inbox_wait_filters")
-    conn.execute("DROP INDEX IF EXISTS idx_mesh_tasks_requester_open")
-    conn.execute("DROP INDEX IF EXISTS idx_sessions_continued_from")
-    try:
-        conn.execute("ALTER TABLE flow_runs DROP COLUMN continuation_mode")
-    except sqlite3.OperationalError:
-        pass
-    conn.execute("UPDATE sessions SET turn_queue_enrolled = 0")
-    conn.commit()
-    conn.close()
-
-
 def _seed_pre_cutover(db: MeshDB) -> None:
     for sid, status in (("s-idle", "idle"), ("s-busy", "busy"), ("s-closed", "closed")):
         db.upsert_session(Session(session_id=sid, backend="claude", repo_path="/tmp/repo",
@@ -258,15 +230,15 @@ def _seed_pre_cutover(db: MeshDB) -> None:
         "INSERT INTO mesh_tasks (id, session_id, machine_id, backend, action, payload, status, "
         "created_at, updated_at) VALUES ('oneoff-1', NULL, 'worker-a', 'claude', 'run_oneoff', "
         "'{}', 'pending', ?, ?)", (NOW, NOW))
+    db._conn().execute("UPDATE sessions SET turn_queue_enrolled = 0")
     db._conn().commit()
 
 
-def test_S8_04_migration_43_cutover(tmp_path):
+def test_S8_04_migration_43_cutover(tmp_path, historical_mesh_db):
     path = str(tmp_path / "mesh.db")
-    db = MeshDB(path)
+    db = historical_mesh_db(path, 42)
     _seed_pre_cutover(db)
     db.close()
-    _rewind_to_42(path)
     db = MeshDB(path)  # applies 43 (and every later migration, e.g. 44)
     assert db._conn().execute(
         "SELECT MAX(version) FROM schema_version").fetchone()[0] == db_mod._CURRENT_VERSION
@@ -292,9 +264,9 @@ def test_S8_04_migration_43_cutover(tmp_path):
     assert before == after
 
 
-def test_S8_04b_migration_43_is_fast_on_a_large_db(tmp_path):
+def test_S8_04b_migration_43_is_fast_on_a_large_db(tmp_path, historical_mesh_db):
     path = str(tmp_path / "mesh.db")
-    db = MeshDB(path)
+    db = historical_mesh_db(path, 42)
     conn = db._conn()
     conn.execute("BEGIN")
     conn.executemany(
@@ -308,7 +280,6 @@ def test_S8_04b_migration_43_is_fast_on_a_large_db(tmp_path):
           statuses[i % 5], NOW, NOW) for i in range(60000)])
     conn.execute("COMMIT")
     db.close()
-    _rewind_to_42(path)
     started = time.monotonic()
     db = MeshDB(path)
     elapsed = time.monotonic() - started

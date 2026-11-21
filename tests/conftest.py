@@ -21,14 +21,41 @@ These guards are set BEFORE any test imports config, so they win over .env.
 
 import logging
 import os
+import sqlite3
 import tempfile
+from collections.abc import Callable
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
+
+if TYPE_CHECKING:
+    from src.control.db import MeshDB
 
 # --- 1–2. Force safe env as early as possible (import time) -----------------
 os.environ["AI_TEAM_TEST_MODE"] = "1"
 os.environ["MESH_ENABLED"] = "false"
+
+
+@pytest.fixture
+def historical_mesh_db(monkeypatch: pytest.MonkeyPatch) -> Callable[[str, int], "MeshDB"]:
+    """Build a historical schema directly, without seeding the current schema."""
+    from src.control import db as db_module
+
+    def open_at(path: str, version: int) -> "MeshDB":
+        conn = sqlite3.connect(path)
+        try:
+            conn.execute("PRAGMA user_version = 1")  # nonempty file skips template seeding
+        finally:
+            conn.close()
+        migrations = db_module._get_migrations
+        with monkeypatch.context() as setup:
+            setup.setattr(db_module, "_get_migrations", lambda: [(v, sql) for v, sql in migrations() if v <= version])
+            setup.setattr(db_module, "_CURRENT_VERSION", version)
+            return db_module.MeshDB(path)
+
+    return open_at
+
 
 @pytest.fixture(autouse=True, scope="session")
 def _silence_db_migration_logs():

@@ -42,17 +42,26 @@ BACKOFF_BASE_SECONDS: int = 30
 PENDING_LIMIT: int = 256
 FILTER_MEMBER_LIMIT: int = 64
 KIND_COMPLETION: str = "completion"
+KIND_WATCHED_JOB: str = "watched_job"
+CASE_JOB_WATCH_LIMIT: int = 32
 OUTSTANDING_STATUSES: tuple[str, ...] = ("queued", "pending", "claimed", "running", "recovery_required")
 
+_INBOX_COLUMNS = (
+    "message_id, recipient_session_id, sender_session_id, about_task_id, about_job_id, "
+    "case_id, kind, outcome, state, attempts, next_attempt_at, delivery_turn_id, created_at"
+)
 # Spelled exactly like the partial-index WHERE clauses (migration 45) so SQLite
 # can prove the indexes usable.
 PENDING_SQL: str = (
-    "SELECT message_id, recipient_session_id, sender_session_id, about_task_id, case_id, kind, "
-    "outcome, state, attempts, next_attempt_at, delivery_turn_id, created_at "
+    f"SELECT {_INBOX_COLUMNS} "
     "FROM agent_inbox INDEXED BY idx_agent_inbox_pending "
     "WHERE recipient_session_id = ? AND state IN ('pending', 'delivered') "
     "AND (? IS NULL OR case_id = ?) "
     "ORDER BY created_at ASC, message_id ASC LIMIT ?"
+)
+WATCHING_SQL: str = (
+    f"SELECT {_INBOX_COLUMNS} FROM agent_inbox WHERE recipient_session_id = ? AND state = 'watching' "
+    "AND (? IS NULL OR case_id = ?) ORDER BY created_at, message_id LIMIT ?"
 )
 OUTSTANDING_SQL: str = (
     "SELECT id FROM mesh_tasks INDEXED BY idx_mesh_tasks_requester_open "
@@ -68,6 +77,7 @@ class InboxMessage(BaseModel):
     recipient_session_id: str
     sender_session_id: Optional[str] = None
     about_task_id: Optional[str] = None
+    about_job_id: Optional[str] = None
     case_id: Optional[str] = None
     kind: str
     outcome: Optional[str] = None
@@ -101,7 +111,15 @@ class PendingView(BaseModel):
         return [m for m in self.messages if m.state == "delivered" and m.delivery_turn_id == turn_id]
 
     def waiting(self) -> bool:
-        return bool(self.outstanding_task_ids) or any(m.state == "pending" for m in self.messages)
+        return bool(self.outstanding_task_ids) or any(
+            m.state in ("pending", "watching") for m in self.messages
+        )
+
+    def watched_jobs(self) -> list[dict[str, str | None]]:
+        return [
+            {"job_id": m.about_job_id, "case_id": m.case_id, "state": m.state, "outcome": m.outcome}
+            for m in self.messages if m.about_job_id
+        ]
 
 
 class SettleResult(BaseModel):
@@ -156,6 +174,37 @@ def record_completion(conn: sqlite3.Connection, task_id: str, status: str, now: 
     return cur.rowcount > 0
 
 
+def watch_job(
+    conn: sqlite3.Connection, case_id: str, job_id: str, recipient: str,
+    sender: str, status: str, now: str,
+) -> dict[str, str | bool]:
+    """Arm or replay one watch, serialized with the authoritative job exit."""
+    message_id = f"{KIND_WATCHED_JOB}:{job_id}"
+    existing = conn.execute(
+        "SELECT state FROM agent_inbox WHERE message_id = ?", (message_id,),
+    ).fetchone()
+    if existing is not None:
+        return {"ok": True, "state": existing["state"]}
+    if status not in ("running", "done", "failed", "lost"):
+        return {"ok": False, "reason": "unsupported_job_status"}
+    active = conn.execute(
+        "SELECT COUNT(*) FROM agent_inbox WHERE case_id = ? AND kind = ? "
+        "AND state IN ('watching', 'pending', 'delivered')",
+        (case_id, KIND_WATCHED_JOB),
+    ).fetchone()[0]
+    if active >= CASE_JOB_WATCH_LIMIT:
+        return {"ok": False, "reason": "case_job_watch_limit"}
+    state = "watching" if status == "running" else "pending"
+    conn.execute(
+        "INSERT INTO agent_inbox (message_id, recipient_session_id, sender_session_id, "
+        "about_job_id, case_id, kind, outcome, state, created_at, updated_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (message_id, recipient, sender, job_id, case_id, KIND_WATCHED_JOB,
+         None if state == "watching" else status, state, now, now),
+    )
+    return {"ok": True, "state": state}
+
+
 # --------------------------------------------------------------------------- #
 # The one read
 # --------------------------------------------------------------------------- #
@@ -195,12 +244,16 @@ def pending_for(
     brief, close gate, boot reconcile, heartbeat liveness, Manager tools) reads
     pending state through this function and nothing else."""
     bound = max(1, min(int(limit), PENDING_LIMIT))
-    rows = conn.execute(PENDING_SQL, (recipient_session_id, case_id, case_id, bound)).fetchall()
-    held = _held_task_ids(conn, (r["case_id"] for r in rows))
+    scope = (recipient_session_id, case_id, case_id, bound)
+    rows = conn.execute(
+        f"SELECT * FROM ({PENDING_SQL}) UNION ALL SELECT * FROM ({WATCHING_SQL})", scope + scope,
+    ).fetchall()
+    held = _held_task_ids(conn, (r["case_id"] for r in rows if r["about_task_id"]))
     messages = [
         InboxMessage(
             message_id=r["message_id"], recipient_session_id=r["recipient_session_id"],
             sender_session_id=r["sender_session_id"], about_task_id=r["about_task_id"],
+            about_job_id=r["about_job_id"],
             case_id=r["case_id"], kind=r["kind"], outcome=r["outcome"], state=r["state"],
             attempts=int(r["attempts"] or 0), ready_at=r["next_attempt_at"],
             delivery_turn_id=r["delivery_turn_id"], created_at=r["created_at"],
@@ -325,7 +378,7 @@ def kill_case(conn: sqlite3.Connection, case_id: str, reason: str, now: str) -> 
     (closing was a deliberate decision — I5 alerts only on delivery failure)."""
     cur = conn.execute(
         "UPDATE agent_inbox SET state = 'dead', last_error = ?, updated_at = ?, alerted_at = ? "
-        "WHERE case_id = ? AND state IN ('pending', 'delivered')",
+        "WHERE case_id = ? AND state IN ('watching', 'pending', 'delivered')",
         (reason, now, now, case_id),
     )
     return cur.rowcount
@@ -434,8 +487,10 @@ def waiting_for(conn: sqlite3.Connection, recipient_session_ids: list[str]) -> d
     marks = _placeholders(len(sids))
     for r in conn.execute(
         "SELECT DISTINCT recipient_session_id FROM agent_inbox INDEXED BY idx_agent_inbox_pending "
-        f"WHERE recipient_session_id IN ({marks}) AND state IN ('pending', 'delivered') AND state = 'pending'",
-        sids,
+        f"WHERE recipient_session_id IN ({marks}) AND state IN ('pending', 'delivered') AND state = 'pending' "
+        "UNION SELECT DISTINCT recipient_session_id FROM agent_inbox "
+        f"WHERE recipient_session_id IN ({marks}) AND state = 'watching'",
+        (*sids, *sids),
     ).fetchall():
         out[str(r[0])] = True
     for r in conn.execute(
@@ -476,7 +531,7 @@ def has_rebound_pending(conn: sqlite3.Connection, case_id: str) -> bool:
     """Read-only probe: does a pending message of ``case_id`` sit with a replaced
     Manager-seat holder?"""
     return conn.execute(
-        "SELECT 1 FROM agent_inbox WHERE case_id = ? AND state = 'pending' "
+        "SELECT 1 FROM agent_inbox WHERE case_id = ? AND state IN ('watching', 'pending') "
         "AND recipient_session_id IN (SELECT entity_id FROM flow_links WHERE flow_run_id = ? "
         "AND entity_type = 'session' AND role = 'manager') "
         "AND recipient_session_id != COALESCE((SELECT entity_id FROM flow_links WHERE flow_run_id = ? "
@@ -499,7 +554,7 @@ def follow_case_rebind(conn: sqlite3.Connection, case_id: str, now: str) -> int:
         return 0
     cur = conn.execute(
         "UPDATE agent_inbox SET recipient_session_id = ?, updated_at = ? "
-        "WHERE case_id = ? AND state = 'pending' AND recipient_session_id != ? "
+        "WHERE case_id = ? AND state IN ('watching', 'pending') AND recipient_session_id != ? "
         "AND recipient_session_id IN (SELECT entity_id FROM flow_links WHERE flow_run_id = ? "
         "AND entity_type = 'session' AND role = 'manager')",
         (current["entity_id"], now, case_id, current["entity_id"], case_id),
@@ -573,7 +628,7 @@ def case_pending(conn: sqlite3.Connection, case_id: str) -> PendingView:
     Composed from ``pending_for`` — not a second read of pending state."""
     recipients = sorted({str(r[0]) for r in conn.execute(
         "SELECT DISTINCT recipient_session_id FROM agent_inbox WHERE case_id = ? "
-        "AND state IN ('pending', 'delivered') "
+        "AND state IN ('watching', 'pending', 'delivered') "
         "UNION SELECT DISTINCT sender_session_id FROM mesh_tasks WHERE flow_run_id = ? "
         "AND sender_session_id IS NOT NULL "
         "AND status IN ('queued', 'pending', 'claimed', 'running', 'recovery_required')",
