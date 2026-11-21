@@ -177,16 +177,11 @@ def test_projection_is_frozen_and_has_no_lifecycle_history(store_db) -> None:
         projection.status = SessionStatus.BUSY
 
 
-def test_migration_48_adds_indexes_to_47_and_reopens_without_row_changes(store_db) -> None:
-    _store, db = store_db
+def test_migration_48_adds_indexes_to_47_and_reopens_without_row_changes(tmp_path, historical_mesh_db) -> None:
+    path = str(tmp_path / "schema47.db")
+    db = historical_mesh_db(path, 47)
     db.upsert_session(_session("preserved", task_history=[{"task_id": "old"}]))
     before = db.get_session("preserved")
-    with db._write() as conn:
-        conn.execute("DROP INDEX idx_sessions_updated_at")
-        conn.execute("DROP INDEX idx_sessions_pinned_updated_at")
-        conn.execute("ALTER TABLE job_completion_effects DROP COLUMN consumed_at")
-        conn.execute("DELETE FROM schema_version WHERE version>=48")
-    path = str(db._path)
     db.close()
     for _ in range(2):
         reopened = MeshDB(path)

@@ -31,6 +31,7 @@ from fastapi import BackgroundTasks, Depends, FastAPI, File, HTTPException, Quer
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, ValidationError
+from starlette.requests import ClientDisconnect
 
 _STAGING_ROOT = Path(__file__).resolve().parent.parent.parent / "state" / "uploads"
 
@@ -50,6 +51,7 @@ _MESH_HEALTH_SAMPLE_SECONDS = 30.0
 _JOB_COMPLETION_READ_SLOTS = threading.BoundedSemaphore(4)
 _JOBS_LIST_READ_SLOTS = threading.BoundedSemaphore(4)
 _JOB_RESULT_SLOTS = threading.BoundedSemaphore(4)
+_JOB_DONE_SLOTS = threading.BoundedSemaphore(4)
 _QUOTA_OBSERVATION_SLOTS = threading.BoundedSemaphore(4)
 _QUOTA_OBSERVATION_BODY_TIMEOUT_SEC = 5.0
 
@@ -572,7 +574,7 @@ class RegisterJobPayload(BaseModel):
 
 class JobDonePayload(BaseModel):
     node_id: str
-    exit_code: int
+    exit_code: int = Field(strict=True, ge=-(2**63), le=2**63 - 1)
     tail: str = ""
     status: Optional[str] = None
 
@@ -2220,19 +2222,18 @@ def record_job_probe(job_id: str, payload: JobProbePayload) -> Dict[str, str]:
     return {"status": "recorded", "job_id": job_id}
 
 
-@app.post("/jobs/{job_id}/done", dependencies=[Depends(_require_auth)])
 def report_job_done(job_id: str, payload: JobDonePayload) -> Dict[str, str]:
     """Worker reports that a watched job reached terminal state."""
     db = get_db()
     if db is None:
         raise HTTPException(status_code=503, detail="Database unavailable")
-    job = db.get_job(job_id)
-    if not job:
+    owns_job = db.job_node_matches(job_id, payload.node_id)
+    if owns_job is None:
         raise HTTPException(status_code=404, detail=f"Job {job_id!r} not found")
-    if job.get("node_id") != payload.node_id:
+    if not owns_job:
         raise HTTPException(
             status_code=403,
-            detail=f"Job {job_id!r} is owned by node {job.get('node_id')!r}, not {payload.node_id!r}",
+            detail="job_not_owned_by_node",
         )
     if payload.status == "lost":
         db.fail_job(
@@ -2250,6 +2251,52 @@ def report_job_done(job_id: str, payload: JobDonePayload) -> Dict[str, str]:
 
     _hint_turn_scheduler()
     return {"status": "accepted", "job_id": job_id}
+
+
+@app.post(
+    "/jobs/{job_id}/done", dependencies=[Depends(_require_auth)],
+    openapi_extra={"requestBody": {"required": True, "content": {
+        "application/json": {"schema": JobDonePayload.model_json_schema()},
+    }}},
+)
+async def accept_job_done(job_id: str, request: Request) -> Dict[str, str]:
+    """Acknowledge after the terminal job and any Manager inbox watch commit."""
+    from .turn_queue import TurnQueueError
+
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", job_id):
+        raise HTTPException(status_code=422, detail="invalid_job_id")
+    if not _JOB_DONE_SLOTS.acquire(blocking=False):
+        raise HTTPException(status_code=429, detail="job_done_busy")
+    release_here = True
+    try:
+        body = bytearray()
+        async with asyncio.timeout(3):
+            async for chunk in request.stream():
+                if len(body) + len(chunk) > 32 * 1024:
+                    raise HTTPException(status_code=413, detail="job_done_body_too_large")
+                body.extend(chunk)
+        try:
+            payload = JobDonePayload.model_validate_json(body)
+        except ValidationError:
+            raise HTTPException(status_code=422, detail="invalid_job_done") from None
+
+        future = asyncio.get_running_loop().run_in_executor(None, report_job_done, job_id, payload)
+
+        def finished(done: asyncio.Future[Dict[str, str]]) -> None:
+            _JOB_DONE_SLOTS.release()
+            if not done.cancelled():
+                done.exception()
+
+        future.add_done_callback(finished)
+        release_here = False
+        return await asyncio.shield(future)
+    except (TimeoutError, ClientDisconnect):
+        raise HTTPException(status_code=408, detail="job_done_body_incomplete") from None
+    except (sqlite3.Error, TurnQueueError):
+        raise HTTPException(status_code=503, detail="job_done_unavailable") from None
+    finally:
+        if release_here:
+            _JOB_DONE_SLOTS.release()
 
 
 @app.post("/sessions/{session_id}/proactive-turn", dependencies=[Depends(_require_auth)])

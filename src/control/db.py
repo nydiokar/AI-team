@@ -1874,12 +1874,17 @@ class MeshDB:
             if version > current:
                 # executescript() issues an implicit COMMIT before running —
                 # even for an empty/no-op script — which would terminate the
-                # BEGIN IMMEDIATE transaction this method runs inside. Skip it
-                # for baseline markers (empty SQL) and use plain execute()
-                # for real migrations instead so the transaction stays intact.
-                if sql.strip():
-                    for statement in filter(None, (s.strip() for s in sql.split(";"))):
-                        conn.execute(statement)
+                # BEGIN IMMEDIATE transaction this method runs inside. Use
+                # execute() and let SQLite handle semicolons inside triggers.
+                statement = ""
+                for part in sql.split(";"):
+                    statement += part + ";"
+                    if sqlite3.complete_statement(statement):
+                        if statement.strip() != ";":
+                            conn.execute(statement)
+                        statement = ""
+                if statement.strip():
+                    conn.execute(statement)  # surface malformed trailing SQL
                 conn.execute(
                     "INSERT INTO schema_version(version, applied_at) VALUES (?, ?)",
                     (version, _now()),
@@ -7652,7 +7657,9 @@ class MeshDB:
             for m in view.messages if m.about_task_id
         ]
         pending = [{"task_id": t} for t in view.outstanding_task_ids]
-        return {"ok": True, "reason": None, "resolved": resolved, "pending": pending}
+        jobs = view.watched_jobs()
+        return {"ok": True, "reason": None, "resolved": resolved, "pending": pending,
+                **({"watched_jobs": jobs} if jobs else {})}
 
     def arm_wait_group(
         self,
@@ -9064,6 +9071,30 @@ class MeshDB:
         except Exception as e:
             logger.warning("event=db_register_job_failed job_id=%s err=%s", job_id, e)
 
+    def watch_case_job(self, case_id: str, job_id: str, manager_id: str) -> dict[str, JsonValue]:
+        """Subscribe the current Case Manager to one worker job from that Case."""
+        with self._managed_write("watch_case_job") as conn:
+            case = conn.execute(
+                "SELECT status, (SELECT entity_id FROM flow_links "
+                "WHERE flow_run_id = f.flow_run_id AND entity_type = 'session' AND role = 'manager' "
+                "ORDER BY id DESC LIMIT 1) AS manager_id FROM flow_runs f WHERE flow_run_id = ?",
+                (case_id,),
+            ).fetchone()
+            if case is None:
+                return {"ok": False, "reason": "case_not_found"}
+            if case["manager_id"] != manager_id:
+                return {"ok": False, "reason": "not_case_manager"}
+            if case["status"] in self._CLOSED_STATUSES:
+                return {"ok": False, "reason": "case_closed"}
+            job = conn.execute(
+                "SELECT session_id, status FROM jobs WHERE id = ? AND launch_case_id = ?",
+                (job_id, case_id),
+            ).fetchone()
+            if job is None or not job["session_id"] or job["session_id"] == manager_id:
+                return {"ok": False, "reason": "not_a_worker_job_launched_in_this_case"}
+            return _agent_inbox.watch_job(conn, case_id, job_id, manager_id,
+                                          job["session_id"], job["status"], _now())
+
     def start_job(
         self,
         job_id: str,
@@ -9142,19 +9173,16 @@ class MeshDB:
     ) -> None:
         """Mark a running job as done."""
         now = _now()
-        try:
-            with self._write() as conn:
-                conn.execute(
-                    """
-                    UPDATE jobs
-                    SET status = 'done', exit_code = ?, tail = ?,
-                        finished_at = ?, updated_at = ?
-                    WHERE id = ? AND status = 'running'
-                    """,
-                    (exit_code, tail, now, now, job_id),
-                )
-        except Exception as e:
-            logger.warning("event=db_complete_job_failed job_id=%s err=%s", job_id, e)
+        with self._managed_write("complete_job") as conn:
+            conn.execute(
+                """
+                UPDATE jobs
+                SET status = 'done', exit_code = ?, tail = ?,
+                    finished_at = ?, updated_at = ?
+                WHERE id = ? AND status = 'running'
+                """,
+                (exit_code, tail, now, now, job_id),
+            )
 
     def fail_job(
         self,
@@ -9164,18 +9192,21 @@ class MeshDB:
     ) -> None:
         """Mark a running job as failed or lost."""
         now = _now()
-        try:
-            with self._write() as conn:
-                conn.execute(
-                    """
-                    UPDATE jobs
-                    SET status = ?, tail = ?, finished_at = ?, updated_at = ?
-                    WHERE id = ? AND status = 'running'
-                    """,
-                    (status, error, now, now, job_id),
-                )
-        except Exception as e:
-            logger.warning("event=db_fail_job_failed job_id=%s err=%s", job_id, e)
+        with self._managed_write("fail_job") as conn:
+            conn.execute(
+                """
+                UPDATE jobs
+                SET status = ?, tail = ?, finished_at = ?, updated_at = ?
+                WHERE id = ? AND status = 'running'
+                """,
+                (status, error, now, now, job_id),
+            )
+
+    def job_node_matches(self, job_id: str, node_id: str) -> bool | None:
+        row = self._conn().execute(
+            "SELECT node_id = ? FROM jobs WHERE id = ?", (node_id, job_id),
+        ).fetchone()
+        return bool(row[0]) if row is not None else None
 
     def get_job(self, job_id: str) -> Optional[Dict[str, Any]]:
         row = self._conn().execute(
@@ -11427,6 +11458,32 @@ def _get_migrations() -> List[tuple]:
         (49, """
             ALTER TABLE job_completion_effects ADD COLUMN consumed_at TEXT;
         """),  # A109: consumption fences admission and retires unstarted job wakes.
+        (50, """
+            ALTER TABLE jobs ADD COLUMN launch_case_id TEXT;
+            ALTER TABLE agent_inbox ADD COLUMN about_job_id TEXT;
+            CREATE INDEX idx_agent_inbox_watching ON agent_inbox(recipient_session_id, created_at)
+                WHERE state = 'watching';
+            CREATE TRIGGER bind_watched_job_launch_case
+            AFTER INSERT ON jobs
+            WHEN NEW.session_id IS NOT NULL
+            BEGIN
+                UPDATE jobs SET launch_case_id = (
+                    SELECT CASE WHEN status = 'running' THEN flow_run_id END FROM mesh_tasks
+                     WHERE session_id = NEW.session_id AND claimed_by = NEW.node_id
+                       AND queue_protocol = 1
+                       AND status IN ('pending', 'claimed', 'running', 'recovery_required')
+                ) WHERE id = NEW.id;
+            END;
+            CREATE TRIGGER promote_watched_job_inbox
+            AFTER UPDATE OF status ON jobs
+            WHEN OLD.status = 'running' AND NEW.status IN ('done', 'failed', 'lost')
+            BEGIN
+                UPDATE agent_inbox
+                   SET state = 'pending', outcome = NEW.status,
+                       created_at = NEW.updated_at, updated_at = NEW.updated_at
+                 WHERE message_id = 'watched_job:' || NEW.id AND state = 'watching';
+            END;
+        """),  # #228: publish job exit to the same inbox in the terminal transaction.
     ]
 
 

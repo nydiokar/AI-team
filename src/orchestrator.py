@@ -2056,10 +2056,21 @@ class TaskOrchestrator(ITaskOrchestrator):
         from src.control.turn_queue import TurnQueueError
 
         batch = list(messages)[: ib.PENDING_LIMIT]
-        presented = [str(m.about_task_id or m.message_id) for m in batch]
+        presented = [str(m.about_task_id or m.message_id) for m in batch if not m.about_job_id]
+        job_messages = [m for m in batch if m.about_job_id]
+        sections: list[str] = []
+        if presented:
+            sections.append(self._render_wake_turn(case_id, presented))
+        if job_messages:
+            job_outcomes = ", ".join(f"{m.about_job_id} ({m.outcome})" for m in job_messages)
+            sections.append(
+                f"[continuation] Watched job completion(s) for Case {case_id}: "
+                f"{job_outcomes}. Inspect System > Jobs and the run's artifacts "
+                "to verify the outcome before deciding how to continue the Case."
+            )
         turn_id = ib.wake_turn_id(recipient, batch)
         task = self._make_task(
-            description=self._render_wake_turn(case_id, presented),
+            description="\n\n".join(sections),
             session_id=recipient,
             cwd=getattr(session, "repo_path", None),
             source="manager_continuation",
@@ -2085,6 +2096,7 @@ class TaskOrchestrator(ITaskOrchestrator):
             "case_continuation_delivered", None,
             {"case_id": case_id, "generation": generation, "managed": True,
              "presented_task_ids": presented, "turn_id": str(admission),
+             **({"presented_job_ids": [m.about_job_id for m in job_messages]} if job_messages else {}),
              "recipient_session_id": recipient},
         )
         return 1
@@ -6537,7 +6549,9 @@ class TaskOrchestrator(ITaskOrchestrator):
             for m in view.messages if m.about_task_id
         ]
         pending = [{"task_id": t} for t in view.outstanding_task_ids]
-        return {"ok": True, "session_id": sid, "resolved": resolved, "pending": pending}
+        jobs = view.watched_jobs()
+        return {"ok": True, "session_id": sid, "resolved": resolved, "pending": pending,
+                **({"watched_jobs": jobs} if jobs else {})}
 
     def get_case_brief(self, flow_run_id: str) -> Dict[str, Any]:
         """[A54] Orchestrator seam — the full working state of a Case from the DB

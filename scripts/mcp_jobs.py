@@ -72,6 +72,10 @@ _TOOLS = [
             "Registration returns immediately; the job runs independently and does not "
             "consume a task slot. Continue independent work, or return control while it runs. "
             "By default, an unconsumed completion wakes this same session so you can continue. "
+            "Completion follows process exit. If output goes only to a private log, the "
+            "capture in System > Jobs can stay empty throughout the run. "
+            "For a detached run launched in a Case, include the job_id in your delivery so "
+            "the Manager can subscribe directly to process exit. "
             "Use job_result to read status/results: a terminal read acknowledges consumption "
             "and prevents a redundant queued continuation. If you inspect a private log or "
             "artifact directly, call job_result before proceeding to acknowledge the result. "
@@ -255,7 +259,7 @@ def _normalize_worker_command(command: str) -> str:
 
 
 def _watch_job(args: Dict[str, Any]) -> str:
-    node = os.environ.get("NODE_ID") or os.environ.get("WORKER_NODE_ID") or socket.gethostname()
+    node = os.environ.get("WORKER_NODE_ID") or os.environ.get("NODE_ID") or socket.gethostname()
     session = (
         _bounded_text(args.get("session_id"), "session_id", _MAX_SESSION_ID_CHARS, required=False)
         or os.environ.get("AI_TEAM_SESSION_ID")
@@ -314,7 +318,7 @@ def _job_result(args: Dict[str, Any]) -> str:
     if not re.fullmatch(r"[A-Za-z0-9_-]+", job_id):
         raise ValueError("invalid job_id")
     session = os.environ.get("AI_TEAM_SESSION_ID") or os.environ.get("SESSION_ID") or ""
-    node = os.environ.get("NODE_ID") or os.environ.get("WORKER_NODE_ID") or socket.gethostname()
+    node = os.environ.get("WORKER_NODE_ID") or os.environ.get("NODE_ID") or socket.gethostname()
     if not session:
         raise ValueError("your session identity is not present; cannot consume a job result")
     result = _post_job({"session_id": session, "node_id": node}, f"/jobs/{job_id}/result")
