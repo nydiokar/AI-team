@@ -167,6 +167,7 @@ class UsageOut(BaseModel):
 class InstructionsOut(BaseModel):
     ok: bool
     task_id: str
+    assignment_id: Optional[str] = None
     session: Optional[SessionOut] = None
 
 
@@ -476,7 +477,24 @@ def build_router(
         from src.control.turn_queue import TurnQueueError
         from src.orchestrator import HarnessAdmissionBlocked
 
-        async with idem_guard_async("instructions", idempotency_key) as cached:
+        if body.expected_deliverable is not None and (
+            not body.expected_deliverable.strip()
+            or not body.case_id or not body.session_id or not body.requester_session_id or body.parent_flow_run_id
+            or (principal or "").strip().lower() != core.AUTOMATION_PRINCIPAL
+        ):
+            raise HTTPException(status_code=422, detail="delegation_requires_manager_case_dispatch")
+
+        if body.expected_deliverable is not None:
+            from config import config
+
+            interval = int(getattr(config.mesh, "case_continuation_tick_interval_sec", 30) or 0)
+            if config.mesh.jobs_read_mode != "controller" or not config.mesh.enabled or interval <= 0:
+                raise HTTPException(status_code=503, detail="assignment_requires_shared_controller_and_wake_dispatcher")
+
+        # Durable assignments replay from the admission ledger, including
+        # validation of the original payload and the surviving assignment id.
+        cached_key = None if body.expected_deliverable is not None else idempotency_key
+        async with idem_guard_async("instructions", cached_key) as cached:
             if cached is not None:
                 return JSONResponse(cached)
 
@@ -495,7 +513,9 @@ def build_router(
                     session = orchestrator.session_service.store.get(session.session_id)
                     resp = {"ok": True, "task_id": str(task_id),
                             "session": await asyncio.to_thread(core._session_payload, session, with_queue=True)}
-                    idem_put("instructions", idempotency_key, resp)
+                    if body.expected_deliverable is not None:
+                        resp["assignment_id"] = str(task_id)
+                    idem_put("instructions", cached_key, resp)
                     return JSONResponse(resp)
                 # [A82 Stage 8b] Legacy session execution is retired at the
                 # convergence cutoff: a non-enrolled session turn has no pathway
@@ -523,7 +543,7 @@ def build_router(
                     raise core._harness_blocked_http(blocked)
 
             resp = {"ok": True, "task_id": task_id, "session": core._session_payload(session)}
-            idem_put("instructions", idempotency_key, resp)
+            idem_put("instructions", cached_key, resp)
             return JSONResponse(resp)
 
     @router.post(

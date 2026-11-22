@@ -46,6 +46,7 @@ _ROLE_MANAGER_TOOLS = {
     "mcp__manager__open_case",
     "mcp__manager__get_case",
     "mcp__manager__get_case_brief",
+    "mcp__manager__resume_assignment",
     "mcp__manager__read_session_history",
     "mcp__manager__close_case",
     "mcp__manager__record_review",

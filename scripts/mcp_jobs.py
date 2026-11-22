@@ -74,8 +74,10 @@ _TOOLS = [
             "By default, an unconsumed completion wakes this same session so you can continue. "
             "Completion follows process exit. If output goes only to a private log, the "
             "capture in System > Jobs can stay empty throughout the run. "
-            "For a detached run launched in a Case, include the job_id in your delivery so "
-            "the Manager can subscribe directly to process exit. "
+            "For a durable assignment, pass the current turn credentials and stable operation ID. "
+            "Launch progress reaches the Manager automatically. Record a yield with the job ID "
+            "before returning, then interpret the job outcome in your continuation. "
+            "A Manager can separately subscribe to process exit when useful. "
             "Use job_result to read status/results: a terminal read acknowledges consumption "
             "and prevents a redundant queued continuation. If you inspect a private log or "
             "artifact directly, call job_result before proceeding to acknowledge the result. "
@@ -109,6 +111,9 @@ _TOOLS = [
                     "description": "Whether an unconsumed completion wakes this same session when the job finishes. Defaults to true.",
                     "default": True,
                 },
+                "turn_id": {"type": "string", "description": "Current controller turn_id for durable delegated work."},
+                "turn_proof": {"type": "string", "description": "Current controller assignment tool proof."},
+                "operation_id": {"type": "string", "description": "Stable unique identifier for this assignment job. Reuse it on request retry."},
                 "expected_runtime_sec": {
                     "type": "integer",
                     "description": "Optional expected runtime in seconds. Helps the gateway decide when a cache heartbeat is worth arming.",
@@ -137,8 +142,36 @@ _TOOLS = [
         ),
         "inputSchema": {
             "type": "object",
-            "properties": {"job_id": {"type": "string", "minLength": 1, "maxLength": 128}},
+            "properties": {
+                "job_id": {"type": "string", "minLength": 1, "maxLength": 128},
+                "turn_id": {"type": "string", "description": "For an assignment job, your current controller turn_id."},
+                "turn_proof": {"type": "string", "description": "Current controller assignment tool proof."},
+            },
             "required": ["job_id"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "assignment_disposition",
+        "description": (
+            "Checkpoint or report your active delegated assignment. Yield names the detached job "
+            "that should wake you. Continue schedules another analysis turn with your checkpoint. "
+            "Completed requires findings and evidence references. Failed describes an unrecoverable "
+            "failure. Decision_needed states the decision and what it unblocks."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "turn_id": {"type": "string"},
+                "turn_proof": {"type": "string"},
+                "disposition": {"enum": ["yield", "continue", "completed", "failed", "decision_needed"]},
+                "summary": {"type": "string", "maxLength": 2048},
+                "job_id": {"type": "string"},
+                "evidence": {"type": "array", "maxItems": 6, "items": {"type": "string", "maxLength": 500}},
+                "limitations": {"type": "string", "maxLength": 1000},
+                "next_action": {"type": "string", "maxLength": 1000, "description": "Required for failed or decision_needed."},
+            },
+            "required": ["turn_id", "turn_proof", "disposition", "summary"],
             "additionalProperties": False,
         },
     },
@@ -292,9 +325,18 @@ def _watch_job(args: Dict[str, Any]) -> str:
         "notify_agent": notify_agent,
         "expected_runtime_sec": expected_runtime_sec,
         "cache_heartbeat": cache_heartbeat,
+        **({key: _bounded_text(args.get(key), key, 128) for key in ("turn_id", "turn_proof", "operation_id")}
+           if args.get("turn_id") or args.get("operation_id") else {}),
     })
 
     job_id = result.get("job_id", "?")
+    assignment_id = (result.get("job") or {}).get("assignment_id")
+    if assignment_id:
+        return (
+            f"Registered: {job_id}\nAssignment: {assignment_id}\n"
+            f"Launch progress is in the Manager's inbox. Record assignment_disposition "
+            f"with disposition='yield' and job_id='{job_id}' before ending this turn."
+        )
     return (
         f"Registered: {job_id}\n"
         f"Label:   {label}\n"
@@ -313,6 +355,12 @@ def _watch_job(args: Dict[str, Any]) -> str:
     )
 
 
+def _assignment_disposition(args: Dict[str, Any]) -> str:
+    session = os.environ.get("AI_TEAM_SESSION_ID") or os.environ.get("SESSION_ID") or ""
+    node = os.environ.get("WORKER_NODE_ID") or os.environ.get("NODE_ID") or socket.gethostname()
+    return json.dumps(_post_job({**args, "session_id": session, "node_id": node}, "/assignments/disposition"))
+
+
 def _job_result(args: Dict[str, Any]) -> str:
     job_id = _bounded_text(args.get("job_id"), "job_id", 128) or ""
     if not re.fullmatch(r"[A-Za-z0-9_-]+", job_id):
@@ -321,7 +369,11 @@ def _job_result(args: Dict[str, Any]) -> str:
     node = os.environ.get("WORKER_NODE_ID") or os.environ.get("NODE_ID") or socket.gethostname()
     if not session:
         raise ValueError("your session identity is not present; cannot consume a job result")
-    result = _post_job({"session_id": session, "node_id": node}, f"/jobs/{job_id}/result")
+    payload = {"session_id": session, "node_id": node}
+    if args.get("turn_id"):
+        payload["turn_id"] = _bounded_text(args["turn_id"], "turn_id", 128)
+        payload["turn_proof"] = _bounded_text(args.get("turn_proof"), "turn_proof", 128)
+    result = _post_job(payload, f"/jobs/{job_id}/result")
     return json.dumps(result, ensure_ascii=False)
 
 # ---------------------------------------------------------------------------
@@ -359,7 +411,10 @@ def _dispatch(req: Dict[str, Any]) -> None:
         name = params.get("name", "")
         arguments = params.get("arguments", {})
 
-        impl = {"watch_job": _watch_job, "job_result": _job_result, "whoami": _whoami}.get(name)
+        impl = {
+            "watch_job": _watch_job, "job_result": _job_result, "whoami": _whoami,
+            "assignment_disposition": _assignment_disposition,
+        }.get(name)
         if impl is not None:
             try:
                 text = impl(arguments)
