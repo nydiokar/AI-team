@@ -380,3 +380,63 @@ own plane: it replaces the rotting prose `DISPATCH_LOG` (which had drifted ~16 P
 an honest, proof-gated board. A *reliable* dispatch board is, longer-term, a legitimate **input** to
 a Manager choosing the next unblocked drop — but that selection stays an operator-invoked, bounded
 act, never an autonomous pull. Keep the two planes separate; let them meet only at the evidence seam.
+
+## 11. Delegated assignments spanning worker turns and jobs
+
+**Proposed follow-through contract.** This extends the deployed agent inbox for
+[#228](https://github.com/nydiokar/AI-team/issues/228). The October 11, 2026 Case
+record shows a launch reply that reached the Manager, a successful silent script
+exit, and a subsequent worker turn. The operator then had to prompt the Manager
+to continue. PR #300 added an optional process-exit subscription. The remaining
+obligation is delivery of the worker's assignment outcome across that sequence.
+
+1. **Dispatch opens one durable assignment.** Anchor it to the originating
+   dispatch, its Case, requesting Manager, owning worker session and expected
+   deliverable. Restore that identity on every owned continuation and retry.
+   A warm session can serve other assignments, so session membership alone
+   cannot establish which assignment a turn or job belongs to.
+2. **The worker can report progress and yield.** Persist a typed checkpoint
+   that identifies the outstanding work and the next continuation. The Manager
+   can see that the worker launched a job and the assignment is still open.
+   Preserve the useful launch notification. A yielded turn without a recorded
+   disposition remains unresolved and must surface a recoverable state.
+3. **Jobs continue the owning worker.** Bind each job to its active assignment
+   when it is registered. A terminal result resumes that worker with the job
+   outcome and assignment context through the existing watched-job machinery.
+   The worker evaluates the result, decides whether it needs to retry, launches
+   the next job if needed, or prepares a final report. Repeat for each job
+   under the same assignment. The Manager can inspect job progress. An
+   optional job subscription is informational and confers no execution
+   ownership or authority to act on the assignment.
+4. **The worker submits the assignment outcome.** Require an explicit final
+   delivery with an outcome, what was done or found, evidence references and
+   any remaining limitations. An unrecoverable failure or a blocker requiring
+   a decision must also reach the Manager, with a clear disposition. Use a
+   typed outcome tied to the assignment. Process exit, turn success and
+   free-form reply text are insufficient to infer final delivery.
+5. **The harness delivers the report.** Persist the outcome and its Manager
+   inbox intent in one transaction with a stable identity per delivery.
+   Retry safely through the existing inbox and managed queue. Keep one worker
+   responsible for advancing the assignment and preserve existing stop,
+   cancellation and recovery fences. The Manager reviews the worker's report;
+   existing `record_review` and `close_case` remain responsible for acceptance.
+   An open or unresolved assignment stays visible when deciding Case closure.
+
+Reuse the managed turn ledger, watched-job result consumption, Case membership
+and the agent inbox. Coordinate with [A111](https://github.com/nydiokar/AI-team/issues/292)
+on assignment identity, evidence submission and review. Resolve ownership from
+controller records and recover from those records after a restart. Keep ordinary
+single-turn dispatch compatible, while requiring explicit disposition wherever
+a worker can carry the assignment past the end of its turn.
+
+**Acceptance.** Drive a full Manager dispatch through a worker that launches
+four sequential jobs, including a recoverable failure and a zero-output exit.
+The worker receives and interprets each result under the original assignment.
+The Manager can see launch progress and receives one logical final delivery
+with the worker's findings and evidence. The flow requires zero Manager job
+subscriptions, job-ID handoffs as prerequisites, polls or operator prompts.
+Prove the unrecoverable failure and decision-needed paths separately. Across
+duplicate reports, crashes before and after commit, overlapping assignments
+in a reused session and Case cancellation, prove attribution, recovery and
+deduplication. Verify the actual Manager inbox and review input, including
+that intermediate job exits never imply that the delegated work is complete.
