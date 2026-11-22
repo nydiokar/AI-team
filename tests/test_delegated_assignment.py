@@ -1,6 +1,8 @@
 """Offline delivery through Manager MCP, managed carrier and Case inbox."""
 import asyncio
 import json
+import multiprocessing
+import os
 import re
 import threading
 from types import SimpleNamespace
@@ -501,3 +503,57 @@ def test_assignment_write_admission_holds_through_http_cancellation(harness, mon
                 await asyncio.gather(*active, return_exceptions=True)
 
     asyncio.run(run())
+
+
+def _crashing_report_writer(path, request, *, before_commit):
+    from src.control import delegated_assignment
+
+    db = db_module.MeshDB(path)
+    enqueue = delegated_assignment.enqueue_message
+
+    def write_and_exit(*args, **kwargs):
+        enqueue(*args, **kwargs)
+        os._exit(71)
+
+    if before_commit:
+        delegated_assignment.enqueue_message = write_and_exit
+    db.record_assignment_disposition(delegated_assignment.Disposition.model_validate(request))
+    os._exit(72)
+
+
+def test_report_writer_process_death_before_and_after_commit(harness):
+    h = harness
+    assignment_id = h.dispatch()
+    h.finish(h.manager, h.manager_claim)
+    token, tool_args = h.start(assignment_id)
+    report = h.report_args(tool_args, "completed", evidence=["crash-safe artifact"])
+    context = multiprocessing.get_context("spawn")
+    for before_commit, exit_code in ((True, 71), (False, 72)):
+        writer = context.Process(
+            target=_crashing_report_writer, args=(str(h.db._path), report),
+            kwargs={"before_commit": before_commit},
+        )
+        writer.start()
+        try:
+            writer.join(8)
+            assert writer.exitcode == exit_code
+        finally:
+            if writer.is_alive():
+                writer.terminate()
+                writer.join()
+            writer.close()
+        h.restart_controller_db()
+        stored = _rows(h.db, "SELECT state,report FROM delegated_assignments WHERE assignment_id=?", assignment_id)
+        notices = _rows(h.db, "SELECT message_id FROM agent_inbox WHERE kind='assignment_report'")
+        if before_commit:
+            assert stored == [{"state": "active", "report": None}]
+            assert not notices
+        else:
+            assert stored[0]["state"] == "completed"
+            assert json.loads(stored[0]["report"])["evidence"] == ["crash-safe artifact"]
+            assert notices == [{"message_id": f"assignment_report:{assignment_id}"}]
+    h.post("/assignments/disposition", report)
+    h.finish(assignment_id, token)
+    _drive(h.db, h.orchestrator)
+    (wake,) = _wakes(h.db)
+    assert "crash-safe artifact" in wake["prompt"]
