@@ -465,13 +465,15 @@ process outcome.
 
 Gateway and task-server must share the controller DB, with mesh admission and
 the inbox dispatcher enabled. Migration 51 is additive. Deploy both controller
-containers together from the same image. Enable use only after the Manager MCP
+containers together from the same image. New assignment admission defaults off.
+Set `DELEGATED_ASSIGNMENTS_ENABLED=true` in the controller environment only after the Manager MCP
 has the updated dispatch schema and the worker jobs MCP and carrier profile
 expose `assignment_disposition` to the target session. An existing pooled
 Claude client keeps its boot-time tool grant. Confirm the tool on a fresh client
 using the supported worker build or dynamic profile, with worker promotion
 owned by the operator. Existing sessions and live agents were not exercised by
-the credential-free regression.
+the credential-free regression. Turning admission off leaves existing assignments
+free to finish through the same inbox and job machinery.
 
 The Case's existing wake cap, pause, recipient availability and operator stop
 still govern inbox delivery. When delivery is held, the persisted report

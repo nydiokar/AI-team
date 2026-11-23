@@ -123,6 +123,11 @@ class JobWatchOut(CommandResult):
     state: str | None = None
 
 
+class AssignmentResumeOut(BaseModel):
+    status: str
+    assignment_id: str
+
+
 class PublishArtifactOut(CommandResult):
     link_id: int
     event_id: str
@@ -573,7 +578,10 @@ def build_router(
             raise HTTPException(status_code=422, detail=result)
         return JSONResponse(result)
 
-    @router.post("/api/cases/{case_id}/assignments/{assignment_id}/resume")
+    @router.post(
+        "/api/cases/{case_id}/assignments/{assignment_id}/resume",
+        responses={200: {"model": AssignmentResumeOut}},
+    )
     async def api_resume_assignment(
         request: Request,
         case_id: str = Path(pattern=r"^[A-Za-z0-9_-]{1,128}$"),

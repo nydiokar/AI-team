@@ -297,6 +297,76 @@ def ready_recipients(conn: sqlite3.Connection, now: str, limit: int = PENDING_LI
 # --------------------------------------------------------------------------- #
 # State transitions (all conditional ⇒ idempotent)
 # --------------------------------------------------------------------------- #
+def enqueue_assignment(
+    conn: sqlite3.Connection, assignment: sqlite3.Row, kind: str, identity: str,
+    outcome: str, now: str, *, worker: bool = False,
+) -> None:
+    recipient = assignment["worker_session_id"] if worker else assignment["requester_session_id"]
+    if not worker:
+        # Follow the existing Case seat-rebind convention without changing the
+        # original requester preserved on the assignment and each owned turn.
+        seat = conn.execute(
+            "SELECT entity_id FROM flow_links WHERE flow_run_id=? AND entity_type='session' "
+            "AND role='manager' ORDER BY id DESC LIMIT 1", (assignment["case_id"],),
+        ).fetchone()
+        if seat:
+            recipient = seat["entity_id"]
+    conn.execute(
+        "INSERT INTO agent_inbox (message_id, recipient_session_id, sender_session_id, "
+        "about_task_id, case_id, kind, outcome, state, attempts, created_at, updated_at) "
+        "VALUES (?,?,?,?,?,?,?,'pending',0,?,?) ON CONFLICT(message_id) DO NOTHING",
+        (f"{kind}:{identity}", recipient, assignment["worker_session_id"],
+         assignment["assignment_id"], assignment["case_id"], kind, outcome, now, now),
+    )
+
+
+def assignment_checkpoint(conn: sqlite3.Connection, message_id: str) -> sqlite3.Row | None:
+    return conn.execute(
+        "SELECT a.* FROM agent_inbox i JOIN delegated_assignments a ON a.assignment_id=i.about_task_id "
+        "WHERE i.message_id=? AND i.kind=? AND i.state='pending'",
+        (message_id, assignment.CONTINUE),
+    ).fetchone()
+
+
+def ack_assignment_checkpoint(conn: sqlite3.Connection, turn_id: str, now: str) -> None:
+    conn.execute(
+        "UPDATE agent_inbox SET state='acked', acked_at=?, resolution='assignment_recovery', updated_at=? "
+        "WHERE kind=? AND delivery_turn_id=? AND state='delivered'",
+        (now, now, assignment.CONTINUE, turn_id),
+    )
+
+
+def rearm_assignment_checkpoint(conn: sqlite3.Connection, turn_id: str, now: str) -> None:
+    conn.execute(
+        "UPDATE agent_inbox SET state='pending', attempts=0, next_attempt_at=NULL, "
+        "last_error=NULL, alerted_at=NULL, delivery_turn_id=NULL, updated_at=? "
+        "WHERE message_id=? AND state='dead'",
+        (now, f"{assignment.CONTINUE}:{turn_id}"),
+    )
+
+
+def end_unavailable_assignment_checkpoints(
+    conn: sqlite3.Connection, recipient: str, case_id: str | None, now: str,
+) -> list[str]:
+    """Retire undeliverable checkpoints without changing their recipient."""
+    ended = conn.execute(
+        "UPDATE agent_inbox SET state='dead', last_error='worker_unavailable', updated_at=?, alerted_at=? "
+        "WHERE recipient_session_id=? AND case_id IS ? AND kind=? AND state='pending' RETURNING about_task_id",
+        (now, now, recipient, case_id, assignment.CONTINUE),
+    ).fetchall()
+    return [str(message["about_task_id"]) for message in ended]
+
+
+def cancel_assignment_wakes(conn: sqlite3.Connection, case_id: str, now: str) -> None:
+    conn.execute(
+        "UPDATE mesh_tasks SET status='cancelled', completed_at=?, updated_at=?, effects_state='telemetry', "
+        "error='assignment Case closed' WHERE id IN (SELECT delivery_turn_id FROM agent_inbox "
+        "WHERE case_id=? AND kind IN (?,?,?) AND state='delivered') "
+        "AND status IN ('queued','pending','claimed') AND started_at IS NULL",
+        (now, now, case_id, assignment.REPORT, assignment.PROGRESS, assignment.CONTINUE),
+    )
+
+
 def deliver(conn: sqlite3.Connection, message_ids: list[str], turn_id: str, now: str) -> int:
     """pending → delivered on ``turn_id`` (one admission ⇒ ``attempts + 1``).
     Returns the number of rows claimed; a concurrent claimer gets 0."""
@@ -413,8 +483,8 @@ def readdress(conn: sqlite3.Connection, from_session_id: str, to_session_id: str
         return 0
     cur = conn.execute(
         "UPDATE agent_inbox SET recipient_session_id = ?, updated_at = ? "
-        "WHERE recipient_session_id = ? AND state = 'pending'",
-        (to_session_id, now, from_session_id),
+        "WHERE recipient_session_id = ? AND state = 'pending' AND kind != ?",
+        (to_session_id, now, from_session_id, assignment.CONTINUE),
     )
     return cur.rowcount
 
@@ -565,10 +635,10 @@ def follow_case_rebind(conn: sqlite3.Connection, case_id: str, now: str) -> int:
         return 0
     cur = conn.execute(
         "UPDATE agent_inbox SET recipient_session_id = ?, updated_at = ? "
-        "WHERE case_id = ? AND state IN ('watching', 'pending') AND recipient_session_id != ? "
+        "WHERE case_id = ? AND state IN ('watching', 'pending') AND recipient_session_id != ? AND kind != ? "
         "AND recipient_session_id IN (SELECT entity_id FROM flow_links WHERE flow_run_id = ? "
         "AND entity_type = 'session' AND role = 'manager')",
-        (current["entity_id"], now, case_id, current["entity_id"], case_id),
+        (current["entity_id"], now, case_id, current["entity_id"], assignment.CONTINUE, case_id),
     )
     return cur.rowcount
 

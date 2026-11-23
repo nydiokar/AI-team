@@ -7248,13 +7248,12 @@ class MeshDB:
             )
             conn.execute(
                 "UPDATE mesh_tasks SET status='cancelled', completed_at=?, updated_at=?, effects_state='telemetry', "
-                "error='assignment Case closed' WHERE (assignment_id IN "
-                "(SELECT assignment_id FROM delegated_assignments WHERE case_id=?) OR id IN "
-                "(SELECT delivery_turn_id FROM agent_inbox WHERE case_id=? "
-                "AND kind IN ('assignment_report','assignment_progress','assignment_continue') "
-                "AND state='delivered')) AND status IN ('queued','pending','claimed') AND started_at IS NULL",
-                (now, now, flow_run_id, flow_run_id),
+                "error='assignment Case closed' WHERE assignment_id IN "
+                "(SELECT assignment_id FROM delegated_assignments WHERE case_id=?) "
+                "AND status IN ('queued','pending','claimed') AND started_at IS NULL",
+                (now, now, flow_run_id),
             )
+            _agent_inbox.cancel_assignment_wakes(conn, flow_run_id, now)
             _agent_inbox.kill_case(conn, flow_run_id, "case_closed", now)
         # [#177] Retire this Case's pending single-flight dispatch tokens
         # (cont:/respawn:/qresume:/tresume:, all riding CONTINUATION_MACHINE_SENTINEL).
@@ -8053,6 +8052,20 @@ class MeshDB:
     def inbox_readdress(self, from_session_id: str, to_session_id: str) -> int:
         with self._write() as conn:
             return _agent_inbox.readdress(conn, from_session_id, to_session_id, _now())
+
+    def inbox_end_unavailable_assignment_checkpoints(self, session_id: str, case_id: str | None) -> None:
+        with self._managed_write("end_unavailable_assignment_checkpoints") as conn:
+            now = _now()
+            ended = _agent_inbox.end_unavailable_assignment_checkpoints(conn, session_id, case_id, now)
+            for assignment_id in ended:
+                row = conn.execute(
+                    "UPDATE delegated_assignments SET state='unresolved', issue='worker_unavailable', updated_at=? "
+                    "WHERE assignment_id=? AND worker_session_id=? AND state IN ('continuing','unresolved') RETURNING *",
+                    (now, assignment_id, session_id),
+                ).fetchone()
+                if row is not None:
+                    _agent_inbox.enqueue_assignment(conn, row, _assignment.PROGRESS, f"{row['active_turn_id']}-unavailable",
+                                                     "worker_unavailable", now)
 
     def inbox_follow_case_rebind(self, case_id: str) -> int:
         """[A104 D4] Withdraw queued wakes stranded on a replaced Manager seat
@@ -9159,11 +9172,7 @@ class MeshDB:
             ):
                 raise OwnershipConflictError("assignment checkpoint not ready", job_id=job_id)
         elif kind == "continuation" and inbox_ids and len(inbox_ids) == 1:
-            assignment = conn.execute(
-                "SELECT a.* FROM agent_inbox i JOIN delegated_assignments a ON a.assignment_id=i.about_task_id "
-                "WHERE i.message_id=? AND i.kind=?",
-                (inbox_ids[0], _assignment.CONTINUE),
-            ).fetchone()
+            assignment = _agent_inbox.assignment_checkpoint(conn, inbox_ids[0])
             if assignment is not None and (
                 assignment["state"] not in ("continuing", "unresolved")
                 or inbox_ids[0] != f"{_assignment.CONTINUE}:{assignment['active_turn_id']}"
@@ -9226,15 +9235,10 @@ class MeshDB:
             if (row["case_status"] in self._CLOSED_STATUSES or row["state"] != "unresolved"
                     or row["worker_status"] in ("closed", "cancelled")):
                 raise OwnershipConflictError("resume requires an unresolved assignment and available worker")
-            _assignment.enqueue_message(
+            _agent_inbox.enqueue_assignment(
                 conn, row, _assignment.CONTINUE, row["active_turn_id"], "manager_resume", now, worker=True,
             )
-            conn.execute(
-                "UPDATE agent_inbox SET state='pending', next_attempt_at=NULL, "
-                "last_error=NULL, alerted_at=NULL, delivery_turn_id=NULL, updated_at=? "
-                "WHERE message_id=? AND state='dead'",
-                (now, f"{_assignment.CONTINUE}:{row['active_turn_id']}"),
-            )
+            _agent_inbox.rearm_assignment_checkpoint(conn, row["active_turn_id"], now)
             return {"status": "pending", "assignment_id": assignment_id}
 
     def record_assignment_disposition(self, report: _assignment.Disposition) -> dict[str, str]:
@@ -9289,7 +9293,7 @@ class MeshDB:
                  content if state in _assignment.FINAL else None, now, assignment["assignment_id"]),
             )
             if state in _assignment.FINAL:
-                _assignment.enqueue_message(
+                _agent_inbox.enqueue_assignment(
                     conn, assignment, _assignment.REPORT, assignment["assignment_id"], state, now,
                 )
             return {"status": "accepted", "disposition": report.disposition}
@@ -9365,7 +9369,7 @@ class MeshDB:
                         "UPDATE delegated_assignments SET job_id=?, updated_at=? WHERE assignment_id=?",
                         (job_id, now, assignment["assignment_id"]),
                     )
-                    _assignment.enqueue_message(conn, assignment, _assignment.PROGRESS, job_id, "launched", now)
+                    _agent_inbox.enqueue_assignment(conn, assignment, _assignment.PROGRESS, job_id, "launched", now)
                 return job_id
         except (ScopeForbiddenError, OwnershipConflictError):
             raise
@@ -10238,7 +10242,7 @@ class MeshDB:
             "UPDATE delegated_assignments SET state='unresolved', issue='job_continuation_unavailable', "
             "updated_at=? WHERE assignment_id=?", (now, assignment["assignment_id"]),
         )
-        _assignment.enqueue_message(
+        _agent_inbox.enqueue_assignment(
             conn, assignment, _assignment.PROGRESS, f"{job_id}-unavailable",
             "job_continuation_unavailable", now,
         )

@@ -487,6 +487,8 @@ def build_router(
         if body.expected_deliverable is not None:
             from config import config
 
+            if not config.mesh.delegated_assignments_enabled:
+                raise HTTPException(status_code=503, detail="delegated_assignment_admission_disabled")
             interval = int(getattr(config.mesh, "case_continuation_tick_interval_sec", 30) or 0)
             if config.mesh.jobs_read_mode != "controller" or not config.mesh.enabled or interval <= 0:
                 raise HTTPException(status_code=503, detail="assignment_requires_shared_controller_and_wake_dispatcher")

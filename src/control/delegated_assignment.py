@@ -56,29 +56,6 @@ def worker_context(turn_id: str, expected: str) -> str:
     )
 
 
-def enqueue_message(
-    conn: sqlite3.Connection, assignment: sqlite3.Row, kind: str, identity: str,
-    outcome: str, now: str, *, worker: bool = False,
-) -> None:
-    recipient = assignment["worker_session_id"] if worker else assignment["requester_session_id"]
-    if not worker:
-        # Follow the existing Case seat-rebind convention without changing the
-        # original requester preserved on the assignment and each owned turn.
-        seat = conn.execute(
-            "SELECT entity_id FROM flow_links WHERE flow_run_id=? AND entity_type='session' "
-            "AND role='manager' ORDER BY id DESC LIMIT 1", (assignment["case_id"],),
-        ).fetchone()
-        if seat:
-            recipient = seat["entity_id"]
-    conn.execute(
-        "INSERT INTO agent_inbox (message_id, recipient_session_id, sender_session_id, "
-        "about_task_id, case_id, kind, outcome, state, attempts, created_at, updated_at) "
-        "VALUES (?,?,?,?,?,?,?,'pending',0,?,?) ON CONFLICT(message_id) DO NOTHING",
-        (f"{kind}:{identity}", recipient, assignment["worker_session_id"],
-         assignment["assignment_id"], assignment["case_id"], kind, outcome, now, now),
-    )
-
-
 def turn_proof(claim_token: str) -> str:
     return hmac.digest(claim_token.encode(), b"delegated-assignment/v1", "sha256").hex()
 
@@ -110,6 +87,8 @@ def active_owner(
 
 
 def settle_turn(conn: sqlite3.Connection, turn_id: str, status: str, now: str) -> bool:
+    from . import agent_inbox
+
     row = conn.execute(
         "SELECT a.* FROM mesh_tasks t "
         "JOIN delegated_assignments a USING(assignment_id) WHERE t.id=?", (turn_id,),
@@ -121,20 +100,16 @@ def settle_turn(conn: sqlite3.Connection, turn_id: str, status: str, now: str) -
     if status == "completed" and row["state"] == "waiting":
         return True
     if status == "completed" and row["state"] == "continuing":
-        enqueue_message(conn, row, CONTINUE, turn_id, "continue", now, worker=True)
+        agent_inbox.enqueue_assignment(conn, row, CONTINUE, turn_id, "continue", now, worker=True)
         return True
     reason = "missing_disposition" if status == "completed" else f"worker_turn_{status}"
     if status != "completed":
-        conn.execute(
-            "UPDATE agent_inbox SET state='acked', acked_at=?, resolution='assignment_recovery', updated_at=? "
-            "WHERE kind=? AND delivery_turn_id=? AND state='delivered'",
-            (now, now, CONTINUE, turn_id),
-        )
+        agent_inbox.ack_assignment_checkpoint(conn, turn_id, now)
     conn.execute(
         "UPDATE delegated_assignments SET state='unresolved', issue=?, updated_at=? WHERE assignment_id=?",
         (reason, now, row["assignment_id"]),
     )
-    enqueue_message(conn, row, PROGRESS, turn_id, reason, now)
+    agent_inbox.enqueue_assignment(conn, row, PROGRESS, turn_id, reason, now)
     # Give a missing checkpoint one bounded same-worker repair opportunity.
     # A second missing disposition stays visible and requires intervention.
     if (reason == "missing_disposition" or status == "failed") and not row["recovery_used"]:
@@ -142,7 +117,7 @@ def settle_turn(conn: sqlite3.Connection, turn_id: str, status: str, now: str) -
             "UPDATE delegated_assignments SET recovery_used=1 WHERE assignment_id=?",
             (row["assignment_id"],),
         )
-        enqueue_message(conn, row, CONTINUE, turn_id, reason, now, worker=True)
+        agent_inbox.enqueue_assignment(conn, row, CONTINUE, turn_id, reason, now, worker=True)
     return True
 
 

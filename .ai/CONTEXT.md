@@ -41,7 +41,10 @@ ASGI transport buffers and legacy cache-heartbeat registration have no new
 hard deadline. Case briefs add an indexed 64-row assignment projection to the
 existing authenticated Case read, whose older recipient/history work retains
 the existing thread-pool and read bounds. Migration and client capability
-gates are in `docs/AUTONOMOUS_CASE_CONTINUATION_DESIGN.md` §11.
+gates are in `docs/AUTONOMOUS_CASE_CONTINUATION_DESIGN.md` §11. New assignment
+admission defaults off (`DELEGATED_ASSIGNMENTS_ENABLED`). Existing assignments
+can drain with admission off. Enable only when Manager and target worker tool
+surfaces are verified.
 
 
 **Read-path closure (2026-10-31):** J1–J5 engineering corrections are merged and

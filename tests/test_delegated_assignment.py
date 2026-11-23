@@ -28,6 +28,7 @@ class Harness:
         self.db, self.orchestrator = _env(tmp_path, monkeypatch)
         self.orchestrator.notifier = SimpleNamespace(notify_task_outcome=AsyncMock())
         monkeypatch.setattr(config.mesh, "enabled", True)
+        monkeypatch.setattr(config.mesh, "delegated_assignments_enabled", True)
         monkeypatch.setattr(control_api, "_dashboard_token", lambda: "offline-token")
         monkeypatch.setattr(task_server, "_worker_token", lambda: "offline-token")
         monkeypatch.setattr(task_server, "get_db", lambda: self.db)
@@ -119,6 +120,27 @@ class Harness:
 @pytest.fixture
 def harness(tmp_path, monkeypatch):
     return Harness(tmp_path, monkeypatch)
+
+
+def test_staged_controller_refuses_new_assignments_and_drains_existing_work(harness, monkeypatch):
+    h = harness
+    assignment_id = h.dispatch()
+    monkeypatch.setattr(config.mesh, "delegated_assignments_enabled", False)
+    response = h.gateway.post("/api/instructions", headers={**h.auth, "X-AI-Team-Principal": "automation"}, json={
+        "description": "New assignment", "expected_deliverable": "Findings", "case_id": h.case_id,
+        "session_id": "worker", "requester_session_id": "sess-1",
+    })
+    assert response.status_code == 503
+    assert response.json()["detail"] == "delegated_assignment_admission_disabled"
+    assert [row["assignment_id"] for row in _rows(h.db, "SELECT assignment_id FROM delegated_assignments")] == [assignment_id]
+    h.finish(h.manager, h.manager_claim)
+    token, tool_args = h.start(assignment_id)
+    h.disposition(tool_args, "completed", evidence=["artifact"])
+    h.finish(assignment_id, token)
+    _drive(h.db, h.orchestrator)
+    (wake,) = _wakes(h.db)
+    assert "Assignment report" in wake["prompt"]
+    assert h.dispatch(legacy=True)
 
 
 def test_four_detached_jobs_deliver_one_explicit_assignment_report(harness):
@@ -340,6 +362,29 @@ def test_cancellation_fences_queued_wake_and_late_worker_report(harness):
     assert h.db.assignment_for_turn(assignment_id)["state"] == "cancelled"
 
 
+def test_worker_checkpoint_stays_bound_when_closed_worker_has_successor(harness):
+    from tests.test_agent_inbox_delivery import _close
+
+    h = harness
+    assignment_id = h.dispatch()
+    h.finish(h.manager, h.manager_claim)
+    token, tool_args = h.start(assignment_id)
+    h.disposition(tool_args, "continue", summary="Compare results")
+    h.finish(assignment_id, token)
+    _add_session(h.db, "successor")
+    with h.db._write() as conn:
+        conn.execute("UPDATE sessions SET continued_from='worker' WHERE session_id='successor'")
+    _close(h.orchestrator, "worker")
+
+    _drive(h.db, h.orchestrator)
+    assert all(wake["session_id"] != "successor" for wake in _wakes(h.db))
+    assert not h.db.pending_for("successor").messages
+    (assignment,) = h.request("GET", f"/api/cases/{h.case_id}/brief")["brief"]["assignments"]
+    assert (assignment["state"], assignment["issue"]) == ("unresolved", "worker_unavailable")
+    (notice,) = _wakes(h.db)
+    assert notice["session_id"] == "sess-1" and "worker_unavailable" in notice["prompt"]
+
+
 def test_ordinary_single_turn_dispatch_keeps_existing_completion(harness):
     h = harness
     task_id = h.dispatch(legacy=True)
@@ -506,17 +551,17 @@ def test_assignment_write_admission_holds_through_http_cancellation(harness, mon
 
 
 def _crashing_report_writer(path, request, *, before_commit):
-    from src.control import delegated_assignment
+    from src.control import agent_inbox, delegated_assignment
 
     db = db_module.MeshDB(path)
-    enqueue = delegated_assignment.enqueue_message
+    enqueue = agent_inbox.enqueue_assignment
 
     def write_and_exit(*args, **kwargs):
         enqueue(*args, **kwargs)
         os._exit(71)
 
     if before_commit:
-        delegated_assignment.enqueue_message = write_and_exit
+        agent_inbox.enqueue_assignment = write_and_exit
     db.record_assignment_disposition(delegated_assignment.Disposition.model_validate(request))
     os._exit(72)
 

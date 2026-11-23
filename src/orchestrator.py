@@ -2022,6 +2022,10 @@ class TaskOrchestrator(ITaskOrchestrator):
         if session is None or session.status in (
             SessionStatus.CLOSED, SessionStatus.CANCELLED,
         ) or restart_errored:
+            from src.control.delegated_assignment import CONTINUE
+
+            if any(message.kind == CONTINUE for message in ready):
+                await asyncio.to_thread(db.inbox_end_unavailable_assignment_checkpoints, recipient, case_id)
             successor = await asyncio.to_thread(db.inbox_successor, recipient)
             if successor:
                 await asyncio.to_thread(db.inbox_readdress, recipient, successor)

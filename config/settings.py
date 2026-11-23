@@ -27,6 +27,7 @@ _MANAGED_ENV_KEYS = {
     "CONTROL_API_HOST",
     "DASHBOARD_PORT",
     "DASHBOARD_TOKEN",
+    "DELEGATED_ASSIGNMENTS_ENABLED",
     "GATEWAY_HEARTBEAT_INTERVAL_SEC",
     "GATEWAY_INACTIVITY_TIMEOUT_SEC",
     "GATEWAY_LOCAL_EXECUTION_ENABLED",
@@ -252,6 +253,7 @@ class MeshConfig:
     # sessions are assigned to it; never inferred from the hostname.
     local_carrier_node_id: str = ""         # MESH_LOCAL_CARRIER_NODE_ID
     worker_token: str = ""                  # WORKER_TOKEN — shared mesh auth secret
+    delegated_assignments_enabled: bool = False  # DELEGATED_ASSIGNMENTS_ENABLED
     jobs_read_mode: Literal["controller", "federated"] = "controller"  # JOBS_READ_MODE
     node_heartbeat_timeout_sec: int = 90    # MESH_HEARTBEAT_TIMEOUT_SEC
     oneoff_queue_timeout_sec: int = 36000   # MESH_ONEOFF_QUEUE_TIMEOUT_SEC (10 hours)
@@ -792,6 +794,9 @@ class Config:
                 self.mesh.worker_token = v
         except Exception:
             pass
+        self.mesh.delegated_assignments_enabled = os.getenv(
+            "DELEGATED_ASSIGNMENTS_ENABLED", "false",
+        ).strip().lower() in ("1", "true")
         jobs_read_mode: str = os.getenv("JOBS_READ_MODE", "controller").strip()
         if jobs_read_mode not in ("controller", "federated"):
             raise ValueError("JOBS_READ_MODE must be controller or federated")
