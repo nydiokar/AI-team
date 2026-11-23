@@ -440,3 +440,48 @@ duplicate reports, crashes before and after commit, overlapping assignments
 in a reused session and Case cancellation, prove attribution, recovery and
 deduplication. Verify the actual Manager inbox and review input, including
 that intermediate job exits never imply that the delegated work is complete.
+
+### Operator and rollout notes
+
+For a multi-turn assignment, the Manager supplies `case_id` and
+`expected_deliverable` to `dispatch_worker`. Reuse an `operation_id` to replay a
+dispatch against the same worker session. Dispatch without the deliverable field
+keeps the single-turn behavior. The assignment ID is the originating task ID
+and is also the `task_id` for `record_review`. A111/#292 can bind its evidence and
+contract revisions to that ID through the existing review and close operations.
+
+The worker passes the current controller turn ID and claim-scoped proof to the
+jobs tools. Each `watch_job` has a stable operation ID and one outstanding job
+per assignment. `assignment_disposition` records a yield against that job, an
+analysis checkpoint for another turn, or a completed, failed or decision-needed
+report. Failed and decision-needed reports carry a next action. Case brief
+shows the current checkpoint and unresolved state. A missing disposition or
+failed worker turn gets one automatic same-worker recovery opportunity.
+`resume_assignment` lets the current Manager resume unresolved work on that
+same worker after checking the reason. It does not release an operator stop.
+Case cancellation fences further assignment work and inbox delivery. A
+detached process can still exit independently, and its job record keeps the
+process outcome.
+
+Gateway and task-server must share the controller DB, with mesh admission and
+the inbox dispatcher enabled. Migration 51 is additive. Deploy both controller
+containers together from the same image. New assignment admission defaults off.
+Set `DELEGATED_ASSIGNMENTS_ENABLED=true` in the controller environment only after the Manager MCP
+has the updated dispatch schema and the worker jobs MCP and carrier profile
+expose `assignment_disposition` to the target session. An existing pooled
+Claude client keeps its boot-time tool grant. Confirm the tool on a fresh client
+using the supported worker build or dynamic profile, with worker promotion
+owned by the operator. Existing sessions and live agents were not exercised by
+the credential-free regression. Turning admission off leaves existing assignments
+free to finish through the same inbox and job machinery.
+
+The Case's existing wake cap, pause, recipient availability and operator stop
+still govern inbox delivery. When delivery is held, the persisted report
+remains available in Case brief for review. On rollback, stop new durable
+dispatches and drain or explicitly cancel open assignments before running a
+controller image that predates assignment routing. Keep the pre-deploy image
+and online DB backup. A database restore would discard intervening writes and
+requires a separate operator decision. The initial worker-session creation
+request uses the existing session API idempotency cache. Durable dispatch
+replay across a controller restart uses the original worker session and
+operation ID.

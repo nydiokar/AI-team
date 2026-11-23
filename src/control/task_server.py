@@ -38,6 +38,7 @@ _STAGING_ROOT = Path(__file__).resolve().parent.parent.parent / "state" / "uploa
 from src.control.app_metrics import RequestTimingMiddleware
 from src.control.db import cache_heartbeat_interval_sec, get_db
 from src.control.job_completion import JobCompletionPage
+from src.control.delegated_assignment import Disposition, Identifier
 from src.control.mesh_health import get_mesh_health
 from src.control.node_registry import NodeInfo, NodeCapabilities, get_registry
 from src.control.telemetry_store import TelemetryStore
@@ -52,6 +53,7 @@ _JOB_COMPLETION_READ_SLOTS = threading.BoundedSemaphore(4)
 _JOBS_LIST_READ_SLOTS = threading.BoundedSemaphore(4)
 _JOB_RESULT_SLOTS = threading.BoundedSemaphore(4)
 _JOB_DONE_SLOTS = threading.BoundedSemaphore(4)
+_JOB_WRITE_SLOTS = threading.BoundedSemaphore(4)
 _QUOTA_OBSERVATION_SLOTS = threading.BoundedSemaphore(4)
 _QUOTA_OBSERVATION_BODY_TIMEOUT_SEC = 5.0
 
@@ -559,17 +561,20 @@ class QuotaObservationPayload(BaseModel):
 # ---------------------------------------------------------------------------
 
 class RegisterJobPayload(BaseModel):
-    node_id: str
-    session_id: Optional[str] = None
-    label: str
-    command: Optional[str] = None
-    attach_pid: Optional[int] = None   # attach to an already-running process instead of spawning
-    cwd: Optional[str] = None          # working directory for spawn mode
-    log_path: Optional[str] = None
+    node_id: str = Field(min_length=1, max_length=128)
+    session_id: Optional[str] = Field(default=None, max_length=128)
+    label: str = Field(min_length=1, max_length=512)
+    command: Optional[str] = Field(default=None, max_length=8000)
+    attach_pid: Optional[int] = Field(default=None, gt=0, le=2**31 - 1)
+    cwd: Optional[str] = Field(default=None, max_length=1000)
+    log_path: Optional[str] = Field(default=None, max_length=1000)
     notify: bool = True
     notify_agent: bool = False
     expected_runtime_sec: Optional[int] = Field(default=None, ge=0, le=86400)
     cache_heartbeat: str = Field(default="auto", max_length=8)
+    turn_id: Identifier | None = None
+    turn_proof: Identifier | None = Field(default=None, repr=False)
+    operation_id: Identifier | None = None
 
 
 class JobDonePayload(BaseModel):
@@ -581,6 +586,8 @@ class JobDonePayload(BaseModel):
 
 class JobResultPayload(BaseModel):
     model_config = ConfigDict(extra="forbid")
+    turn_id: Identifier | None = None
+    turn_proof: Identifier | None = Field(default=None, repr=False)
     session_id: str = Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_-]+$")
     node_id: str = Field(min_length=1, max_length=128)
 
@@ -2060,7 +2067,6 @@ def delete_staged_file(file_id: str) -> Dict[str, str]:
 # ---------------------------------------------------------------------------
 
 
-@app.post("/jobs", dependencies=[Depends(_require_auth)])
 def register_job(payload: RegisterJobPayload) -> Dict[str, Any]:
     """Register a new watched job.
 
@@ -2075,9 +2081,8 @@ def register_job(payload: RegisterJobPayload) -> Dict[str, Any]:
     hb_mode = str(payload.cache_heartbeat or "auto").strip().lower()
     if hb_mode not in ("auto", "on", "off"):
         raise HTTPException(status_code=422, detail={"ok": False, "reason": "invalid_cache_heartbeat"})
-    job_id = f"job_{uuid.uuid4().hex[:12]}"
-    db.register_job(
-        job_id=job_id,
+    job_id = db.register_job(
+        job_id=f"job_{uuid.uuid4().hex[:12]}",
         node_id=payload.node_id,
         label=payload.label,
         session_id=payload.session_id,
@@ -2086,6 +2091,11 @@ def register_job(payload: RegisterJobPayload) -> Dict[str, Any]:
         log_path=payload.log_path,
         notify=payload.notify,
         notify_agent=payload.notify_agent,
+        turn_id=payload.turn_id,
+        turn_proof=payload.turn_proof,
+        operation_id=payload.operation_id,
+        attach_pid=payload.attach_pid,
+        strict=True,
     )
     runtime_sec = payload.expected_runtime_sec
     auto_below_interval = (
@@ -2095,6 +2105,7 @@ def register_job(payload: RegisterJobPayload) -> Dict[str, Any]:
     )
     if (
         payload.session_id
+        and not payload.turn_id
         and hb_mode != "off"
         and (payload.notify_agent or hb_mode == "on")
         and not auto_below_interval
@@ -2106,11 +2117,77 @@ def register_job(payload: RegisterJobPayload) -> Dict[str, Any]:
             owner_id=job_id,
             expected_runtime_sec=runtime_sec,
         )
-    if payload.attach_pid is not None:
-        # Record the PID immediately so the worker watcher monitors it without spawning.
-        db.start_job(job_id, pid=payload.attach_pid, pgid=0, log_path=payload.log_path)
     job = db.get_job(job_id)
+    _hint_turn_scheduler()
     return {"status": "registered", "job_id": job_id, "job": job}
+
+
+async def _bounded_job_write(request: Request, model: type[BaseModel], run: Any) -> Any:
+    """Bound memory and retain admission through cancellation of the HTTP waiter."""
+    from .turn_queue import TurnQueueError
+
+    if not _JOB_WRITE_SLOTS.acquire(blocking=False):
+        raise HTTPException(status_code=429, detail="job_write_busy")
+    release_here = True
+    try:
+        body = bytearray()
+        async with asyncio.timeout(3):
+            async for chunk in request.stream():
+                if len(body) + len(chunk) > 40 * 1024:
+                    raise HTTPException(status_code=413, detail="job_write_body_too_large")
+                body.extend(chunk)
+        try:
+            payload = model.model_validate_json(body)
+        except ValidationError:
+            raise HTTPException(status_code=422, detail="invalid_job_write") from None
+        future = asyncio.get_running_loop().run_in_executor(None, run, payload)
+
+        def finished(done: asyncio.Future) -> None:
+            _JOB_WRITE_SLOTS.release()
+            if not done.cancelled():
+                done.exception()
+
+        future.add_done_callback(finished)
+        release_here = False
+        return await asyncio.shield(future)
+    except (TimeoutError, ClientDisconnect):
+        raise HTTPException(status_code=408, detail="job_write_body_incomplete") from None
+    except TurnQueueError as exc:
+        raise HTTPException(status_code=exc.status_code, detail={"reason": exc.code, "message": exc.detail}) from None
+    except sqlite3.Error:
+        raise HTTPException(status_code=503, detail="job_write_unavailable") from None
+    finally:
+        if release_here:
+            _JOB_WRITE_SLOTS.release()
+
+
+@app.post(
+    "/jobs", dependencies=[Depends(_require_auth)],
+    openapi_extra={"requestBody": {"required": True, "content": {
+        "application/json": {"schema": RegisterJobPayload.model_json_schema()},
+    }}},
+)
+async def accept_register_job(request: Request) -> Dict[str, Any]:
+    return await _bounded_job_write(request, RegisterJobPayload, register_job)
+
+
+def report_assignment(payload: Disposition) -> dict[str, str]:
+    db = get_db()
+    if db is None:
+        raise HTTPException(status_code=503, detail="assignment_database_unavailable")
+    result = db.record_assignment_disposition(payload)
+    _hint_turn_scheduler()
+    return result
+
+
+@app.post(
+    "/assignments/disposition", dependencies=[Depends(_require_auth)],
+    openapi_extra={"requestBody": {"required": True, "content": {
+        "application/json": {"schema": Disposition.model_json_schema()},
+    }}},
+)
+async def accept_assignment_disposition(request: Request) -> dict[str, str]:
+    return await _bounded_job_write(request, Disposition, report_assignment)
 
 
 @app.post("/jobs/{job_id}/result", dependencies=[Depends(_require_auth)])
@@ -2145,7 +2222,8 @@ async def consume_job_result(
             db = get_db()
             if db is None:
                 raise HTTPException(status_code=503, detail="job_result_unavailable")
-            result = db.consume_job_result(job_id, payload.session_id, payload.node_id)
+            turn = {"turn_id": payload.turn_id, "turn_proof": payload.turn_proof} if payload.turn_id else {}
+            result = db.consume_job_result(job_id, payload.session_id, payload.node_id, **turn)
             _hint_turn_scheduler()
             return JSONResponse(result)
 
@@ -2247,7 +2325,7 @@ def report_job_done(job_id: str, payload: JobDonePayload) -> Dict[str, str]:
         err = f"exit code {payload.exit_code}"
         if payload.tail:
             err = f"{err}: {payload.tail[:500]}"
-        db.fail_job(job_id, err)
+        db.fail_job(job_id, err, exit_code=payload.exit_code)
 
     _hint_turn_scheduler()
     return {"status": "accepted", "job_id": job_id}

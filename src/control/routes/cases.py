@@ -123,6 +123,11 @@ class JobWatchOut(CommandResult):
     state: str | None = None
 
 
+class AssignmentResumeOut(BaseModel):
+    status: str
+    assignment_id: str
+
+
 class PublishArtifactOut(CommandResult):
     link_id: int
     event_id: str
@@ -384,6 +389,8 @@ def build_router(
                     case_id, verdict=body.verdict, reason=body.reason,
                     task_id=body.task_id, actor="manager",
                 )
+            except TurnQueueError as exc:
+                raise core._turn_queue_http(exc) from exc
             except Exception as exc:
                 logger.exception(
                     "event=record_review_write_failed flow_run_id=%s task_id=%s verdict=%s",
@@ -570,6 +577,40 @@ def build_router(
             # structured refusal, not a server error — 422 so the caller can react.
             raise HTTPException(status_code=422, detail=result)
         return JSONResponse(result)
+
+    @router.post(
+        "/api/cases/{case_id}/assignments/{assignment_id}/resume",
+        responses={200: {"model": AssignmentResumeOut}},
+    )
+    async def api_resume_assignment(
+        request: Request,
+        case_id: str = Path(pattern=r"^[A-Za-z0-9_-]{1,128}$"),
+        assignment_id: str = Path(pattern=r"^[A-Za-z0-9_-]{1,128}$"),
+        session_id: str = Query(pattern=r"^[A-Za-z0-9_-]{1,128}$"),
+    ) -> JSONResponse:
+        from src.control.turn_admission import run_turn_mutation_async
+
+        try:
+            async with asyncio.timeout(1):
+                async for chunk in request.stream():
+                    if chunk:
+                        raise HTTPException(status_code=413, detail="assignment_resume_body_not_empty")
+
+            def resume() -> JSONResponse:
+                db = core._db()
+                if db is None:
+                    raise HTTPException(status_code=503, detail="assignment_database_unavailable")
+                result = db.resume_assignment(case_id, assignment_id, session_id)
+                notify_turn_queue_changed()
+                return JSONResponse(result)
+
+            return await run_turn_mutation_async(resume)
+        except (TimeoutError, ClientDisconnect):
+            raise HTTPException(status_code=408, detail="assignment_resume_body_incomplete") from None
+        except TurnQueueError as exc:
+            raise core._turn_queue_http(exc) from exc
+        except sqlite3.Error:
+            raise HTTPException(status_code=503, detail="assignment_database_unavailable") from None
 
     @router.get(
         "/api/cases/{case_id}/brief",

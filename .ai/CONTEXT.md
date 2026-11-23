@@ -29,6 +29,24 @@ instead and leave a one-liner here.
 
 Current work:
 
+**#228 delegated assignments.** The jobs registration and disposition receivers
+share four concurrent writes per task-server process. A disconnected waiter
+retains its slot until its write finishes. The streamed body cap is 40 KiB
+(160 KiB across four admitted bodies, plus decoding and connection overhead),
+with a three-second read deadline and the managed SQLite five-second write-lock
+budget. The Case resume receiver accepts an empty body with a one-second read
+deadline and shares the four-slot turn mutation pool. Malformed inputs fail
+before the write, and unavailable DBs return retryable HTTP errors. Native I/O,
+ASGI transport buffers and legacy cache-heartbeat registration have no new
+hard deadline. Case briefs add an indexed 64-row assignment projection to the
+existing authenticated Case read, whose older recipient/history work retains
+the existing thread-pool and read bounds. Migration and client capability
+gates are in `docs/AUTONOMOUS_CASE_CONTINUATION_DESIGN.md` §11. New assignment
+admission defaults off (`DELEGATED_ASSIGNMENTS_ENABLED`). Existing assignments
+can drain with admission off. Enable only when Manager and target worker tool
+surfaces are verified.
+
+
 **Read-path closure (2026-10-31):** J1–J5 engineering corrections are merged and
 running in **`20d6167`**, schema 48 (PRs #267–270). Failure-honest session/reason
 reads, preserved intentional file-only mode, shared snapshots/cooperative SQL

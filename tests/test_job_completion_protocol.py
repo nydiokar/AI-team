@@ -189,9 +189,14 @@ def test_migration_47_skips_historical_terminals_enrolls_running_and_future(tmp_
         before.setattr(db_module, "_get_migrations", lambda: [(v, s) for v, s in migrations() if v < 47])
         before.setattr(db_module, "_CURRENT_VERSION", 46)
         old = MeshDB(str(path))
-        _register(old, "historical")
-        old.complete_job("historical", 0)
-        _register(old, "running")
+        # Seed v46 rows using its schema. Current job writers require v51.
+        with old._write() as legacy:
+            legacy.executemany(
+                "INSERT INTO jobs(id, session_id, node_id, label, status, notify, started_at, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, 1, '2026-01-01', '2026-01-01', '2026-01-01')",
+                [(job_id, "sess-1", "worker-a", "offline job", status)
+                 for job_id, status in (("historical", "done"), ("running", "running"))],
+            )
         old.close()
     upgraded = MeshDB(str(path))
     try:

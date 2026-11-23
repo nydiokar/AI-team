@@ -357,6 +357,7 @@ class InstructionBody(BaseModel):
     # every operator request and on an un-redeployed mcp_manager (the gateway then
     # resolves the requester server-side, role-free).
     requester_session_id: Optional[str] = Field(default=None, max_length=128)
+    expected_deliverable: Optional[str] = Field(default=None, min_length=1, max_length=2000)
     # [Session-fork] Verbatim digest of the marked messages carried over from a
     # forked session. When present it is injected ONCE, fence-defused and re-clamped
     # (keeping the most recent tail) as a reference-only `<prior_context>` block on
@@ -1084,6 +1085,8 @@ def _upload_staging_root() -> "Path":
 
 def _instruction_extra_metadata(body: InstructionBody) -> Optional[Dict[str, Any]]:
     metadata: Dict[str, Any] = dict(_fork_carry_meta(body.continue_inline) or {})
+    if body.expected_deliverable:
+        metadata["__expected_deliverable"] = body.expected_deliverable
     if body.upload_attachment and body.upload_attachment.staged_file:
         metadata["staged_file"] = dict(body.upload_attachment.staged_file)
     # None (not {}) for an empty carry-over: submit_instruction treats

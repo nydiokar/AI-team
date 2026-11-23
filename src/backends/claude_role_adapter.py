@@ -45,6 +45,7 @@ _PROFILE_TOOLS: Dict[str, List[str]] = {
         # Register a long-running detached shell job (read-only to the session).
         "mcp__jobs__watch_job",
         "mcp__jobs__job_result",
+        "mcp__jobs__assignment_disposition",
     ],
     MANAGER_TOOL_PROFILE: [
         "mcp__manager__list_nodes",
@@ -60,6 +61,7 @@ _PROFILE_TOOLS: Dict[str, List[str]] = {
         "mcp__manager__reconcile_waits",
         "mcp__manager__arm_wait_group",
         "mcp__manager__get_case_brief",
+        "mcp__manager__resume_assignment",
         "mcp__manager__publish_spec",
         "mcp__manager__publish_artifact",
         "mcp__manager__record_spec_review",

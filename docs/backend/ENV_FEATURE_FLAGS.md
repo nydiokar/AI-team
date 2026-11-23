@@ -179,6 +179,7 @@ rollout order and operator recovery are in burndown J2. No worker restart is nee
 | Flag | Managed? | Default | Meaning | Code seam |
 |------|----------|---------|---------|-----------|
 | `MESH_ENABLED` | ✅ YES | false | Activates worker-dispatch routing through the node registry. Set to **true** when running a multi-node mesh (gateway + worker). | `config/settings.py:563` |
+| `DELEGATED_ASSIGNMENTS_ENABLED` | ✅ YES | false | Admits new durable assignments after the Manager and target worker tool surfaces are ready. Existing assignments continue through the inbox when admission is off. | `config/settings.py` |
 | `MESH_SHADOW_WRITE` | ✅ YES | true | Mirror session/task writes into the mesh DB. | `config/settings.py:677` |
 | `CONTROL_API_ENABLED` | ✅ YES | true | The in-process `/api/*` control surface (Web UI + read APIs, incl. `/api/flows`). | `config/settings.py:611` |
 | `TELEMETRY_ENABLED` | ✅ YES | true | LLM-turn telemetry capture. OFF ⇒ `NullTelemetrySink`. | `config/settings.py:695` |

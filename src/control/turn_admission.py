@@ -177,6 +177,7 @@ class AdmissionRequest(BaseModel):
     # [A104 I2] The session that REQUESTED this work (dispatch_worker): persisted
     # as the turn's sender so its completion is addressed to that agent's inbox.
     requester_session_id: Optional[str] = Field(default=None, max_length=256)
+    expected_deliverable: Optional[str] = Field(default=None, min_length=1, max_length=2000)
     machine_id: Optional[str] = Field(default=None, max_length=256)
     # Durable "lineage pending" writer token (Case lineage written after the
     # commit, then finalized under CAS); None ⇒ no post-admission lineage.
@@ -230,6 +231,7 @@ def admit_turn(
                 sender_session_id=request.sender_session_id,
                 sender_capability_hash=request.sender_capability_hash,
                 requester_session_id=request.requester_session_id,
+                expected_deliverable=request.expected_deliverable,
                 machine_id=request.machine_id,
                 lineage_token=request.lineage_token,
                 producer_token=request.producer_token,

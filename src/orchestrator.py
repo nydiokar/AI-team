@@ -2022,6 +2022,10 @@ class TaskOrchestrator(ITaskOrchestrator):
         if session is None or session.status in (
             SessionStatus.CLOSED, SessionStatus.CANCELLED,
         ) or restart_errored:
+            from src.control.delegated_assignment import CONTINUE
+
+            if any(message.kind == CONTINUE for message in ready):
+                await asyncio.to_thread(db.inbox_end_unavailable_assignment_checkpoints, recipient, case_id)
             successor = await asyncio.to_thread(db.inbox_successor, recipient)
             if successor:
                 await asyncio.to_thread(db.inbox_readdress, recipient, successor)
@@ -2055,10 +2059,43 @@ class TaskOrchestrator(ITaskOrchestrator):
         from src.control import agent_inbox as ib
         from src.control.turn_queue import TurnQueueError
 
+        from src.control import delegated_assignment as assignment
+
+        # A worker checkpoint must carry exactly one assignment, even on a
+        # warm session with several ready assignments or ordinary messages.
         batch = list(messages)[: ib.PENDING_LIMIT]
-        presented = [str(m.about_task_id or m.message_id) for m in batch if not m.about_job_id]
-        job_messages = [m for m in batch if m.about_job_id]
+        if batch[0].kind == assignment.CONTINUE:
+            batch = batch[:1]
+        else:
+            batch = [m for m in batch if m.kind != assignment.CONTINUE][:32]
+        presented = [str(m.about_task_id or m.message_id) for m in batch if m.kind == ib.KIND_COMPLETION]
+        job_messages = [m for m in batch if m.kind == ib.KIND_WATCHED_JOB]
         sections: list[str] = []
+        reports = [m for m in batch if m.kind == assignment.REPORT]
+        if reports:
+            facts = await asyncio.to_thread(db.assignment_reports, [m.about_task_id for m in reports])
+            for fact in facts:
+                report = json.loads(fact["report"])
+                sections.append(
+                    f"Assignment report for {fact['assignment_id']} ({fact['state']})\n"
+                    f"Expected deliverable: {fact['expected_deliverable']}\n"
+                    f"Worker findings: {report['summary']}\n"
+                    f"Evidence: {json.dumps(report['evidence'], ensure_ascii=False)}\n"
+                    f"Limitations: {report['limitations'] or '(none recorded)'}\n"
+                    + (f"Next action: {report['next_action']}\n" if report["next_action"] else "")
+                    + f"Verify this report using record_review(case_id='{case_id}', "
+                    f"task_id='{fact['assignment_id']}')."
+                )
+        for message in batch:
+            if message.kind == assignment.PROGRESS:
+                detail = message.message_id.partition(":")[2] if message.outcome == "launched" else ""
+                sections.append(
+                    f"Assignment progress for {message.about_task_id}: {message.outcome} {detail}. "
+                    "The worker owns follow-up. Inspect get_case_brief for the assignment state."
+                    + (" Use resume_assignment if recovery has stopped." if message.outcome != "launched" else "")
+                )
+            if message.kind == assignment.CONTINUE:
+                sections.append(f"Continue delegated assignment {message.about_task_id}.")
         if presented:
             sections.append(self._render_wake_turn(case_id, presented))
         if job_messages:
@@ -5025,6 +5062,8 @@ class TaskOrchestrator(ITaskOrchestrator):
         receipt = await asyncio.to_thread(db.get_job_completion, job_id) if db is not None else None
         if receipt and receipt.get("consumed_at"):
             return
+        assignment = await asyncio.to_thread(db.watched_assignment, job_id) if db is not None else None
+        extra = {self._ATTACH_CASE_META_KEY: assignment["case_id"]} if assignment else {}
         try:
             await self.submit_instruction(
                 description,
@@ -5032,6 +5071,7 @@ class TaskOrchestrator(ITaskOrchestrator):
                 cwd=getattr(session, "repo_path", None),
                 source="watched_job",
                 extra_metadata={
+                    **extra,
                     "job_id": job_id,
                     "source": "watched_job",
                     self._TURN_PRODUCER_META_KEY: {
@@ -5093,6 +5133,7 @@ class TaskOrchestrator(ITaskOrchestrator):
         # reads may also parse a JSON fallback, so keep them off the loop.
         session = await asyncio.to_thread(self.session_store.get, session_id) if session_id else None
         payload = self._job_notification_payload(job)
+        assignment = await asyncio.to_thread(db.watched_assignment, job_id)
         for effect in ("notification", "action"):
             if receipt[f"{effect}_state"] != "pending":
                 continue
@@ -5111,6 +5152,12 @@ class TaskOrchestrator(ITaskOrchestrator):
                               if job.get("notify_agent") else
                               existing.get("action") == "watched_job" and
                               existing.get("status") in ("completed", "failed")))
+                    if assignment:
+                        valid = valid and (
+                            existing.get("assignment_id") == assignment["assignment_id"]
+                            and existing.get("flow_run_id") == assignment["case_id"]
+                            and existing.get("sender_session_id") == assignment["requester_session_id"]
+                        )
                     await asyncio.to_thread(
                         db.finish_job_effect, job_id, token, effect,
                         "done" if valid else "dead", "" if valid else "job effect identity collision",
@@ -5118,6 +5165,15 @@ class TaskOrchestrator(ITaskOrchestrator):
                     if not valid:
                         logger.warning("event=job_completion_failed job_id=%s effect=action reason=identity_collision", job_id)
                     continue
+                if assignment:
+                    if assignment["case_status"] in db._CLOSED_STATUSES or assignment["state"] == "cancelled":
+                        await asyncio.to_thread(db.finish_job_effect, job_id, token, effect, "done", "")
+                        continue
+                    if (assignment["state"] != "waiting" or assignment["job_id"] != job_id
+                            or assignment["turn_status"] != "completed"):
+                        # A short-lived process can exit before the launch
+                        # turn checkpoints and settles. Keep the receipt live.
+                        continue
             if not await asyncio.to_thread(db.begin_job_effect, job_id, token, effect):
                 latest = await asyncio.to_thread(db.get_job_completion, job_id)
                 if latest[f"{effect}_state"] == "dead" and receipt[f"{effect}_state"] == "pending":
@@ -5150,7 +5206,7 @@ class TaskOrchestrator(ITaskOrchestrator):
                             raise ValueError("unmanaged job continuation refused")
                         if job.get("notify_agent"):
                             description = (
-                                f"The watched job `{payload['label']}` finished with status "
+                                f"The watched job {job_id} (`{payload['label']}`) finished with status "
                                 f"`{payload['status']}`.\n\n{payload['reply']}"
                             )
                             await self._admit_managed_watched_job(
@@ -6546,7 +6602,7 @@ class TaskOrchestrator(ITaskOrchestrator):
         view = db.pending_for(sid)
         resolved = [
             {"task_id": m.about_task_id, "outcome": m.outcome or "success", "case_id": m.case_id}
-            for m in view.messages if m.about_task_id
+            for m in view.messages if m.kind in ("completion", "assignment_report")
         ]
         pending = [{"task_id": t} for t in view.outstanding_task_ids]
         jobs = view.watched_jobs()
@@ -9502,6 +9558,9 @@ Generated from user description: {description}
         if source == "agent_session" and (not sender_session_id or not sender_case_id):
             raise ManagedUnsupportedError("agent send requires validated sender and Case")
         scope = f"{principal}:{sender_session_id}:{sid}:instruction" if sender_session_id else f"{principal}:{sid}:instruction"
+        expected = meta.get("__expected_deliverable") if source == "automation_session" else None
+        if expected:
+            scope = f"{principal}:assignment:{join_case}:{requester}"
         # Original-request hash (design §4): target, body, attachments, options —
         # computed BEFORE lineage stamps the per-attempt flow ids.
         admission_hash = _canonical_admission_hash({
@@ -9542,7 +9601,8 @@ Generated from user description: {description}
             sender_session_id=sender_session_id or None,
             sender_capability_hash=sender_cap_hash or None,
             requester_session_id=requester or None,
-            flow_run_id=sender_case_id or None,
+            expected_deliverable=expected,
+            flow_run_id=sender_case_id or (join_case if expected else None),
             lineage_token=token,
         )
         admission = await admit_turn_async(
@@ -10361,6 +10421,22 @@ Generated from user description: {description}
                 await self._maybe_inject_compact_context(task)
         finally:
             self._compact_injected_ids.discard(task.id)
+        if row.get("assignment_id"):
+            from src.control.db import get_db
+            from src.control.delegated_assignment import worker_context
+
+            assignment = await asyncio.to_thread(get_db().assignment_for_turn, task.id)
+            context = worker_context(task.id, assignment["expected_deliverable"])
+            if task.id != assignment["assignment_id"]:
+                context += f"\nOriginating assignment {assignment['assignment_id']}: {assignment['objective']}"
+            if assignment["checkpoint"]:
+                context += "\nLast worker checkpoint: " + assignment["checkpoint"]
+            if assignment["issue"]:
+                context += f"\nRecovery reason: {assignment['issue']}."
+                if assignment["job_id"]:
+                    context += f" Last launched job: {assignment['job_id']}."
+                context += " Inspect existing work before launching or reporting."
+            task.prompt = f"{task.prompt}\n\n{context}"
         session = self.session_store.get(sid) if sid else None
         # Re-resolved at activation (a repin while queued applies; a carrier
         # that deregistered makes the head back off instead of activating).
@@ -10884,8 +10960,9 @@ Generated from user description: {description}
         attempts = int(row.get("effects_attempts") or 0)
         notify_failed = str(row.get("effects_error") or "").startswith("notify_failed")
         bumped = False
-        if state == "pending" and compaction:
-            # [A84 review F6] Legacy compaction never notified.
+        if state == "pending" and (compaction or row.get("assignment_id")):
+            # Assignment-owned worker turns report through the typed inbox path.
+            # Legacy compaction also has no outcome notification.
             if not await asyncio.to_thread(db.transition_turn_effects, task_id, "pending", "notified"):
                 return False
         elif state == "pending":
@@ -11086,6 +11163,7 @@ Generated from user description: {description}
                     payload={
                         "outcome": "success" if result.success else "failed",
                         "error_class": (result.error_class or None) if not result.success else None,
+                        **({"assignment_id": row["assignment_id"]} if row.get("assignment_id") else {}),
                     },
                     strict=True, once=True,
                 )

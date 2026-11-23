@@ -69,6 +69,7 @@ from .turn_queue import (
 # A104 — the agent inbox (pure SQL helpers over an open connection; no cycle:
 # agent_inbox imports only pydantic/stdlib).
 from . import agent_inbox as _agent_inbox
+from . import delegated_assignment as _assignment
 if False:  # typing-only forward refs for the strict helper signatures
     from .turn_queue import ClaimToken, StartAuthorization, CompletionResult, RecoveryResolution, TurnAdmission
     from .turn_queue import TurnCancelOutcome, SessionCloseTurns, SenderCapabilityGrant, SenderIdentity
@@ -3104,6 +3105,7 @@ class MeshDB:
         sender_session_id: Optional[str] = None,
         sender_capability_hash: Optional[str] = None,
         requester_session_id: Optional[str] = None,
+        expected_deliverable: Optional[str] = None,
         idempotency_scope: Optional[str] = None,
         idempotency_key: Optional[str] = None,
         admission_hash: Optional[str] = None,
@@ -3346,6 +3348,16 @@ class MeshDB:
                             and (req["status"] or "") not in ("closed", "cancelled")
                         ):
                             sender_session_id = requester_session_id
+                    assignment_id = None
+                    if expected_deliverable is not None:
+                        case = conn.execute(
+                            "SELECT status FROM flow_runs WHERE flow_run_id=?", (flow_run_id,),
+                        ).fetchone()
+                        if (not sender_session_id or case is None or case["status"] in self._CLOSED_STATUSES
+                                or srow is None or srow["case_role"] == "manager"
+                                or sender_session_id != _case_latest_manager(conn, flow_run_id)):
+                            raise ScopeForbiddenError("delegation requires the open Case's current Manager")
+                        assignment_id = new_id
                     if turn_kind == "retry" and parent_task_id:
                         # A human B can commit after the producer's read-side
                         # A/B/R decision. Recheck under the SAME write
@@ -3358,6 +3370,13 @@ class MeshDB:
                                 session_id=sid, failed_task_id=parent_task_id,
                                 decision=decision.action,
                             )
+                    inherited = self._assignment_for_turn(
+                        conn, turn_kind, sid, idempotency_key, inbox_message_ids,
+                    )
+                    if inherited is not None:
+                        assignment_id = inherited["assignment_id"]
+                        sender_session_id = inherited["requester_session_id"]
+                        flow_run_id = inherited["case_id"]
                     if turn_kind == "watched_job" and idempotency_key and idempotency_key.startswith("watched:"):
                         consumed = conn.execute(
                             "SELECT consumed_at FROM job_completion_effects WHERE job_id=?",
@@ -3439,9 +3458,9 @@ class MeshDB:
                             queue_protocol, queue_sequence, turn_source, sender_session_id,
                             turn_kind, idempotency_scope, idempotency_key, admission_hash,
                             revision, not_before, expires_at, coalesce_key, flow_run_id,
-                            intent_bytes, lineage_state, lineage_token, lineage_lease_until
+                            intent_bytes, lineage_state, lineage_token, lineage_lease_until, assignment_id
                         ) VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?,
-                                  1, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?)
+                                  1, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
                             new_id, sid, machine_id, row_backend, action,
@@ -3453,8 +3472,26 @@ class MeshDB:
                             "pending" if lineage_token else None,
                             lineage_token,
                             _iso_in(lineage_lease_sec) if lineage_token else None,
+                            assignment_id,
                         ),
                     )
+                    if expected_deliverable is not None:
+                        conn.execute(
+                            "INSERT INTO delegated_assignments "
+                            "(assignment_id,case_id,requester_session_id,worker_session_id,expected_deliverable,"
+                            "active_turn_id,state,updated_at) VALUES (?,?,?,?,?,?,'active',?)",
+                            (new_id, flow_run_id, sender_session_id, sid, expected_deliverable, new_id, now),
+                        )
+                    elif inherited is not None:
+                        conn.execute(
+                            "UPDATE delegated_assignments SET active_turn_id=?, state='active', "
+                            "updated_at=? WHERE assignment_id=?", (new_id, now, assignment_id),
+                        )
+                        if turn_kind == "watched_job":
+                            conn.execute(
+                                "UPDATE jobs SET assignment_result_turn_id=? WHERE id=?",
+                                (new_id, inherited["job_id"]),
+                            )
                     admitted = {
                         "task_id": new_id, "status": "queued", "revision": 1,
                         "queue_sequence": sequence, "idempotent_replay": False,
@@ -4110,6 +4147,7 @@ class MeshDB:
                     """,
                     (task_id, new_rev, actor, now),
                 )
+                _assignment.settle_turn(conn, task_id, "withdrawn", now)
                 if audit_reason:
                     _insert_watched_job_withdrawal_audit(conn, task_id, audit_reason, now)
                 # [A104 I5] A withdrawn wake returns its messages to pending
@@ -4265,6 +4303,7 @@ class MeshDB:
                     )
                 if conn.execute("SELECT changes()").fetchone()[0] == 0:
                     raise OwnershipConflictError("cancel lost the state race", task_id=task_id)
+                _assignment.settle_turn(conn, task_id, "cancelled", now)
                 return TurnCancelOutcome(task_id=task_id, outcome="cancelled", status="cancelled")
         except TurnQueueError:
             raise
@@ -4336,6 +4375,7 @@ class MeshDB:
                     )
                     # [A82 Stage 4d] a queued job notification leaves its record
                     _insert_watched_job_withdrawal_audit(conn, str(q["id"]), "session_closed", now)
+                    _assignment.settle_turn(conn, str(q["id"]), "withdrawn", now)
                     withdrawn.append(str(q["id"]))
                 active = conn.execute(
                     """
@@ -5303,7 +5343,7 @@ class MeshDB:
             with self._write() as conn:
                 row = conn.execute(
                     "SELECT id, session_id, status, queue_protocol, payload, machine_id, "
-                    "expires_at, turn_source, revision, flow_run_id "
+                    "expires_at, turn_source, revision, flow_run_id, assignment_id "
                     "FROM mesh_tasks WHERE id = ?",
                     (task_id,),
                 ).fetchone()
@@ -5403,6 +5443,16 @@ class MeshDB:
                         payload = json.loads(row["payload"]) if row["payload"] else {}
                     except Exception:
                         payload = {}
+                    if row["assignment_id"]:
+                        # Scope a tool proof to this live claim without exposing
+                        # the raw queue token or persisting the proof in intent.
+                        prompt = (
+                            f"{payload.get('prompt', '')}\n\nAssignment tool turn_proof: "
+                            f"{_assignment.turn_proof(token)}. Use only as a tool argument."
+                        )
+                        payload["prompt"] = prompt
+                        if isinstance(payload.get("session"), dict):
+                            payload["session"]["last_user_message"] = prompt
                     return ClaimToken(
                         token,
                         task_id=task_id,
@@ -5625,7 +5675,8 @@ class MeshDB:
         Case-addressed ``completion_outbox`` write is retired; the table remains as
         history only.) ``flow_run_id`` is provenance only and kept for the callers'
         signature."""
-        _agent_inbox.record_completion(conn, task_id, status, now)
+        if not _assignment.settle_turn(conn, task_id, status, now):
+            _agent_inbox.record_completion(conn, task_id, status, now)
         _agent_inbox.settle_turn(conn, task_id, status, now)
 
     def complete_turn(
@@ -5676,7 +5727,7 @@ class MeshDB:
             with self._write() as conn:
                 row = conn.execute(
                     "SELECT id, session_id, status, queue_protocol, claim_token, cancel_token, "
-                    "flow_run_id, action, turn_kind, idempotency_key FROM mesh_tasks WHERE id = ?",
+                    "flow_run_id, action, turn_kind, idempotency_key, assignment_id FROM mesh_tasks WHERE id = ?",
                     (task_id,),
                 ).fetchone()
                 if row is None or row["queue_protocol"] != 1:
@@ -5750,7 +5801,11 @@ class MeshDB:
                     )
                 if enrichment:
                     _apply_turn_enrichment(conn, task_id, enrichment, now)
-                if status == "completed" and row["turn_kind"] == "watched_job":
+                if status == "completed" and row["turn_kind"] == "watched_job" and (
+                    not row["assignment_id"] or conn.execute(
+                        "SELECT 1 FROM assignment_dispositions WHERE turn_id=?", (task_id,),
+                    ).fetchone() is not None
+                ):
                     # A successful watched-job continuation consumed its result.
                     conn.execute(
                         "UPDATE job_completion_effects SET consumed_at=COALESCE(consumed_at, ?), "
@@ -7157,16 +7212,49 @@ class MeshDB:
                     "rework_requested)"
                 )
 
-        self.update_flow_run(flow_run_id, status=outcome)
-        self.append_flow_event(
-            flow_run_id,
-            "flow.closed" if outcome == "closed" else "flow.status_changed",
-            actor, to_state=outcome,
-            payload={
-                "outcome": outcome,
-                "reconciliation": criteria_reconciliation or None,
-            },
-        )
+        now = _now()
+        with self._managed_write("close_case") as conn:
+            if not force and outcome == "closed":
+                unresolved_assignment = conn.execute(
+                    "SELECT assignment_id FROM delegated_assignments a WHERE case_id=? AND ("
+                    "a.state IN ('active','waiting','continuing','unresolved') OR "
+                    "(a.state IN ('completed','failed','decision_needed') AND COALESCE(("
+                    "SELECT event_type FROM flow_events e WHERE e.flow_run_id=a.case_id "
+                    "AND e.entity_type='task' AND e.entity_id=a.assignment_id "
+                    "AND e.event_type IN ('review.accepted','review.waived','review.rework_requested') "
+                    "ORDER BY e.id DESC LIMIT 1),'') NOT IN ('review.accepted','review.waived'))) LIMIT 1",
+                    (flow_run_id,),
+                ).fetchone()
+                if unresolved_assignment is not None:
+                    raise CaseCloseBlocked(
+                        f"assignment {unresolved_assignment['assignment_id']} needs resolution or review"
+                    )
+            changed = conn.execute(
+                "UPDATE flow_runs SET status=?, updated_at=? WHERE flow_run_id=? "
+                "AND COALESCE(status,'') NOT IN ('closed','cancelled')", (outcome, now, flow_run_id),
+            ).rowcount
+            if not changed:
+                return False
+            conn.execute(
+                "INSERT INTO flow_events (flow_run_id,event_type,actor,to_state,payload_json,created_at) "
+                "VALUES (?,?,?,?,?,?)",
+                (flow_run_id, "flow.closed" if outcome == "closed" else "flow.status_changed",
+                 actor, outcome, json.dumps({"outcome": outcome,
+                                             "reconciliation": criteria_reconciliation or None}), now),
+            )
+            conn.execute(
+                "UPDATE delegated_assignments SET state='cancelled', updated_at=? WHERE case_id=? "
+                "AND state IN ('active','waiting','continuing','unresolved')", (now, flow_run_id),
+            )
+            conn.execute(
+                "UPDATE mesh_tasks SET status='cancelled', completed_at=?, updated_at=?, effects_state='telemetry', "
+                "error='assignment Case closed' WHERE assignment_id IN "
+                "(SELECT assignment_id FROM delegated_assignments WHERE case_id=?) "
+                "AND status IN ('queued','pending','claimed') AND started_at IS NULL",
+                (now, now, flow_run_id),
+            )
+            _agent_inbox.cancel_assignment_wakes(conn, flow_run_id, now)
+            _agent_inbox.kill_case(conn, flow_run_id, "case_closed", now)
         # [#177] Retire this Case's pending single-flight dispatch tokens
         # (cont:/respawn:/qresume:/tresume:, all riding CONTINUATION_MACHINE_SENTINEL).
         # Once the Case is terminal these wakes are moot; left pending they linger
@@ -7233,6 +7321,8 @@ class MeshDB:
         """
         payload_json = json.dumps(payload) if payload is not None else None
         with self._write() as conn:
+            if event_type.startswith("review.") and entity_type == "task" and entity_id:
+                _assignment.require_reviewable(conn, flow_run_id, entity_id, event_type)
             cur = conn.execute(
                 """
                 INSERT INTO flow_events (
@@ -7654,11 +7744,18 @@ class MeshDB:
         view = _agent_inbox.case_pending(self._conn(), flow_run_id)
         resolved = [
             {"task_id": m.about_task_id, "outcome": m.outcome or "success"}
-            for m in view.messages if m.about_task_id
+            for m in view.messages if m.kind in (_agent_inbox.KIND_COMPLETION, _assignment.REPORT)
         ]
         pending = [{"task_id": t} for t in view.outstanding_task_ids]
         jobs = view.watched_jobs()
+        assignments = _assignment.read_case(self._conn(), flow_run_id)
+        known = {entry["task_id"] for entry in pending}
+        pending.extend(
+            {"task_id": a["assignment_id"]} for a in assignments
+            if a["state"] not in (*_assignment.FINAL, "cancelled") and a["assignment_id"] not in known
+        )
         return {"ok": True, "reason": None, "resolved": resolved, "pending": pending,
+                **({"assignments": assignments} if assignments else {}),
                 **({"watched_jobs": jobs} if jobs else {})}
 
     def arm_wait_group(
@@ -7955,6 +8052,20 @@ class MeshDB:
     def inbox_readdress(self, from_session_id: str, to_session_id: str) -> int:
         with self._write() as conn:
             return _agent_inbox.readdress(conn, from_session_id, to_session_id, _now())
+
+    def inbox_end_unavailable_assignment_checkpoints(self, session_id: str, case_id: str | None) -> None:
+        with self._managed_write("end_unavailable_assignment_checkpoints") as conn:
+            now = _now()
+            ended = _agent_inbox.end_unavailable_assignment_checkpoints(conn, session_id, case_id, now)
+            for assignment_id in ended:
+                row = conn.execute(
+                    "UPDATE delegated_assignments SET state='unresolved', issue='worker_unavailable', updated_at=? "
+                    "WHERE assignment_id=? AND worker_session_id=? AND state IN ('continuing','unresolved') RETURNING *",
+                    (now, assignment_id, session_id),
+                ).fetchone()
+                if row is not None:
+                    _agent_inbox.enqueue_assignment(conn, row, _assignment.PROGRESS, f"{row['active_turn_id']}-unavailable",
+                                                     "worker_unavailable", now)
 
     def inbox_follow_case_rebind(self, case_id: str) -> int:
         """[A104 D4] Withdraw queued wakes stranded on a replaced Manager seat
@@ -8703,9 +8814,12 @@ class MeshDB:
             return None
         conn = self._conn()
         view = _agent_inbox.case_pending(conn, case_id)
-        ready = sorted({str(m.about_task_id) for m in view.messages if m.about_task_id})
+        ready = sorted({
+            str(m.about_task_id) for m in view.messages if m.kind in (_agent_inbox.KIND_COMPLETION, _assignment.REPORT)
+        })
         children = conn.execute(
-            "SELECT id, status FROM mesh_tasks WHERE flow_run_id = ? AND ("
+            "SELECT id, status FROM mesh_tasks WHERE flow_run_id = ? AND "
+            "(assignment_id IS NULL OR id=assignment_id) AND ("
             "sender_session_id IS NOT NULL OR id IN (SELECT entity_id FROM flow_links "
             "WHERE flow_run_id = ? AND entity_type = 'task' AND role = 'task' "
             "AND created_by = 'manager')) ORDER BY created_at DESC LIMIT 256",
@@ -8729,13 +8843,19 @@ class MeshDB:
                 review_by_task[str(e["entity_id"])] = rec
         live = ("queued", "pending", "claimed", "running", "recovery_required")
         workers: List[Dict[str, Any]] = []
+        assignments = _assignment.read_case(conn, case_id)
+        assignment_by_id = {a["assignment_id"]: a for a in assignments}
         for c in reversed(children):
             tid, st = str(c["id"]), str(c["status"] or "")
             done = st not in live
+            assignment = assignment_by_id.get(tid)
+            if assignment:
+                st = assignment["state"]
+                done = st in (*_assignment.FINAL, "cancelled")
             workers.append({
                 "task_id": tid,
                 "finished": done,
-                "outcome": (("success" if st == "completed" else st) if done else None),
+                "outcome": st if assignment else (("success" if st == "completed" else st) if done else None),
                 "latest_review": review_by_task.get(tid),
             })
         worker_session_ids = [
@@ -8765,7 +8885,10 @@ class MeshDB:
             "workers": workers,
             "worker_session_ids": worker_session_ids,
             "latest_review": latest_case_review,
-            "open_waits": sorted(view.outstanding_task_ids),
+            "open_waits": sorted(set(view.outstanding_task_ids) | {
+                a["assignment_id"] for a in assignments if a["state"] not in (*_assignment.FINAL, "cancelled")
+            }),
+            "assignments": assignments,
             "ready_waits": ready,
             "wait_groups": wait_groups,
         }
@@ -9035,6 +9158,146 @@ class MeshDB:
     # Watched jobs
     # ------------------------------------------------------------------
 
+    def _assignment_for_turn(
+        self, conn: sqlite3.Connection, kind: str, session_id: str,
+        operation_id: str | None, inbox_ids: list[str] | None,
+    ) -> sqlite3.Row | None:
+        """Resolve continuation provenance from the ledger, never the session's Case."""
+        if kind == "watched_job" and operation_id and operation_id.startswith("watched:"):
+            job_id = operation_id.removeprefix("watched:")
+            assignment = self._watched_assignment(conn, job_id)
+            if assignment is not None and (
+                assignment["state"] != "waiting" or assignment["job_id"] != job_id
+                or assignment["turn_status"] != "completed"
+            ):
+                raise OwnershipConflictError("assignment checkpoint not ready", job_id=job_id)
+        elif kind == "continuation" and inbox_ids and len(inbox_ids) == 1:
+            assignment = _agent_inbox.assignment_checkpoint(conn, inbox_ids[0])
+            if assignment is not None and (
+                assignment["state"] not in ("continuing", "unresolved")
+                or inbox_ids[0] != f"{_assignment.CONTINUE}:{assignment['active_turn_id']}"
+            ):
+                raise OwnershipConflictError("assignment checkpoint superseded")
+        else:
+            return None
+        if assignment is not None:
+            case = conn.execute(
+                "SELECT status FROM flow_runs WHERE flow_run_id=?", (assignment["case_id"],),
+            ).fetchone()
+            if (session_id != assignment["worker_session_id"] or case is None
+                    or case["status"] in self._CLOSED_STATUSES):
+                raise ScopeForbiddenError("assignment continuation outside its open Case or owning worker")
+        return assignment
+
+    def _watched_assignment(self, conn: sqlite3.Connection, job_id: str) -> sqlite3.Row | None:
+        return conn.execute(
+            "SELECT a.*, t.status AS turn_status, f.status AS case_status FROM jobs j "
+            "JOIN delegated_assignments a USING(assignment_id) "
+            "JOIN mesh_tasks t ON t.id=a.active_turn_id JOIN flow_runs f ON f.flow_run_id=a.case_id "
+            "WHERE j.id=?", (job_id,),
+        ).fetchone()
+
+    def watched_assignment(self, job_id: str) -> dict[str, Any] | None:
+        row = self._watched_assignment(self._conn(), job_id)
+        return dict(row) if row is not None else None
+
+    def assignment_reports(self, assignment_ids: list[str]) -> list[dict[str, Any]]:
+        placeholders = ",".join("?" for _ in assignment_ids)
+        return [dict(row) for row in self._conn().execute(
+            f"SELECT assignment_id,state,expected_deliverable,report FROM delegated_assignments "
+            f"WHERE assignment_id IN ({placeholders}) AND report IS NOT NULL ORDER BY updated_at",
+            assignment_ids,
+        )]
+
+    def assignment_for_turn(self, task_id: str) -> dict[str, Any] | None:
+        row = self._conn().execute(
+            "SELECT a.*, origin.prompt AS objective FROM mesh_tasks t "
+            "JOIN delegated_assignments a USING(assignment_id) "
+            "JOIN mesh_tasks origin ON origin.id=a.assignment_id WHERE t.id=?",
+            (task_id,),
+        ).fetchone()
+        return dict(row) if row is not None else None
+
+    def resume_assignment(self, case_id: str, assignment_id: str, manager_id: str) -> dict[str, str]:
+        """Put the unresolved checkpoint back in the same worker's inbox."""
+        now = _now()
+        with self._managed_write("resume_assignment") as conn:
+            row = conn.execute(
+                "SELECT a.*, f.status AS case_status, s.status AS worker_status "
+                "FROM delegated_assignments a JOIN flow_runs f ON f.flow_run_id=a.case_id "
+                "JOIN sessions s ON s.session_id=a.worker_session_id "
+                "WHERE a.case_id=? AND a.assignment_id=?", (case_id, assignment_id),
+            ).fetchone()
+            if row is None:
+                raise TurnNotFoundError("assignment not found in this Case")
+            if _case_latest_manager(conn, case_id) != manager_id:
+                raise ScopeForbiddenError("only the current Case Manager can resume an assignment")
+            if (row["case_status"] in self._CLOSED_STATUSES or row["state"] != "unresolved"
+                    or row["worker_status"] in ("closed", "cancelled")):
+                raise OwnershipConflictError("resume requires an unresolved assignment and available worker")
+            _agent_inbox.enqueue_assignment(
+                conn, row, _assignment.CONTINUE, row["active_turn_id"], "manager_resume", now, worker=True,
+            )
+            _agent_inbox.rearm_assignment_checkpoint(conn, row["active_turn_id"], now)
+            return {"status": "pending", "assignment_id": assignment_id}
+
+    def record_assignment_disposition(self, report: _assignment.Disposition) -> dict[str, str]:
+        content = report.model_dump_json()
+        now = _now()
+        with self._managed_write("assignment_disposition") as conn:
+            prior = conn.execute(
+                "SELECT d.payload, t.claim_token FROM assignment_dispositions d "
+                "JOIN mesh_tasks t ON t.id=d.turn_id WHERE d.turn_id=?", (report.turn_id,),
+            ).fetchone()
+            if prior is not None:
+                _assignment.require_proof(prior["claim_token"], report.turn_proof)
+                if prior["payload"] != content:
+                    raise OwnershipConflictError("turn already recorded a different disposition")
+                return {"status": "accepted", "disposition": report.disposition}
+            assignment = _assignment.active_owner(
+                conn, report.session_id, report.node_id, report.turn_id, report.turn_proof,
+            )
+            if assignment["state"] != "active":
+                raise OwnershipConflictError("assignment is not awaiting this turn's disposition")
+            # One detached job per checkpoint. The result of the incoming job
+            # is already in this turn's prompt. An outgoing job must be named.
+            outstanding = conn.execute(
+                "SELECT id FROM jobs WHERE assignment_id=? AND assignment_result_turn_id IS NULL LIMIT 2",
+                (assignment["assignment_id"],),
+            ).fetchall()
+            if report.disposition == "yield":
+                job = conn.execute(
+                    "SELECT id FROM jobs WHERE id=? AND assignment_id=? AND assignment_result_turn_id IS NULL",
+                    (report.job_id, assignment["assignment_id"]),
+                ).fetchone()
+                if job is None or any(row["id"] != report.job_id for row in outstanding):
+                    raise OwnershipConflictError("yield must identify this assignment's outstanding job")
+                state = "waiting"
+                conn.execute(
+                    "UPDATE job_completion_effects SET action_state='pending', action_attempts=0, "
+                    "action_error=NULL, updated_at=? WHERE job_id=? AND action_state='dead' "
+                    "AND consumed_at IS NULL", (now, report.job_id),
+                )
+            elif outstanding:
+                raise OwnershipConflictError("record a yield for the outstanding job before reporting")
+            else:
+                state = "continuing" if report.disposition == "continue" else report.disposition
+            conn.execute(
+                "INSERT INTO assignment_dispositions(turn_id,payload) VALUES (?,?)",
+                (report.turn_id, content),
+            )
+            conn.execute(
+                "UPDATE delegated_assignments SET state=?, job_id=COALESCE(?,job_id), checkpoint=?, "
+                "report=?, issue=NULL, recovery_used=0, updated_at=? WHERE assignment_id=?",
+                (state, report.job_id, report.summary,
+                 content if state in _assignment.FINAL else None, now, assignment["assignment_id"]),
+            )
+            if state in _assignment.FINAL:
+                _agent_inbox.enqueue_assignment(
+                    conn, assignment, _assignment.REPORT, assignment["assignment_id"], state, now,
+                )
+            return {"status": "accepted", "disposition": report.disposition}
+
     def register_job(
         self,
         job_id: str,
@@ -9046,30 +9309,80 @@ class MeshDB:
         log_path: Optional[str] = None,
         notify: bool = True,
         notify_agent: bool = False,
-    ) -> None:
-        """Insert a new running job row."""
+        *,
+        turn_id: str | None = None,
+        turn_proof: str | None = None,
+        operation_id: str | None = None,
+        attach_pid: int | None = None,
+        strict: bool = False,
+    ) -> str | None:
+        """Register the job and any assignment progress in one transaction."""
         now = _now()
         try:
-            with self._write() as conn:
+            with self._managed_write("register_job") as conn:
+                assignment = None
+                request_hash = None
+                if turn_id:
+                    assignment = _assignment.active_owner(conn, session_id or "", node_id, turn_id, turn_proof or "")
+                    if not operation_id or not notify_agent or not (command or "").strip() or attach_pid is not None:
+                        raise OwnershipConflictError("assignment jobs require operation_id and worker continuation")
+                    job_id = producer_turn_id(operation_id, assignment["assignment_id"], 1, prefix="job")
+                    request_hash = _canonical_admission_hash({
+                        "command": command, "label": label, "cwd": cwd, "log_path": log_path,
+                    })
+                    prior = conn.execute(
+                        "SELECT assignment_request_hash FROM jobs WHERE id=?", (job_id,),
+                    ).fetchone()
+                    if prior is not None:
+                        if prior["assignment_request_hash"] != request_hash:
+                            raise OwnershipConflictError("job operation_id reused for different work")
+                        return job_id
+                    if assignment["state"] != "active" or conn.execute(
+                        "SELECT 1 FROM jobs WHERE assignment_id=? AND assignment_result_turn_id IS NULL LIMIT 1",
+                        (assignment["assignment_id"],),
+                    ).fetchone() is not None:
+                        raise OwnershipConflictError("assignment already has outstanding work for this turn")
+                elif session_id and conn.execute(
+                    "SELECT 1 FROM mesh_tasks WHERE session_id=? AND queue_protocol=1 "
+                    "AND status='running' AND assignment_id IS NOT NULL", (session_id,),
+                ).fetchone() is not None:
+                    raise ScopeForbiddenError("assignment job requires the current controller turn_id")
                 conn.execute(
                     """
                     INSERT INTO jobs
                         (id, session_id, node_id, label, command, cwd, status,
                          started_at, started_epoch, log_path, notify, notify_agent,
-                         created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, 'running', ?, ?, ?, ?, ?, ?, ?)
+                         created_at, updated_at, assignment_id, launch_turn_id,
+                         assignment_request_hash, pid, pgid)
+                    VALUES (?, ?, ?, ?, ?, ?, 'running', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
-                        job_id, session_id, node_id, label, command, cwd,
-                        now, time.time(), log_path,
-                        1 if notify else 0, 1 if notify_agent else 0,
-                        now, now,
+                        job_id, session_id, node_id, label, command, cwd, now, time.time(), log_path,
+                        int(notify and assignment is None), int(notify_agent), now, now,
+                        assignment["assignment_id"] if assignment else None, turn_id, request_hash,
+                        attach_pid, 0 if attach_pid is not None else None,
                     ),
                 )
+                if assignment is not None:
+                    conn.execute("UPDATE jobs SET launch_case_id=? WHERE id=?", (assignment["case_id"], job_id))
+                    conn.execute(
+                        "UPDATE delegated_assignments SET job_id=?, updated_at=? WHERE assignment_id=?",
+                        (job_id, now, assignment["assignment_id"]),
+                    )
+                    _agent_inbox.enqueue_assignment(conn, assignment, _assignment.PROGRESS, job_id, "launched", now)
+                return job_id
+        except (ScopeForbiddenError, OwnershipConflictError):
+            raise
         except sqlite3.IntegrityError:
+            if strict:
+                raise
             logger.debug("event=db_register_job_duplicate job_id=%s", job_id)
-        except Exception as e:
-            logger.warning("event=db_register_job_failed job_id=%s err=%s", job_id, e)
+            return None
+        except Exception as exc:
+            if strict:
+                raise
+            logger.warning("event=db_register_job_failed job_id=%s err=%s", job_id, exc)
+            return None
 
     def watch_case_job(self, case_id: str, job_id: str, manager_id: str) -> dict[str, JsonValue]:
         """Subscribe the current Case Manager to one worker job from that Case."""
@@ -9189,6 +9502,8 @@ class MeshDB:
         job_id: str,
         error: str,
         status: str = "failed",
+        *,
+        exit_code: int | None = None,
     ) -> None:
         """Mark a running job as failed or lost."""
         now = _now()
@@ -9196,10 +9511,10 @@ class MeshDB:
             conn.execute(
                 """
                 UPDATE jobs
-                SET status = ?, tail = ?, finished_at = ?, updated_at = ?
+                SET status = ?, exit_code = ?, tail = ?, finished_at = ?, updated_at = ?
                 WHERE id = ? AND status = 'running'
                 """,
-                (status, error, now, now, job_id),
+                (status, exit_code, error, now, now, job_id),
             )
 
     def job_node_matches(self, job_id: str, node_id: str) -> bool | None:
@@ -9806,10 +10121,17 @@ class MeshDB:
         from .job_completion import JOB_COMPLETION_BATCH
 
         rows = self._conn().execute(
-            "SELECT job_id FROM job_completion_effects "
-            "WHERE (notification_state='pending' OR action_state='pending') "
-            "AND (lease_until IS NULL OR lease_until <= ?) "
-            "AND (source='local' OR ?) ORDER BY updated_at, job_id LIMIT ?",
+            "SELECT e.job_id FROM job_completion_effects e "
+            "LEFT JOIN jobs j ON j.id=e.job_id "
+            "LEFT JOIN delegated_assignments a ON a.assignment_id=j.assignment_id "
+            "LEFT JOIN mesh_tasks t ON t.id=a.active_turn_id "
+            "LEFT JOIN flow_runs f ON f.flow_run_id=a.case_id "
+            "WHERE (e.notification_state='pending' OR e.action_state='pending') "
+            "AND (e.lease_until IS NULL OR e.lease_until <= ?) AND (e.source='local' OR ?) "
+            "AND (a.assignment_id IS NULL OR j.assignment_result_turn_id IS NOT NULL "
+            "OR f.status IN ('closed','cancelled') "
+            "OR (a.state='waiting' AND a.job_id=j.id AND t.status='completed')) "
+            "ORDER BY e.updated_at, e.job_id LIMIT ?",
             (time.time(), int(include_remote), max(1, min(int(limit), JOB_COMPLETION_BATCH))),
         ).fetchall()
         return [str(r[0]) for r in rows]
@@ -9821,7 +10143,8 @@ class MeshDB:
         return dict(row) if row else None
 
     def consume_job_result(
-        self, job_id: str, session_id: str, node_id: str,
+        self, job_id: str, session_id: str, node_id: str, *,
+        turn_id: str | None = None, turn_proof: str | None = None,
     ) -> dict[str, JsonValue]:
         """Read bounded evidence and consume a terminal result in one transaction.
 
@@ -9836,7 +10159,7 @@ class MeshDB:
             row = conn.execute(
                 "SELECT id, session_id, node_id, substr(label,1,512) AS label, "
                 "status, exit_code, substr(COALESCE(tail,''),-1500) AS tail, "
-                "substr(COALESCE(log_path,''),1,1000) AS log_path, notify, notify_agent "
+                "substr(COALESCE(log_path,''),1,1000) AS log_path, notify, notify_agent, assignment_id "
                 "FROM jobs WHERE id=?", (job_id,),
             ).fetchone()
             if row is None:
@@ -9845,6 +10168,12 @@ class MeshDB:
                 raise PermissionError("job is not owned by this session and node")
             result: dict[str, JsonValue] = dict(row)
             result["consumed"] = False
+            if row["assignment_id"] is not None:
+                owner = _assignment.active_owner(conn, session_id, node_id, turn_id or "", turn_proof or "")
+                if owner["assignment_id"] != row["assignment_id"]:
+                    raise ScopeForbiddenError("job result belongs to a different assignment")
+                # Observing an assigned result cannot retire its continuation.
+                return result
             if row["status"] == "running":
                 return result
             snapshot = compact_job(result)
@@ -9904,12 +10233,27 @@ class MeshDB:
                 return None
             return dict(conn.execute("SELECT * FROM job_completion_effects WHERE job_id=?", (job_id,)).fetchone())
 
+    def _assignment_job_unavailable(self, conn: sqlite3.Connection, job_id: str, now: str) -> None:
+        assignment = self._watched_assignment(conn, job_id)
+        if (assignment is None or assignment["state"] != "waiting" or assignment["job_id"] != job_id
+                or assignment["case_status"] in self._CLOSED_STATUSES):
+            return
+        conn.execute(
+            "UPDATE delegated_assignments SET state='unresolved', issue='job_continuation_unavailable', "
+            "updated_at=? WHERE assignment_id=?", (now, assignment["assignment_id"]),
+        )
+        _agent_inbox.enqueue_assignment(
+            conn, assignment, _assignment.PROGRESS, f"{job_id}-unavailable",
+            "job_continuation_unavailable", now,
+        )
+
     def begin_job_effect(self, job_id: str, token: str, effect: str) -> bool:
         from .job_completion import JOB_EFFECT_ATTEMPTS
 
         if effect not in ("notification", "action"):
             raise ValueError("invalid job effect")
         with self._managed_write("begin_job_effect") as conn:
+            now = _now()
             # A crash on the last attempt leaves pending+attempts=max. Finalize
             # that unknown outcome durably, rather than silently retry forever.
             conn.execute(
@@ -9917,8 +10261,10 @@ class MeshDB:
                 f"{effect}_error='attempts_exhausted_or_outcome_unknown', updated_at=? "
                 f"WHERE job_id=? AND lease_token=? AND {effect}_state='pending' "
                 f"AND lease_until > ? AND {effect}_attempts >= ?",
-                (_now(), job_id, token, time.time(), JOB_EFFECT_ATTEMPTS),
+                (now, job_id, token, time.time(), JOB_EFFECT_ATTEMPTS),
             )
+            if effect == "action" and conn.execute("SELECT changes()").fetchone()[0]:
+                self._assignment_job_unavailable(conn, job_id, now)
             conn.execute(
                 f"UPDATE job_completion_effects SET {effect}_attempts={effect}_attempts+1 "
                 f"WHERE job_id=? AND lease_token=? AND lease_until > ? "
@@ -9933,13 +10279,16 @@ class MeshDB:
         state_expr: str = "CASE WHEN consumed_at IS NOT NULL THEN 'done' ELSE ? END" if effect == "action" else "?"
         error_expr: str = "CASE WHEN consumed_at IS NOT NULL THEN NULL ELSE ? END" if effect == "action" else "?"
         with self._managed_write("finish_job_effect") as conn:
-            conn.execute(
+            now = _now()
+            changed = conn.execute(
                 f"UPDATE job_completion_effects SET {effect}_state={state_expr}, "
                 f"{effect}_error={error_expr}, updated_at=? "
                 "WHERE job_id=? AND lease_token=? AND lease_until > ?",
-                (state, error[:500] or None, _now(), job_id, token, time.time()),
-            )
-            return conn.execute("SELECT changes()").fetchone()[0] == 1
+                (state, error[:500] or None, now, job_id, token, time.time()),
+            ).rowcount == 1
+            if changed and effect == "action" and state == "dead":
+                self._assignment_job_unavailable(conn, job_id, now)
+            return changed
 
     def refund_job_effect(self, job_id: str, token: str, effect: str) -> None:
         if effect not in ("notification", "action"):
@@ -11484,6 +11833,42 @@ def _get_migrations() -> List[tuple]:
                  WHERE message_id = 'watched_job:' || NEW.id AND state = 'watching';
             END;
         """),  # #228: publish job exit to the same inbox in the terminal transaction.
+        (51, """
+            ALTER TABLE mesh_tasks ADD COLUMN assignment_id TEXT;
+            ALTER TABLE jobs ADD COLUMN assignment_id TEXT;
+            ALTER TABLE jobs ADD COLUMN launch_turn_id TEXT;
+            ALTER TABLE jobs ADD COLUMN assignment_request_hash TEXT;
+            ALTER TABLE jobs ADD COLUMN assignment_result_turn_id TEXT;
+            CREATE UNIQUE INDEX idx_assignment_outstanding_job ON jobs(assignment_id)
+                WHERE assignment_id IS NOT NULL AND assignment_result_turn_id IS NULL;
+            CREATE INDEX idx_assignment_tasks ON mesh_tasks(assignment_id)
+                WHERE assignment_id IS NOT NULL;
+            CREATE TABLE delegated_assignments (
+                assignment_id TEXT PRIMARY KEY,
+                case_id TEXT NOT NULL,
+                requester_session_id TEXT NOT NULL,
+                worker_session_id TEXT NOT NULL,
+                expected_deliverable TEXT NOT NULL,
+                active_turn_id TEXT NOT NULL,
+                state TEXT NOT NULL CHECK(state IN (
+                    'active','waiting','continuing','unresolved','completed','failed','decision_needed','cancelled'
+                )),
+                job_id TEXT,
+                checkpoint TEXT,
+                issue TEXT,
+                recovery_used INTEGER NOT NULL DEFAULT 0,
+                report TEXT,
+                updated_at TEXT NOT NULL
+            );
+            CREATE INDEX idx_assignments_case ON delegated_assignments(case_id, updated_at);
+            CREATE INDEX idx_assignments_requester ON delegated_assignments(requester_session_id, updated_at);
+            CREATE INDEX idx_assignment_review ON flow_events(flow_run_id, entity_id, id)
+                WHERE entity_type='task' AND event_type IN ('review.accepted','review.waived','review.rework_requested');
+            CREATE TABLE assignment_dispositions (
+                turn_id TEXT PRIMARY KEY,
+                payload TEXT NOT NULL
+            );
+        """),
     ]
 
 

@@ -187,7 +187,11 @@ def test_subscription_admission_stays_bounded_after_disconnect(launched_job, mon
 def test_upgrade_leaves_old_jobs_without_inventing_a_case(tmp_path, historical_mesh_db):
     path = str(tmp_path / "controller-v49.db")
     old = historical_mesh_db(path, 49)
-    old.register_job("old", "worker-a", "old job", session_id="job-worker")
+    with old._write() as conn:
+        conn.execute(
+            "INSERT INTO jobs(id,node_id,label,session_id,status,started_at,created_at,updated_at) "
+            "VALUES ('old','worker-a','old job','job-worker','running','2026-10-11','2026-10-11','2026-10-11')"
+        )
     old.close()
     upgraded = db_module.MeshDB(path)
     try:

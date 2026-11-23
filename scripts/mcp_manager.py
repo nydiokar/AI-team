@@ -551,6 +551,17 @@ def _dispatch_worker(args: Dict[str, Any]) -> str:
     parent_flow_run_id = _bounded_text(
         args.get("parent_flow_run_id"), "parent_flow_run_id", _MAX_ID_CHARS, required=False)
     case_id = _bounded_text(args.get("case_id"), "case_id", _MAX_ID_CHARS, required=False)
+    expected = _bounded_text(args.get("expected_deliverable"), "expected_deliverable", 2000, required=False)
+    operation_id = _bounded_text(args.get("operation_id"), "operation_id", 128, required=False)
+    requester = _self_session_id()
+    if expected and (not case_id or parent_flow_run_id or not requester):
+        raise ValueError("expected_deliverable requires your current Manager identity and case_id")
+    dispatch_headers = {"X-AI-Team-Principal": "automation"}
+    create_headers = {}
+    if expected and operation_id:
+        identity = hashlib.sha256(json.dumps([requester, case_id, operation_id]).encode()).hexdigest()
+        dispatch_headers["Idempotency-Key"] = f"assignment:{identity}"
+        create_headers["Idempotency-Key"] = f"assignment-session:{identity}"
     node_id = _bounded_text(args.get("node_id"), "node_id", _MAX_ID_CHARS, required=False)
     backend = _bounded_text(args.get("backend"), "backend", _MAX_ID_CHARS, required=False) or "claude"
 
@@ -647,7 +658,8 @@ def _dispatch_worker(args: Dict[str, Any]) -> str:
             # reusing an existing session_id cannot retro-stamp it.
             sess_body["role_boot"] = "worker"
         sess_result = _dispatch_api_request(
-            "POST", "/api/sessions", sess_body, backend=backend, attempted_node=node_id)
+            "POST", "/api/sessions", sess_body, backend=backend, attempted_node=node_id,
+            **({"headers": create_headers} if create_headers else {}))
         new_sess = sess_result.get("session") if isinstance(sess_result, dict) else None
         new_sid = new_sess.get("session_id") if isinstance(new_sess, dict) else None
         if not isinstance(new_sid, str) or not new_sid.strip() or len(new_sid) > _MAX_ID_CHARS:
@@ -659,6 +671,8 @@ def _dispatch_worker(args: Dict[str, Any]) -> str:
         opened_session = True
 
     body: Dict[str, Any] = {"description": objective}
+    if expected:
+        body["expected_deliverable"] = expected
     if session_id:
         body["session_id"] = session_id
     if cwd:
@@ -681,7 +695,6 @@ def _dispatch_worker(args: Dict[str, Any]) -> str:
     # session (the carrier exports its ai-team session id), so the worker's
     # completion is addressed to THAT session's inbox. Absent ⇒ the gateway
     # resolves the requester itself.
-    requester = _self_session_id()
     if requester and requester != session_id:
         body["requester_session_id"] = requester[:128]
 
@@ -690,8 +703,10 @@ def _dispatch_worker(args: Dict[str, Any]) -> str:
     # never releases an operator stop hold (a label, not authentication).
     result = _dispatch_api_request("POST", "/api/instructions", body,
                                    backend=backend, attempted_node=node_id,
-                                   headers={"X-AI-Team-Principal": "automation"})
+                                   headers=dispatch_headers)
     task_id = result.get("task_id", "?")
+    if expected and result.get("assignment_id") != task_id:
+        raise RuntimeError("Controller did not confirm durable assignment support. Inspect the dispatched turn before retrying.")
     session = result.get("session") or {}
     sess_id = session.get("session_id") if isinstance(session, dict) else None
 
@@ -737,7 +752,13 @@ def _dispatch_worker(args: Dict[str, Any]) -> str:
             f"lineage edge (a SHADOW record — confirm via /api/flows, don't assume)."
         )
     lines.append("")
-    if case_id:
+    if expected:
+        lines.append(
+            f"Assignment: {task_id} remains open across worker turns and detached jobs. "
+            f"Return control. The inbox delivers progress and the worker's final report. "
+            f"Review the report with record_review(case_id='{case_id}', task_id='{task_id}')."
+        )
+    elif case_id:
         # [A104] The completion is addressed to THIS session's inbox (whoever
         # requested the work) and delivered as ONE wake turn; nothing to arm.
         lines.append(
@@ -800,6 +821,8 @@ def _terminal_task_event(
             payload = json.loads(payload)
         except Exception:
             payload = None
+    if isinstance(payload, dict) and payload.get("assignment_id"):
+        return {"kind": "delegated", "assignment_id": payload["assignment_id"]}
     outcome = str(payload.get("outcome")) if isinstance(payload, dict) and payload.get("outcome") else "success"
     return {"kind": "done" if outcome == "success" else "attention", "outcome": outcome}
 
@@ -854,6 +877,11 @@ def _wait_for_worker(args: Dict[str, Any]) -> str:
                 if tev is not None:
                     stage = flow.get("current_stage")
                     ekind = tev["kind"]
+                    if ekind == "delegated":
+                        return (
+                            f"Worker turn belongs to durable assignment {tev['assignment_id']}. "
+                            "Return control for the final assignment report or inspect get_case_brief."
+                        )
                     return (
                         f"Worker flow {resolved_id} reached: {ekind.upper()} (task.finished)\n"
                         f"task_outcome={tev['outcome']!r} current_stage={stage!r}\n"
@@ -1035,6 +1063,19 @@ def _get_case(args: Dict[str, Any]) -> str:
 # Tool: get_case_brief  (A54 — durable single-call Case reconstruction)
 # ---------------------------------------------------------------------------
 
+def _resume_assignment(args: Dict[str, Any]) -> str:
+    case_id = _bounded_text(args.get("case_id"), "case_id", _MAX_ID_CHARS)
+    assignment_id = _bounded_text(args.get("assignment_id"), "assignment_id", _MAX_ID_CHARS)
+    session_id = _self_session_id()
+    if not session_id:
+        raise ValueError("resume_assignment requires your current Manager identity")
+    result = _api_request(
+        "POST", f"/api/cases/{urllib.parse.quote(case_id)}/assignments/"
+        f"{urllib.parse.quote(assignment_id)}/resume?session_id={urllib.parse.quote(session_id)}",
+    )
+    return f"Assignment {assignment_id} recovery request is {result['status']} in the owning worker's inbox."
+
+
 def _get_case_brief(args: Dict[str, Any]) -> str:
     """[A54] The FULL working state of a Case from the DB alone (read-only over
     GET /api/cases/{case_id}/brief).
@@ -1053,6 +1094,7 @@ def _get_case_brief(args: Dict[str, Any]) -> str:
 
     workers = brief.get("workers") or []
     groups = brief.get("wait_groups") or []
+    assignments = brief.get("assignments") or []
     open_waits = brief.get("open_waits") or []
     ready_waits = brief.get("ready_waits") or []
     latest_review = brief.get("latest_review") or None
@@ -1078,6 +1120,16 @@ def _get_case_brief(args: Dict[str, Any]) -> str:
         )
     if not workers:
         lines.append("  (none dispatched yet.)")
+    for assignment in assignments:
+        lines.append(f"  Assignment {assignment['assignment_id']} — {assignment['state']}")
+        if assignment.get("job_id"):
+            lines.append(f"    Job {assignment['job_id']} ({assignment.get('job_status')})")
+        if assignment.get("issue"):
+            lines.append(f"    Recovery: {assignment['issue']}. Use resume_assignment to re-enter the owning worker.")
+        if assignment.get("checkpoint"):
+            lines.append(f"    Worker checkpoint: {assignment['checkpoint']}")
+        if assignment.get("report"):
+            lines.append(f"    Report: {json.dumps(assignment['report'], ensure_ascii=False)}")
     lines.append("")
     lines.append(
         f"Inbox — running (requested, not finished): {open_waits or '[]'}; "
@@ -1640,7 +1692,9 @@ _TOOLS = [
             "Dispatch a bounded task to a WORKER as a real gateway task (separate from the "
             "Manager's own session — never a sub-agent). Thin wrapper over the existing, "
             "auth-guarded, Level-3-gated POST /api/instructions. Returns the worker's task_id; "
-            "its completion lands in YOUR inbox and wakes you once (no polling, nothing to arm). Provide a professional, not-overstated objective. "
+            "its completion lands in your inbox. For detached jobs or multiple worker turns, "
+            "supply expected_deliverable so the same worker owns the assignment until an explicit "
+            "report. Launch progress and the report arrive through your inbox. "
             "If session_id is given the work runs in that existing worker session; otherwise, when "
             "you pass cwd, a NEW observable worker session is opened (case_role=worker, joined to "
             "your Case) that you and the operator can open, read, and resume — always prefer this "
@@ -1658,6 +1712,8 @@ _TOOLS = [
             "type": "object",
             "properties": {
                 "objective": {"type": "string", "description": "The bounded task for the worker (becomes the instruction description). Ground it; do not overstate scope."},
+                "expected_deliverable": {"type": "string", "maxLength": 2000, "description": "Required for work that yields across turns or detached jobs. Describe the final findings or artifact expected. Requires case_id."},
+                "operation_id": {"type": "string", "maxLength": 128, "description": "Stable identifier for this durable dispatch. Reuse it when retrying the same dispatch."},
                 "session_id": {"type": "string", "description": "Existing worker session to run in. Omit to open a NEW observable worker session (when cwd is given)."},
                 "cwd": {"type": "string", "description": "Working directory / repo path. Pass it (typically your Case's repo) so a real, openable worker session can be opened; without it the dispatch falls back to a sessionless one-off. RESOLVED ON THE TARGET NODE'S filesystem (see node_id) — a path that exists on your node but not on the gateway host requires node_id set to the node that actually holds the repo."},
                 "files": {"type": "array", "items": {"type": "string"}, "description": "Target files to focus the worker on (optional)."},
@@ -1749,6 +1805,16 @@ _TOOLS = [
                 "case_id": {"type": "string", "description": "The Case (flow_run) id to inspect — the Manager's own case."},
             },
             "required": ["case_id"],
+        },
+    },
+    {
+        "name": "resume_assignment",
+        "description": "Ask the same owning worker to resume an unresolved assignment after inspecting its Case checkpoint.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"case_id": {"type": "string"}, "assignment_id": {"type": "string"}},
+            "required": ["case_id", "assignment_id"],
+            "additionalProperties": False,
         },
     },
     {
@@ -2033,6 +2099,7 @@ _TOOL_IMPLS = {
     "open_case": _open_case,
     "get_case": _get_case,
     "get_case_brief": _get_case_brief,
+    "resume_assignment": _resume_assignment,
     "read_session_history": _read_session_history,
     "close_case": _close_case,
     "record_review": _record_review,
