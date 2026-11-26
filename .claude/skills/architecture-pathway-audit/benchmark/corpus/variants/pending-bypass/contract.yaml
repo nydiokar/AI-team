@@ -1,0 +1,4 @@
+scope: [consumer.py, owner.py]
+stores:
+  agent_inbox:
+    readers: [owner.py]
