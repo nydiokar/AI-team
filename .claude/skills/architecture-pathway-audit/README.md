@@ -123,7 +123,9 @@ hiding them; vanished IDs appear as `stale_ids`.
 
 Read the JSON report’s `run`, `coverage` and `analysis_scope` fields together.
 The run identifies the current attempt, source digest, effective scope, analysis
-stage and errors. A batch run returns **2** when required analysis is incomplete
+stage and errors. The JSON report is the canonical artifact. Match its
+`run.id` to the run shown in the HTML snapshot before using that snapshot as
+evidence. A batch run returns **2** when required analysis is incomplete
 or failed. A completed execution and a deliberate partial search can each
 return **0**. Inspect `run.status` to tell them apart. A completed zero means
 only that the declared static checks emitted no matching findings on the
@@ -134,8 +136,9 @@ bounds and the continuation offset for omitted evidence. To retrieve additional
 evidence, repeat the command against the same source and options, with
 `--findings-offset` set to the previous report’s `next_findings_offset`. Match
 source digest and settings before comparing pages. Known/stale baseline metadata
-and mechanical facts remain distinct from candidate findings. Semantic defects
-require source and behavioral review.
+and mechanical facts remain distinct from candidate findings. SQL candidates disclose capped per-finding samples; the canonical
+JSON provides the checked SQL edges for reviewing omitted source evidence.
+Semantic defects require source and behavioral review.
 
 Dynamic dispatch, unknown receiver types, callbacks, conditional registration and
 sub-app mounts limit coverage. Scope may exclude scripts, config, frontend code
