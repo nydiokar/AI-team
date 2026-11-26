@@ -515,7 +515,8 @@ def _sql_name(token: str) -> Optional[str]:
     if _SQL_DYNAMIC in token:
         return None
     first: str = token[:1]
-    if first in ('"', '`', '[') and len(token) >= 2:
+    # SQLite also accepts legacy single-quoted identifiers in table positions.
+    if first in ('"', "'", '`', '[') and len(token) >= 2:
         return token[1:-1].replace(first * 2, first).lower()
     lowered: str = token.lower()
     return lowered if _SQL_IDENTIFIER.fullmatch(token) and lowered not in _SQL_RESERVED else None

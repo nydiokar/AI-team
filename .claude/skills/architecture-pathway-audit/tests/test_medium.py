@@ -52,9 +52,10 @@ class TestExtraction(unittest.TestCase):
         a = data_access(fn('''def read(c):
     c.execute('SELECT * FROM main."Secret Store" JOIN temp.[other] USING (id)')
     c.execute('UPDATE main.`write table` SET id = 2')
+    c.execute("SELECT * FROM main.'legacy quote'")
 '''))
         self.assertEqual({(x['table'], x['mode']) for x in a},
-                         {('secret store', 'read'), ('other', 'read'), ('write table', 'write')})
+                         {('secret store', 'read'), ('other', 'read'), ('write table', 'write'), ('legacy quote', 'read')})
 
     def test_docstrings_and_nested_cte_scope(self):
         a = data_access(fn('''def read(c):
