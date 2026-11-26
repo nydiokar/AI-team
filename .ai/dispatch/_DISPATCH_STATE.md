@@ -5,7 +5,7 @@
 | status | job_id | created | updated | depends_on | proof | flags |
 |---|---|---|---|---|---|---|
 | active | AGENT_105_CROSS_PROCESS_TURN_SIGNAL | 2026-10-09 | 2026-11-06 | — | ✓ | STALE_19d |
-| active | AGENT_116_TRUSTWORTHY_ARCHITECTURE_AUDIT | 2026-11-16 | 2026-11-25 | — | — |  |
+| active | AGENT_116_TRUSTWORTHY_ARCHITECTURE_AUDIT | 2026-11-16 | 2026-11-26 | — | ✓ |  |
 | active | AGENT_117_TELEMETRY_CONTEXT_ECONOMICS | 2026-11-17 | 2026-11-18 | — | ✓ |  |
 | active | AGENT_118_OPENCODE_REPLY_RECOVERY | 2026-11-18 | 2026-11-18 | — | — |  |
 | ready | A115_AGENT_DISCOVERY_FOR_DELEGATION | 2026-11-15 | 2026-11-15 | — | — |  |

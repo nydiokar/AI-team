@@ -5,14 +5,14 @@ status: active              # ready | active | blocked | done | dead
 owner: codex
 depends_on: []
 results_ref: DISPATCH_LOG.md#A116             # -> DISPATCH_LOG.md section with the verdict prose
-evidence: []                  # artifact paths that PROVE it ran (checked to exist)
-updated_at: "2026-11-25T23:57:35.423184+00:00"
+evidence: ["tests/test_control_api_work.py","tests/test_cost_read_model.py","tests/test_spec_authoring_decompose.py"]                  # artifact paths that PROVE it ran (checked to exist)
+updated_at: "2026-11-26T09:10:46.467971+00:00"
 ```
 
 # DISPATCH — A116 · Trustworthy architecture audit and authoritative ledger reads
 
 **Level:** 3 (agent acceptance decisions, service/read boundaries, breadth) · **Type:** code + audit + certification
-**Authored:** 2026-11-16 · **Packet state:** active; application and audit-tool stages in progress
+**Authored:** 2026-11-16 · **Packet state:** active; P1 application reads merged in PR #302 (`5a04f30`, 2026-11-26); audit-tool stages and C1–C12 certification in progress
 **Issue:** [#290](https://github.com/nydiokar/AI-team/issues/290)
 **Depends on:** none; coordinate with A111 acceptance work and current read-path changes, do not wait for their unrelated stages.
 **Branch:** fresh `feat/a116-<stage>` from current `origin/main` in an isolated worktree; PR, review, push and self-merge each coherent stage. No unrelated branch carried forward.
@@ -157,7 +157,7 @@ For each touched gateway or explorer HTTP handler, record concurrency admission 
 ## Milestone (burndown)
 
 - [ ] P0 frozen executable baseline witnesses, benign controls, labels and independent plan review.
-- [ ] P1 authoritative latest-review and complete membership consumers repaired, bounded and proven through downstream seams.
+- [x] P1 authoritative latest-review and complete membership consumers repaired, bounded and proven through downstream seams (PR #302 `5a04f30`, 2026-11-26).
 - [ ] P2 failure-honest CLI/JSON/browser/dispatch outcomes, freshness, coverage/count/cache identity.
 - [ ] P3 supported SQL extraction/ownership, maintained responsibility-correct guards and honest portable evaluation.
 - [ ] P4 C1–C12 passed, independent adversarial review blockers fixed, merged rerun and deployed app seams verified.
@@ -180,7 +180,7 @@ unrelated handoff. This is an explained registry baseline, not A116 certificatio
 
 ## Closure
 
-Open. This packet and issue establish an approved, executable handoff. No implementation, corrected tool or application behavior, final semantic score or deployment certification is claimed yet.
+Partial. P1 authoritative review/membership reads merged in PR #302 (`5a04f30`, 2026-11-26) with the boundary measurements recorded below. P0 frozen witnesses, P2–P4 audit-tool stages, C1–C12 certification and deployment verification remain open; no final semantic score or full closure is claimed.
 
 ### Authoritative ledger reads
 
