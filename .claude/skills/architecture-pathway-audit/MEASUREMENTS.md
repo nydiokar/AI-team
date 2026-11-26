@@ -305,14 +305,15 @@ The frozen executable witnesses now live in `tests/test_failure_honest.py` plus
 They cover the vacuous-scope gate, unparseable and skipped required inputs, the
 index-error `--no-serve` path, row-capped expansions, corrupt/mismatched cache and
 the preserved 0/1 contract checker meanings. The old defects above remain recorded
-as history; the first three rows are fixed on branch `feat/a116-failure-honest-audit`.
+as history; the first three rows are fixed and merged to `main` as `8d5d2b7` via PR #304
+(branch `feat/a116-failure-honest-audit`).
 
 - Baseline, detached worktree at `49c4dfa` with only those witness files copied in:
   `python -m pytest .claude/skills/architecture-pathway-audit/tests/test_failure_honest.py
   tests/test_dispatch_state.py --no-header` → **14 failed, 9 passed in 3.16s**. The
   dispatch witness printed `CONTRACT MET` after scanning 0 files and flipped the job
   to `done` — the original vacuous-green gate, reproduced.
-- Candidate on that branch: `python -m pytest .claude/skills/architecture-pathway-audit/tests
+- Candidate (merged commit `8d5d2b7`): `python -m pytest .claude/skills/architecture-pathway-audit/tests
   tests/test_dispatch_state.py --no-header` → **76 passed, 1 skipped in 2.97s**
   (Python 3.12.3, isolated venv with project `test` extras). No CBM binary, worker
   action, paid turn or production data was used.
