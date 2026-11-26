@@ -1,12 +1,12 @@
 ```yaml
 job_id: AGENT_74_PROACTIVE_TURN_OWNERSHIP
 created_at: "2026-08-05T09:34:34.482453+00:00"        # CANONICAL — set once at dispatch, never derive again
-status: ready              # ready | active | blocked | done | dead
+status: done              # ready | active | blocked | done | dead
 owner: opencode-agent
 depends_on: []
 results_ref: DISPATCH_LOG A74 (PR #75)             # -> DISPATCH_LOG.md section with the verdict prose
-evidence: []                  # artifact paths that PROVE it ran (checked to exist)
-updated_at: "2026-08-05T10:24:54.161536+00:00"
+evidence: ["src/control/task_server.py","tests/test_proactive_turn_delivery.py"]                  # artifact paths that PROVE it ran (checked to exist)
+updated_at: "2026-11-26T09:59:44.150804+00:00"
 ```
 
 # DISPATCH — AGENT_74_PROACTIVE_TURN_OWNERSHIP
@@ -56,7 +56,8 @@ while A71 lands the full per-node credential model).
 
 ## Milestone
 
-- 2026-08-05: PR #75 merged (`feat/security-proactive-turn-ownership`, `c94b471`). 4 new tests +
+- 2026-08-05: PR #75 merged (`feat/security-proactive-turn-ownership`). On-`main` merge `3ddead7`,
+  content commit `cf880ec`. 4 new tests +
   existing proactive/task-server suites green. Gateway restarted post-merge; `/health` ok.
 
 ## Closure
@@ -67,4 +68,10 @@ remain open to any worker. No legit flow changed (a worker only reports turns fo
 pinned sessions are host-or-nothing by design). Verification was offline unit-level (direct endpoint
 calls with a real `MeshDB`) — no live probe was run to avoid disturbing real sessions. Evidence:
 `tests/test_proactive_turn_delivery.py` (4 new tests, 7 total in file).
+
+**Registry reconciliation 2026-11-26:** the original milestone hash `c94b471` was the merge on the
+unmerged `feat/security-per-node-credentials` lineage; the same fix is on `main` via merge `3ddead7`
+(content `cf880ec`). Re-verified the pinned-session 403 path in `src/control/task_server.py` and
+`pytest tests/test_proactive_turn_delivery.py …` → 121 passed, 2 skipped across the six closure suites.
+`status: done` was drifted to `ready`; corrected via `dispatch_state.py --set`.
 

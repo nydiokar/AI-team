@@ -1,12 +1,12 @@
 ```yaml
 job_id: AGENT_68_PEER_MESSAGING_TRANSPORT_INVESTIGATION
 created_at: "2026-08-03T18:17:00.871619+00:00"        # CANONICAL — set once at dispatch, never derive again
-status: ready              # ready | active | blocked | done | dead
+status: done              # ready | active | blocked | done | dead
 owner: ""
 depends_on: []
-results_ref: null             # -> DISPATCH_LOG.md section with the verdict prose
-evidence: []                  # artifact paths that PROVE it ran (checked to exist)
-updated_at: "2026-08-03T18:17:00.871643+00:00"
+results_ref: DISPATCH_LOG.md#A68             # -> DISPATCH_LOG.md section with the verdict prose
+evidence: ["docs/PEER_MESSAGING_INVESTIGATION.md"]                  # artifact paths that PROVE it ran (checked to exist)
+updated_at: "2026-11-26T09:58:47.399905+00:00"
 ```
 
 # DISPATCH — A68 · Peer messaging transport — holistic investigation (NO implementation)
@@ -133,10 +133,17 @@ separately.
 
 ---
 ## Milestone (burndown)
-- [ ] Five proactive-investigation findings answered from our code
-- [ ] 2-3 candidate designs w/ cost·risk·payoff + hard-constraints checklist
-- [ ] Recommendation written; go/no-go framed as operator decision
-- [ ] `docs/PEER_MESSAGING_INVESTIGATION.md` on `main`; zero src diff
+- [x] Five proactive-investigation findings answered from our code
+- [x] 2-3 candidate designs w/ cost·risk·payoff + hard-constraints checklist
+- [x] Recommendation written; go/no-go framed as operator decision
+- [x] `docs/PEER_MESSAGING_INVESTIGATION.md` on `main`; zero src diff
 
-## Closure (fill on completion)
-(fill when executed)
+## Closure — 2026-11-26 (registry reconciliation)
+
+**Verdict: done as a study.** Commit `02a29fd` (on `main`) added
+`docs/PEER_MESSAGING_INVESTIGATION.md` (342 lines: Options A–D with cost/risk/payoff,
+recommendation, and the four-hard-constraints checklist). Verified doc-only —
+`git show --stat 02a29fd` shows one file changed and zero `src/` diff, satisfying acceptance 2.
+Acceptance 3 is satisfied by the document framing go/no-go as an operator decision; that
+decision is deliberately **not** part of this job and remains with the operator. No code,
+flag, or live probe was introduced.

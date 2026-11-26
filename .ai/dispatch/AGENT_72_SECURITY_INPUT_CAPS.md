@@ -1,12 +1,12 @@
 ```yaml
 job_id: AGENT_72_SECURITY_INPUT_CAPS
 created_at: "2026-08-05T09:34:34.482453+00:00"        # CANONICAL — set once at dispatch, never derive again
-status: ready              # ready | active | blocked | done | dead
+status: done              # ready | active | blocked | done | dead
 owner: opencode-agent
 depends_on: []
 results_ref: DISPATCH_LOG A72 (PR #73)             # -> DISPATCH_LOG.md section with the verdict prose
-evidence: []                  # artifact paths that PROVE it ran (checked to exist)
-updated_at: "2026-08-05T10:21:22.235181+00:00"
+evidence: ["src/control/control_api.py","tests/test_control_api_write.py"]                  # artifact paths that PROVE it ran (checked to exist)
+updated_at: "2026-11-26T09:59:43.323684+00:00"
 ```
 
 # DISPATCH — AGENT_72_SECURITY_INPUT_CAPS
@@ -57,7 +57,8 @@ see `AGENT_67_MESH_SECURITY_REVIEW_THREAT_MODEL.md` closure and `docs/backend/ME
 
 ## Milestone
 
-- 2026-08-05: PR #73 merged (`feat/security-api-input-caps`, `b5d9ad1`). 4 control-api suites green
+- 2026-08-05: PR #73 merged (`feat/security-api-input-caps`). On-`main` merge `496b99d`,
+  content commits `9a97a72` + `76b5a82`. 4 control-api suites green
   (write + fork + wait_group + flows). Gateway restarted; `/health` ok.
 
 ## Closure
@@ -69,4 +70,11 @@ restarted gateway with a 262145-char description probe. Under-cap dispatch flows
 suites green). No rate limit shipped, per plan (Manager parallel-dispatch risk). Evidence:
 `tests/test_control_api_write.py` (3 new tests) + live 422 probe. `docs/backend/MESH_SECURITY.md` note
 updated in the A73 commit batch.
+
+**Registry reconciliation 2026-11-26:** the original milestone hash `b5d9ad1` was an equivalent
+commit on the unmerged `feat/security-per-node-credentials` branch, not on `main`; the code was
+merged to `main` as `496b99d` (`9a97a72` + `76b5a82`). Re-verified: `_MAX_INSTRUCTION_CHARS =
+262144` present in `src/control/control_api.py`, and
+`pytest tests/test_control_api_write.py …` → 121 passed, 2 skipped across the six closure suites.
+`status: done` was drifted to `ready` in this packet; corrected via `dispatch_state.py --set`.
 

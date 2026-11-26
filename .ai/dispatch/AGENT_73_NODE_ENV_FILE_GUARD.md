@@ -1,12 +1,12 @@
 ```yaml
 job_id: AGENT_73_NODE_ENV_FILE_GUARD
 created_at: "2026-08-05T09:34:34.482453+00:00"        # CANONICAL — set once at dispatch, never derive again
-status: ready              # ready | active | blocked | done | dead
+status: done              # ready | active | blocked | done | dead
 owner: opencode-agent
 depends_on: []
 results_ref: DISPATCH_LOG A73 (PR #74)             # -> DISPATCH_LOG.md section with the verdict prose
-evidence: []                  # artifact paths that PROVE it ran (checked to exist)
-updated_at: "2026-08-05T10:23:13.844770+00:00"
+evidence: ["scripts/safe_worker_deploy.py","tests/test_safe_worker_deploy_env_guard.py"]                  # artifact paths that PROVE it ran (checked to exist)
+updated_at: "2026-11-26T09:59:43.728004+00:00"
 ```
 
 # DISPATCH — AGENT_73_NODE_ENV_FILE_GUARD
@@ -59,7 +59,8 @@ chmod 600 by A67 — this extends the discipline to every node via the deploy pa
 
 ## Milestone
 
-- 2026-08-05: PR #74 merged (`feat/security-env-file-guard`, `25219f4`). 5 unit tests green
+- 2026-08-05: PR #74 merged (`feat/security-env-file-guard`). On-`main` merge `23839d6`,
+  content commit `69c5e40`. 5 unit tests green
   (`tests/test_safe_worker_deploy_env_guard.py`). Script-only — no gateway restart needed.
 
 ## Closure
@@ -71,4 +72,11 @@ the guarded file itself). Windows no-op; missing file no-op; mode 600 passes. En
 live on the operator's next surfaced worker deploy (Horse) — surfaced, not done silently. Evidence:
 `tests/test_safe_worker_deploy_env_guard.py` (5 tests). `docs/backend/MESH_SECURITY.md` storage section
 updated.
+
+**Registry reconciliation 2026-11-26:** the original milestone hash `25219f4` sat on the unmerged
+`feat/security-per-node-credentials` branch; the equivalent code reached `main` via merge `23839d6`
+(content `69c5e40`). Re-verified `_assert_env_file_private` in `scripts/safe_worker_deploy.py` and
+`pytest tests/test_safe_worker_deploy_env_guard.py …` → 121 passed, 2 skipped across the six closure
+suites. The operator-side enforcement on the next worker deploy remains surfaced, not silently done.
+`status: done` was drifted to `ready`; corrected via `dispatch_state.py --set`.
 

@@ -1,12 +1,12 @@
 ```yaml
 job_id: AGENT_75_DASHBOARD_TOKEN_NOT_IN_HTML
 created_at: "2026-08-05T09:34:34.482453+00:00"        # CANONICAL — set once at dispatch, never derive again
-status: ready              # ready | active | blocked | done | dead
+status: done              # ready | active | blocked | done | dead
 owner: ""
 depends_on: []
-results_ref: null             # -> DISPATCH_LOG.md section with the verdict prose
-evidence: []                  # artifact paths that PROVE it ran (checked to exist)
-updated_at: "2026-08-05T09:34:34.482453+00:00"
+results_ref: DISPATCH_LOG.md#A75             # -> DISPATCH_LOG.md section with the verdict prose
+evidence: ["src/control/control_api.py","tests/test_control_api_webui.py"]                  # artifact paths that PROVE it ran (checked to exist)
+updated_at: "2026-11-26T10:00:08.835740+00:00"
 ```
 
 # DISPATCH — AGENT_75_DASHBOARD_TOKEN_NOT_IN_HTML
@@ -60,3 +60,24 @@ hygiene gap, and that the clean fix is best done together with the credential wo
 - Served dashboard HTML no longer contains the token literal; TokenGate flow verified green.
 - Targeted `pytest` evidence recorded; PR merged to `main`; gateway restarted and `/health` ok.
 - Set `evidence:` to the test report + PR ref and `status: done`.
+
+## Closure — 2026-11-26 (registry reconciliation, superseded wording)
+
+**Verdict: done, with the literal Done-when wording explicitly superseded.** PR
+[#150](https://github.com/nydiokar/AI-team/pull/150) (merge `db6280b`) removed the unconditional
+`window.__DASHBOARD_TOKEN__` global — `test_index_never_embeds_token` and the SPA fallback test
+assert no token literal for ordinary/local requests. PR
+[#156](https://github.com/nydiokar/AI-team/pull/156) (merge `c448400`) then **deliberately
+re-introduced injection for trusted remote tailnet peers only**, gated by `_ui_request_trusted`
+(`src/control/control_api.py:868`): Host must be the bind host, a `*.ts.net` MagicDNS name or a
+tailnet IP literal, *and* the peer must be a remote tailnet device (loopback/this-host peers are
+refused; DNS-rebinding names are refused). Those requests get `no-store`, and
+`test_untrusted_request_never_gets_token` covers the refusal cases.
+
+Therefore the original absolute claim ("no token in any served HTML") is **no longer literally
+true** and is not claimed here. What holds: the page-inspectable side-channel for untrusted
+requests is closed, TokenGate still works (trusted remote injection + header auth), and no new
+auth layer was added. This is a later main-branch design decision, not a silent weakening of this
+job; record it as such at review. Targeted verification 2026-11-26:
+`pytest tests/test_control_api_webui.py …` → 121 passed, 2 skipped across the six closure suites.
+No new live gateway probe was run from this dev host.
