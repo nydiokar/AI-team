@@ -22,6 +22,7 @@ FLOW: frozenset[str] = frozenset({'HANDLES', 'CALLS', 'ASYNC_CALLS', 'HTTP_CALLS
 MAX_DEPTH: int = 12
 LOW_CONFIDENCE: float = 0.3  # CBM resolution confidence below this is a name guess (e.g. suffix_match 0.09)
 MAX_FINDINGS_PER_KIND: int = 40
+SQL_EVIDENCE_SAMPLE_SIZE: int = 6
 FOOTPRINT_MIN_CALLEES: int = 4
 FOOTPRINT_JACCARD: float = 0.85
 FOCUS_TABLES: int = 3  # an operation/reader touching more tables than this is not one focused fact-recording step
@@ -388,10 +389,11 @@ def analyze(nodes: dict[str, dict[str, Any]], edges: list[dict[str, Any]], roots
     def tname(t: str) -> str:
         return str(nodes.get(t, {}).get('label') or t)
 
-    def acc_ev(es: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        return [{'path': [e['from'], e['to']], 'edges': [{'from': e['from'], 'to': e['to'], 'type': e['type'],
-                                                          'file': e.get('file'), 'line': e.get('line'), 'source': 'ast',
-                                                          'props': e.get('props')}]} for e in es[:6]]
+    def acc_ev(es: list[dict[str, Any]]) -> dict[str, Any]:
+        sampled: list[dict[str, Any]] = [
+            {'path': [e['from'], e['to']], 'edges': [e]} for e in es[:SQL_EVIDENCE_SAMPLE_SIZE]
+        ]
+        return {'evidence': sampled, 'evidence_total': len(es), 'evidence_omitted': len(es) - len(sampled)}
     # M1. Orphaned medium: written but never read, or read but never written, within the analysed scope.
     for t in sorted(set(t_readers) | set(t_writers)):
         if bool(t_readers[t]) != bool(t_writers[t]):
@@ -400,7 +402,7 @@ def analyze(nodes: dict[str, dict[str, Any]], edges: list[dict[str, Any]], roots
                  'related': sorted({e['from'] for e in (t_writers[t] or t_readers[t])}),
                  'title': f'Table {tname(t)} is {side} in scope',
                  'detail': 'May be consumed/produced outside the analysed scope (other process, migration, '
-                           'dynamic SQL) or be dead/void state.', 'evidence': acc_ev(t_writers[t] or t_readers[t])})
+                           'dynamic SQL) or be dead/void state.', **acc_ev(t_writers[t] or t_readers[t])})
     # M2. Oldest-N window over an append-only medium: the newest entries become unreachable as it grows.
     for t in sorted(t_readers):
         ws: list[dict[str, Any]] = t_writers.get(t, [])
@@ -412,7 +414,7 @@ def analyze(nodes: dict[str, dict[str, Any]], edges: list[dict[str, Any]], roots
                      'title': f'{len({e["from"] for e in bad})} reader(s) take the oldest-N rows of append-only {tname(t)}',
                      'detail': 'The table is only ever inserted into; LIMIT without ORDER BY .. DESC returns the oldest '
                                'rows, so state derived from it silently degrades as the table grows.',
-                     'evidence': acc_ev(bad)})
+                     **acc_ev(bad)})
     # M3. Co-written, separately read: tables written together by one operation (within 2 call levels) that have
     #     readers of only one of them, on both sides. Two stores of one fact with split readers can disagree.
     direct_w: dict[str, set[str]] = defaultdict(set)
