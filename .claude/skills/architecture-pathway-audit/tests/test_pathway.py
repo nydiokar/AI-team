@@ -410,6 +410,22 @@ class TestEngineOffline(unittest.TestCase):
         self.assertEqual([e['line'] for e in reads], [3, 4])
         self.assertEqual(reads[1]['props']['declaration_lines'], [1])
 
+    def test_ready_index_with_different_generation_is_rebuilt(self):
+        client = cbm_client.CBMClient(sys.executable)
+        self.eng.cbm = client
+        self.eng.changed = set()
+        status = {'project': self.eng.project, 'root_path': str(self.scope), 'status': 'ready',
+                  'indexed_at': 'prior', 'nodes': 10, 'edges': 10}
+        self.eng.cache['index'] = {'receipt': self.eng.index_receipt(status)}
+        with patch.object(client, 'ensure_started'), patch.object(client, 'tool', side_effect=[
+            {**status, 'indexed_at': 'foreign'}, {'nodes': 10, 'edges': 10}, status,
+        ]) as tool, patch.object(self.eng, '_q', return_value=([], True)):
+            self.eng.ensure_index()
+        self.assertIsNone(self.eng.ready_error)
+        self.assertEqual([call.args[0] for call in tool.call_args_list],
+                         ['index_status', 'index_repository', 'index_status'])
+        self.assertEqual(self.eng.stats['index_runs'], 1)
+
     def test_incomplete_query_is_retried_and_caps_are_distinct(self):
         rid = self.rid('POST', '/v1/orders/a')
         route, _ = self.eng.expand(rid)
