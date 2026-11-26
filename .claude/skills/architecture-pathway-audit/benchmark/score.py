@@ -153,22 +153,29 @@ def _read_report(out: Path, manifest: Manifest, case: str, *, graph: bool) -> di
     return report
 
 
-def _graph_matches(finding: dict, witness: GraphWitness) -> bool:
-    if (finding.get('level'), finding.get('kind'), finding.get('anchor')) != ('candidate', witness.kind, witness.entity):
-        return False
-    return any(
-        (edge.get('file'), edge.get('line'), edge.get('to'), edge.get('type'), (edge.get('props') or {}).get('window'))
-        == (witness.file, witness.line, witness.entity, witness.edge_type, witness.window)
-        for evidence in finding.get('evidence', []) for edge in evidence.get('edges', [])
-    )
+def _graph_matches(findings: list[dict], witness: GraphWitness) -> bool:
+    incomplete: bool = False
+    for finding in findings:
+        if (finding.get('level'), finding.get('kind'), finding.get('anchor')) != ('candidate', witness.kind, witness.entity):
+            continue
+        if any(
+            (edge.get('file'), edge.get('line'), edge.get('to'), edge.get('type'), (edge.get('props') or {}).get('window'))
+            == (witness.file, witness.line, witness.entity, witness.edge_type, witness.window)
+            for evidence in finding.get('evidence', []) for edge in evidence.get('edges', [])
+        ):
+            return True
+        incomplete |= finding.get('evidence_omitted') != 0
+    if incomplete:
+        raise ValueError('matching candidate has omitted or unaccounted-for source evidence')
+    return False
 
 
 def assess_case(case: Case, report: dict, base: dict) -> tuple[str, int]:
     """Compare candidate localization or a deterministic policy violation to a frozen witness."""
     if case.graph:
         candidates: list[dict] = [f for f in report['findings'] if f.get('level') == 'candidate']
-        matched: bool = any(_graph_matches(f, case.graph) for f in candidates)
-        preexisting: bool = any(_graph_matches(f, case.graph) for f in base['findings'])
+        matched: bool = _graph_matches(candidates, case.graph)
+        preexisting: bool = _graph_matches(base['findings'], case.graph)
         total: int = len(candidates)
         defect_status: str = 'localized' if matched and not preexisting else ('preexisting' if matched else 'missed')
         control_status: str = 'flagged' if matched and not preexisting else 'unflagged'
