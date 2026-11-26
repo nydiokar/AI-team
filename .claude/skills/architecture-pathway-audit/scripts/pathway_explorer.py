@@ -59,6 +59,10 @@ EXPANSION_BUDGET_SECONDS: float = 20.0
 HTTP_DEADLINE: ContextVar[float | None] = ContextVar('http_deadline', default=None)
 
 
+class AuditStaleError(CBMError):
+    """An analysis input changed while the run was active."""
+
+
 def log(msg: str) -> None:
     print('[pathway]', msg, flush=True)
 
@@ -218,6 +222,8 @@ class Engine:
         st: dict[str, Any] = self.state()
         if verify_source and st['run']['status'] in ('completed', 'partial'):
             self.assert_source_unchanged()
+            if self.cbm is not None and self.index_receipt(self.index_status()) != self.cache['index']['receipt']:
+                raise AuditStaleError('CBM index generation changed during analysis')
         atomic_text(self.cache_path, json.dumps(self.cache, ensure_ascii=False, separators=(',', ':')))
         atomic_text(self.out, self.render_html(st))
         atomic_json(self.report, {k: st[k] for k in (
@@ -295,9 +301,20 @@ class Engine:
                 continue
             paths.add(rel)
             if self.cache['files'].get(rel, {}).get('sha') != hashlib.sha256(data).hexdigest():
-                raise CBMError(f'Source changed during analysis: {rel}')
+                raise AuditStaleError(f'Source changed during analysis: {rel}')
         if paths != set(self.cache['files']) or skipped != self.skipped:
-            raise CBMError('Source inventory changed during analysis')
+            raise AuditStaleError('Source inventory changed during analysis')
+
+    def read_verified_source(self, rel: str) -> bytes:
+        path: Path = (self.scope / rel).resolve()
+        expected: str | None = self.cache['files'].get(rel, {}).get('sha')
+        if not expected or not path.is_relative_to(self.scope) or not path.is_file():
+            raise AuditStaleError(f'Source missing or unavailable since analysis: {rel}')
+        with path.open('rb') as stream:
+            blob: bytes = stream.read(MAX_SOURCE_BYTES + 1)
+        if len(blob) > MAX_SOURCE_BYTES or hashlib.sha256(blob).hexdigest() != expected:
+            raise AuditStaleError(f'Source changed since analysis: {rel}')
+        return blob
 
     def invalidate(self, changed: set[str]) -> int:
         """Drop cached expansions that may be affected by changed files.
@@ -327,11 +344,12 @@ class Engine:
                 raise CBMError('CBM executable unavailable')
             self.run.stage = 'index'
             self.cbm.ensure_started()
-            need: bool = bool(self.changed) or not self.cache.get('index')
+            index: dict[str, Any] = self.cache.get('index') or {}
+            need: bool = bool(self.changed) or not index.get('receipt')
             if not need:
                 try:
-                    st: Any = self.cbm.tool('index_status', {'project': self.project, 'format': 'json'})
-                    need = not isinstance(st, dict) or st.get('status') not in ('ready', 'indexed')
+                    st: dict[str, Any] = self.index_status()
+                    need = self.index_receipt(st) != index['receipt']
                 except CBMError:
                     need = True
             if need:
@@ -345,16 +363,22 @@ class Engine:
                     not isinstance(res.get(k), int) or res[k] < 0 for k in ('nodes', 'edges')
                 ):
                     raise CBMError('index_repository returned incomplete index metadata')
+                st = self.index_status()
+                receipt: dict[str, Any] = self.index_receipt(st)
                 with self.lock:
                     self.stats['index_runs'] += 1
                     self.stats['index_seconds'] += dt
                     self.cache['index'] = {'at': time.strftime('%Y-%m-%dT%H:%M:%S'), 'seconds': round(dt, 2),
-                                           'nodes': (res or {}).get('nodes'), 'edges': (res or {}).get('edges')}
+                                           'nodes': res['nodes'], 'edges': res['edges'], 'receipt': receipt}
                     self.cache['index_token'] = int(self.cache.get('index_token') or 0) + 1
                     self.cache['symbols'] = self.cache['fanin'] = self.cache['cbm_routes'] = None
                 log(f'CBM index ready in {dt:.1f}s: {(res or {}).get("nodes")} nodes, {(res or {}).get("edges")} edges')
             else:
                 log('CBM index reused (no source changes since last run).')
+            assert self.cache.get('index') is not None
+            self.cache['index']['coverage'] = {
+                key: st.get(key) for key in ('parse_partial', 'parse_unusable', 'skipped', 'not_indexed')
+            }
             with self.lock:  # warm the global tables so the first click is not the slow one
                 t1: float = time.perf_counter()
                 self.run.stage = 'graph inventory'
@@ -371,6 +395,24 @@ class Engine:
             log('ERROR ' + self.ready_error)
         finally:
             self.ready.set()
+
+    def index_status(self) -> dict[str, Any]:
+        cbm: CBMClient = self._need_cbm()
+        args: dict[str, str] = {'project': self.project, 'format': 'json', 'diagnostics': 'summary'}
+        deadline: float | None = HTTP_DEADLINE.get()
+        response: Any = cbm.tool('index_status', args, deadline=deadline) if deadline is not None else cbm.tool(
+            'index_status', args,
+        )
+        if not isinstance(response, dict):
+            raise CBMError('CBM did not return an index status object')
+        return response
+
+    def index_receipt(self, status: dict[str, Any]) -> dict[str, Any]:
+        if (status.get('status') != 'ready' or status.get('project') != self.project
+                or status.get('root_path') != str(self.scope) or not status.get('indexed_at')
+                or any(not isinstance(status.get(k), int) for k in ('nodes', 'edges'))):
+            raise CBMError('CBM index status could not attest the selected project, root and generation')
+        return {key: status[key] for key in ('project', 'root_path', 'indexed_at', 'nodes', 'edges')}
 
     def _need_cbm(self) -> CBMClient:
         if self.ready_error or self.cbm is None:
@@ -445,10 +487,12 @@ class Engine:
 
     # ------------------------------------------------------------- AST nodes
     def _tree(self, rel: str) -> Optional[ast.Module]:
+        if rel not in self.cache['facts']:
+            return None
         if rel not in self.trees:
             try:
-                self.trees[rel] = ast.parse((self.scope / rel).read_text(encoding='utf-8-sig'), filename=rel)
-            except (OSError, SyntaxError, ValueError):
+                self.trees[rel] = ast.parse(self.read_verified_source(rel).decode('utf-8-sig'), filename=rel)
+            except (SyntaxError, ValueError):
                 return None
         return self.trees[rel]
 
@@ -1035,6 +1079,7 @@ class Engine:
         return {
             'source_files': len(self.cache['files']),
             'skipped_files': self.skipped,
+            'cbm_index_coverage': (self.cache.get('index') or {}).get('coverage'),
             'sql_limitations': [
                 {'file': rel, **limitation}
                 for rel, facts in sorted(self.cache['facts'].items())
@@ -1080,6 +1125,11 @@ class Engine:
                 for key in ('parse_errors', 'incomplete_entries', 'skipped_files'):
                     if cov[key]:
                         run.errors.append(RunError(stage='coverage', detail=f'{len(cov[key])} {key.replace("_", " ")}'))
+                native: dict[str, Any] = cov['cbm_index_coverage'] or {}
+                for key in ('parse_partial', 'parse_unusable', 'skipped'):
+                    if isinstance(native.get(key), dict) and native[key].get('count', 0):
+                        run.errors.append(RunError(stage='index coverage',
+                                                   detail=f'CBM reports {native[key]["count"]} {key} inputs'))
                 if self.sweep and self.sweep['incomplete_adjacency_roots']:
                     run.errors.append(RunError(stage='sweep', detail='some root adjacency queries exceeded the row cap'))
                 if self.cache_state == 'invalid':
@@ -1120,18 +1170,12 @@ class Engine:
         n: Optional[dict[str, Any]] = self.graph()[0].get(nid)
         if not n or not n.get('file'):
             raise KeyError('node has no source file')
-        p: Path = (self.scope / n['file']).resolve()
-        if not p.is_relative_to(self.scope) or n['file'] not in self.cache['files'] or not p.is_file():
-            raise KeyError('source outside scope')
-        with p.open('rb') as stream:
-            blob: bytes = stream.read(MAX_SOURCE_BYTES + 1)
-        expected: str = self.cache['files'][n['file']]['sha']
-        if len(blob) > MAX_SOURCE_BYTES or hashlib.sha256(blob).hexdigest() != expected:
-            raise ValueError('Source changed since analysis; rerun the explorer to refresh evidence')
+        blob: bytes = self.read_verified_source(n['file'])
         lines: list[str] = blob.decode('utf-8-sig', errors='replace').splitlines()
         start: int = max(1, (n.get('line') or 1))
         end: int = min(len(lines), max(start, n.get('end_line') or start) , start + 79)
-        return {'file': n['file'], 'abs': str(p), 'start': start, 'end': end, 'text': '\n'.join(lines[start - 1:end])}
+        return {'file': n['file'], 'abs': str(self.scope / n['file']), 'start': start, 'end': end,
+                'text': '\n'.join(lines[start - 1:end])}
 
     def search(self, q: str) -> list[dict[str, Any]]:
         ql: str = q.lower()
@@ -1201,7 +1245,7 @@ class Handler(BaseHTTPRequestHandler):
                     runs: list[dict[str, Any]] = [eng.expand_bfs(nid, d, depth if d == 'out' else 1, 400, candidates=True,
                                                                 deadline=deadline)
                                                for d in dirs]
-                    eng.persist()
+                    eng.persist(verify_source=True)
                     res: dict[str, Any] = eng.delta(bn, be)
                 res['request'] = {'id': nid, 'dirs': dirs, 'depth': depth, 'runs': runs,
                                   'ms': round((time.perf_counter() - t0) * 1000, 1)}
@@ -1227,6 +1271,12 @@ class Handler(BaseHTTPRequestHandler):
             return
         except TimeoutError as exc:
             self.send({'error': str(exc), 'kind': 'timeout'}, 504)
+        except AuditStaleError as exc:
+            with eng.lock:
+                eng.run.fail('freshness', str(exc))
+                eng.ready_error = str(exc)
+                eng.persist()
+            self.send({'error': str(exc), 'kind': 'stale_input'}, 409)
         except (CBMError, OSError) as exc:
             log(f'ERROR {self.path}: {exc}')
             self.send({'error': str(exc), 'kind': 'unavailable'}, 503)
@@ -1428,7 +1478,7 @@ def serve(eng: Engine, port: int, no_open: bool) -> None:
             pass
         finally:
             with eng.lock:
-                eng.persist()
+                eng.persist(verify_source=True)
 
 
 if __name__ == '__main__':
