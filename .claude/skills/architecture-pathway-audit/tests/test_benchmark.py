@@ -98,6 +98,7 @@ class TestScorer(unittest.TestCase):
         def finding(level: str, kind: str, line: int, prefix: str) -> dict:
             return {
                 'level': level, 'kind': kind, 'anchor': witness.entity,
+                'evidence_omitted': 0,
                 'title': f'{witness.entity} {witness.file} {witness.line}',
                 'evidence': [{'edges': [{
                     'from': f'{prefix}.ledger.latest_review', 'to': witness.entity,
@@ -113,6 +114,12 @@ class TestScorer(unittest.TestCase):
         exact: dict = graph_report(finding('candidate', witness.kind, witness.line, 'new_project-with-different-prefix'))
         self.assertEqual(assess_case(case, exact, base), ('localized', 1))
         self.assertEqual(assess_case(case, exact, exact), ('preexisting', 1))
+        sampled: dict = finding('candidate', witness.kind, witness.line + 1, 'cb-project')
+        sampled['evidence_omitted'] = 10
+        with self.assertRaisesRegex(ValueError, 'omitted or unaccounted'):
+            assess_case(case, graph_report(sampled), base)
+        with self.assertRaisesRegex(ValueError, 'omitted or unaccounted'):
+            assess_case(case, exact, graph_report(sampled))
 
     def test_failed_or_incomplete_controls_remain_unknown(self) -> None:
         _, digest = load_corpus(CORPUS)
