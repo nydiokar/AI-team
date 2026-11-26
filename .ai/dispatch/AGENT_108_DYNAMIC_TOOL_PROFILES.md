@@ -114,7 +114,7 @@ initiative, not part of making tool profiles dynamic:
 - [x] worker-snapshot seam proven; registry/flag/DB-authority suites green
 - [x] docs + managed env keys
 - [ ] A109 role-extensibility (role registry + Codex/OpenCode role→server + hard-coded branches) — operator decision
-- [ ] mechanism live — needs ONE worker deploy on Horse to install; thereafter restart-free
+- [x] worker-side mechanism present in current builds; activation is an operator registry write (defaults OFF/empty)
 
 ## Closure
 
@@ -134,5 +134,7 @@ tests/test_manager_role.py tests/test_worker_role.py tests/test_scientific_gover
 tests/test_mcp_manager.py tests/test_mcp_jobs.py tests/test_control_api.py
 tests/test_database_authority.py -p no:warnings -q` → all green.
 
-**What follows:** A109 role-extensibility (surfaced above); one worker deploy on Horse installs the
-mechanism, after which tool/role profile changes are a controller registry write with no worker restart.
+**What follows:** A109 role-extensibility (surfaced above); the worker-side mechanism is present in
+current builds, so tool/role profile changes are a controller registry write with no worker restart.
+Activation (`TOOL_PROFILES_DYNAMIC`, `TOOL_PROFILES_OVERLAY`) remains an operator registry write;
+defaults are OFF/empty.

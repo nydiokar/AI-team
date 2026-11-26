@@ -1012,12 +1012,10 @@ now skips arming when `expected_runtime_sec` is known and shorter than
 `cache_heartbeat="on"` still always arms explicitly (regression test:
 `test_auto_policy_skips_arming_for_jobs_shorter_than_interval`).
 
-Still deferred (1, low severity — edge case, not a blocker for turning `CACHE_HEARTBEAT_ACTIVE`
-on at normal scale):
-- `_cache_heartbeat_owner_live`'s `case_wait_group` branch (`src/orchestrator.py:1263`) scans
-  `list_flow_events` (N+1 per owner, 500-row window) with resolution logic that can diverge from
-  `compute_continuation_tick`'s sticky/monotonic resolution on the same event stream — only bites
-  Cases with 500+ flow events or a wait group re-armed after resolving. Needs a shared helper.
+Formerly deferred `case_wait_group` liveness issue — **resolved by A104 Gate 3 (`8c5596c`,
+2026-10-09)**: `_cache_heartbeat_owner_live` now reads `db.inbox_list_filters` (`src/orchestrator.py:1574`)
+from the same authoritative inbox as other activation readers. The old `list_flow_events`
+N+1/divergent-resolution path no longer exists. `CACHE_HEARTBEAT_ACTIVE` still defaults OFF.
 `ensure_cache_heartbeat_owner`'s bare-except (masks genuine DB errors as "flag off") was reviewed
 and left as-is — it fails safe (no heartbeat instead of a crash), and a distinguishable error
 surface is cosmetic, not a correctness or cost risk.
