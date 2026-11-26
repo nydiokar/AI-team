@@ -17,7 +17,7 @@ CORPUS: Path = BENCH / 'corpus'
 sys.path.insert(0, str(BENCH))
 
 from run_corpus import _child, run_case  # noqa: E402
-from score import Manifest, Observation, assess_case, load_corpus, score  # noqa: E402
+from score import Manifest, Observation, assess_case, load_corpus, score, validate_report  # noqa: E402
 
 
 class TestWitnesses(unittest.TestCase):
@@ -66,7 +66,27 @@ class TestWitnesses(unittest.TestCase):
 
 
 def graph_report(*findings: dict, status: str = 'completed') -> dict:
-    return {'run': {'status': status}, 'analysis_scope': {'omitted_by_kind': {}}, 'findings': list(findings)}
+    return {
+        'scope': '/fixture', 'run': report_identity(status=status, stage='analysis'),
+        'analysis_scope': {'omitted_by_kind': {}}, 'findings': list(findings),
+        'stats': {'index': {'nodes': 2, 'edges': 1}, 'cbm_version': '0.11.0'},
+        'coverage': {'source_files': 1, 'parse_errors': [], 'incomplete_entries': [], 'skipped_files': {},
+                     'sweep': {'root_selection': 'all', 'expanded_roots': 1, 'route_roots': 0, 'non_http_roots': 1,
+                               'depth_limited_roots': 0, 'node_limited_roots': 0, 'incomplete_adjacency_roots': 0}},
+    }
+
+
+def report_identity(*, status: str, stage: str) -> dict:
+    return {'status': status, 'stage': stage, 'id': '1' * 32, 'source_sha256': '2' * 64,
+            'python': '3.12.16', 'started_at': '2026-11-26T00:00:00Z', 'errors': [],
+            'requested_scope': ['.'], 'effective_scope': ['/fixture']}
+
+
+def clean_contract() -> dict:
+    return {
+        'run': report_identity(status='completed', stage='assertions'), 'ok': True, 'violations': [],
+        'coverage': {'files': 2, 'parse_errors': [], 'skipped': [], 'uncovered_scopes': [], 'uncovered_forbidden_areas': []},
+    }
 
 
 class TestScorer(unittest.TestCase):
@@ -104,16 +124,48 @@ class TestScorer(unittest.TestCase):
             for case, data in (
                 ('base', graph_report()),
                 ('requester-ambiguity', graph_report(status='incomplete')),
-                ('inbox-lifecycle', {'run': {'status': 'completed'}, 'violations': []}),
+                ('inbox-lifecycle', clean_contract()),
             ):
                 raw: bytes = json.dumps(data).encode()
                 (gen / f'{case}.json').write_bytes(raw)
-                manifest.runs[case] = Observation(status='completed', returncode=0, sha256=hashlib.sha256(raw).hexdigest())
+                manifest.runs[case] = Observation(
+                    status='completed', returncode=0, sha256=hashlib.sha256(raw).hexdigest(),
+                    run_id=data['run']['id'], source_sha256=data['run']['source_sha256'],
+                )
             (out / 'manifest.json').write_text(manifest.model_dump_json())
             results: dict = score(CORPUS, out)
             self.assertEqual(results['status'], 'incomplete')
             self.assertEqual(results['benign_controls_flagged'], {'matched': 0, 'evaluated': 1, 'labeled': 2, 'unknown': 1})
             self.assertEqual(results['candidate_localization']['unknown'], 2)
+
+    def test_completed_label_without_producer_evidence_is_rejected(self) -> None:
+        incomplete: dict = {'run': {'status': 'completed'}, 'findings': [], 'analysis_scope': {'omitted_by_kind': {}}}
+        with self.assertRaisesRegex(ValueError, 'execution or source identity'):
+            validate_report(incomplete, graph=True, returncode=0)
+        incomplete = graph_report()
+        incomplete['coverage']['sweep']['depth_limited_roots'] = 1
+        with self.assertRaisesRegex(ValueError, 'coverage evidence'):
+            validate_report(incomplete, graph=True, returncode=0)
+
+    def test_manifest_rejects_report_with_mismatched_source_identity(self) -> None:
+        _, digest = load_corpus(CORPUS)
+        with tempfile.TemporaryDirectory() as location:
+            out = Path(location)
+            manifest = Manifest(generation='run-' + '1' * 32, corpus_sha256=digest, status='completed')
+            gen: Path = out / manifest.generation
+            gen.mkdir()
+            report: dict = clean_contract()
+            raw: bytes = json.dumps(report).encode()
+            (gen / 'inbox-lifecycle.json').write_bytes(raw)
+            manifest.runs['inbox-lifecycle'] = Observation(
+                status='completed', returncode=0, sha256=hashlib.sha256(raw).hexdigest(),
+                run_id=report['run']['id'], source_sha256='a' * 64,
+            )
+            (out / 'manifest.json').write_text(manifest.model_dump_json())
+            results: dict = score(CORPUS, out)
+            control: dict = next(row for row in results['cases'] if row['id'] == 'inbox-lifecycle')
+            self.assertEqual(control['result'], 'unknown')
+            self.assertIn('source identity differs', control['error'])
 
     def test_graph_failure_without_report_is_recorded(self) -> None:
         with tempfile.TemporaryDirectory() as location, patch('run_corpus._child', return_value=1):

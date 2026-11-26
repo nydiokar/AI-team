@@ -5,6 +5,7 @@ import argparse
 import hashlib
 import json
 from pathlib import Path
+import re
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -63,6 +64,8 @@ class Observation(StrictModel):
     status: Literal['completed', 'failed']
     returncode: int | None = None
     sha256: str | None = None
+    run_id: str | None = None
+    source_sha256: str | None = None
     error: str | None = None
 
 
@@ -97,16 +100,43 @@ def load_corpus(corpus: Path) -> tuple[GroundTruth, str]:
     return gt, digest.hexdigest()
 
 
-def validate_report(report: dict, *, graph: bool, returncode: int) -> None:
+def validate_report(report: dict, *, graph: bool, returncode: int) -> tuple[str, str]:
     if not isinstance(report, dict) or report.get('run', {}).get('status') != 'completed':
         raise ValueError('required analysis did not complete')
+    run: dict = report['run']
+    run_id: str = run.get('id') or ''
+    source_sha: str = run.get('source_sha256') or ''
+    coverage: dict = report.get('coverage') or {}
+    expected_stage: str = 'analysis' if graph else 'assertions'
+    if (not re.fullmatch('[0-9a-f]{32}', run_id) or not re.fullmatch('[0-9a-f]{64}', source_sha)
+            or run.get('stage') != expected_stage or run.get('errors') != []
+            or not run.get('started_at') or not run.get('python')
+            or not run.get('requested_scope') or not run.get('effective_scope') or not coverage):
+        raise ValueError('completed report lacks execution or source identity')
     if graph:
         scope: dict = report.get('analysis_scope') or {}
+        sweep: dict = coverage.get('sweep') or {}
+        stats: dict = report.get('stats') or {}
         if (returncode != 0 or not isinstance(report.get('findings'), list)
-                or 'omitted_by_kind' not in scope or any(scope['omitted_by_kind'].values())):
+                or 'omitted_by_kind' not in scope or any(scope['omitted_by_kind'].values())
+                or not stats.get('index') or not stats.get('cbm_version')
+                or not coverage.get('source_files') or coverage.get('parse_errors') != []
+                or coverage.get('incomplete_entries') != [] or coverage.get('skipped_files') != {}
+                or sweep.get('root_selection') != 'all'
+                or sweep.get('expanded_roots') != sweep['route_roots'] + sweep['non_http_roots']
+                or any(sweep.get(key) != 0 for key in
+                       ('depth_limited_roots', 'node_limited_roots', 'incomplete_adjacency_roots'))
+                or run['effective_scope'] != [report.get('scope')]):
             raise ValueError('graph report failed, omitted findings, or lacks coverage evidence')
-    elif not isinstance(report.get('violations'), list) or returncode != (1 if report['violations'] else 0):
-        raise ValueError('contract exit status and violations do not agree')
+    else:
+        if (not isinstance(report.get('violations'), list) or returncode != (1 if report['violations'] else 0)
+                or report.get('ok') is not (returncode == 0)):
+            raise ValueError('contract exit status and violations do not agree')
+        if (not coverage.get('files')
+                or any(coverage.get(key) != [] for key in
+                       ('parse_errors', 'skipped', 'uncovered_scopes', 'uncovered_forbidden_areas'))):
+            raise ValueError('contract lacks complete coverage evidence')
+    return run_id, source_sha
 
 
 def _read_report(out: Path, manifest: Manifest, case: str, *, graph: bool) -> dict:
@@ -117,7 +147,9 @@ def _read_report(out: Path, manifest: Manifest, case: str, *, graph: bool) -> di
     if hashlib.sha256(raw).hexdigest() != record.sha256:
         raise ValueError('report digest differs from the completed observation')
     report: dict = json.loads(raw)
-    validate_report(report, graph=graph, returncode=record.returncode)
+    run_id, source_sha = validate_report(report, graph=graph, returncode=record.returncode)
+    if (run_id, source_sha) != (record.run_id, record.source_sha256):
+        raise ValueError('run or source identity differs from the completed observation')
     return report
 
 
@@ -160,7 +192,7 @@ def score(corpus: Path, out: Path) -> dict:
     try:
         base: dict = _read_report(out, manifest, 'base', graph=True)
         base_error: str | None = None
-    except (AttributeError, OSError, ValueError) as exc:
+    except (AttributeError, KeyError, OSError, TypeError, ValueError) as exc:
         base = {}
         base_error = str(exc)
     for case in labels.cases:
