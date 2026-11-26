@@ -17,12 +17,16 @@ The check is a pure function of the files at the revision: Python via AST tokens
 imports, string literals; docstrings are reported as notes, comments ignored), any other text file by identifier
 tokens per line, and SQL table access via `pyast_adapter.data_access`. No LLM, no graph service.
 
-Exit codes: 0 contract met, 1 violations, 2 contract or input error.
+Exit codes: 0 contract met, 1 completed check with violations, 2 invalid input or
+incomplete required analysis (wrong/empty scope, skipped or unparseable required input).
+Every nonpassing code refuses dispatch closure; a zero-result run is only clean when the
+applicable checks actually completed over the declared scope.
 """
 from __future__ import annotations
 
 import argparse
 import ast
+import hashlib
 import json
 import re
 import subprocess
@@ -91,6 +95,13 @@ class Contract(BaseModel):
     forbidden_in: dict[str, list[Forbidden]] = {}
     stores: dict[str, StoreRule] = {}
     waivers: list[Waiver] = []
+
+    @field_validator('scope')
+    @classmethod
+    def _nonempty_scope(cls, v: list[str]) -> list[str]:
+        if not v or any(not isinstance(s, str) or not s.strip() for s in v):
+            raise ValueError('scope must declare at least one non-empty path ("." means the whole repo)')
+        return v
 
     @field_validator('retired_patterns')
     @classmethod
@@ -167,12 +178,7 @@ def _child_defs(node: ast.AST) -> list[ast.AST]:
     return sorted(found, key=lambda d: d.lineno)
 
 
-def scan_python(source: str, rel: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """(identifier occurrences, SQL table accesses). Unparseable files degrade to a text scan."""
-    try:
-        tree: ast.Module = ast.parse(source)
-    except SyntaxError:
-        return scan_text(source, rel), []
+def _scan_parsed(tree: ast.Module, rel: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     docs: set[int] = _docstring_ids(tree)
     occ: list[dict[str, Any]] = []
     for n in ast.walk(tree):
@@ -195,6 +201,24 @@ def scan_python(source: str, rel: str) -> tuple[list[dict[str, Any]], list[dict[
             occ += [_occ(t, kind, rel, line) for t in sorted(set(TOKEN.findall(n.value)))]
     uniq: dict[tuple[str, str, int], dict[str, Any]] = {(o['token'], o['kind'], o['line']): o for o in occ}
     return list(uniq.values()), _accesses(tree, rel)
+
+
+def scan_python(source: str, rel: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """(identifier occurrences, SQL table accesses). Unparseable files degrade to a text scan."""
+    try:
+        return _scan_parsed(ast.parse(source), rel)
+    except SyntaxError:
+        return scan_text(source, rel), []
+
+
+def parse_python(source: str, rel: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]], Optional[str]]:
+    """Like scan_python, but surfaces a syntax failure instead of silently degrading to text.
+    Unparseable Python loses AST-based SQL/ownership checks, so it is an analysis error."""
+    try:
+        occ, acc = _scan_parsed(ast.parse(source), rel)
+        return occ, acc, None
+    except SyntaxError as exc:
+        return scan_text(source, rel), [], f'{type(exc).__name__}: {exc}'
 
 
 def _git(repo: Path, *args: str, data: Optional[bytes] = None) -> bytes:
@@ -235,6 +259,7 @@ def _allowed(acc: dict[str, Any], globs: list[str]) -> bool:
 def check(contract: Contract, repo: Path, rev: Optional[str]) -> dict[str, Any]:
     files: dict[str, bytes] = _files(repo, rev, contract.scope)
     cov: dict[str, Any] = {'files': 0, 'python': 0, 'text': 0, 'skipped': [], 'parse_errors': []}
+    errors: list[str] = []
     occ: list[dict[str, Any]] = []
     acc: list[dict[str, Any]] = []
     for path in sorted(files):
@@ -248,14 +273,25 @@ def check(contract: Contract, repo: Path, rev: Optional[str]) -> dict[str, Any]:
         cov['files'] += 1
         if path.endswith('.py'):
             cov['python'] += 1
-            o, a = scan_python(text, path)
-            if o and all(x['kind'] == 'text' for x in o):
+            o, a, parse_error = parse_python(text, path)
+            if parse_error:
                 cov['parse_errors'].append(path)
             occ += o
             acc += a
         else:
             cov['text'] += 1
             occ += scan_text(text, path)
+
+    if cov['files'] == 0:
+        errors.append(f'no files scanned in declared scope {contract.scope!r}')
+    if cov['skipped']:
+        errors.append(f'{len(cov["skipped"])} required input(s) skipped (binary/oversize): '
+                      + ', '.join(cov['skipped'][:5]))
+    if cov['parse_errors']:
+        errors.append(f'{len(cov["parse_errors"])} python file(s) unparseable (AST checks lost): '
+                      + ', '.join(cov['parse_errors'][:5]))
+    digest: str = hashlib.sha256(''.join(f'{p}\0' + hashlib.sha256(files[p]).hexdigest()
+                                         for p in sorted(files)).encode('utf-8')).hexdigest()
 
     retired: set[str] = set(contract.retired)
     pats: list[tuple[str, re.Pattern[str]]] = [(p, re.compile(p)) for p in contract.retired_patterns]
@@ -289,7 +325,12 @@ def check(contract: Contract, repo: Path, rev: Optional[str]) -> dict[str, Any]:
             waived.append({**h, 'reason': w.reason})
         else:
             violations.append(h)
-    return {'ok': not violations, 'rev': rev, 'violations': violations, 'waived': waived, 'notes': notes,
+    status: str = 'incomplete' if errors else ('violations' if violations else 'pass')
+    return {'ok': not violations and not errors, 'status': status, 'analysis_complete': not errors,
+            'analysis_errors': errors, 'source_digest': digest,
+            'scope': {'requested': contract.scope, 'exclusions': contract.exclude,
+                      'files_scanned': cov['files'], 'files_skipped': len(cov['skipped'])},
+            'rev': rev, 'violations': violations, 'waived': waived, 'notes': notes,
             'coverage': cov, 'limits': LIMITS}
 
 
@@ -298,10 +339,13 @@ def _report(r: dict[str, Any], contract_path: str, per_rule: int) -> str:
     lines: list[str] = [
         f'contract: {contract_path}',
         f'revision: {r["rev_sha"]}',
+        f'scope:    {r["scope"]["requested"]!r} (excluded {r["scope"]["exclusions"]!r})',
+        f'digest:   {r["source_digest"]}',
         f'scanned:  {cov["files"]} files ({cov["python"]} python, {cov["text"]} text); '
         f'skipped {len(cov["skipped"])} binary/oversize; {len(cov["parse_errors"])} python files unparseable (text-scanned)',
         '',
-        ('CONTRACT MET' if r['ok'] else f'CONTRACT NOT MET: {len(r["violations"])} violation(s)')
+        ('REQUIRED ANALYSIS INCOMPLETE: ' + '; '.join(r['analysis_errors']) if not r['analysis_complete'] else
+         'CONTRACT MET' if r['ok'] else f'CONTRACT NOT MET: {len(r["violations"])} violation(s)')
         + f'; {len(r["waived"])} waived; {len(r["notes"])} docstring note(s)',
     ]
     by_rule: dict[str, list[dict[str, Any]]] = {}
@@ -342,6 +386,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     print(_report(r, args.contract, args.per_rule))
     if args.json:
         Path(args.json).write_text(json.dumps(r, indent=1), encoding='utf-8')
+    if not r['analysis_complete']:
+        return 2
     return 0 if r['ok'] else 1
 
 

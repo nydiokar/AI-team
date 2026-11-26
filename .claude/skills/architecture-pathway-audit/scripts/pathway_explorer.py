@@ -16,6 +16,7 @@ import builtins
 import hashlib
 import json
 import os
+import platform
 import re
 import subprocess
 import sys
@@ -109,6 +110,14 @@ def sha256(p: Path) -> str:
     return hashlib.sha256(p.read_bytes()).hexdigest()
 
 
+def _atomic_text(path: Path, text: str) -> None:
+    """Publish a whole artifact or none: a failed run must never leave a prior clean report fresh."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp: Path = path.with_name(path.name + '.tmp')
+    tmp.write_text(text, encoding='utf-8')
+    tmp.replace(path)
+
+
 def cbm_node(row: dict[str, Any]) -> dict[str, Any]:
     labels: list[str] = _labels(row.get('l'))
     kind: str = labels[-1] if labels else 'Unknown'
@@ -153,35 +162,84 @@ class Engine:
         self.version: int = 0
         self._findings_memo: tuple[int, dict[str, Any]] = (-1, {})
         self._medium_memo: Optional[tuple[tuple[int, int], dict[str, dict[str, Any]], list[dict[str, Any]]]] = None
+        self.identity: dict[str, Any] = {'schema': SCHEMA, 'project': project, 'scope': str(self.scope),
+                                         'python': platform.python_version(), 'parser': 'stdlib-ast'}
+        self.cache_error: Optional[str] = None
+        self.cache_reason: Optional[str] = None
         self.cache: dict[str, Any] = self._load()
         self.changed: set[str] = set()
         self.inventory: dict[str, Any] = {}
 
     # ------------------------------------------------------------------ cache
     def _load(self) -> dict[str, Any]:
-        empty: dict[str, Any] = {'schema': SCHEMA, 'project': self.project, 'scope': str(self.scope), 'files': {},
-                                 'facts': {}, 'entries': {}, 'nodes': {}, 'symbols': None, 'fanin': None,
-                                 'cbm_routes': None, 'index': None, 'index_token': 0}
+        empty: dict[str, Any] = {**self.identity, 'files': {}, 'facts': {}, 'entries': {}, 'nodes': {},
+                                 'symbols': None, 'fanin': None, 'cbm_routes': None, 'index': None,
+                                 'index_token': 0}
         try:
             d: dict[str, Any] = json.loads(self.cache_path.read_text(encoding='utf-8'))
-        except (OSError, ValueError):
+        except FileNotFoundError:
             return empty
-        if d.get('schema') != SCHEMA or d.get('project') != self.project or d.get('scope') != str(self.scope):
+        except (OSError, ValueError) as exc:
+            self.cache_error = f'corrupt cache {self.cache_path}: {exc}'
+            return empty
+        if any(d.get(k) != v for k, v in self.identity.items()):
+            self.cache_reason = f'cache identity mismatch (expected {self.identity}, found ' \
+                                + str({k: d.get(k) for k in self.identity}) + ')'
             return empty
         return d
+
+    def source_digest(self) -> str:
+        payload: str = ''.join(f'{rel}\0{(meta or {}).get("sha", "")}\n'
+                               for rel, meta in sorted(self.cache['files'].items()))
+        return hashlib.sha256(payload.encode('utf-8')).hexdigest()
+
+    def run_status(self) -> dict[str, Any]:
+        """One typed outcome shared by JSON, HTML and the CLI. Candidate count never drives it."""
+        errors: list[str] = []
+        hard_failure: bool = False
+        if self.cache_error:
+            errors.append(self.cache_error)
+            hard_failure = True
+        if self.ready_error:
+            errors.append(self.ready_error)
+            hard_failure = True
+        elif not self.ready.is_set():
+            errors.append('CBM index did not reach ready state; analysis is still pending')
+            hard_failure = True
+        elif self.cbm is not None:
+            for key in ('symbols', 'fanin', 'cbm_routes'):
+                if self.cache.get(key) is None:
+                    errors.append(f'required CBM {key} table was not loaded')
+                    hard_failure = True
+        parse_errors: list[str] = [rel for rel, f in self.cache['facts'].items() if f.get('parse_error')]
+        if parse_errors:
+            errors.append(f'{len(parse_errors)} required python file(s) unparseable: ' + ', '.join(parse_errors[:5]))
+        incomplete: list[str] = sorted(k for k, e in self.cache['entries'].items() if not e.get('complete', True))
+        if incomplete:
+            errors.append(f'{len(incomplete)} expansion(s) truncated by row caps: ' + ', '.join(incomplete[:5]))
+        status: str = 'failed' if hard_failure else ('incomplete' if errors else 'complete')
+        unresolved: int = sum(len(e.get('unresolved', [])) for e in self.cache['entries'].values())
+        return {'status': status, 'required_analysis_complete': not errors, 'errors': errors,
+                'capability_gaps': ['bounded static analysis; not full repository or runtime coverage',
+                                    f'{unresolved} unresolved/ambiguous call target(s) in loaded entries'],
+                'identity': {**self.identity, 'source_digest': self.source_digest(),
+                             'cbm_version': self.cbm.version if self.cbm else ''},
+                'cache_invalidation_reason': self.cache_reason,
+                'artifact': {'written_at': time.strftime('%Y-%m-%dT%H:%M:%S'), 'project': self.project,
+                             'scope': str(self.scope), 'ready': self.ready.is_set(),
+                             'ready_error': self.ready_error}}
 
     def persist(self) -> None:
         tmp: Path = self.cache_path.with_suffix('.tmp')
         tmp.write_text(json.dumps(self.cache, ensure_ascii=False, separators=(',', ':')), encoding='utf-8')
         tmp.replace(self.cache_path)
         st: dict[str, Any] = self.state()
-        self.report.parent.mkdir(parents=True, exist_ok=True)
-        self.report.write_text(json.dumps({'project': self.project, 'scope': str(self.scope),
-                                           'coverage': st['coverage'], 'analysis_scope': st['analysis_scope'],
-                                           'findings': st['findings'], 'stats': st['stats'],
-                                           'routes': st['routes']}, ensure_ascii=False, indent=1), encoding='utf-8')
-        self.out.parent.mkdir(parents=True, exist_ok=True)
-        self.out.write_text(self.render_html(st), encoding='utf-8')
+        _atomic_text(self.report, json.dumps({'project': self.project, 'scope': str(self.scope),
+                                              'run': st['run'], 'coverage': st['coverage'],
+                                              'analysis_scope': st['analysis_scope'], 'findings': st['findings'],
+                                              'stats': st['stats'], 'routes': st['routes']},
+                                             ensure_ascii=False, indent=1))
+        _atomic_text(self.out, self.render_html(st))
 
     def render_html(self, st: Optional[dict[str, Any]] = None) -> str:
         template: str = Path(__file__).with_name('viewer.html').read_text(encoding='utf-8')
@@ -937,6 +995,7 @@ class Engine:
                     'expanded': sorted(self.cache['entries']), 'unresolved': unresolved,
                     'findings': fr['findings'], 'analysis_scope': fr['scope'], 'coverage': cov,
                     'stats': {**self.stats, **cbm_stats, 'index': self.cache.get('index')},
+                    'run': self.run_status(),
                     'ready': self.ready.is_set(), 'ready_error': self.ready_error}
 
     def delta(self, before_nodes: set[str], before_edges: set[tuple[str, str, str]]) -> dict[str, Any]:
@@ -1030,7 +1089,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send({'error': str(exc), 'kind': 'cbm_error' if isinstance(exc, CBMError) else 'error'}, 500)
 
 
-def main() -> None:
+def main(argv: Optional[list[str]] = None) -> int:
     ap = argparse.ArgumentParser(description='Interactive execution-path explorer (CBM + FastAPI AST adapter)')
     ap.add_argument('--repo', default='.')
     ap.add_argument('--scope', default='src', help='Folder (relative to --repo) to index and analyse; "." for all')
@@ -1056,7 +1115,7 @@ def main() -> None:
     ap.add_argument('--no-daemon', action='store_true', help='(compat, ignored) a single MCP session is always used')
     ap.add_argument('--no-open', action='store_true')
     ap.add_argument('--no-serve', action='store_true', help='Write HTML/JSON and exit')
-    a = ap.parse_args()
+    a = ap.parse_args(argv)
     if not 1 <= a.neighbors <= 5000:
         ap.error('--neighbors must be 1..5000')
     t_start: float = time.perf_counter()
@@ -1083,26 +1142,46 @@ def main() -> None:
         f'{len(changed)} changed files{" (first run)" if first else ""}; {dropped} cached expansions invalidated; '
         f'{len(eng.cache["entries"])} reused.')
     threading.Thread(target=eng.ensure_index, daemon=True, name='cbm-index').start()
-    if a.sweep_depth > 0:
+
+    def ready_or_fail() -> bool:
         eng.ready.wait()
+        if eng.ready_error:
+            log('ERROR ' + eng.ready_error + ' — publishing a nonpassing artifact')
+            eng.persist()
+            log('ANALYSIS NOT COMPLETE (' + eng.run_status()['status'] + '): ' + str(eng.report))
+            cbm.close()
+            return False
+        return True
+
+    if a.sweep_depth > 0:
+        if not ready_or_fail():
+            return 2
         t0: float = time.perf_counter()
-        eng.symbols()
-        eng.fanin()
-        eng.cbm_routes()
-        hits = misses = visited = trunc = 0
-        sweep_ids: list[str] = [r['id'] for r in eng.inventory['routes']] + (eng.orphan_roots() if a.roots == 'all' else [])
-        for rid in sweep_ids:
-            res: dict[str, Any] = eng.expand_bfs(rid, 'out', a.sweep_depth, a.sweep_cap)
-            hits += res['cache_hits']
-            misses += res['cbm_expansions']
-            visited += res['visited']
-            trunc += res['truncated']
-        log(f'Sweep depth {a.sweep_depth}: {len(sweep_ids)} roots, {visited} node visits, '
-            f'{misses} expansions fetched, {hits} cache hits, {trunc} truncated, {time.perf_counter() - t0:.1f}s')
+        try:
+            eng.symbols()
+            eng.fanin()
+            eng.cbm_routes()
+            hits = misses = visited = trunc = 0
+            sweep_ids: list[str] = [r['id'] for r in eng.inventory['routes']] + (eng.orphan_roots() if a.roots == 'all' else [])
+            for rid in sweep_ids:
+                res: dict[str, Any] = eng.expand_bfs(rid, 'out', a.sweep_depth, a.sweep_cap)
+                hits += res['cache_hits']
+                misses += res['cbm_expansions']
+                visited += res['visited']
+                trunc += res['truncated']
+            log(f'Sweep depth {a.sweep_depth}: {len(sweep_ids)} roots, {visited} node visits, '
+                f'{misses} expansions fetched, {hits} cache hits, {trunc} truncated, {time.perf_counter() - t0:.1f}s')
+        except (CBMError, OSError, subprocess.SubprocessError) as exc:
+            eng.ready_error = f'sweep failed: {exc}'
+            log('ERROR ' + eng.ready_error + ' — publishing a nonpassing artifact')
+            eng.persist()
+            cbm.close()
+            return 2
     elif not first and not changed:
         pass
     if a.baseline_update:
-        eng.ready.wait()
+        if not ready_or_fail():
+            return 2
         eng.fanin()
         cur: dict[str, Any] = {x['id']: x for x in eng.findings()['findings']}
         old: dict[str, Any] = json.loads(eng.baseline_path.read_text(encoding='utf-8')) if eng.baseline_path.is_file() else {}
@@ -1115,18 +1194,29 @@ def main() -> None:
         eng.baseline_path.write_text(json.dumps({'acknowledged': have}, indent=1), encoding='utf-8')
         log(f'Baseline {eng.baseline_path}: {len(have)} acknowledged ({len(have) - len(seen)} added)')
         cbm.close()
-        return
+        return 0
     if a.no_serve:
-        eng.ready.wait()
-        if not eng.ready_error:
+        if not ready_or_fail():
+            return 2
+        try:
             eng.fanin()
             eng.cbm_routes()
+        except (CBMError, OSError, subprocess.SubprocessError) as exc:
+            eng.ready_error = f'required table load failed: {exc}'
+            eng.persist()
+            cbm.close()
+            return 2
         eng.persist()
         st: dict[str, Any] = eng.state()
+        run: dict[str, Any] = st['run']
         log(f'Wrote {eng.out} and {eng.report}: {len(st["nodes"])} nodes, {len(st["edges"])} edges, '
-            f'{len(st["findings"])} findings, {st["stats"]["cbm_calls"]} CBM calls, total {time.perf_counter() - t_start:.1f}s')
+            f'{len(st["findings"])} findings, {st["stats"]["cbm_calls"]} CBM calls, '
+            f'analysis={run["status"]}, total {time.perf_counter() - t_start:.1f}s')
         cbm.close()
-        return
+        if not run['required_analysis_complete']:
+            log('ERROR required analysis incomplete: ' + '; '.join(run['errors']))
+            return 2
+        return 0
     Handler.engine = eng
     server: ThreadingHTTPServer = ThreadingHTTPServer(('127.0.0.1', a.port), Handler)
     url: str = f'http://127.0.0.1:{a.port}/'
@@ -1143,11 +1233,12 @@ def main() -> None:
         with eng.lock:
             eng.persist()
         cbm.close()
+    return 0
 
 
 if __name__ == '__main__':
     try:
-        main()
+        sys.exit(main())
     except (CBMError, OSError, subprocess.SubprocessError) as e:
         print('ERROR:', e, file=sys.stderr)
         sys.exit(2)
