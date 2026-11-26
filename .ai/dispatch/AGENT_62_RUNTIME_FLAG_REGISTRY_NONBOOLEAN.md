@@ -1,12 +1,12 @@
 ```yaml
 job_id: AGENT_62_RUNTIME_FLAG_REGISTRY_NONBOOLEAN
 created_at: "2026-08-01T13:48:33+03:00"        # CANONICAL — set once at dispatch, never derive again
-status: ready              # ready | active | blocked | done | dead
+status: done              # ready | active | blocked | done | dead
 owner: ""
 depends_on: []
-results_ref: null             # -> DISPATCH_LOG.md section with the verdict prose
-evidence: []                  # artifact paths that PROVE it ran (checked to exist)
-updated_at: "2026-08-03T13:20:23.070427+00:00"
+results_ref: DISPATCH_LOG.md#A62             # -> DISPATCH_LOG.md section with the verdict prose
+evidence: ["src/control/db.py","src/control/control_api.py","scripts/ops_flag.sh","tests/test_runtime_flag_typed.py","tests/test_ops_flag_migrate.py"]                  # artifact paths that PROVE it ran (checked to exist)
+updated_at: "2026-11-26T09:58:30.067892+00:00"
 ```
 
 # DISPATCH — A62 · Runtime flag registry: extend beyond booleans to numeric/string knobs
@@ -125,13 +125,29 @@ boolean entries' semantics.
 
 ---
 ## Milestone (burndown)
-- [ ] Registry type model extended (`value_type` field + type-aware coerce/validate), 23 existing
+- [x] Registry type model extended (`value_type` field + type-aware coerce/validate), 23 existing
       booleans byte-identical
-- [ ] `RuntimeFlagBody` widened + server-side type validation (422 on mismatch)
-- [ ] `CLAUDE_SDK_MAX_TURNS`/`CLAUDE_SDK_MAX_BUDGET_USD` added as registry entries, R1/R2 decided
+- [x] `RuntimeFlagBody` widened + server-side type validation (422 on mismatch)
+- [x] `CLAUDE_SDK_MAX_TURNS`/`CLAUDE_SDK_MAX_BUDGET_USD` added as registry entries, R1/R2 decided
       and documented
-- [ ] `scripts/ops_flag.sh set` command added; `on`/`off`/`migrate` verified compatible
-- [ ] Targeted tests green; PR opened per branch policy
+- [x] `scripts/ops_flag.sh set` command added; `on`/`off`/`migrate` verified compatible
+- [x] Targeted tests green; PR opened per branch policy
 
-## Closure (fill on completion)
-(fill when executed)
+## Closure — 2026-11-26 (registry reconciliation)
+
+**Verdict: done at code level.** PR [#246](https://github.com/nydiokar/AI-team/pull/246) merged
+(`a113094`, branch `feat/runtime-flag-registry-nonbool`) with the typed registry in
+`src/control/db.py`, `RuntimeFlagBody` and 422 validation in `src/control/control_api.py`, the
+`CLAUDE_SDK_MAX_TURNS` (int) / `CLAUDE_SDK_MAX_BUDGET_USD` (float) entries, the worker snapshot
+ceiling read, and `scripts/ops_flag.sh set`. Acceptance 1–4 and 6 are covered by
+`tests/test_runtime_flag_typed.py` (byte-identical bool rendering, listed type/value/source,
+`/health` governor reflection and null-wins, wrong-type 422); `tests/test_ops_flag_migrate.py`
+exercises the real CLI against an in-process gateway for `migrate` round-trips.
+
+**Honest remainder:** no dedicated `ops_flag.sh set <INT>` CLI transcript was retained in this
+checkout, and no new live `/api/flags` probe was run here — acceptance 5 is verified by the
+implemented `set` branch plus API-level round-trip tests, not by a recorded CLI session. This
+closure asserts merged code and offline tests only; the dev host is not the live gateway.
+Targeted verification 2026-11-26: `pytest tests/test_runtime_flag_typed.py
+tests/test_ops_flag_migrate.py …` → 121 passed, 2 skipped across the six closure suites
+(Python 3.12.3, isolated venv).

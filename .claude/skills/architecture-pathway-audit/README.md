@@ -118,9 +118,17 @@ Read `coverage` and `analysis_scope` in JSON: route discovery/expansion counts,
 parse failures, unresolved calls, incomplete pages, hub boundaries and finding
 caps. Graph rules use loaded neighborhoods; SQL/fingerprint rules also inspect
 AST definitions outside expanded routes. Bounded sweeps are not complete audits.
-For `--no-serve` without a sweep, an index failure can still exit successfully
-with empty findings; inspect stderr/stdout and reject a report whose analysis is
-still pending. The JSON report currently omits the index error itself.
+Every report now carries a `run` object: `status` (`complete` / `incomplete` /
+`failed`), `required_analysis_complete`, typed `errors`, capability gaps, source
+and identity digests, and cache invalidation reason. It is shared by JSON, the
+browser banner/coverage pane and the `--no-serve` CLI exit code (0 complete, 2
+incomplete/failed). Findings count never drives that exit code: a bounded
+zero-finding scan is clean only when required analysis actually completed.
+Artifacts are published atomically, so a failed run cannot leave an old clean
+report looking fresh. Candidate counts are still structural leads, never
+semantic verdicts. `contract_check.py` follows the same rule: exit 0 only over
+applicable completed checks, 1 for completed checks with violations, 2 for a
+wrong/empty scope, skipped/binary/oversize required input or unparseable Python.
 
 Dynamic dispatch, unknown receiver types, callbacks, conditional registration and
 sub-app mounts limit coverage. Scope may exclude scripts, config, frontend code

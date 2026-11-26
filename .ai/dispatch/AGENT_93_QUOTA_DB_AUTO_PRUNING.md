@@ -1,12 +1,12 @@
 ```yaml
 job_id: AGENT_93_QUOTA_DB_AUTO_PRUNING
 created_at: "2026-10-01T22:25:00+00:00"
-status: ready
+status: blocked
 owner: ""
 depends_on: []
 results_ref: DISPATCH_LOG.md#A93
-evidence: []
-updated_at: "2026-10-01T22:25:00+00:00"
+evidence: ["src/services/quota_window_coordinator.py","src/services/quota_window_prewarmer.py","tests/test_quota_window_coordinator.py","docs/backend/DATABASE_AUTHORITY.md"]
+updated_at: "2026-11-26T10:08:34.666270+00:00"
 ```
 
 # DISPATCH — A93 · Bounded retention for `quota_windows.db` (worker + controller)
@@ -71,9 +71,41 @@ Root causes (verify in the tree before changing):
 
 ## Milestone (burndown)
 
-- [ ] Readers of `coordinator_events` inventoried; retention window chosen and recorded
-- [ ] Worker-path + controller-path daily retention (snapshots + events), batched
-- [ ] Space reclamation decision implemented for the worker cache
+- [x] Readers of `coordinator_events` inventoried; retention window chosen and recorded
+- [x] Worker-path + controller-path daily retention (snapshots + events), batched
+- [x] Space reclamation decision implemented for the worker cache
 - [ ] Tests green; PR merged; operator-restarted worker shows `quota_snapshots_pruned` / events pruned
 
-## Closure (fill on completion)
+## Code complete — live acceptance gate only (2026-11-26 reconciliation)
+
+Merged on `main`: PR [#245](https://github.com/nydiokar/AI-team/pull/245) (merge `95e6efe`,
+content `dfac85e`) and PR [#248](https://github.com/nydiokar/AI-team/pull/248) (merge `6fc534c`,
+content `8785f4d`). Verified on `HEAD`: `_EVENT_RETENTION_DAYS = 14` and batched
+`prune_once_daily` in `src/services/quota_window_coordinator.py`, the worker prewarmer call at
+`src/services/quota_window_prewarmer.py:530`, and the documented steady-state window in
+`docs/backend/DATABASE_AUTHORITY.md` §4 R2. Targeted tests
+`pytest tests/test_quota_window_coordinator.py tests/test_quota_window_prewarmer.py --no-header`
+→ **108 passed in 17.72s** (Python 3.12.3). No live store was read from this dev host.
+
+**This is not `done`.** Acceptance requires one real daily cycle on merged code, which cannot be
+observed here. Status is `blocked` on the operator/Kanebra gate below.
+
+### Kanebra-only verification (read-only; no worker restart by the agent)
+
+1. Confirm the running worker/gateway images include merges `95e6efe` and `6fc534c` (read-only:
+   image labels/build SHA, or the loaded build identity via `/health`). If an older image is
+   loaded, the operator schedules the normal worker/gateway restart — **the agent must not
+   restart any worker**.
+2. After the operator's restart and one UTC-daily tick, grep gateway + worker logs read-only for
+   `event=quota_snapshots_pruned rows=… retention_days=14 archived=…` and the event-prune line.
+3. For **each** quota store (worker-local and controller; path from `QUOTA_DB_PATH`, default
+   `state/quota_windows.db` in each process's working directory), run a read-only query:
+   `sqlite3 -readonly <db> "SELECT MIN(created_at), COUNT(*) FROM snapshots; SELECT MIN(created_at), COUNT(*) FROM coordinator_events;"`.
+   Expect no non-anchor snapshot / no event older than 14 days after the first pass. Archived
+   history is kept in `quota_archive.db` next to the store — verify it exists and is non-empty.
+4. **Controller caveat:** `prune_once_daily` on the controller side is built only when
+   `QUOTA_COORDINATOR_ENABLED` is on; with it off, `/telemetry/quota-observation` still writes the
+   controller store and nothing prunes it. If the flag is off, do not claim controller-store
+   acceptance — record it as open pending the separate A58 operator decision. No flag write here.
+5. Record observed row counts and steady-state size (rows/day × 14) back into §4 R2 with the date,
+   then set this job `done` with those evidence paths.

@@ -111,6 +111,23 @@ Required certification matrix:
 
 Every scoped run should cheaply validate input/version/index/report preconditions; use the committed conformance fixtures as a repeatable validation command and CI/upgrade regression guard. Do not rerun the full expensive corpus automatically for every graph click. Certification names supported capabilities and unresolved runtime/static limits. Zero can mean no matching findings in completed declared checks, never universal absence of bugs. 101 means classified evidence items, never 101 certified defects.
 
+### Stage log — 2026-11-26 (P2 slice, not closed)
+
+Branch `feat/a116-failure-honest-audit` implemented T1-style fail-closed contract checking and
+T2 failure-honest explorer outcomes: typed `run` status in JSON/HTML/CLI, atomic artifact
+publication, cache identity/corruption reporting, and dispatch `done` refusal for incomplete
+contracts. Frozen witnesses:
+`.claude/skills/architecture-pathway-audit/tests/test_failure_honest.py` plus the new
+`tests/test_dispatch_state.py` gate test. Baseline `49c4dfa` (witnesses copied into a detached
+worktree): **14 failed, 9 passed** — including the original 0-file `CONTRACT MET` that allowed
+`done`. Candidate: **76 passed, 1 skipped** on the touched modules with Python 3.12.3.
+PR [#304](https://github.com/nydiokar/AI-team/pull/304) (`test` and `isolated-docker` checks
+green) was squash-merged to `main` as `8d5d2b7` on 2026-11-26. Note: PR #303 (earlier merge of
+the same branch name, `3553f9f`) carried only the registry reconciliation — no A116 code — so
+the code landed via #304.
+Still open: P0 F1/F2 and the full frozen corpus/reviewer, T3, T4, T5, and C1–C12 certification;
+status remains `active`. Exact commands and attribution are in the skill's `MEASUREMENTS.md`.
+
 ## TYPE
 
 Implementation + audit, Level 3, already approved for autonomous execution. This authoring task creates the issue/packet and preserves evidence; the future executor owns P0–P4. Keep that distinction in registry state and GitHub issue state.

@@ -279,9 +279,9 @@ An enforceable end-state contract must reflect those responsibility distinctions
 
 | Priority | Reproduction / root cause | Consequence |
 |---|---|---|
-| High for automated closure | `Contract(scope=['typo'], retired=['old_send'])` scans 0 files and returns `ok=true`; `check` makes success depend only on violations | A misspelled scope can produce a vacuous green gate. |
-| High for automated closure | Syntax-invalid Python containing a forbidden SQL read is text-scanned, loses all store accesses, and returns `ok=true` | Coverage errors do not prevent a passing ownership check. Binary/oversize skips likewise do not fail closure. |
-| High for batch consumers | Inject `CBMError` from `ensure_started`, invoke default `--no-serve` without a sweep: CLI returns normally with zero findings | `ready_error` is logged, but omitted by `persist` from JSON; pending analysis can be mistaken for success. Sweep mode instead raises when it needs CBM. |
+| High for automated closure — **fixed 2026-11-26** | `Contract(scope=['typo'], retired=['old_send'])` scanned 0 files and returned `ok=true`; `check` made success depend only on violations | A misspelled scope could produce a vacuous green gate. Now `status=incomplete`, exit 2. |
+| High for automated closure — **fixed 2026-11-26** | Syntax-invalid Python containing a forbidden SQL read was text-scanned, lost all store accesses, and returned `ok=true` | Coverage errors could bypass a passing ownership check. Binary/oversize skips likewise did not fail closure. Now both are required-analysis errors, exit 2. |
+| High for batch consumers — **fixed 2026-11-26** | Inject `CBMError` from `ensure_started`, invoke default `--no-serve` without a sweep: CLI returned normally with zero findings | `ready_error` was logged but omitted by `persist` from JSON; pending analysis could be mistaken for success. Now JSON/HTML/CLI carry one `run` status and exit 2. |
 | High for evaluation claims | Give `score.py` one new `CONVERGENCE` fact mentioning the changed function | Output is `CAUGHT`, `recall 1 / 1`, despite no defect evidence. It counts new entity-touching facts/candidates, not semantic recall. |
 | Medium | `SELECT * FROM main.secret` with `stores.secret.readers=[]` passes; unqualified `FROM secret` correctly fails | The SQL regex records `main` instead of `secret`; ownership enforcement has a schema-qualified-name hole. |
 | Medium | A function docstring containing `SELECT * FROM secret` violates `stores.secret.readers=[]` despite executing no SQL | `_strings` does not exclude docstrings. CTE alias artifacts above are another SQL false-positive class. |
@@ -298,12 +298,29 @@ prints child return codes without aggregating them into a failing top-level exit
 These are source-traced limitations; only the convergence-only false catch was
 executably demonstrated here.
 
-No application fix or detector change is included in this documentation task.
-For using this as an automated gate, address fail-open coverage/index outcomes
-first, then make evaluation distinguish facts, candidates and verified defects.
-For application follow-up, preserve the two failing threshold fixtures above and
-fix the specific latest-review and Case-link consumers; a blanket newest-first
-change would break intentional oldest-first/ambiguity behavior.
+### Stage fix verification — 2026-11-26 (A116 P2, T1/T2 slice)
+
+The frozen executable witnesses now live in `tests/test_failure_honest.py` plus
+`tests/test_dispatch_state.py::test_done_is_refused_when_the_contract_scope_is_incomplete`.
+They cover the vacuous-scope gate, unparseable and skipped required inputs, the
+index-error `--no-serve` path, row-capped expansions, corrupt/mismatched cache and
+the preserved 0/1 contract checker meanings. The old defects above remain recorded
+as history; the first three rows are fixed and merged to `main` as `8d5d2b7` via PR #304
+(branch `feat/a116-failure-honest-audit`).
+
+- Baseline, detached worktree at `49c4dfa` with only those witness files copied in:
+  `python -m pytest .claude/skills/architecture-pathway-audit/tests/test_failure_honest.py
+  tests/test_dispatch_state.py --no-header` → **14 failed, 9 passed in 3.16s**. The
+  dispatch witness printed `CONTRACT MET` after scanning 0 files and flipped the job
+  to `done` — the original vacuous-green gate, reproduced.
+- Candidate (merged commit `8d5d2b7`): `python -m pytest .claude/skills/architecture-pathway-audit/tests
+  tests/test_dispatch_state.py --no-header` → **76 passed, 1 skipped in 2.97s**
+  (Python 3.12.3, isolated venv with project `test` extras). No CBM binary, worker
+  action, paid turn or production data was used.
+- Not certified by this slice: F1/F2 application repairs (P1), T3 SQL extraction,
+  T4 semantic cache/result parity, T5 scoring/corpus, live browser C7 and C1–C12
+  as a whole. Preserve the threshold fixtures above for that follow-up; a blanket
+  newest-first change would break intentional oldest-first/ambiguity behavior.
 
 ### Evidence and reproduction notes
 
