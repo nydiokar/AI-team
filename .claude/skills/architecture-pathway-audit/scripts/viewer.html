@@ -67,10 +67,16 @@ let V={root:'',sel:'',tab:'details',group:'off',aux:false,ext:false,low:true,col
 let N=new Map(),OUT=new Map(),IN=new Map(),POS=new Map(),VIS=new Set(),FLAG=new Set();
 function ekey(e){return e.from+'\u0001'+e.to+'\u0001'+e.type}
 function index(){N=new Map(S.nodes.map(n=>[n.id,n]));OUT=new Map();IN=new Map();for(const e of S.edges){if(!OUT.has(e.from))OUT.set(e.from,[]);if(!IN.has(e.to))IN.set(e.to,[]);OUT.get(e.from).push(e);IN.get(e.to).push(e)}FLAG=new Set(S.findings.flatMap(f=>[f.anchor,...f.related]))}
-function merge(d){if(!d.delta){S=d;index();return}const have=new Set(S.nodes.map(n=>n.id)),hk=new Set(S.edges.map(ekey));for(const n of d.nodes)if(!have.has(n.id))S.nodes.push(n);for(const e of d.edges)if(!hk.has(ekey(e)))S.edges.push(e);for(const k of ['routes','findings','coverage','stats','expanded','unresolved','analysis_scope','ready','ready_error'])S[k]=d[k];index()}
+function merge(d){if(!d.delta){S=d;index();return}const have=new Set(S.nodes.map(n=>n.id)),hk=new Set(S.edges.map(ekey));for(const n of d.nodes)if(!have.has(n.id))S.nodes.push(n);for(const e of d.edges)if(!hk.has(ekey(e)))S.edges.push(e);for(const k of ['routes','findings','coverage','stats','expanded','unresolved','analysis_scope','ready','ready_error','run'])S[k]=d[k];index()}
 function status(t,err){const s=$('status');s.textContent=t;s.className=err?'err':''}
 async function api(path){const r=await fetch(path);let j;try{j=await r.json()}catch(e){throw Error('Bad response '+r.status)}if(!r.ok)throw Error((j.kind?j.kind+': ':'')+(j.error||r.status));return j}
 const isExp=(id,d)=>S.expanded.includes(d+'|'+id);
+const isIncomplete=(id,d)=>S.coverage.incomplete_entries.includes(d+'|'+id);
+const analysisStatus=()=>S.run?.status||'unknown';
+const analysisErrors=()=>['failed','incomplete','unknown'].includes(analysisStatus());
+const runNotice=()=>'<div class="notice'+(analysisErrors()?' caution':'')+'">Analysis '+esc(analysisStatus())+
+  (S.run?.stage?' · '+esc(S.run.stage):'')+'</div>'+
+  (S.run?.errors||[]).map(e=>'<div class="notice caution">'+esc(e.stage)+': '+esc(e.detail)+'</div>').join('');
 function edgeShown(e){if(e.type==='CANDIDATE_CALL')return V.low;if(e.low_confidence&&!V.low)return false;if(AUX.has(e.type))return V.aux;return FLOW.has(e.type)||STRUCT.has(e.type)}
 function nodeShown(id){const n=N.get(id);if(!n)return false;if(!V.ext&&(n.kind==='External'))return false;if(!V.aux&&(n.kind==='EnvVar'||n.kind==='Variable'||n.kind==='Table'))return false;return true}
 function label(id){const n=N.get(id);return n?n.label:id}
@@ -116,7 +122,7 @@ function render(){index();const {col,more,edges}=visible();VIS=new Set(col.keys(
   el.querySelector('[data-a=up]').onclick=ev=>{ev.stopPropagation();expand(k,'in')};el.querySelector('[data-a=down]').onclick=ev=>{ev.stopPropagation();V.collapsed.delete(k);expand(k,'out')};
   el.querySelector('[data-a=col]').onclick=ev=>{ev.stopPropagation();V.collapsed.has(k)?V.collapsed.delete(k):V.collapsed.add(k);render()};box.appendChild(el)}
  transform();routesList();pane();legend();
- const nE=[...dEdges.values()].length;if(!V.busy)status(`${VIS.size} nodes · ${nE} edges shown · ${S.nodes.length} nodes / ${S.edges.length} edges loaded${LIVE?'':' · OFFLINE SNAPSHOT (expansion disabled)'}${S.ready_error?' · '+S.ready_error:''}`,!!S.ready_error)}
+ const nE=[...dEdges.values()].length;if(!V.busy)status(`Analysis ${analysisStatus()} · ${VIS.size} nodes · ${nE} edges shown${LIVE?'':' · Offline snapshot'}${S.ready_error?' · '+S.ready_error:''}`,analysisErrors())}
 function dlabel(k,members){return k.startsWith('grp::')?k:label(k)}
 function legend(){const items=[['CALLS','call'],['async','await'],['SPAWNS','spawn'],['HANDLES','handles'],['REGISTERS','registers'],['HTTP_CALLS','http'],['OVERRIDDEN_BY','impl'],['CANDIDATE_CALL','candidate'],['CONFIGURES','config'],['WRITES','writes']];
  $('legend').innerHTML=items.map(([c,t])=>`<svg width="26" height="8"><path class="edge e-${c}" d="M1 4H25"/></svg>${t}`).join(' &nbsp;')}
@@ -143,20 +149,24 @@ function details(){const n=N.get(V.sel);if(!n)return '<div class="notice">Select
  return `<div class="mono"><b>${esc(n.kind)}</b> ${esc(n.label)}</div><div class="mono" style="color:var(--dim)">${esc(n.qn)}</div>
  <div style="margin:6px 0">${n.file?`<a href="vscode://file/${esc(abs)}:${n.line||1}">${esc(n.file)}:${n.line||''}</a> · <span class="link" data-src="${esc(n.id)}">show source</span>`:'(no source location)'} · source: ${esc(n.source)}</div>
  <div class="tb" style="flex-wrap:wrap"><button data-root="${esc(n.id)}">Focus as root</button><button data-exp="out">Expand ▸</button><button data-exp="in">◂ Callers</button></div>
- <div id="srcbox"></div><h3>Outgoing (${outs.length}) ${isExp(n.id,'out')?'· complete':'· not expanded'}</h3>${elist(outs,'out')}
- <h3>Incoming (${ins.length}) ${isExp(n.id,'in')?'· complete':'· partial (only edges loaded via other nodes)'}</h3>${elist(ins,'in')}
+ <div id="srcbox"></div><h3>Outgoing (${outs.length}) ${isIncomplete(n.id,'out')?'· row cap reached':isExp(n.id,'out')?'· expanded':'· not expanded'}</h3>${elist(outs,'out')}
+ <h3>Incoming (${ins.length}) ${isIncomplete(n.id,'in')?'· row cap reached':isExp(n.id,'in')?'· expanded':'· partial (only edges loaded via other nodes)'}</h3>${elist(ins,'in')}
  ${unr.length?`<h3>Unresolved / ambiguous calls (${unr.length})</h3>`+unr.slice(0,60).map(u=>`<div class="mono">L${u.line} ${esc(u.callee)} — <span style="color:var(--warn)">${esc(u.status)}</span> ${esc(u.reason||'')}${u.candidates&&u.candidates.length?'<br>&nbsp;&nbsp;candidates: '+u.candidates.map(c=>`<span class="link" data-sel="${esc(c)}">${esc(c.split('.').slice(-2).join('.'))}</span>`).join(', '):''}</div>`).join(''):''}
  ${S.findings.filter(f=>f.anchor===n.id||f.related.includes(n.id)).map(f=>`<h3>Finding</h3><div class="finding" data-f="${esc(f.id)}"><span class="lvl ${f.level}">${f.level}</span><b>${esc(f.kind)}</b><div>${esc(f.title)}</div></div>`).join('')}`}
-function findings(){const fs=S.findings;if(!fs.length)return `<div class="notice">${esc((S.analysis_scope||{}).note||'No structural candidates in the loaded graph.')} This is not a clean-architecture verdict.</div>`;
- const sc=S.analysis_scope||{};return `<div class="notice caution">Facts are observed structure; candidates are structural patterns that <b>may</b> indicate a defect. Nothing here is semantically verified — every item needs source review. Analysis covers only loaded neighbourhoods (${sc.roots_with_loaded_paths||0} routes with loaded paths).${sc.capped_kinds&&sc.capped_kinds.length?` Capped at ${sc.cap_per_kind} per kind: ${sc.capped_kinds.map(k=>`${k} (${sc.counts_by_kind[k]})`).join(', ')}.`:''}</div>`+
+function findings(){const fs=S.findings,sc=S.analysis_scope||{},counts=sc.counts_by_level||{};
+ const headline=runNotice()+`<div class="notice">${fs.length} findings on this page · ${counts.candidate||0} candidates · ${counts.fact||0} structural facts. Source review is pending.</div>`;
+ const omitted=Object.entries(sc.omitted_by_kind||{}).filter(([,n])=>n>0);
+ const page=omitted.length?`<div class="notice caution">Evidence omitted from this page: ${omitted.map(([k,n])=>esc(k)+' ('+n+')').join(', ')}.${sc.next_findings_offset!=null?' Rerun with --findings-offset '+esc(sc.next_findings_offset)+' for the next page.':''}</div>`:'';
+ return headline+page+
  fs.map(f=>`<div class="finding${f.id===V.finding?' on':''}" data-f="${esc(f.id)}"><span class="lvl ${f.level}">${f.level}</span><b>${esc(f.kind)}</b><div><b>${esc(label(f.anchor))}</b> — ${esc(f.title)}</div><div style="color:var(--dim)">${esc(f.detail)}</div>${f.id===V.finding?evidence(f):''}</div>`).join('')}
 function evidence(f){return f.evidence.map((ev,i)=>ev.path?`<div class="mono" style="margin-top:5px">${ev.role?esc(ev.role)+': ':''}${ev.path.map(x=>`<span class="link" data-sel="${esc(x)}">${esc(label(x))}</span>`).join(' → ')}${ev.config?'<br>config: '+esc(ev.config.join(', ')||'none'):''}<br>${(ev.edges||[]).map(e=>esc(`${e.type||'?'} ${e.file||''}${e.line?':'+e.line:''}`)).join(' | ')}</div>`:`<div class="mono" style="margin-top:5px">shared: ${esc((ev.shared||[]).map(x=>x.split('.').pop()).join(', '))}<br>only A: ${esc((ev.only_a||[]).map(x=>x.split('.').pop()).join(', '))}<br>only B: ${esc((ev.only_b||[]).map(x=>x.split('.').pop()).join(', '))}</div>`).join('')+`<div style="color:var(--dim);margin-top:4px">Semantic verification: ${esc(f.semantic_verification)}</div>`}
 function coverage(){const c=S.coverage,st=S.stats,x=c.route_cross_check_vs_cbm||{};const m=(k,v)=>`<div class="metric">${k}<b>${esc(v)}</b></div>`;
- return `<h3>Routes</h3>${m('Discovered (AST)',c.routes_discovered)}${Object.entries(c.routes_by_status).map(([k,v])=>m('· '+k,v)).join('')}${m('Loaded in selector',c.routes_loaded_in_selector)}${m('Expanded',c.routes_expanded)}${Object.entries(c.handlers).map(([k,v])=>m('Handler: '+k.replace(/_/g,' '),v)).join('')}
+ return runNotice()+`<h3>Source and sweep</h3>${m('Source files',c.source_files||0)}${S.run?.source_sha256?m('Source SHA-256',S.run.source_sha256):''}${Object.entries(c.sweep||{}).map(([k,v])=>m(k.replace(/_/g,' '),v)).join('')}
+ <h3>Routes</h3>${m('Discovered (AST)',c.routes_discovered)}${Object.entries(c.routes_by_status).map(([k,v])=>m('· '+k,v)).join('')}${m('Loaded in selector',c.routes_loaded_in_selector)}${m('Expanded',c.routes_expanded)}${Object.entries(c.handlers).map(([k,v])=>m('Handler: '+k.replace(/_/g,' '),v)).join('')}
  <h3>Cross-check vs CBM Route nodes</h3>${x.available?m('CBM Route nodes',x.cbm_route_nodes)+m('AST METHOD+path keys',x.ast_route_keys)+m('Matched',x.matched)+m('AST-only',x.ast_only.length)+m('CBM-only (server)',x.cbm_only_server.length)+m('CBM-only (outbound HTTP targets)',x.cbm_only_client_http_targets.length)+`<div class="mono" style="color:var(--dim)">${esc([...x.ast_only,...x.cbm_only_server,...x.cbm_only_client_http_targets].join('\n'))}</div>`:'<div style="color:var(--dim)">pending CBM</div>'}
  <h3>Graph</h3>${m('Loaded nodes',c.loaded_nodes)}${m('Loaded edges',c.loaded_edges)}${Object.entries(c.edge_sources).map(([k,v])=>m('Edges from '+k,v)).join('')}${m('Expansions cached',c.expanded_entries)}${m('Incomplete (row cap)',c.incomplete_entries.length)}
  <h3>Unresolved calls (in expanded nodes)</h3>${Object.entries(c.unresolved_calls).map(([k,v])=>m(k,v)).join('')||'<div style="color:var(--dim)">none</div>'}
- <h3>Limitations</h3>${[...c.cbm_limitations,...c.route_limitations.map(l=>`${l.kind} ${l.file}:${l.line} ${l.detail}`),...c.parse_errors].map(t=>`<div class="notice">${esc(t)}</div>`).join('')}<div class="notice caution">Complete repository audit: NO. Static analysis cannot see runtime-computed dispatch; absent edges are not evidence of absent execution paths.</div>
+ <h3>Limitations</h3>${[...c.cbm_limitations,...c.route_limitations.map(l=>`${l.kind} ${l.file}:${l.line} ${l.detail}`),...c.parse_errors,...Object.entries(c.skipped_files||{}).map(([k,v])=>k+' · '+v)].map(t=>`<div class="notice">${esc(t)}</div>`).join('')}<div class="notice caution">Results cover the configured static analysis. Runtime-computed dispatch may be missing.</div>
  <h3>Performance</h3>${m('CBM calls (this process)',st.cbm_calls)}${m('CBM query seconds',st.cbm_query_seconds)}${m('Cache hits / misses',`${st.cache_hits} / ${st.cache_misses}`)}${m('Last expansion ms',st.last_expand_ms??'-')}${m('Index runs (this process)',st.index_runs)}${st.index?m('Last index',`${st.index.at} (${st.index.seconds}s, ${st.index.nodes} nodes)`):''}${m('CBM version',st.cbm_version||'-')}`}
 function wirePane(){const p=$('pane');p.querySelectorAll('[data-sel]').forEach(a=>a.onclick=()=>{const id=a.dataset.sel;if(!VIS.has(id))V.extra.add(id);select(id)});
  p.querySelectorAll('[data-root]').forEach(b=>b.onclick=()=>{setRoot(b.dataset.root);if(!isExp(b.dataset.root,'out'))expand(b.dataset.root,'out')});
@@ -185,7 +195,6 @@ const tog=(b,k)=>{$(b).onclick=()=>{V[k]=!V[k];$(b).classList.toggle('on',V[k]);
 document.querySelectorAll('.tabs button').forEach(b=>b.onclick=()=>{V.tab=b.dataset.t;pane()});
 async function boot(){if(!S&&LIVE)S=await api('/api/state');index();$('sub').textContent=`${S.project} · ${S.scope}`;
  const first=S.routes.find(r=>isExp(r.id,'out'))||S.routes[0];if(first){V.root=first.id;V.sel=first.id}render();fit();
- if(LIVE&&!S.ready){status('CBM session warming up / indexing in background; routes are already available.');const poll=setInterval(async()=>{try{const s=await api('/api/state');if(s.ready){clearInterval(poll);merge(s);render()}}catch(e){}},1500)}
  window.__explorer={get state(){return S},get view(){return V},visibleCount:()=>VIS.size,openRoute,expand,showFinding,render}}
 boot().catch(e=>status('Failed to load state: '+e.message,true));
 </script></body></html>
