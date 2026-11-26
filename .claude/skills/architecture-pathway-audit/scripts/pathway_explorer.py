@@ -222,7 +222,8 @@ class Engine:
         atomic_text(self.out, self.render_html(st))
         atomic_json(self.report, {k: st[k] for k in (
             'project', 'scope', 'run', 'coverage', 'analysis_scope', 'findings', 'stats', 'routes',
-        )} | {'snapshot_path': str(self.out)})
+        )} | {'snapshot_path': str(self.out),
+              'sql_edges': [e for e in st['edges'] if e['type'] in ('READS_TABLE', 'WRITES_TABLE')]})
 
     def render_html(self, st: Optional[dict[str, Any]] = None) -> str:
         return render_snapshot(st or self.state())
