@@ -58,6 +58,11 @@ constraint permits that access; an empty list permits nobody. Choose constraints
 around actual responsibilities: lifecycle queries are not necessarily competing
 pending-state read models.
 
+For AI-Team inbox ownership, use `contracts/agent_inbox.yaml` with
+`tests/test_a104_single_pending_source.py`. The contract checks store access.
+The repository test checks that wake production and activation consult
+`pending_for` and agree on message state.
+
 Exit statuses: **0** no unwaived violations found; **1** violations; **2** invalid
 contract/input. Always inspect coverage: zero scanned files, skipped files and
 Python parse failures can invalidate a passing result. Static SQL extraction misses
@@ -137,8 +142,21 @@ coding-agent CLI:
 ```
 
 `test_real_cbm.py` exercises the real binary, expansion, cache reuse/invalidation
-and competing-path detection. It skips when CBM is missing; a skip does not prove
-compatibility. The benchmark runner/scorer require an external corpus containing
-`base/`, `variants/`, `controls/` and `GROUND_TRUTH.json`. The scorer's `CAUGHT`
-label measures entity touches, not verified defect recall. Results, reviewed
-findings, reproductions and experience belong in [MEASUREMENTS.md](MEASUREMENTS.md).
+and competing-path detection. It skips when CBM is missing.
+
+Run and score the bundled corpus using the verified CBM release and a disposable
+results directory. The runner records one manifest per invocation and returns
+nonzero if any required analysis fails or omits findings.
+
+```bash
+audit_dir=.claude/skills/architecture-pathway-audit/benchmark
+audit_out=$(mktemp -d)
+.venv/bin/python "$audit_dir/run_corpus.py" "$audit_dir/corpus" "$audit_out"
+.venv/bin/python "$audit_dir/score.py" "$audit_dir/corpus" "$audit_out"
+```
+
+The exact source labels identify candidate localization independently from
+verified contract violations. Structural facts never count as localization.
+Benign controls have their own flagged and unknown counts. See
+`tests/test_benchmark.py` for independent SQLite replay of the ledger witnesses
+and [MEASUREMENTS.md](MEASUREMENTS.md) for results.
