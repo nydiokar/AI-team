@@ -107,6 +107,7 @@ ledger with the 2026-11-26 read-only Kanebra findings:
 |---|---|---|---|---|
 | **A117** | `AGENT_117_TELEMETRY_CONTEXT_ECONOMICS.md` | — | **active** — PR #293 merged; gateway/task-server live `05fad0a` | Context/advice, recovery lineage and SDK estimates verified; worker activation/natural acceptance remain explicit gates. |
 | **A118** | `AGENT_118_OPENCODE_REPLY_RECOVERY.md` | — | **active** — issue #298; P0 evidence review in progress; no implementation merged | Reconstruct the reported OpenCode missing-reply incident, determine whether managed-turn ownership/correlation is structurally wrong, and repair the proven cause with end-to-end attribution and visibility regressions. |
+| **A119** | `AGENT_119_OPENCODE_V2_FOUNDATION.md` | — (coordinate A118/A102) | **ready** — Level 3; issue #310; no production cutover | Paid-free V2 contract probe + fake server and adoption/seam decisions for the later OpenCode refactor; V2 auth, route, prompt, message and event breaks confirmed offline. |
 | **A116** | `AGENT_116_TRUSTWORTHY_ARCHITECTURE_AUDIT.md` | none; coordinate A111 | **active — P1 ledger reads merged PR #302 `5a04f30` (2026-11-26); audit-tool stages + certification open; issue #290** | Repair authoritative review/membership reads and make architecture-audit execution, coverage, counts and evaluation failure-honest; autonomous implementation, independent verification and scoped certification required. |
 | **A111** | `AGENT_111_INTENT_ALIGNED_VERIFIED_CLOSURE.md` | staged gates in packet | **ready — operator-approved; issue #292** — implementation not started | P0–P6: failure/friction traces → inherited intent → evidence-bound closure → existing reviewer → recovery/bounds → measured quality/usability → useful hands-off proof. Coordinates A116 (A114 retired 2026-11-26 by SDK-budget abstention); reserved activation gates remain. |
 | **A105** | `AGENT_105_CROSS_PROCESS_TURN_SIGNAL.md` | A104 ✅ | **active** — PRs #280/#281 merged; live `7d39020`; natural acceptance pending (stale marker is this external gate, not missing engineering) | Shared bounded HTTP turn signal wakes scheduler, effects and inbox; polls remain recovery. Await three natural eligible completions ≤2s and 24h observation; no paid proof turn. |
@@ -127,6 +128,12 @@ ledger with the 2026-11-26 read-only Kanebra findings:
 ---
 
 ## Recent shift notes
+
+**2026-11-26 — OpenCode V2 foundation authored (A119).** The installed CLI is `v2.4.2` while
+the live adapter still speaks V1 unprefixed routes; a spawned V2 `serve` returns `401` to
+the adapter's unauthenticated health probe. V2 also removes assistant `parentID` and the
+SSE event names the adapter reads. Audit is `docs/OPENCODE_V2_MIGRATION_AUDIT.md`;
+A119 is ready, Level 3, and performs no cutover or live turn. A118 still owns issue #298.
 
 **2026-11-23 — #301 delegated assignment delivery merged (`b87acbf`).** Explicit assignment
 outcomes now reach their owning worker across process death, with a bounded authenticated Case
