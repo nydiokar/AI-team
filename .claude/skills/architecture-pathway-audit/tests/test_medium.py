@@ -48,6 +48,49 @@ class TestExtraction(unittest.TestCase):
     def test_prose_is_not_sql(self):
         self.assertEqual(data_access(fn('def f():\n    return "read from the user and update the settings later"\n')), [])
 
+    def test_qualified_and_quoted_table_names(self):
+        a = data_access(fn('''def read(c):
+    c.execute('SELECT * FROM main."Secret Store" JOIN temp.[other] USING (id)')
+    c.execute('UPDATE main.`write table` SET id = 2')
+'''))
+        self.assertEqual({(x['table'], x['mode']) for x in a},
+                         {('secret store', 'read'), ('other', 'read'), ('write table', 'write')})
+
+    def test_docstrings_and_nested_cte_scope(self):
+        a = data_access(fn('''def read(c):
+    """SELECT * FROM example_only"""
+    c.execute("WITH queue AS (SELECT * FROM incoming) "
+              "SELECT * FROM queue JOIN main.queue JOIN ("
+              "WITH activity AS (SELECT * FROM history LIMIT 20) SELECT * FROM activity)")
+    c.execute("SELECT * FROM activity")
+'''))
+        got = {(x['table'], x['window']) for x in a}
+        self.assertEqual(got, {('incoming', 'full'), ('queue', 'full'),
+                               ('history', 'oldest_n'), ('activity', 'full')})
+
+    def test_shared_declaration_is_attributed_to_execute_call(self):
+        from pyast_adapter import parse_file
+
+        facts = parse_file('''COLS = "id, state"
+PENDING_SQL = f"SELECT {COLS} FROM real_pending LIMIT ?"
+
+def audit_only():
+    return PENDING_SQL
+
+def pending_for(c, limit):
+    c.execute(f"SELECT * FROM ({PENDING_SQL})", (limit,))
+
+def dynamic(c, sql):
+    c.execute(sql)
+''', 'owner.py')
+        audit, pending, dynamic = facts['defs']
+        self.assertNotIn('access', audit)
+        self.assertEqual([(a['table'], a['line'], a['declaration_lines']) for a in pending['access']],
+                         [('real_pending', 8, [1, 2])])
+        self.assertNotIn('access', dynamic)
+        self.assertEqual([(v['function'], v['line']) for v in facts['sql_limitations']],
+                         [('dynamic', 11)])
+
 
 class TestRules(unittest.TestCase):
     def test_oldest_n_on_append_only_flagged_but_not_on_mutable(self):

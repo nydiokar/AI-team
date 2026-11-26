@@ -1,0 +1,40 @@
+{
+  "cases": [
+    {
+      "id": "latest-review",
+      "classification": "defect",
+      "description": "F1: a later applicable rejection is absent from the decision window.",
+      "graph": {"kind": "TRUNCATED_WINDOW", "entity": "table::flow_events", "file": "ledger.py", "line": 8, "edge_type": "READS_TABLE", "window": "oldest_n"}
+    },
+    {
+      "id": "case-membership",
+      "classification": "defect",
+      "description": "F2: the 201st member loses worker-role attribution.",
+      "graph": {"kind": "TRUNCATED_WINDOW", "entity": "table::flow_links", "file": "ledger.py", "line": 8, "edge_type": "READS_TABLE", "window": "oldest_n"}
+    },
+    {
+      "id": "retired-import",
+      "classification": "defect",
+      "description": "A102 control-plane example: a caller imports a retired backend class.",
+      "contract": {"rule": "retired:OldBackend", "file": "carrier.py", "line": 1, "kind": "import"}
+    },
+    {
+      "id": "pending-bypass",
+      "classification": "defect",
+      "description": "A competing consumer bypasses pending_for and counts terminal messages as pending.",
+      "contract": {"rule": "store:agent_inbox:readers", "file": "consumer.py", "line": 2, "kind": "read"}
+    },
+    {
+      "id": "requester-ambiguity",
+      "classification": "benign",
+      "description": "The LIMIT 2 read accurately distinguishes one candidate from many.",
+      "graph": {"kind": "TRUNCATED_WINDOW", "entity": "table::flow_links", "file": "ledger.py", "line": 8, "edge_type": "READS_TABLE", "window": "oldest_n"}
+    },
+    {
+      "id": "inbox-lifecycle",
+      "classification": "benign",
+      "description": "The owner reads terminal state for lifecycle inspection; its only consumer calls pending_for.",
+      "contract": {"rule": "store:agent_inbox:readers", "file": "consumer.py", "line": 2, "kind": "read"}
+    }
+  ]
+}
