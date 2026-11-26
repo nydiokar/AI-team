@@ -1,86 +1,208 @@
-"""Score detector output vs ground truth. Usage: score.py <corpus_dir> <results_dir>
+"""Score the portable corpus by matching independently labeled source evidence."""
+from __future__ import annotations
 
-A variant is only counted by touching entities via a finding that is NEW relative to base; read the output
-critically: a CONVERGENCE/DIVERGE_REJOIN fact mentioning the function is not a catch of the defect."""
+import argparse
+import hashlib
 import json
-import pathlib
-import re
-import sys
-from collections import Counter
+from pathlib import Path
+from typing import Literal
 
-R = pathlib.Path(sys.argv[2])
-GT = json.load(open(pathlib.Path(sys.argv[1]) / 'GROUND_TRUTH.json'))
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
-def norm(s):
-    s = re.sub(r'^cb-[a-z0-9]+\.', '', s)
-    return s.replace('route::', 'R:')
+class StrictModel(BaseModel):
+    model_config = ConfigDict(extra='forbid')
 
 
-def load(name):
-    d = json.load(open(R / f'{name}.json'))
-    out = []
-    for f in d['findings']:
-        ids = [norm(f['anchor'])] + [norm(x) for x in f['related']]
-        text = norm(json.dumps(f))
-        out.append({'kind': f['kind'], 'sig': (f['kind'], tuple(sorted(ids))), 'ids': ids, 'text': text, 'title': f['title'],
-                    'tags': f.get('tags', [])})
-    return out
+class GraphWitness(StrictModel):
+    kind: str
+    entity: str
+    file: str
+    line: int = Field(ge=1)
+    edge_type: str
+    window: str
 
 
-base = load('base')
-base_sigs = {f['sig'] for f in base}
-base_kinds = Counter(f['kind'] for f in base)
-print('BASE findings', len(base), dict(base_kinds))
+class ContractWitness(StrictModel):
+    rule: str
+    file: str
+    line: int = Field(ge=1)
+    kind: str
 
 
-def touches(f, items, tables):
-    hits = []
-    for it in items:
-        if it in f['text']:
-            hits.append(it.split('.')[-1])
-    for t in tables:
-        if f'table::{t}' in f['text'] or f'Table {t} ' in f['title']:
-            hits.append('T:' + t)
-    return hits
+class Case(StrictModel):
+    id: str = Field(pattern=r'^[a-z][a-z0-9-]*$')
+    classification: Literal['defect', 'benign']
+    description: str
+    graph: GraphWitness | None = None
+    contract: ContractWitness | None = None
+
+    @model_validator(mode='after')
+    def exactly_one_witness(self) -> Case:
+        if (self.graph is None) == (self.contract is None):
+            raise ValueError('each case needs exactly one graph or contract witness')
+        return self
+
+    @property
+    def path(self) -> Path:
+        return Path('variants' if self.classification == 'defect' else 'controls') / self.id
 
 
-print('\n== DEFECT VARIANTS')
-caught = 0
-for v in GT['variants']:
-    fs = load(v['id'])
-    new = [f for f in fs if f['sig'] not in base_sigs]
-    rel = []
-    for f in new:
-        h = touches(f, v['functions'], [])
-        if h:
-            rel.append((f['kind'], h, f['title'][:70]))
-    rel_t = []
-    for f in new:
-        h = touches(f, [], v['tables'])
-        if h and f['kind'] in ('ORPHAN_MEDIUM', 'TRUNCATED_WINDOW', 'SPLIT_READERS'):
-            rel_t.append((f['kind'], h, f['title'][:70]))
-    in_base = [f['kind'] for f in fs if f['sig'] in base_sigs and touches(f, v['functions'], [])]
-    ok = bool(rel or rel_t)
-    caught += ok
-    print(v['id'], v['class'], 'HARD' if v.get('expected_hard') else '    ', 'CAUGHT' if ok else 'missed',
-          f'new={len(new)}', rel[:2], rel_t[:2], '| already-in-base-mentions:', Counter(in_base).most_common(2))
-print('recall', caught, '/', len(GT['variants']))
+class GroundTruth(StrictModel):
+    cases: list[Case] = Field(min_length=1)
 
-print('\n== CONTROLS (new findings touching the control addition = false positive)')
-fp_total = 0
-for k in GT['controls']:
-    fs = load(k['id'])
-    new = [f for f in fs if f['sig'] not in base_sigs]
-    rel = [(f['kind'], touches(f, k['functions'], []), f['title'][:70]) for f in new if touches(f, k['functions'], [])]
-    fp_total += bool(rel)
-    print(k['id'], f'new={len(new)}', 'FALSE-POSITIVE' if rel else 'clean', rel[:3])
-print('controls flagged', fp_total, '/', len(GT['controls']))
+    @model_validator(mode='after')
+    def unique_ids(self) -> GroundTruth:
+        names: list[str] = [case.id for case in self.cases]
+        if 'base' in names or len(set(names)) != len(names):
+            raise ValueError('case names must be unique and may not use the reserved base name')
+        return self
 
-print('\n== ALL new-vs-base findings by kind across variants (noise vs signal view)')
-c = Counter()
-for v in GT['variants']:
-    for f in load(v['id']):
-        if f['sig'] not in base_sigs:
-            c[f['kind']] += 1
-print(dict(c))
+
+class Observation(StrictModel):
+    status: Literal['completed', 'failed']
+    returncode: int | None = None
+    sha256: str | None = None
+    error: str | None = None
+
+
+class Manifest(StrictModel):
+    schema_version: Literal[1] = 1
+    generation: str = Field(pattern=r'^run-[0-9a-f]{32}$')
+    corpus_sha256: str
+    status: Literal['running', 'completed', 'failed']
+    runs: dict[str, Observation] = Field(default_factory=dict)
+
+
+def load_corpus(corpus: Path) -> tuple[GroundTruth, str]:
+    labels: bytes = (corpus / 'GROUND_TRUTH.json').read_bytes()
+    gt: GroundTruth = GroundTruth.model_validate_json(labels)
+    files: list[Path] = []
+    for case_path in [Path('base'), *(case.path for case in gt.cases)]:
+        path: Path = corpus / case_path
+        if not path.is_dir():
+            raise ValueError(f'missing fixture: {case_path}')
+        for file in path.rglob('*'):
+            if {'.git', '__pycache__'} & set(file.relative_to(path).parts):
+                continue
+            if file.is_symlink():
+                raise ValueError(f'fixture contains a symbolic link: {file.relative_to(corpus)}')
+            if file.is_file():
+                files.append(file)
+    digest = hashlib.sha256(labels)
+    for file in sorted(files):
+        digest.update(file.relative_to(corpus).as_posix().encode('utf-8'))
+        digest.update(b'\x00')
+        digest.update(hashlib.sha256(file.read_bytes()).digest())
+    return gt, digest.hexdigest()
+
+
+def validate_report(report: dict, *, graph: bool, returncode: int) -> None:
+    if not isinstance(report, dict) or report.get('run', {}).get('status') != 'completed':
+        raise ValueError('required analysis did not complete')
+    if graph:
+        scope: dict = report.get('analysis_scope') or {}
+        if (returncode != 0 or not isinstance(report.get('findings'), list)
+                or 'omitted_by_kind' not in scope or any(scope['omitted_by_kind'].values())):
+            raise ValueError('graph report failed, omitted findings, or lacks coverage evidence')
+    elif not isinstance(report.get('violations'), list) or returncode != (1 if report['violations'] else 0):
+        raise ValueError('contract exit status and violations do not agree')
+
+
+def _read_report(out: Path, manifest: Manifest, case: str, *, graph: bool) -> dict:
+    record: Observation | None = manifest.runs.get(case)
+    if record is None or record.status != 'completed' or record.returncode is None:
+        raise ValueError(record.error if record and record.error else 'missing completed observation')
+    raw: bytes = (out / manifest.generation / f'{case}.json').read_bytes()
+    if hashlib.sha256(raw).hexdigest() != record.sha256:
+        raise ValueError('report digest differs from the completed observation')
+    report: dict = json.loads(raw)
+    validate_report(report, graph=graph, returncode=record.returncode)
+    return report
+
+
+def _graph_matches(finding: dict, witness: GraphWitness) -> bool:
+    if (finding.get('level'), finding.get('kind'), finding.get('anchor')) != ('candidate', witness.kind, witness.entity):
+        return False
+    return any(
+        (edge.get('file'), edge.get('line'), edge.get('to'), edge.get('type'), (edge.get('props') or {}).get('window'))
+        == (witness.file, witness.line, witness.entity, witness.edge_type, witness.window)
+        for evidence in finding.get('evidence', []) for edge in evidence.get('edges', [])
+    )
+
+
+def assess_case(case: Case, report: dict, base: dict) -> tuple[str, int]:
+    """Compare candidate localization or a deterministic policy violation to a frozen witness."""
+    if case.graph:
+        candidates: list[dict] = [f for f in report['findings'] if f.get('level') == 'candidate']
+        matched: bool = any(_graph_matches(f, case.graph) for f in candidates)
+        preexisting: bool = any(_graph_matches(f, case.graph) for f in base['findings'])
+        total: int = len(candidates)
+        defect_status: str = 'localized' if matched and not preexisting else ('preexisting' if matched else 'missed')
+        control_status: str = 'flagged' if matched and not preexisting else 'unflagged'
+    else:
+        assert case.contract is not None
+        key: dict = case.contract.model_dump()
+        violations: list[dict] = report['violations']
+        matched = any(all(hit.get(field) == value for field, value in key.items()) for hit in violations)
+        total = len(violations)
+        defect_status = 'verified_violation' if matched else 'missed'
+        control_status = 'flagged' if violations else 'unflagged'
+    return (defect_status if case.classification == 'defect' else control_status), total
+
+
+def score(corpus: Path, out: Path) -> dict:
+    labels, digest = load_corpus(corpus)
+    manifest: Manifest = Manifest.model_validate_json((out / 'manifest.json').read_bytes())
+    if manifest.corpus_sha256 != digest or manifest.status == 'running':
+        raise ValueError('no finished observations for the current corpus')
+    rows: list[dict] = []
+    try:
+        base: dict = _read_report(out, manifest, 'base', graph=True)
+        base_error: str | None = None
+    except (AttributeError, OSError, ValueError) as exc:
+        base = {}
+        base_error = str(exc)
+    for case in labels.cases:
+        row: dict = {'id': case.id, 'classification': case.classification, 'engine': 'graph' if case.graph else 'contract'}
+        try:
+            if case.graph and base_error is not None:
+                raise ValueError(f'baseline unavailable: {base_error}')
+            report: dict = _read_report(out, manifest, case.id, graph=case.graph is not None)
+            row['result'], row['candidate_or_violation_count'] = assess_case(case, report, base)
+        except (AttributeError, KeyError, OSError, TypeError, ValueError) as exc:
+            row.update(result='unknown', error=str(exc))
+        rows.append(row)
+
+    def metric(classification: str, engine: str | None, hit: str) -> dict:
+        eligible: list[dict] = [r for r in rows if r['classification'] == classification and (engine is None or r['engine'] == engine)]
+        unknown: int = sum(r['result'] == 'unknown' for r in eligible)
+        return {'matched': sum(r['result'] == hit for r in eligible), 'evaluated': len(eligible) - unknown,
+                'labeled': len(eligible), 'unknown': unknown}
+
+    complete: bool = manifest.status == 'completed' and base_error is None and all(r['result'] != 'unknown' for r in rows)
+    return {
+        'status': 'completed' if complete else 'incomplete',
+        'corpus_sha256': digest,
+        'candidate_localization': metric('defect', 'graph', 'localized'),
+        'verified_contract_defect_recall': metric('defect', 'contract', 'verified_violation'),
+        'benign_controls_flagged': metric('benign', None, 'flagged'),
+        'cases': rows,
+    }
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('corpus', type=Path)
+    parser.add_argument('results', type=Path)
+    args = parser.parse_args()
+    try:
+        summary: dict = score(args.corpus, args.results)
+    except (OSError, ValueError) as exc:
+        summary = {'status': 'incomplete', 'error': str(exc)}
+    print(json.dumps(summary, indent=2))
+    return 0 if summary['status'] == 'completed' else 1
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())
