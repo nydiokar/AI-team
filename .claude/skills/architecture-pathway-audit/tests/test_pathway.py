@@ -389,6 +389,27 @@ class TestEngineOffline(unittest.TestCase):
         os.utime(path, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
         self.assertEqual(self.eng.sync_files(), {'app/services/store.py'})
 
+    def test_changed_source_prevents_final_artifact_and_oversize_drops_old_facts(self):
+        path = self.scope / 'app/services/store.py'
+        path.write_bytes(b' ' * (pe.MAX_SOURCE_BYTES + 1))
+        with self.assertRaisesRegex(cbm_client.CBMError, 'Source inventory changed'):
+            self.eng.persist(verify_source=True)
+        self.assertIn('app/services/store.py', self.eng.sync_files())
+        self.assertNotIn('app/services/store.py', self.eng.cache['facts'])
+        self.assertIn('app/services/store.py', self.eng.coverage({}, [])['skipped_files'])
+
+    def test_distinct_sql_execution_lines_survive_graph_merge(self):
+        path = self.scope / 'app/ledger.py'
+        path.write_text('QUERY = "SELECT * FROM test ORDER BY id ASC LIMIT 2"\n'
+                        'def read(conn):\n'
+                        '    conn.execute("SELECT * FROM test")\n'
+                        '    conn.execute(QUERY)\n')
+        self.eng.sync_files()
+        _, edges, _ = self.eng.graph()
+        reads = [e for e in edges if e['to'] == 'table::test']
+        self.assertEqual([e['line'] for e in reads], [3, 4])
+        self.assertEqual(reads[1]['props']['declaration_lines'], [1])
+
     def test_incomplete_query_is_retried_and_caps_are_distinct(self):
         rid = self.rid('POST', '/v1/orders/a')
         route, _ = self.eng.expand(rid)

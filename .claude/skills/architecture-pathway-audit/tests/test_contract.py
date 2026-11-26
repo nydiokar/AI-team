@@ -213,6 +213,27 @@ class TestCheckOnGit(unittest.TestCase):
         self.assertFalse(result['ok'])
         self.assertEqual(result['status'], 'failed')
 
+    def test_worktree_report_cannot_supply_its_own_retired_token(self):
+        import json
+        contract_path, output = self.repo / 'contract.yaml', self.repo / 'agent' / 'result.json'
+        contract_path.write_text('scope: [agent]\nretired: [pending]\n')
+        args = ['--contract', str(contract_path), '--repo', str(self.repo), '--json', str(output)]
+        self.assertEqual(main(args), 0)
+        result = json.loads(output.read_text())
+        self.assertEqual(result['coverage']['generated_report'], 'agent/result.json')
+        self.assertEqual(result['coverage']['files'], 1)
+
+    def test_store_check_has_execution_and_declaration_provenance(self):
+        (self.repo / 'agent' / 'reader.py').write_text(
+            "SELECTOR = 'SELECT id FROM main.\"events\"'\n"
+            'def run(conn, statement):\n    conn.execute(SELECTOR)\n    conn.execute(statement)\n',
+        )
+        c = Contract.model_validate({'scope': ['agent'], 'stores': {'events': {'readers': []}}})
+        result = check(c, self.repo, None)
+        self.assertEqual([v['line'] for v in result['violations']], [3])
+        self.assertEqual(result['violations'][0]['declaration_lines'], [1])
+        self.assertEqual(result['coverage']['sql_limitations'][0]['line'], 4)
+
 
 if __name__ == '__main__':
     unittest.main()

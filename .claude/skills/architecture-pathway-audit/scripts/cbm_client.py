@@ -29,13 +29,18 @@ class CBMError(RuntimeError):
 
 def find_executable(explicit: Optional[str] = None) -> str:
     """Resolve the CBM binary: --cbm, $CBM_BIN, PATH, then the default Windows/Unix install dirs."""
-    candidates: list[Optional[str]] = [explicit, os.getenv('CBM_BIN'), shutil.which('codebase-memory-mcp')]
+    configured: str | None = explicit if explicit is not None else os.getenv('CBM_BIN')
+    if configured is not None:
+        if Path(configured).is_file() and os.access(configured, os.X_OK):
+            return configured
+        raise CBMError(f'CBM executable is unavailable: {configured}')
+    candidates: list[Optional[str]] = [shutil.which('codebase-memory-mcp')]
     local: Optional[str] = os.getenv('LOCALAPPDATA')
     if local:
         candidates.append(str(Path(local) / 'Programs' / 'codebase-memory-mcp' / 'codebase-memory-mcp.exe'))
     candidates.append(str(Path.home() / '.local' / 'bin' / 'codebase-memory-mcp'))
     for c in candidates:
-        if c and Path(c).is_file():
+        if c and Path(c).is_file() and os.access(c, os.X_OK):
             return c
     raise CBMError('codebase-memory-mcp executable not found; pass --cbm <path> or set CBM_BIN')
 
@@ -77,7 +82,7 @@ class CBMClient:
         self.version: str = ''
 
     # -- process management -------------------------------------------------
-    def _start(self) -> None:
+    def _start(self, init_timeout: float = 60.0) -> None:
         t0: float = time.perf_counter()
         self.msgs = queue.Queue()
         self.proc = subprocess.Popen([self.exe], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
@@ -101,7 +106,7 @@ class CBMClient:
         threading.Thread(target=pump, daemon=True, name='cbm-stdout').start()
         init: Any = self._rpc('initialize', {'protocolVersion': '2025-06-18', 'capabilities': {},
                                              'clientInfo': {'name': 'architecture-pathway-audit', 'version': '5'}},
-                              timeout=60)
+                              timeout=init_timeout)
         self.version = str((init.get('serverInfo') or {}).get('version', ''))
         self._send({'jsonrpc': '2.0', 'method': 'notifications/initialized'})
         self.log(f'CBM MCP session ready (v{self.version}) in {time.perf_counter() - t0:.2f}s')
@@ -141,30 +146,48 @@ class CBMClient:
                     self.proc.wait(3)
                 except (OSError, subprocess.TimeoutExpired):
                     self.proc.kill()
+                    self.proc.wait()
             if self.proc and self.proc.stdout:
                 self.proc.stdout.close()
             self.proc = None
 
-    def ensure_started(self) -> None:
+    def ensure_started(self, init_timeout: float = 60.0) -> None:
         with self.lock:
             if self.proc is None or self.proc.poll() is not None:
-                self._start()
+                try:
+                    self._start(init_timeout)
+                except BaseException:
+                    self.close()
+                    raise
 
     # -- tools ----------------------------------------------------------------
-    def tool(self, name: str, args: dict[str, Any], timeout: Optional[float] = None) -> Any:
+    def tool(
+        self, name: str, args: dict[str, Any], timeout: Optional[float] = None, *, deadline: float | None = None,
+    ) -> Any:
         """Call a CBM tool; one restart on a dead/hung process, never on a tool error."""
         with self.lock:
             for attempt in (1, 2):
-                self.ensure_started()
+                wait: float = timeout or self.timeout
+                if deadline is not None:
+                    wait = min(wait, deadline - time.monotonic())
+                    if wait <= 0:
+                        raise TimeoutError('CBM request deadline exceeded')
+                self.ensure_started(init_timeout=min(60.0, wait) if deadline is not None else 60.0)
                 t0: float = time.perf_counter()
                 try:
+                    if deadline is not None:
+                        wait = min(wait, deadline - time.monotonic())
+                        if wait <= 0:
+                            raise TimeoutError('CBM request deadline exceeded')
                     result: Any = self._rpc('tools/call', {'name': name, 'arguments': args},
-                                            timeout or self.timeout)
+                                            wait)
                 except (TimeoutError, OSError, CBMError) as exc:
                     if isinstance(exc, CBMError) and 'exited' not in str(exc):
                         raise
                     self.log(f'CBM session failed ({exc}); restarting (attempt {attempt})')
                     self.close()
+                    if deadline is not None and time.monotonic() >= deadline:
+                        raise TimeoutError('CBM request deadline exceeded') from exc
                     if attempt == 2:
                         raise CBMError(f'CBM {name} failed twice: {exc}') from exc
                     continue
@@ -174,7 +197,9 @@ class CBMClient:
                 return _structured(result)
         raise CBMError('unreachable')
 
-    def query(self, project: str, cypher: str, page: int = 200, max_pages: int = 20) -> tuple[list[dict[str, Any]], bool]:
+    def query(
+        self, project: str, cypher: str, page: int = 200, max_pages: int = 20, *, deadline: float | None = None,
+    ) -> tuple[list[dict[str, Any]], bool]:
         """Run a read query, following CBM `has_more` with explicit offsets.
 
         Returns (rows as dicts, complete). complete=False means the row cap was hit and the
@@ -193,7 +218,7 @@ class CBMClient:
                 args['cursor'] = cursor  # snapshot continuation: stable across concurrent re-indexing
             else:
                 args['offset'] = offset
-            res: Any = self.tool('query_graph', args)
+            res: Any = self.tool('query_graph', args, deadline=deadline) if deadline is not None else self.tool('query_graph', args)
             if not isinstance(res, dict) or not isinstance(res.get('rows'), list):
                 raise CBMError('query_graph returned no rows array: ' + str(res)[:300])
             cols: list[str] = list(res.get('columns') or [])
