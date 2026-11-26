@@ -14,7 +14,7 @@ not by name, so legitimate fan-out to helpers is not reported as an anomaly.
 from __future__ import annotations
 
 import hashlib
-from collections import defaultdict, deque
+from collections import Counter, defaultdict, deque
 from typing import Any, Iterable, Optional
 
 FLOW: frozenset[str] = frozenset({'HANDLES', 'CALLS', 'ASYNC_CALLS', 'HTTP_CALLS', 'SPAWNS', 'CALL_REFERENCE',
@@ -108,7 +108,8 @@ HUB_MIN_READERS: int = 10  # a medium read by at least this many functions AND i
 
 def analyze(nodes: dict[str, dict[str, Any]], edges: list[dict[str, Any]], roots: list[str],
             fanin: dict[str, int], utility_threshold: int,
-            twins: Optional[list[dict[str, Any]]] = None) -> dict[str, Any]:
+            twins: Optional[list[dict[str, Any]]] = None, *,
+            findings_offset: int = 0, acknowledged: frozenset[str] = frozenset()) -> dict[str, Any]:
     """Return {'findings': [...], 'scope': {...}} for the loaded graph."""
     succ: dict[str, list[str]] = defaultdict(list)
     emap: dict[tuple[str, str], dict[str, Any]] = {}
@@ -137,6 +138,7 @@ def analyze(nodes: dict[str, dict[str, Any]], edges: list[dict[str, Any]], roots
     live_roots: list[str] = [r for r in roots if r in succ]
     reach: dict[str, dict[str, Optional[str]]] = {}
     depth: dict[str, dict[str, int]] = {}
+    depth_limited_roots: int = 0
     for r in live_roots:
         parent: dict[str, Optional[str]] = {r: None}
         d: dict[str, int] = {r: 0}
@@ -150,14 +152,23 @@ def analyze(nodes: dict[str, dict[str, Any]], edges: list[dict[str, Any]], roots
                     parent[k] = n
                     d[k] = d[n] + 1
                     q.append(k)
+        depth_limited_roots += any(
+            d[n] == MAX_DEPTH and not utility(n) and any(k not in parent for k in succ.get(n, []))
+            for n in parent
+        )
         reach[r] = parent
         depth[r] = d
     findings: list[dict[str, Any]] = []
     per_kind: dict[str, int] = defaultdict(int)
+    per_level: dict[str, int] = defaultdict(int)
+    matching_acknowledgements: set[str] = set()
 
     def add(f: dict[str, Any]) -> None:
-        per_kind[f['kind']] += 1  # counted even when capped, so truncation is reported, not silent
-        if per_kind[f['kind']] > MAX_FINDINGS_PER_KIND:
+        per_kind[f['kind']] += 1
+        per_level[f['level']] += 1
+        if f['id'] in acknowledged:
+            matching_acknowledgements.add(f['id'])
+        if not findings_offset < per_kind[f['kind']] <= findings_offset + MAX_FINDINGS_PER_KIND:
             return
         f.setdefault('semantic_verification', 'not performed (requires source review by an agent or human)')
         findings.append(f)
@@ -305,7 +316,7 @@ def analyze(nodes: dict[str, dict[str, Any]], edges: list[dict[str, Any]], roots
             jac: float = len(inter) / len(sig[a] | sig[b])
             if jac >= 0.6 and sig[a] - sig[b] and sig[b] - sig[a]:
                 pairs.append((jac, a, b))
-    for jac, a, b in sorted(pairs, reverse=True)[:MAX_FINDINGS_PER_KIND]:
+    for jac, a, b in sorted(pairs, reverse=True):
         add({'id': _fid('OVERLAPPING_PATHS', [a, b]), 'kind': 'OVERLAPPING_PATHS', 'level': 'candidate',
              'anchor': a, 'related': [b],
              'title': f'Two handlers share {jac:.0%} of their downstream components',
@@ -444,7 +455,7 @@ def analyze(nodes: dict[str, dict[str, Any]], edges: list[dict[str, Any]], roots
         ry: list[str] = sorted(r for r in focused if y in direct_r[r] and x not in direct_r[r] and y not in direct_w.get(r, ()))
         if rx and ry:
             split.append((len(rx) + len(ry), x, y, rx, ry))
-    for _, x, y, rx, ry in sorted(split, key=lambda t: (t[0], t[1], t[2]))[:MAX_FINDINGS_PER_KIND]:  # fewest readers first
+    for _, x, y, rx, ry in sorted(split, key=lambda t: (t[0], t[1], t[2])):  # fewest readers first
         add({'id': _fid('SPLIT_READERS', x, y), 'kind': 'SPLIT_READERS', 'level': 'candidate', 'anchor': x,
              'related': [y, *rx[:6], *ry[:6]],
              'title': f'{tname(x)} and {tname(y)} are written together but read apart',
@@ -536,9 +547,17 @@ def analyze(nodes: dict[str, dict[str, Any]], edges: list[dict[str, Any]], roots
         f.setdefault('tags', [])
     order: dict[str, int] = {'candidate': 0, 'fact': 1}
     findings.sort(key=lambda f: (order[f['level']], any(t.startswith('hub_medium') for t in f['tags']), f['kind'], f['anchor'], f['id']))
-    return {'findings': findings,
+    emitted_by_kind: dict[str, int] = dict(Counter(f['kind'] for f in findings))
+    return {'findings': findings, 'matching_acknowledgements': sorted(matching_acknowledgements),
             'scope': {'roots_with_loaded_paths': len(live_roots), 'max_depth': MAX_DEPTH,
+                      'depth_limited_roots': depth_limited_roots,
                       'counts_by_kind': dict(sorted(per_kind.items())),
+                      'counts_by_level': dict(sorted(per_level.items())),
+                      'emitted_by_kind': emitted_by_kind,
+                      'omitted_by_kind': {k: v - emitted_by_kind.get(k, 0) for k, v in sorted(per_kind.items())},
+                      'findings_offset': findings_offset,
+                      'next_findings_offset': findings_offset + MAX_FINDINGS_PER_KIND if
+                      any(v > findings_offset + MAX_FINDINGS_PER_KIND for v in per_kind.values()) else None,
                       'capped_kinds': sorted(k for k, v in per_kind.items() if v > MAX_FINDINGS_PER_KIND),
                       'cap_per_kind': MAX_FINDINGS_PER_KIND,
                       'utility_fanin_threshold': utility_threshold,
