@@ -5,7 +5,7 @@
 | status | job_id | created | updated | depends_on | proof | flags |
 |---|---|---|---|---|---|---|
 | active | AGENT_105_CROSS_PROCESS_TURN_SIGNAL | 2026-10-09 | 2026-11-06 | — | ✓ | STALE_19d |
-| active | AGENT_116_TRUSTWORTHY_ARCHITECTURE_AUDIT | 2026-11-16 | 2026-11-25 | — | — |  |
+| active | AGENT_116_TRUSTWORTHY_ARCHITECTURE_AUDIT | 2026-11-16 | 2026-11-26 | — | ✓ |  |
 | active | AGENT_117_TELEMETRY_CONTEXT_ECONOMICS | 2026-11-17 | 2026-11-18 | — | ✓ |  |
 | active | AGENT_118_OPENCODE_REPLY_RECOVERY | 2026-11-18 | 2026-11-18 | — | — |  |
 | ready | A115_AGENT_DISCOVERY_FOR_DELEGATION | 2026-11-15 | 2026-11-15 | — | — |  |
@@ -93,7 +93,7 @@
 | done | AGENT_76_SKILLS_LIBRARY_O1 | 2026-08-08 | 2026-10-06 | — | ✓ |  |
 | done | AGENT_77_REPO_READABILITY_INDEX_O4 | 2026-08-08 | 2026-08-08 | — | ✓ |  |
 | done | AGENT_79_PWA_LIVE_REFRESH_UX | 2026-08-24 | 2026-08-24 | — | ✓ |  |
-| done | AGENT_80_SESSION_CACHE_HEARTBEAT | 2026-08-26 | 2026-08-29 | — | ✓ |  |
+| done | AGENT_80_SESSION_CACHE_HEARTBEAT | 2026-08-26 | 2026-11-26 | — | ✓ |  |
 | done | AGENT_81_EVENT_DRIVEN_REFRESH | 2026-09-15 | 2026-09-15 | — | ✓ |  |
 | done | AGENT_82_SESSION_TURN_QUEUE | 2026-09-22 | 2026-11-02 | — | ✓ |  |
 | done | AGENT_83_SESSION_STATE_LEGIBILITY | 2026-09-22 | 2026-09-25 | — | ✓ |  |

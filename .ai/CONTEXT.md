@@ -1,6 +1,6 @@
 # AI-Team Gateway — Hot Context
 
-**Last Updated:** 2026-11-17
+**Last Updated:** 2026-11-26
 **Branch policy:** `main` for docs-only; `feat/<slug>` + PR + self-merge for any `src/` or config
 change. Restart the **gateway** freely when deploying merged code. Never restart a worker/node-carrier
 without surfacing it to the operator first.
@@ -29,7 +29,7 @@ instead and leave a one-liner here.
 
 Current work:
 
-**#228 delegated assignments.** The jobs registration and disposition receivers
+**#228 delegated assignments (PR #301 merged 2026-11-23, `b87acbf`).** The jobs registration and disposition receivers
 share four concurrent writes per task-server process. A disconnected waiter
 retains its slot until its write finishes. The streamed body cap is 40 KiB
 (160 KiB across four admitted bodies, plus decoding and connection overhead),
@@ -103,11 +103,11 @@ Only jobs that are genuinely open. Everything merged/done is in git and the disp
 | Job | Packet | Depends on | Status | What it is |
 |---|---|---|---|---|
 | **A117** | `AGENT_117_TELEMETRY_CONTEXT_ECONOMICS.md` | — | **active** — PR #293 merged; gateway/task-server live `05fad0a` | Context/advice, recovery lineage and SDK estimates verified; worker activation/natural acceptance remain explicit gates. |
-| **A118** | `AGENT_118_OPENCODE_REPLY_RECOVERY.md` | — | **ready** — issue #298; implementation follows evidence/plan review | Reconstruct the reported OpenCode missing-reply incident, determine whether managed-turn ownership/correlation is structurally wrong, and repair the proven cause with end-to-end attribution and visibility regressions. |
-| **A116** | `AGENT_116_TRUSTWORTHY_ARCHITECTURE_AUDIT.md` | none; coordinate A111 | **active — issue #290** | Repair authoritative review/membership reads and make architecture-audit execution, coverage, counts and evaluation failure-honest; autonomous implementation, independent verification and scoped certification required. |
+| **A118** | `AGENT_118_OPENCODE_REPLY_RECOVERY.md` | — | **active** — issue #298; P0 evidence review in progress; no implementation merged | Reconstruct the reported OpenCode missing-reply incident, determine whether managed-turn ownership/correlation is structurally wrong, and repair the proven cause with end-to-end attribution and visibility regressions. |
+| **A116** | `AGENT_116_TRUSTWORTHY_ARCHITECTURE_AUDIT.md` | none; coordinate A111 | **active — P1 ledger reads merged PR #302 `5a04f30` (2026-11-26); audit-tool stages + certification open; issue #290** | Repair authoritative review/membership reads and make architecture-audit execution, coverage, counts and evaluation failure-honest; autonomous implementation, independent verification and scoped certification required. |
 | **A114** | `AGENT_114_CONSEQUENTIAL_DECISION_INTEGRATION.md` | A113 proven; coordinate A111/A71/A75 | ready for offline implementation | Protect declared SDK-budget use at turn admission and SDK creation/reuse; prove owner authority, target-worker resolved inputs, recovery and visibility. Launch-only guards miss warm sends. A113 is an offline palette proof; production enforcement remains unactivated. |
 | **A111** | `AGENT_111_INTENT_ALIGNED_VERIFIED_CLOSURE.md` | staged gates in packet | **ready — operator-approved; issue #292** — implementation not started | P0–P6: failure/friction traces → inherited intent → evidence-bound closure → existing reviewer → recovery/bounds → measured quality/usability → useful hands-off proof. Coordinates A114/A116; reserved activation gates remain. |
-| **A105** | `AGENT_105_CROSS_PROCESS_TURN_SIGNAL.md` | A104 ✅ | **active** — PRs #280/#281 merged; live `7d39020`; natural acceptance pending | Shared bounded HTTP turn signal wakes scheduler, effects and inbox; polls remain recovery. Await three natural eligible completions ≤2s and 24h observation; no paid proof turn. |
+| **A105** | `AGENT_105_CROSS_PROCESS_TURN_SIGNAL.md` | A104 ✅ | **active** — PRs #280/#281 merged; live `7d39020`; natural acceptance pending (stale marker is this external gate, not missing engineering) | Shared bounded HTTP turn signal wakes scheduler, effects and inbox; polls remain recovery. Await three natural eligible completions ≤2s and 24h observation; no paid proof turn. |
 | **A102** | `AGENT_102_UNIFY_BACKEND_PATHWAYS.md` | — | **blocked** — S2 merged + gateway live (`7c6d01a`); worker promotion and natural S3 acceptance pending | One carrier-owned `TurnControl` and natural backend operations; shims, rollout gates and dead gateway session execution removed. Worker restart needs the operator decision and drain/ancestry checks; no paid proof turn. |
 | **A94** | `AGENT_94_SYSTEM_ONE_CORE_DELIVERY_SCORECARD.md` | — | ready (Level 3) | S1 core + decision log + replay baseline + advisory wake scorecard. Operator inputs: read-only controller DB copy, `TYPESAFE_API_KEY`. |
 | **A95** | `AGENT_95_SYSTEM_ONE_DISPATCH_PREFLIGHT.md` | A94 | ready after A94 (Level 3) | Soft pre-flight on `dispatch_worker` (Manager can override). |
@@ -127,8 +127,14 @@ Only jobs that are genuinely open. Everything merged/done is in git and the disp
 
 ## Recent shift notes
 
-**A116 ledger read boundaries.** Work detail, timeline and roster share four synchronous
-read slots; Case Cost has four separate slots. Admission lasts through JSON encoding.
+**2026-11-23 — #301 delegated assignment delivery merged (`b87acbf`).** Explicit assignment
+outcomes now reach their owning worker across process death, with a bounded authenticated Case
+projection. Admission stays OFF (`DELEGATED_ASSIGNMENTS_ENABLED`); enable only after Manager and
+target-worker tool surfaces are verified. Rollback gates are in
+`docs/AUTONOMOUS_CASE_CONTINUATION_DESIGN.md` §11.
+
+**2026-11-26 — A116 ledger read boundaries (PR #302, `5a04f30`).** Work detail, timeline and
+roster share four synchronous read slots; Case Cost has four separate slots. Admission lasts through JSON encoding.
 Roster/ledger pages are row-bounded; the older timeline event window and lineage limits
 still apply. Absolute bytes for historical command, summary, metadata, objective and event
 fields remain deferred to preserve old payloads. Case Cost still encodes one result per
@@ -1006,12 +1012,10 @@ now skips arming when `expected_runtime_sec` is known and shorter than
 `cache_heartbeat="on"` still always arms explicitly (regression test:
 `test_auto_policy_skips_arming_for_jobs_shorter_than_interval`).
 
-Still deferred (1, low severity — edge case, not a blocker for turning `CACHE_HEARTBEAT_ACTIVE`
-on at normal scale):
-- `_cache_heartbeat_owner_live`'s `case_wait_group` branch (`src/orchestrator.py:1263`) scans
-  `list_flow_events` (N+1 per owner, 500-row window) with resolution logic that can diverge from
-  `compute_continuation_tick`'s sticky/monotonic resolution on the same event stream — only bites
-  Cases with 500+ flow events or a wait group re-armed after resolving. Needs a shared helper.
+Formerly deferred `case_wait_group` liveness issue — **resolved by A104 Gate 3 (`8c5596c`,
+2026-10-09)**: `_cache_heartbeat_owner_live` now reads `db.inbox_list_filters` (`src/orchestrator.py:1574`)
+from the same authoritative inbox as other activation readers. The old `list_flow_events`
+N+1/divergent-resolution path no longer exists. `CACHE_HEARTBEAT_ACTIVE` still defaults OFF.
 `ensure_cache_heartbeat_owner`'s bare-except (masks genuine DB errors as "flag off") was reviewed
 and left as-is — it fails safe (no heartbeat instead of a crash), and a distinguishable error
 surface is cosmetic, not a correctness or cost risk.

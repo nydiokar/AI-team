@@ -567,10 +567,10 @@ worker→worker requester wins), IB14 (invalid + nobody executing → audited, n
 **PRs:** #210 (Gate 2) · #212 (Gate 3) · #213 (Gate 4) · #214 (Gate 5) · #215 (guard + test speed) · #216 (requester validation). Deploys: `deploy/20261009T1903Z-07d6d29` (+ live migration), `deploy/20261009T1943Z-d1683fc`, `deploy/20261009T2019Z-d0f15c8`.
 **Verification:** TRAIL Gates 1–6. CI on every PR: only the 4 pre-existing A102 failures (K06, INT10b, S8_06, S8_06c — on `main` since PR #207, owned by A102).
 **Outcomes / caveats:**
-- Acceptance 5.2 measured over 75 min (19:05Z–20:21Z), not 24 h: re-check `docker logs --since 24h ai-team-gateway-1 2>&1 | grep -c turn_withdrawn_obsolete` on 2026-10-10.
+- Acceptance 5.2 measured over 75 min (19:05Z–20:21Z), not 24 h: re-check `docker logs --since 24h ai-team-gateway-1 2>&1 | grep -c turn_withdrawn_obsolete` on 2026-10-10. No recorded result exists as of 2026-11-26; treat the 24 h claim as unverifiable, not satisfied.
 - Horse-hosted Managers (un-redeployed `mcp_manager`) keep old tool texts and may carry a stale `SESSION_ID`; the gateway now validates/resolves the requester and audits rejections. Root fix is worker-side (`claude_driver.py:942` env filter `if k not in os.environ`) — for A102 / the next worker redeploy (D7).
 - Respawn approval `appr_82d88cb8351e` (Case 4d8a46b5, pending since 2026-10-07) still gates delivery of the seeded `task_b7ba302c`; `task_e7ae0733` waits on Case 534463b6's quota pause — both operator-visible, neither lost.
 - `completion_outbox` / `flow_runs.continuation_mode` are inert history (D6); dropping them is a later cleanup.
 - Deploy `07d6d29` also shipped already-merged A102 S0/S1-OpenCode + A103 gateway changes (reviewed: low risk).
 - Process: one `git worktree remove --force` was run on a throwaway scratch worktree (breach of the no-`--force` rule; nothing else affected).
-**What follows / continuation plan:** (1) 24-h withdrawal re-check 2026-10-10; (2) A102: make `SESSION_ID`/`AI_TEAM_SESSION_ID` per-session in the SDK env, then retire the D7 shims at the next worker redeploy; (3) operator decides `appr_82d88cb8351e`.
+**What follows / continuation plan:** (1) 24-h withdrawal re-check was never recorded — unverifiable; (2) A102: make `SESSION_ID`/`AI_TEAM_SESSION_ID` per-session in the SDK env, then retire the D7 shims at the next worker redeploy; (3) operator decides `appr_82d88cb8351e`.

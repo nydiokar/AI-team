@@ -13,7 +13,7 @@ updated_at: "2026-09-26T17:28:41.465590+00:00"
 # DISPATCH — A89 · Remote turn cancel delivery (PR #171)
 
 **Level:** 2 (bug fix, two-file patch, no schema change) · **Type:** emergency fix + post-mortem
-**Status:** done — merged, gateway live, worker restart pending (operator decision)
+**Status:** done — merged, gateway live; worker `cancel_turn` handler present in post-merge builds (2026-10-23 / 2026-11-18 operator restarts)
 **Branch:** `feat/fix-remote-session-cancel` → merged to `main` as `bdb804b`
 **Depends on:** —
 
@@ -138,11 +138,10 @@ All 4 pass. Existing `test_session_cancellation.py` unaffected.
 | Component | State | Notes |
 |---|---|---|
 | Gateway | ✅ live — `bdb804b` | Restarted 2026-09-26 after merge |
-| Worker (PM2 `ai-team-worker`) | ⚠️ **pending restart** | Needs restart to pick up the `cancel_turn` handler in `agent.py`. Without it the gateway enqueues the task correctly but the worker falls through to normal execution. |
+| Worker (PM2 `ai-team-worker`) | ✅ handler present in later builds | Operator restarts after merge (2026-10-23, 2026-11-18) loaded code containing `cancel_turn`; the original pending-restart warning is historical. |
 
-**To fully activate:** `pm2 restart ai-team-worker` — operator decision per policy (worker restart
-disrupts live sessions). Until then, the gateway correctly enqueues the `cancel_turn` task; it
-sits pending until the worker picks it up on restart.
+**Activation:** the worker handler shipped in later operator-restarted builds; no worker action
+remains for A89. Do not restart a worker for this job.
 
 ---
 
@@ -168,5 +167,5 @@ A90 documents and tracks the architectural refactor to move this concern back in
 - ✅ Fix in place gateway-side; `cancel_turn` handler written for worker side
 - ✅ 4 targeted tests, all green
 - ✅ PR #171 merged to `main` at `bdb804b`, gateway restarted
-- ⚠️ Worker restart required to fully activate — operator decision
+- ✅ Worker `cancel_turn` handler present in post-merge builds
 - 📋 Architectural debt logged as A90

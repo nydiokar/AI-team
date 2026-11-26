@@ -12,7 +12,7 @@ updated_at: "2026-11-18T10:45:01.322497+00:00"
 # DISPATCH — A118 · OpenCode managed-turn reply recovery and correlation audit
 
 **Level:** 3 (managed-turn correctness and cross-layer recovery) · **Type:** investigation + code + regression proof
-**Authored:** 2026-11-18 · **Packet state:** ready; implementation not started
+**Authored:** 2026-11-18 · **Packet state:** active; P0 evidence review in progress; no implementation merged (registry reconciled 2026-11-26)
 **Issue:** [#298](https://github.com/nydiokar/AI-team/issues/298)
 **Depends on:** none.
 **Branch:** fresh `feat/a118-opencode-reply-recovery` from current `origin/main`, isolated worktree; PR, review, push and self-merge under project policy.
@@ -33,7 +33,7 @@ The prior investigation reported:
 
 These are inherited investigation notes, **not independently re-established evidence in this checkout**. Local `state/mesh.db` and `logs/carrier_state/opencode-native-sessions.sqlite3` do not contain the supplied session/task IDs. Preserve this distinction in all conclusions; recover the original runtime evidence from its authoritative source if available, and record exactly what cannot be recovered.
 
-Current source observations on `main` (`30f1f53`):
+Current source observations on `main` (`30f1f53` at authoring; reconciled 2026-11-26 to `c9d795b` — no A118 code has merged, so re-verify these before implementing):
 
 - `src/backends/opencode.py::_send_message` submits a deterministic `messageID` from the managed `turn_uuid` and documents strict `parentID` attribution.
 - `_await_reply` polls `/session/{id}/message?limit=100` and accepts only `_find_correlated_response(history, managed_message_id)`. The helper searches the returned tail and matches assistant `parentID`/`parentId` exactly; it does not traverse ancestry or recognize a continuation chain.

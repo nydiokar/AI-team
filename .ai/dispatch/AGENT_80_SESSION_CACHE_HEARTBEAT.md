@@ -4,9 +4,9 @@ created_at: "2026-08-26T01:00:00+03:00"
 status: done
 owner: "codex"
 depends_on: []
-results_ref: https://github.com/nydiokar/AI-team/pull/111#closure"
+results_ref: DISPATCH_LOG.md#A80             # -> DISPATCH_LOG.md section with the verdict prose
 evidence: ["tests/test_session_cache_heartbeat.py","tests/test_mcp_jobs.py"]
-updated_at: "2026-08-29T08:47:43.975071+00:00"
+updated_at: "2026-11-26T09:22:16.123284+00:00"
 ```
 
 # A80 — Session Cache Heartbeat

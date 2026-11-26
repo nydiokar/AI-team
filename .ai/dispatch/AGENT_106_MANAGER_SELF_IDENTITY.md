@@ -114,7 +114,7 @@ sweeps). Key finding that shaped the whole fix:
 - [x] `whoami` in manager + worker MCP servers (caller-only)
 - [x] `check_inbox` + `GET /api/agent/inbox` over the single `pending_for` source
 - [x] Targeted tests green incl. the A104 single-source guard
-- [ ] Worker-side `whoami` (mcp_jobs) live — activates on the next worker redeploy (gateway-side is live on gateway restart)
+- [x] Worker-side `whoami` (mcp_jobs) — present in worker builds `c2a81c2`/`3f0f27f` (verified 2026-11-02); gateway-side live on restart
 
 ## Closure
 

@@ -120,9 +120,8 @@ worker node, which is not true today. Token math + the A-vs-B table + the remote
   run on the merged-`main` state. Targeted module only — paid-CLI cost guard respected.
 - **PR:** #86 (`feat/skills-library-o1`) merged to `main`; `b4e4c80` is an ancestor of `origin/main`
   (verified — `skills/`, `_resolve_skills`, design doc, flag, and tests all present in `origin/main`).
-- **Flag stays OFF.** Live activation (`SKILLS_LIBRARY_ENABLED=1`) and any gateway restart are a
-  Manager/operator decision — not performed here.
-- **What remains:** (1) live activation decision; (2) mechanism (B) once `skills/` is provisioned
-  node-side (deploy or a boot-time fetch endpoint); (3) an activation-time edit to `manager.md`
-  teaching the Manager to *prefer* `skills=[…]` over re-authored attitude prose (kept out so the
-  flag-OFF world is unchanged).
+- **Superseded 2026-10-06 (`8deb692`/`0eb5f0f`).** Native `.claude/skills/` replaced this
+  mechanism: `skills/`, the `skills` param and `SKILLS_LIBRARY_ENABLED` were removed. No
+  activation decision remains.
+- **What remains:** none for this job; superseded by native skills. Mechanism (B) and the
+  `manager.md` activation edit are historical alternatives, not open work.

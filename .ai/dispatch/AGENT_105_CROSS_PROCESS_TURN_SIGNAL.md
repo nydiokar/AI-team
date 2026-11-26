@@ -289,8 +289,10 @@ or runtime permissions change. Main-merge CI itself passed.
 Code, adversarial review/fixes, merge, post-merge tests and deployment are complete.
 Gate 4 stays unticked and machine status stays `active`: three natural eligible
 completion-to-wake admissions within 2s and the 24h production observation have
-not occurred yet. The live gateway-down/result receipt comparison is also not
-claimed; offline stalled-gateway and commit-independence tests cover that seam.
+not occurred yet. Registry reconciliation 2026-11-26: the `STALE_19d` marker reflects
+this external observation gate, not missing engineering; do not reset `updated_at` or
+close the job without the three natural admissions. The live gateway-down/result receipt
+comparison is also not claimed; offline stalled-gateway and commit-independence tests cover that seam.
 Observe normal workload from the deployment cutoff above; do not manufacture
 paid work or replay/consume old jobs to close this evidence gap. Native DNS and
 existing consumer native IO deadline limits remain the explicit deferrals above.
