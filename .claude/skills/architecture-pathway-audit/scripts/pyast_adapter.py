@@ -107,11 +107,11 @@ def parse_file(source: str, rel: str) -> dict[str, Any]:
                               'nested': scope_kind == 'function', 'parent': scope,
                               'params': [] if is_class else [a.arg for a in [*node.args.posonlyargs, *node.args.args,
                                                                              *node.args.kwonlyargs]]})
+        acc, limitations = sql_analysis(node, bindings)
+        if acc:
+            facts['defs'][-1]['access'] = acc
+        facts['sql_limitations'].extend({'function': qual, **v} for v in limitations)
         if not is_class:
-            acc, limitations = sql_analysis(node, bindings)
-            if acc:
-                facts['defs'][-1]['access'] = acc
-            facts['sql_limitations'].extend({'function': qual, **v} for v in limitations)
             fp: Optional[dict[str, Any]] = fingerprint(node)
             if fp:
                 facts['defs'][-1]['fp'] = fp
@@ -623,7 +623,7 @@ def _sql_tables(text: str) -> tuple[list[tuple[str, str, str]], set[str]]:
 
         positions: list[int] = list(top(lo, end))
         limit: Optional[int] = next((i for i in positions if at(i) == 'limit'), None)
-        if limit is None or at(limit + 1) in ('0', '1') and at(limit + 2) != ',':
+        if limit is None or at(limit + 1) == '-' or at(limit + 1) in ('0', '1') and at(limit + 2) != ',':
             window: str = 'full'
         else:
             order: Optional[int] = next((i for i in positions if at(i) == 'order' and at(i + 1) == 'by'), None)
@@ -634,6 +634,8 @@ def _sql_tables(text: str) -> tuple[list[tuple[str, str, str]], set[str]]:
         consumed: int = -1
         for i in positions:
             token: str = at(i)
+            if token == 'with' and head in ('insert', 'replace'):
+                return statement(i, end, ctes, depth + 1)
             if i in pairs:
                 statement(i + 1, pairs[i], ctes, depth + 1)
             if token == 'select':
@@ -666,8 +668,9 @@ def sql_analysis(node: ast.AST, module_bindings: dict[str, SqlBinding]) -> tuple
     bindings: dict[str, SqlBinding] = {name: value for name, value in module_bindings.items() if name not in bound}
     accesses: list[dict[str, Any]] = []
     limitations: list[dict[str, Any]] = []
+    direct_body: set[ast.AST] = set(getattr(node, 'body', []))
     for part in nodes:
-        if isinstance(part, (ast.Assign, ast.AnnAssign)):
+        if part in direct_body:
             _declare_sql(part, bound, bindings)
         if not isinstance(part, ast.Call) or not isinstance(part.func, ast.Attribute) or part.func.attr not in _SQL_SINKS:
             continue

@@ -91,6 +91,33 @@ def dynamic(c, sql):
         self.assertEqual([(v['function'], v['line']) for v in facts['sql_limitations']],
                          [('dynamic', 11)])
 
+    def test_insert_select_with_cte_and_unbounded_negative_limit(self):
+        a = data_access(fn('''def copy(c):
+    c.execute("INSERT INTO main.target WITH source AS (SELECT * FROM actual_source) "
+              "SELECT * FROM source LIMIT -1")
+'''))
+        self.assertEqual({(x['table'], x['mode'], x['window']) for x in a},
+                         {('target', 'write', 'full'), ('actual_source', 'read', 'full')})
+
+    def test_class_body_and_conditional_declarations(self):
+        from pyast_adapter import parse_file
+
+        facts = parse_file('''class Reader:
+    SQL = "SELECT * FROM configuration"
+    conn.execute(SQL)
+
+    def run(self, conn, flag):
+        if flag:
+            query = "SELECT * FROM config"
+        else:
+            conn.execute(query)
+''', 'reader.py')
+        cls, method = facts['defs']
+        self.assertEqual([(a['table'], a['line']) for a in cls['access']], [('configuration', 3)])
+        self.assertNotIn('access', method)
+        self.assertEqual(facts['sql_limitations'],
+                         [{'function': 'Reader.run', 'line': 9, 'detail': 'dynamic SQL expression'}])
+
 
 class TestRules(unittest.TestCase):
     def test_oldest_n_on_append_only_flagged_but_not_on_mutable(self):
