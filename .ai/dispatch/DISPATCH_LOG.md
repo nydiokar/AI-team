@@ -38,9 +38,11 @@ rollout; a separate investigation job does not gate starting the build.
 <a id="A115"></a>
 <a id="A116"></a>
 <a id="A118"></a>
+<a id="A119"></a>
 
 | # | Dispatch | Date | Level | Status | One-line |
 |---|---|---|---|---|---|
+| A119 | `AGENT_119_OPENCODE_V2_FOUNDATION.md` | 2026-11-26 | 3 | ready — Level 3; [issue #310](https://github.com/nydiokar/AI-team/issues/310); operator authorization required | **OpenCode V2 migration foundation.** Pin the V2 auth/route/prompt/message/event contract with a paid-free probe and fake server, and settle the adoption decisions + seam map for the later refactor; no adapter cutover, V1 deletion, or live turn. Audit: `docs/OPENCODE_V2_MIGRATION_AUDIT.md`. |
 | A117 | `AGENT_117_TELEMETRY_CONTEXT_ECONOMICS.md` | 2026-11-17 | 3 | active — PR #293 merged `05fad0a`; gateway/task-server live; worker activation gated | **Issue #144 context/recovery economics.** Three P1 corrections; 384 targeted Python/41 web checks plus both CI jobs pass. Read-only production API/mobile check passes. Native worker activation, receipts and calibration remain open. |
 | A118 | `AGENT_118_OPENCODE_REPLY_RECOVERY.md` | 2026-11-18 | 3 | active — P0 investigation; [issue #298](https://github.com/nydiokar/AI-team/issues/298) | **Diagnose and repair OpenCode managed-turn reply loss.** Structural attribution gap confirmed; incident evidence and a safe reviewed ownership contract remain open. |
 | A116 | `AGENT_116_TRUSTWORTHY_ARCHITECTURE_AUDIT.md` | 2026-11-16 | 3 | active — P1 ledger reads merged PR #302 `5a04f30` (2026-11-26); audit-tool stages + C1–C12 certification open; issue #290 | **Trustworthy architecture audit + ledger readers.** Fix stale latest-review and truncated membership projections, fail-open analysis/coverage, SQL attribution and misleading scoring; certify CLI/report/browser/dispatch behavior against frozen defects and benign controls before closure. |
