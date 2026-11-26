@@ -70,7 +70,7 @@ async function get<T>(path: string, token: string, signal?: AbortSignal): Promis
   return (await res.json()) as T;
 }
 
-function costReadSignal(signal?: AbortSignal): AbortSignal {
+function readSignal(signal?: AbortSignal): AbortSignal {
   const deadline = AbortSignal.timeout(15000);
   return signal ? AbortSignal.any([signal, deadline]) : deadline;
 }
@@ -842,10 +842,12 @@ export const api = {
   },
 
   /** GET /api/work/{id} — one case: summary + ledger + parent/children. */
-  async workDetail(token: string, flowRunId: string): Promise<RawCaseDetailResponse> {
+  async workDetail(token: string, flowRunId: string, after = "0", signal?: AbortSignal): Promise<RawCaseDetailResponse> {
+    const query = new URLSearchParams({ link_after: after });
     return get<RawCaseDetailResponse>(
-      `/api/work/${encodeURIComponent(flowRunId)}`,
+      `/api/work/${encodeURIComponent(flowRunId)}?${query}`,
       token,
+      readSignal(signal),
     );
   },
 
@@ -854,10 +856,12 @@ export const api = {
     token: string,
     flowRunId: string,
     limit = 500,
+    signal?: AbortSignal,
   ): Promise<RawCaseTimelineResponse> {
     return get<RawCaseTimelineResponse>(
       `/api/work/${encodeURIComponent(flowRunId)}/timeline?limit=${limit}`,
       token,
+      readSignal(signal),
     );
   },
 
@@ -871,10 +875,13 @@ export const api = {
 
   /** GET /api/work/{id}/roster — the live roster: sessions (manager/workers) with
    *  tokens/turns + the watch_job scripts they own (running/orphaned/agent-spawn). */
-  async workRoster(token: string, flowRunId: string): Promise<RawCaseRosterResponse> {
+  async workRoster(token: string, flowRunId: string, sessionAfter = "0", jobBefore?: string, signal?: AbortSignal): Promise<RawCaseRosterResponse> {
+    const query = new URLSearchParams({ session_after: sessionAfter });
+    if (jobBefore) query.set("job_before", jobBefore);
     return get<RawCaseRosterResponse>(
-      `/api/work/${encodeURIComponent(flowRunId)}/roster`,
+      `/api/work/${encodeURIComponent(flowRunId)}/roster?${query}`,
       token,
+      readSignal(signal),
     );
   },
 
@@ -1032,7 +1039,7 @@ export const api = {
     if (opts.from) qs.set("from", opts.from);
     if (opts.to) qs.set("to", opts.to);
     if (opts.repoPath) qs.set("repo_path", opts.repoPath);
-    return get<RawCostExplorerResponse>(`/api/cost/explorer?${qs.toString()}`, token, costReadSignal(signal));
+    return get<RawCostExplorerResponse>(`/api/cost/explorer?${qs.toString()}`, token, readSignal(signal));
   },
 
   /**
@@ -1058,7 +1065,7 @@ export const api = {
     if (opts.from) qs.set("from", opts.from);
     if (opts.to) qs.set("to", opts.to);
     if (opts.repoPath) qs.set("repo_path", opts.repoPath);
-    return get<RawCostTopResponse>(`/api/cost/top?${qs.toString()}`, token, costReadSignal(signal));
+    return get<RawCostTopResponse>(`/api/cost/top?${qs.toString()}`, token, readSignal(signal));
   },
 
   /** GET /api/cost/projects — distinct projects with usage, ordered by size (the
@@ -1071,7 +1078,7 @@ export const api = {
     const qs = new URLSearchParams({ limit: String(opts.limit ?? 200) });
     if (opts.from) qs.set("from", opts.from);
     if (opts.to) qs.set("to", opts.to);
-    return get<RawCostProjectsResponse>(`/api/cost/projects?${qs.toString()}`, token, costReadSignal(signal));
+    return get<RawCostProjectsResponse>(`/api/cost/projects?${qs.toString()}`, token, readSignal(signal));
   },
 
   /** GET /api/cases/{id}/usage — one case's manager/workers cost split (404 on an
@@ -1080,14 +1087,14 @@ export const api = {
     return get<RawCaseUsageResponse>(
       `/api/cases/${encodeURIComponent(flowRunId)}/usage`,
       token,
-      costReadSignal(signal),
+      readSignal(signal),
     );
   },
 
   /** GET /api/cost/alerts — budget/burn-rate alerts (billable-USD only).
    *  Read-only; fires only when a budget knob is set. */
   async costAlerts(token: string, signal?: AbortSignal): Promise<RawCostAlertsResponse> {
-    return get<RawCostAlertsResponse>(`/api/cost/alerts`, token, costReadSignal(signal));
+    return get<RawCostAlertsResponse>(`/api/cost/alerts`, token, readSignal(signal));
   },
 
   /** GET /api/system-alerts — recent gateway-liveness outages recorded by the

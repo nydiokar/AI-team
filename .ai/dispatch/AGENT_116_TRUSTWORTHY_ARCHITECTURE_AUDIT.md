@@ -1,18 +1,18 @@
 ```yaml
 job_id: AGENT_116_TRUSTWORTHY_ARCHITECTURE_AUDIT
 created_at: "2026-11-16T13:15:02.851908+00:00"        # CANONICAL — set once at dispatch, never derive again
-status: ready              # ready | active | blocked | done | dead
-owner: ""
+status: active              # ready | active | blocked | done | dead
+owner: codex
 depends_on: []
 results_ref: DISPATCH_LOG.md#A116             # -> DISPATCH_LOG.md section with the verdict prose
 evidence: []                  # artifact paths that PROVE it ran (checked to exist)
-updated_at: "2026-11-16T13:20:12.461413+00:00"
+updated_at: "2026-11-25T23:57:35.423184+00:00"
 ```
 
 # DISPATCH — A116 · Trustworthy architecture audit and authoritative ledger reads
 
 **Level:** 3 (agent acceptance decisions, service/read boundaries, breadth) · **Type:** code + audit + certification
-**Authored:** 2026-11-16 · **Packet state:** ready; implementation not started
+**Authored:** 2026-11-16 · **Packet state:** active; application and audit-tool stages in progress
 **Issue:** [#290](https://github.com/nydiokar/AI-team/issues/290)
 **Depends on:** none; coordinate with A111 acceptance work and current read-path changes, do not wait for their unrelated stages.
 **Branch:** fresh `feat/a116-<stage>` from current `origin/main` in an isolated worktree; PR, review, push and self-merge each coherent stage. No unrelated branch carried forward.
@@ -181,3 +181,33 @@ unrelated handoff. This is an explained registry baseline, not A116 certificatio
 ## Closure
 
 Open. This packet and issue establish an approved, executable handoff. No implementation, corrected tool or application behavior, final semantic score or deployment certification is claimed yet.
+
+### Authoritative ledger reads
+
+Decomposition reads the latest applicable scored event by Case, event type and spec, with
+the existing Case/event-ID index. The latest payload must explicitly pass as a JSON boolean.
+The same lookup runs under SQLite write admission before the link, event and stage writes
+commit together. The existing Case closure rework gate is independent.
+
+Work detail and timeline use Case-scoped link cursors. Detail counts all links and timeline
+discloses the full event count alongside its newest event window. The roster pages sessions
+by their oldest link and jobs by descending creation time and ID; its Case-wide totals use
+deduplicated membership in SQL. Cost usage streams per-session/model SQL rows with the first
+role joined in the same query, so a session with several role links is charged once. The
+current Manager lookup uses the newest Manager link and the task DAG read traverses all its
+links in batches. Exact lookup and LIMIT-2 requester ambiguity paths remain distinct.
+Existing best-effort interrupt/sweep and affiliation cleanup have their original caps;
+changing terminal cleanup would need separate mutation/affiliation-race verification.
+
+Work detail, timeline and roster share four synchronous read slots through JSON encoding.
+Case usage has four slots of its own. These routes use the existing 10-second cooperative
+SQLite read snapshot with the existing 5-second per-lock wait. Saturation/unavailability
+returns 503 and bad cursors return 422. Browser paged queries cancel on navigation and have a
+15-second request deadline. Incoming Work and Case Cost reads carry no request body, Case IDs
+are capped at 128 characters, and link/session cursors are nonnegative SQLite integers.
+Roster job cursors cap at 512 characters and each list page at 200 rows. In the independent
+2,000-session/2,000-job isolated test, four actual roster reads held slots, all 96 further
+calls returned 503, and all four admitted reads finished successfully. A first response was
+100,272 bytes with 947,392 to 1,450,454 bytes of traced Python peak, excluding native memory
+and transport. These measurements describe the fixture. Legacy payload-byte, full usage
+response, lineage and native-I/O limits are recorded in CONTEXT.

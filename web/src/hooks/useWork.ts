@@ -54,11 +54,11 @@ export function useWorkList(bucket?: WorkBucket, limit = 100) {
 }
 
 /** One case's full detail (summary + ledger + parent/children). */
-export function useWorkDetail(flowRunId: string | undefined) {
+export function useWorkDetail(flowRunId: string | undefined, after = "0") {
   const token = useAuthStore((s) => s.token);
   return useQuery({
-    queryKey: ["work-detail", flowRunId],
-    queryFn: async () => toCaseDetail(await api.workDetail(token, flowRunId!)),
+    queryKey: ["work-detail", flowRunId, after],
+    queryFn: async ({ signal }) => toCaseDetail(await api.workDetail(token, flowRunId!, after, signal)),
     enabled: Boolean(token) && Boolean(flowRunId),
     refetchInterval: DETAIL_POLL_MS,
     placeholderData: (prev) => prev,
@@ -71,7 +71,7 @@ export function useWorkTimeline(flowRunId: string | undefined) {
   const token = useAuthStore((s) => s.token);
   return useQuery({
     queryKey: ["work-timeline", flowRunId],
-    queryFn: async () => toCaseTimeline(await api.workTimeline(token, flowRunId!)),
+    queryFn: async ({ signal }) => toCaseTimeline(await api.workTimeline(token, flowRunId!, undefined, signal)),
     enabled: Boolean(token) && Boolean(flowRunId),
     refetchInterval: DETAIL_POLL_MS,
     placeholderData: (prev) => prev,
@@ -95,11 +95,11 @@ export function useWorkGraph(flowRunId: string | undefined) {
 /** One case's LIVE roster: sessions (manager/workers) with tokens/turns + the
  *  watch_job scripts they own. The operational "who is doing what right now" head
  *  of the case; polls on the fast (5s) tier. */
-export function useWorkRoster(flowRunId: string | undefined) {
+export function useWorkRoster(flowRunId: string | undefined, sessionAfter = "0", jobBefore?: string) {
   const token = useAuthStore((s) => s.token);
   return useQuery({
-    queryKey: ["work-roster", flowRunId],
-    queryFn: async () => toCaseRoster(await api.workRoster(token, flowRunId!)),
+    queryKey: ["work-roster", flowRunId, sessionAfter, jobBefore],
+    queryFn: async ({ signal }) => toCaseRoster(await api.workRoster(token, flowRunId!, sessionAfter, jobBefore, signal)),
     enabled: Boolean(token) && Boolean(flowRunId),
     refetchInterval: LIVE_POLL_MS,
     placeholderData: (prev) => prev,

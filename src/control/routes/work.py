@@ -7,10 +7,11 @@ monkeypatch ``control_api`` keep reaching these handlers.
 from __future__ import annotations
 
 import json
+from contextlib import contextmanager
 import threading
 from typing import Any, Callable, Literal, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Path, Query
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -18,6 +19,37 @@ from src.control import control_api as core
 from src.control.routes._responses import TokenTotals
 
 _affiliations_gate = threading.BoundedSemaphore(4)
+_case_read_gate = threading.BoundedSemaphore(4)
+_CASE_LINK_PAGE_SIZE = 200
+_SQLITE_ID_MAX = 2**63 - 1
+
+
+@contextmanager
+def _case_read():
+    # The synchronous handler owns the slot through SQL and response encoding,
+    # even if the HTTP client disconnects.
+    if not _case_read_gate.acquire(blocking=False):
+        raise HTTPException(status_code=503, detail="case_read_busy")
+    try:
+        db = core._db()
+        if db is None:
+            raise HTTPException(status_code=503, detail="case_read_unavailable")
+        with db.read_snapshot():
+            yield db
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="case_read_unavailable") from exc
+    finally:
+        _case_read_gate.release()
+
+
+def _case_link_page(db, flow_run_id: str, after_id: int):
+    rows = db.list_flow_links(
+        flow_run_id=flow_run_id, after_id=after_id, limit=_CASE_LINK_PAGE_SIZE + 1,
+    )
+    next_cursor = str(rows[_CASE_LINK_PAGE_SIZE - 1]["id"]) if len(rows) > _CASE_LINK_PAGE_SIZE else None
+    return rows[:_CASE_LINK_PAGE_SIZE], next_cursor
 
 
 # --- Response models (documentation only; handlers return JSONResponse) --------
@@ -131,6 +163,7 @@ class CaseCoverage(BaseModel):
 
 
 class CaseDetailOut(BaseModel):
+    next_link_cursor: str | None = None
     case: CaseSummary
     record: dict
     ledger: CaseLedger
@@ -153,6 +186,8 @@ class TimelineEvent(BaseModel):
 
 
 class CaseTimelineOut(BaseModel):
+    next_link_cursor: str | None = None
+    total_event_count: int
     flow_run_id: str
     events: list[TimelineEvent]
     evidence: list[LinkRow]
@@ -218,6 +253,8 @@ class RosterCounts(BaseModel):
 
 
 class CaseRosterOut(BaseModel):
+    next_session_cursor: str | None = None
+    next_job_cursor: str | None = None
     flow_run_id: str
     sessions: list[RosterSession]
     jobs: list[RosterJob]
@@ -331,44 +368,50 @@ def build_router(orchestrator: Any, *, require_auth: Callable[..., Any]) -> APIR
         "/api/work/{flow_run_id}",
         responses={200: {"model": CaseDetailOut, "description": "One case: summary, full record, grouped ledger, lineage."}},
     )
-    def api_work_detail(flow_run_id: str) -> JSONResponse:
-        """One case: summary + full record + grouped ledger + parent/children.
-
-        404 (``case_not_found``) on an unknown flow_run_id. Linked entities come
-        from flow_links only; absent sections render empty, not inferred."""
+    def api_work_detail(
+        flow_run_id: str = Path(max_length=128),
+        link_after: int = Query(0, ge=0, le=_SQLITE_ID_MAX),
+    ) -> JSONResponse:
+        """Case summary, authoritative link count and an oldest-first ledger page."""
         from src.control import work_read_model as _wrm
-        db = core._db()
-        flow = db.get_flow_run(flow_run_id) if db is not None else None
-        if flow is None:
-            raise HTTPException(status_code=404, detail="case_not_found")
-        links = db.list_flow_links(flow_run_id=flow_run_id)
-        event_count = db.count_flow_events(flow_run_id)  # [A104 I7] exact, not capped
-        parent_id = flow.get("parent_flow_run_id")
-        parent = db.get_flow_run(parent_id) if parent_id else None
-        children = db.list_child_flow_runs(flow_run_id)
-        model = _wrm.build_case_detail(flow, links, event_count, parent, children)
-        return JSONResponse(model)
+
+        with _case_read() as db:
+            flow = db.get_flow_run(flow_run_id)
+            if flow is None:
+                raise HTTPException(status_code=404, detail="case_not_found")
+            links, next_cursor = _case_link_page(db, flow_run_id, link_after)
+            event_count = db.count_flow_events(flow_run_id)
+            parent_id = flow.get("parent_flow_run_id")
+            parent = db.get_flow_run(parent_id) if parent_id else None
+            children = db.list_child_flow_runs(flow_run_id)
+            model = _wrm.build_case_detail(flow, links, event_count, parent, children)
+            link_count = db.count_flow_links(flow_run_id)
+            model["counts"]["links"] = link_count
+            model["coverage"]["has_links"] = link_count > 0
+            model["next_link_cursor"] = next_cursor
+            return JSONResponse(model)
 
     @router.get(
         "/api/work/{flow_run_id}/timeline",
         responses={200: {"model": CaseTimelineOut, "description": "Case audit trail: newest flow_events + linked evidence."}},
     )
     def api_work_timeline(
-        flow_run_id: str,
+        flow_run_id: str = Path(max_length=128),
         limit: int = Query(500, ge=1, le=2000),
+        link_after: int = Query(0, ge=0, le=_SQLITE_ID_MAX),
     ) -> JSONResponse:
-        """The case audit trail: the NEWEST ``limit`` flow_events, in order, +
-        linked evidence pointers (A104 I7: a long Case shows its latest events —
-        incl. a worker's ``task.finished`` for an un-redeployed wait_for_worker).
-        404 on unknown case."""
+        """Newest audit events and an independently paged linked evidence list."""
         from src.control import work_read_model as _wrm
-        db = core._db()
-        flow = db.get_flow_run(flow_run_id) if db is not None else None
-        if flow is None:
-            raise HTTPException(status_code=404, detail="case_not_found")
-        events = db.list_flow_events(flow_run_id, limit=limit, newest=True)
-        links = db.list_flow_links(flow_run_id=flow_run_id)
-        return JSONResponse(_wrm.build_case_timeline(flow_run_id, events, links))
+
+        with _case_read() as db:
+            if db.get_flow_run(flow_run_id) is None:
+                raise HTTPException(status_code=404, detail="case_not_found")
+            events = db.list_flow_events(flow_run_id, limit=limit, newest=True)
+            links, next_cursor = _case_link_page(db, flow_run_id, link_after)
+            model = _wrm.build_case_timeline(flow_run_id, events, links)
+            model["next_link_cursor"] = next_cursor
+            model["total_event_count"] = db.count_flow_events(flow_run_id)
+            return JSONResponse(model)
 
     @router.get(
         "/api/work/{flow_run_id}/graph",
@@ -391,33 +434,37 @@ def build_router(orchestrator: Any, *, require_auth: Callable[..., Any]) -> APIR
         "/api/work/{flow_run_id}/roster",
         responses={200: {"model": CaseRosterOut, "description": "Live operational roster: sessions + jobs + token totals."}},
     )
-    def api_work_roster(flow_run_id: str) -> JSONResponse:
-        """[Cockpit] The live operational roster for a Case — the "who is doing what
-        right now" head of the Case, complementing the flow_events timeline (spine).
-
-        Per Case: its sessions (manager + workers) with role, model, status, token
-        totals, and turn count; and the running/finished SCRIPTS (watch_job rows)
-        owned by those sessions, with orphaned/failed/agent-spawn flags. The join is
-        case → flow_links(session) → those sessions' jobs. All reads are batched
-        (no N+1); job liveness comes from worker-maintained status, never a probe.
-        404 on unknown case."""
+    def api_work_roster(
+        flow_run_id: str = Path(max_length=128),
+        session_after: int = Query(0, ge=0, le=_SQLITE_ID_MAX),
+        job_before: str | None = Query(None, max_length=512),
+    ) -> JSONResponse:
+        """Page sessions and jobs independently, with complete Case-wide totals."""
         from src.control import work_read_model as _wrm
-        db = core._db()
-        flow = db.get_flow_run(flow_run_id) if db is not None else None
-        if flow is None:
-            raise HTTPException(status_code=404, detail="case_not_found")
-        session_links = db.list_flow_links(flow_run_id=flow_run_id, entity_type="session")
-        session_ids = [l.get("entity_id") for l in session_links if l.get("entity_id")]
-        session_rows_by_id = {
-            sid: row for sid in session_ids
-            if (row := db.get_session(sid)) is not None
-        }
-        token_totals = db.get_session_token_totals(session_ids)
-        turn_counts = db.get_session_turn_counts(session_ids)
-        jobs = db.list_jobs_for_sessions(session_ids)
-        return JSONResponse(_wrm.build_case_roster(
-            flow_run_id, session_links, session_rows_by_id,
-            token_totals, turn_counts, jobs,
-        ))
+
+        before = None
+        if job_before is not None:
+            timestamp, separator, job_id = job_before.partition("|")
+            if not separator or not timestamp or not job_id:
+                raise HTTPException(status_code=422, detail="invalid_job_cursor")
+            before = (timestamp, job_id)
+        with _case_read() as db:
+            if db.get_flow_run(flow_run_id) is None:
+                raise HTTPException(status_code=404, detail="case_not_found")
+            page_size = _CASE_LINK_PAGE_SIZE
+            session_page = db.case_roster_session_page(flow_run_id, session_after, page_size + 1)
+            job_page = db.case_roster_job_page(flow_run_id, before, page_size + 1)
+            session_links = session_page[:page_size]
+            session_ids = [row["entity_id"] for row in session_links if row["entity_id"]]
+            session_rows = {row["session_id"]: row for row in session_links if row["session_id"]}
+            model = _wrm.build_case_roster(
+                flow_run_id, session_links, session_rows, db.get_session_token_totals(session_ids),
+                db.get_session_turn_counts(session_ids), job_page[:page_size],
+            )
+            model["counts"], model["token_totals"] = db.case_roster_totals(flow_run_id)
+            model["next_session_cursor"] = str(session_links[-1]["id"]) if len(session_page) > page_size else None
+            last_job = job_page[page_size - 1] if len(job_page) > page_size else None
+            model["next_job_cursor"] = f'{last_job["created_at"]}|{last_job["id"]}' if last_job else None
+            return JSONResponse(model)
 
     return router

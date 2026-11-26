@@ -6828,8 +6828,10 @@ class MeshDB:
         role: Optional[str] = None,
         limit: int = 200,
         created_by: Optional[str] = None,
+        *,
+        after_id: int = 0,
     ) -> List[Dict[str, Any]]:
-        """List authoritative case links, optionally filtered. Oldest-first.
+        """Read a bounded, oldest-first page of Case links.
         Every filter (incl. ``created_by``) is applied in SQL BEFORE ``limit``
         (A104 I7: unrelated links can never push a wanted one out).
 
@@ -6853,6 +6855,9 @@ class MeshDB:
         if created_by:
             clauses.append("created_by = ?")
             params.append(created_by)
+        if after_id:
+            clauses.append("id > ?")
+            params.append(after_id)
         where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
         params.append(limit)
         rows = self._conn().execute(
@@ -6860,6 +6865,102 @@ class MeshDB:
             params,
         ).fetchall()
         return [dict(r) for r in rows]
+
+    def count_flow_links(self, flow_run_id: str) -> int:
+        return self._conn().execute(
+            "SELECT COUNT(*) FROM flow_links WHERE flow_run_id = ?", (flow_run_id,),
+        ).fetchone()[0]
+
+    def iter_case_links(
+        self, flow_run_id: str, entity_type: str, role: str | None = None,
+    ) -> Generator[dict[str, Any], None, None]:
+        """Traverse matching links in bounded batches, closing each SQL cursor before yielding."""
+        if not flow_run_id:
+            return
+        after_id = 0
+        while True:
+            rows = self.list_flow_links(
+                flow_run_id, entity_type, role=role, after_id=after_id,
+            )
+            if not rows:
+                return
+            yield from rows
+            after_id = rows[-1]["id"]
+
+    def case_roster_session_page(self, flow_run_id: str, after_id: int, limit: int) -> list[dict[str, Any]]:
+        """Oldest link per session, joined to only the session fields displayed."""
+        rows = self._conn().execute(
+            """
+            SELECT link.id, link.entity_id, link.role,
+                   s.session_id, s.backend, s.status, s.model, s.machine_id, s.updated_at,
+                   s.last_result_summary, s.last_summary
+            FROM (
+                SELECT MIN(id) AS id FROM flow_links
+                WHERE flow_run_id = ? AND entity_type = 'session'
+                GROUP BY entity_id HAVING MIN(id) > ?
+                ORDER BY id LIMIT ?
+            ) members
+            JOIN flow_links link ON link.id = members.id
+            LEFT JOIN sessions s ON s.session_id = link.entity_id
+            ORDER BY link.id
+            """,
+            (flow_run_id, after_id, limit),
+        )
+        return [dict(row) for row in rows]
+
+    def case_roster_job_page(
+        self, flow_run_id: str, before: tuple[str, str] | None, limit: int,
+    ) -> list[dict[str, Any]]:
+        cursor_filter = "AND (j.created_at, j.id) < (?, ?)" if before is not None else ""
+        rows = self._conn().execute(
+            f"""
+            SELECT j.id, j.label, j.command, j.session_id, j.node_id, j.status,
+                   j.started_at, j.started_epoch, j.finished_at, j.exit_code, j.created_at,
+                   j.tail,
+                   NOT EXISTS(SELECT 1 FROM sessions s WHERE s.session_id = j.session_id) AS orphaned
+            FROM (
+                SELECT DISTINCT entity_id FROM flow_links
+                WHERE flow_run_id = ? AND entity_type = 'session'
+            ) members
+            JOIN jobs j ON j.session_id = members.entity_id
+            WHERE 1 = 1 {cursor_filter}
+            ORDER BY j.created_at DESC, j.id DESC LIMIT ?
+            """,
+            (flow_run_id, *(before or ()), limit),
+        )
+        return [dict(row) for row in rows]
+
+    def case_roster_totals(self, flow_run_id: str) -> tuple[dict[str, int], dict[str, int]]:
+        """Case-wide counts and tokens, without loading membership or history into Python."""
+        members = (
+            "WITH members AS (SELECT DISTINCT entity_id FROM flow_links "
+            "WHERE flow_run_id = ? AND entity_type = 'session') "
+        )
+        conn = self._conn()
+        counts = conn.execute(
+            members + """
+            SELECT (SELECT COUNT(*) FROM members) AS sessions,
+                   COUNT(*) AS jobs,
+                   COUNT(*) FILTER (WHERE LOWER(TRIM(j.status)) = 'running') AS running_jobs
+            FROM members JOIN jobs j ON j.session_id = members.entity_id
+            """,
+            (flow_run_id,),
+        ).fetchone()
+        tokens = dict(conn.execute(
+            members + f"""
+            SELECT COALESCE(SUM({_COST_INPUT_EXPR}), 0) AS input,
+                   COALESCE(SUM(r.output_tokens), 0) AS output,
+                   COALESCE(SUM(r.cache_read_tokens), 0) AS cache_read,
+                   COALESCE(SUM(r.cache_creation_tokens), 0) AS cache_creation
+            FROM members
+            JOIN llm_turns t ON t.session_id = members.entity_id
+            JOIN llm_model_requests r ON r.turn_id = t.turn_id
+            WHERE r.is_duplicate = 0
+            """,
+            (flow_run_id,),
+        ).fetchone())
+        tokens["total"] = sum(tokens.values())
+        return dict(counts), tokens
 
     def list_session_case_links(
         self,
@@ -7589,18 +7690,15 @@ class MeshDB:
         flow_run_id: str,
         spec_id: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
-        """[A56/M4] The most recent ``spec.review_scored`` verdict on a Case (for an
-        optional specific ``spec_id``), or None if the spec was never scored.
-
-        Read-only. Returns the parsed score-card payload (with ``passed``). This is
-        the authoritative "is decomposition unlocked?" read — decompose_case uses it.
-        """
-        latest: Optional[Dict[str, Any]] = None
-        for e in self.list_flow_events_of_types(flow_run_id, ["spec.review_scored"]):
-            if spec_id is not None and e.get("entity_id") != spec_id:
-                continue
-            latest = _event_payload(e) or {}
-        return latest
+        """Return the latest scored verdict for this Case and optional spec."""
+        sql = ("SELECT payload_json FROM flow_events "
+               "WHERE flow_run_id = ? AND event_type = 'spec.review_scored'")
+        params: list[str] = [flow_run_id]
+        if spec_id is not None:
+            sql += " AND entity_id = ?"
+            params.append(spec_id)
+        row = self._conn().execute(sql + " ORDER BY id DESC LIMIT 1", params).fetchone()
+        return (_event_payload(dict(row)) or {}) if row is not None else None
 
     def decompose_case(
         self,
@@ -7634,7 +7732,7 @@ class MeshDB:
         via the flow_links unique index.
         """
         review = self.latest_spec_review(flow_run_id, spec_id)
-        if review is None or not review.get("passed"):
+        if review is None or review.get("passed") is not True:
             return {
                 "ok": False,
                 "reason": "spec_not_approved",
@@ -7660,9 +7758,10 @@ class MeshDB:
         if order is None:
             return {"ok": False, "reason": "cyclic_dependencies"}
 
-        # ---- Write: N task_attached links + ONE decomposition event. Zero flow_runs.
-        link_ids: List[Optional[int]] = []
+        # Prepare payloads before taking the write lock. The second review
+        # lookup and publication share one transaction, including cross-process writes.
         by_key = {str(t.get("task_key")).strip(): t for t in tasks}
+        link_payloads: list[tuple[str, str]] = []
         for key in keys:
             t = by_key[key]
             meta: Dict[str, Any] = {
@@ -7670,20 +7769,46 @@ class MeshDB:
                 "depends_on": deps[key],
                 "spec_id": spec_id,
             }
-            # Carry any non-authoritative planning hints verbatim.
             for hint in ("estimated_hours", "priority", "human_task", "files"):
                 if hint in t:
                     meta[hint] = t[hint]
-            link_ids.append(self.create_flow_link(
-                flow_run_id, "task", key, "task_attached",
-                created_by=actor, metadata=meta,
-            ))
-        self.append_flow_event(
-            flow_run_id, "case.decomposed", actor,
-            entity_type="artifact", entity_id=spec_id,
-            payload={"spec_id": spec_id, "task_count": len(keys), "order": order},
-        )
-        self.update_flow_stage(flow_run_id, "decomposed")
+            link_payloads.append((key, json.dumps(meta)))
+        event_payload = json.dumps({"spec_id": spec_id, "task_count": len(keys), "order": order})
+        with self._write() as conn:
+            review = self.latest_spec_review(flow_run_id, spec_id)
+            if review is None or review.get("passed") is not True:
+                return {"ok": False, "reason": "spec_not_approved", "review": review}
+            now = _now()
+            conn.executemany(
+                """INSERT INTO flow_links
+                   (flow_run_id, entity_type, entity_id, role, created_at, created_by, metadata_json)
+                   VALUES (?, 'task', ?, 'task_attached', ?, ?, ?)
+                   ON CONFLICT(flow_run_id, entity_type, entity_id, role) DO NOTHING""",
+                ((flow_run_id, key, now, actor, meta) for key, meta in link_payloads),
+            )
+            # Read back IDs in bounded batches, retaining the caller's key order.
+            ids_by_key: dict[str, int] = {}
+            for start in range(0, len(keys), 200):
+                chunk = keys[start:start + 200]
+                marks = ",".join("?" for _ in chunk)
+                rows = conn.execute(
+                    f"""SELECT id, entity_id FROM flow_links
+                        WHERE flow_run_id = ? AND entity_type = 'task'
+                          AND role = 'task_attached' AND entity_id IN ({marks})""",
+                    (flow_run_id, *chunk),
+                )
+                ids_by_key.update((row["entity_id"], row["id"]) for row in rows)
+            link_ids = [ids_by_key[key] for key in keys]
+            conn.execute(
+                """INSERT INTO flow_events
+                   (flow_run_id, event_type, actor, entity_type, entity_id, payload_json, created_at)
+                   VALUES (?, 'case.decomposed', ?, 'artifact', ?, ?, ?)""",
+                (flow_run_id, actor, spec_id, event_payload, now),
+            )
+            conn.execute(
+                "UPDATE flow_runs SET current_stage = 'decomposed', updated_at = ? WHERE flow_run_id = ?",
+                (now, flow_run_id),
+            )
         return {
             "ok": True,
             "task_keys": keys,
@@ -7697,9 +7822,7 @@ class MeshDB:
         dispatch, and in what order?" read. Returns ``[{task_key, objective,
         depends_on, metadata}, ...]`` in link-id order."""
         out: List[Dict[str, Any]] = []
-        for link in self.list_flow_links(
-            flow_run_id=flow_run_id, entity_type="task", role="task_attached",
-        ):
+        for link in self.iter_case_links(flow_run_id, "task", role="task_attached"):
             meta = {}
             raw = link.get("metadata_json")
             if raw:
@@ -8625,12 +8748,13 @@ class MeshDB:
         """[M3.4] The session bound to a Case as its Manager (the wake target), or
         None. Reads the authoritative ``flow_links`` (entity_type='session',
         role='manager'); the most recent such link wins."""
-        links = self.list_flow_links(
-            flow_run_id=flow_run_id, entity_type="session", role="manager",
-        )
-        if not links:
-            return None
-        return str(links[-1].get("entity_id") or "") or None
+        row = self._conn().execute(
+            """SELECT entity_id FROM flow_links
+               WHERE flow_run_id = ? AND entity_type = 'session' AND role = 'manager'
+               ORDER BY id DESC LIMIT 1""",
+            (flow_run_id,),
+        ).fetchone()
+        return (str(row["entity_id"] or "") or None) if row is not None else None
 
     def case_reason_evidence(self, flow_run_ids: list[str]) -> dict[str, CaseReasonEvidence]:
         """Status and independent latest pause facts, one SELECT per 500 IDs.
@@ -9883,31 +10007,40 @@ class MeshDB:
         ).fetchall()
         return [dict(r) for r in rows]
 
-    def cost_case_rows(self, flow_run_id: str) -> List[Dict[str, Any]]:
-        """Per (session, model) token rows for every session linked to a case.
+    def cost_case_rows(self, flow_run_id: str) -> Generator[dict[str, Any], None, None]:
+        """Stream per-session/model usage with the oldest membership role.
 
-        The operator-question fuel: manager + its flow_links-joined workers, each
-        session's tokens split per model so USD prices correctly per model. The
-        case's session roles come from the links (fetched by the assembler)."""
-        rows = self._conn().execute(
+        Each session joins through its first link exactly once, including those
+        carrying additional historical role links.
+        """
+        cursor = self._conn().execute(
             f"""
             SELECT t.session_id AS session_id,
+                   COALESCE(NULLIF(fl.role, ''), 'member') AS role,
                    COALESCE(NULLIF(r.model, ''), '') AS model,
                    SUM({_COST_INPUT_EXPR})                            AS input,
                    SUM(COALESCE(r.output_tokens, 0))                  AS output,
                    SUM(COALESCE(r.cache_read_tokens, 0))              AS cache_read,
                    SUM(COALESCE(r.cache_creation_tokens, 0))          AS cache_creation
-            FROM flow_links fl
+            FROM (
+                SELECT MIN(id) AS id FROM flow_links
+                WHERE flow_run_id = ? AND entity_type = 'session'
+                GROUP BY entity_id
+            ) members
+            JOIN flow_links fl ON fl.id = members.id
             JOIN llm_turns t ON t.session_id = fl.entity_id
             JOIN llm_model_requests r ON r.turn_id = t.turn_id
-            WHERE fl.flow_run_id = ? AND fl.entity_type = 'session'
-              AND r.is_duplicate = 0
+            WHERE r.is_duplicate = 0
             GROUP BY t.session_id, r.model
             ORDER BY t.session_id, model
             """,
             (flow_run_id,),
-        ).fetchall()
-        return [dict(r) for r in rows]
+        )
+        try:
+            for row in cursor:
+                yield dict(row)
+        finally:
+            cursor.close()
 
     def cost_session_model_rows(
         self,

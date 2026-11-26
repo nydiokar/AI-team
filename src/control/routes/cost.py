@@ -10,16 +10,20 @@ import sqlite3
 import threading
 from typing import TYPE_CHECKING, Any, Callable, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Path, Query
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from src.control import app_metrics
 from src.control import control_api as core
+
 from src.control.routes._responses import TokenTotals, UsdSummary
 
 if TYPE_CHECKING:
     from src.control.db import MeshDB
+
+
+_case_usage_gate = threading.BoundedSemaphore(4)
 
 
 # --- OpenAPI success-response models (documentation only; handlers return JSONResponse) ---
@@ -251,14 +255,25 @@ def build_router(orchestrator: Any, *, require_auth: Callable[..., Any]) -> APIR
         "/api/cases/{case_id}/usage",
         responses={200: {"model": CaseUsageOut, "description": "Per-case cost breakdown with manager/workers split"}},
     )
-    def api_case_usage(case_id: str) -> JSONResponse:
+    def api_case_usage(case_id: str = Path(max_length=128)) -> JSONResponse:
         """Per-case cost breakdown (the manager/workers split): each session's
         tokens + USD, and the mgr_vs_workers summary. 404 for an unknown case."""
         from src.control.cost_read_model import assemble_case_usage
-        result = assemble_case_usage(_cost_db(), case_id)
-        if result is None:
-            raise HTTPException(status_code=404, detail={"ok": False, "reason": "case_not_found"})
-        return JSONResponse(result)
+        if not _case_usage_gate.acquire(blocking=False):
+            raise HTTPException(status_code=503, detail="case_usage_busy")
+        try:
+            db = _cost_db()
+            with db.read_snapshot():
+                result = assemble_case_usage(db, case_id)
+                if result is None:
+                    raise HTTPException(status_code=404, detail={"ok": False, "reason": "case_not_found"})
+                return JSONResponse(result)
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise HTTPException(status_code=503, detail="case_usage_unavailable") from exc
+        finally:
+            _case_usage_gate.release()
 
     @router.get(
         "/api/cost/top",

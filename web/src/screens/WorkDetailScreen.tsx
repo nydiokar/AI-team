@@ -55,16 +55,37 @@ function Section({ title, count, children }: {
   );
 }
 
+function PageControls({ label, onFirst, onNext }: {
+  label: string;
+  onFirst?: () => void;
+  onNext?: () => void;
+}) {
+  if (!onFirst && !onNext) return null;
+  return (
+    <nav aria-label={`${label} pages`} className="mt-2 flex gap-2">
+      {onFirst && <Button variant="outline" size="sm" onClick={onFirst}>First {label}</Button>}
+      {onNext && <Button variant="outline" size="sm" onClick={onNext}>More {label}</Button>}
+    </nav>
+  );
+}
+
 export function WorkDetailScreen() {
   const { id } = useParams<{ id: string }>();
+  return <WorkDetail key={id} id={id} />;
+}
+
+function WorkDetail({ id }: { id: string | undefined }) {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const [refreshing, setRefreshing] = useState(false);
   const [refreshMessage, setRefreshMessage] = useState<string | null>(null);
-  const detail = useWorkDetail(id);
+  const [linkAfter, setLinkAfter] = useState("0");
+  const [sessionAfter, setSessionAfter] = useState("0");
+  const [jobBefore, setJobBefore] = useState<string>();
+  const detail = useWorkDetail(id, linkAfter);
   const graph = useWorkGraph(id);
   const timeline = useWorkTimeline(id);
-  const roster = useWorkRoster(id);
+  const roster = useWorkRoster(id, sessionAfter, jobBefore);
   const caseState = useSetCaseState(id);
   const closeCase = useCloseCaseManually(id);
 
@@ -86,13 +107,12 @@ export function WorkDetailScreen() {
     setRefreshMessage("Refreshing…");
     try {
       invalidateRouteTarget(queryClient, `/work/${encodeURIComponent(id)}`);
-      await Promise.all([
-        queryClient.refetchQueries({ queryKey: ["work-detail", id] }),
-        queryClient.refetchQueries({ queryKey: ["work-timeline", id] }),
-        queryClient.refetchQueries({ queryKey: ["work-graph", id] }),
-        queryClient.refetchQueries({ queryKey: ["work-roster", id] }),
-        queryClient.refetchQueries({ queryKey: ["case-resume-state", id] }),
-      ]);
+      await Promise.all(["work-detail", "work-timeline", "work-graph", "work-roster", "case-resume-state"].map(
+        (key) => queryClient.refetchQueries(
+          { queryKey: [key, id], type: "active" },
+          { cancelRefetch: false, throwOnError: true },
+        ),
+      ));
       setRefreshMessage("Case refreshed.");
     } catch (e) {
       setRefreshMessage(`Refresh failed: ${String((e as Error)?.message ?? "unknown")}`);
@@ -182,6 +202,10 @@ export function WorkDetailScreen() {
           </div>
         )}
 
+        {detail.isError && !summary && (
+          <p role="alert" className="px-4 pt-6 text-[12px] text-ink-muted">Case details are unavailable.</p>
+        )}
+
         {summary && meta && (
           <>
             {/* Header card: bucket + authoritative status/stage + flow id */}
@@ -263,8 +287,26 @@ export function WorkDetailScreen() {
               title="Live"
               count={roster.data ? roster.data.counts.sessions + roster.data.counts.jobs : undefined}
             >
-              {roster.data ? (
-                <CaseRosterView roster={roster.data} />
+              {roster.isError ? (
+                <p role="alert" className="text-[12px] text-ink-muted">The live roster is unavailable.</p>
+              ) : roster.data ? (
+                <>
+                  <CaseRosterView roster={roster.data} />
+                  <PageControls
+                    label="sessions"
+                    onFirst={sessionAfter !== "0" ? () => setSessionAfter("0") : undefined}
+                    onNext={!roster.isPlaceholderData && roster.data.nextSessionCursor
+                      ? () => setSessionAfter(roster.data!.nextSessionCursor!)
+                      : undefined}
+                  />
+                  <PageControls
+                    label="scripts"
+                    onFirst={jobBefore ? () => setJobBefore(undefined) : undefined}
+                    onNext={!roster.isPlaceholderData && roster.data.nextJobCursor
+                      ? () => setJobBefore(roster.data!.nextJobCursor!)
+                      : undefined}
+                  />
+                </>
               ) : (
                 <p className="text-[12px] text-ink-muted">Loading roster…</p>
               )}
@@ -281,13 +323,31 @@ export function WorkDetailScreen() {
 
             {/* Ledger */}
             <Section title="Ledger" count={detail.data?.counts.links}>
-              <CaseLedgerView ledger={detail.data!.ledger} />
+              {detail.isError ? (
+                <p role="alert" className="text-[12px] text-ink-muted">This ledger page is unavailable.</p>
+              ) : (
+                <CaseLedgerView ledger={detail.data!.ledger} />
+              )}
+              <PageControls
+                label="links"
+                onFirst={linkAfter !== "0" ? () => setLinkAfter("0") : undefined}
+                onNext={!detail.isPlaceholderData && detail.data?.nextLinkCursor
+                  ? () => setLinkAfter(detail.data!.nextLinkCursor!)
+                  : undefined}
+              />
             </Section>
 
             {/* Timeline */}
-            <Section title="Timeline" count={timeline.data?.eventCount}>
-              {timeline.data ? (
-                <CaseTimelineView timeline={timeline.data} />
+            <Section title="Timeline" count={timeline.data?.totalEventCount ?? timeline.data?.eventCount}>
+              {timeline.isError ? (
+                <p role="alert" className="text-[12px] text-ink-muted">The timeline is unavailable.</p>
+              ) : timeline.data ? (
+                <>
+                  {(timeline.data.totalEventCount ?? 0) > timeline.data.eventCount && (
+                    <p className="mb-2 text-[12px] text-ink-muted">Showing the latest {timeline.data.eventCount} events.</p>
+                  )}
+                  <CaseTimelineView timeline={timeline.data} />
+                </>
               ) : (
                 <p className="text-[12px] text-ink-muted">Loading timeline…</p>
               )}
