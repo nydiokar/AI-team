@@ -125,3 +125,18 @@ def test_done_passes_when_the_arch_contract_is_met(tmp_path: Path) -> None:
     dispatch.set_field("GATED_JOB", "status", "done")
 
     assert dispatch._read_yaml_block(packet)["status"] == "done"
+
+
+def test_done_is_refused_when_required_arch_contract_scope_is_missing(tmp_path: Path) -> None:
+    dispatch = _module()
+    packet = _packet(
+        dispatch, tmp_path,
+        "```arch-contract\nscope: [scripts/dispatch, missing-required-scope]\nretired: [unused_sentinel]\n```\n",
+    )
+
+    try:
+        dispatch.set_field("GATED_JOB", "status", "done")
+        raise AssertionError("incomplete required analysis must refuse done")
+    except SystemExit as refused:
+        assert "arch-contract" in str(refused)
+    assert dispatch._read_yaml_block(packet)["status"] == "active"

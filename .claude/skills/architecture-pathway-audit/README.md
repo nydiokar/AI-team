@@ -63,14 +63,15 @@ For AI-Team inbox ownership, use `contracts/agent_inbox.yaml` with
 The repository test checks that wake production and activation consult
 `pending_for` and agree on message state.
 
-Exit statuses: **0** no unwaived violations found; **1** violations; **2** invalid
-contract/input. Always inspect coverage: zero scanned files, skipped files and
-Python parse failures can invalidate a passing result. Static SQL extraction misses
-some queries, including schema-qualified table names and queries assembled
-elsewhere. SQL examples in docstrings can be mistaken for accesses. Python
-symbol mentions in docstrings are otherwise notes; comments are ignored. Other
-text files are scanned lexically. Tests and historical references may require
-explicit, reasoned waivers.
+Exit statuses: **0** completed applicable checks with no unwaived violations;
+**1** completed checks with violations; **2** invalid or incomplete required
+analysis. Required scope paths that resolve to no scanned files, skipped input
+and Python parse errors prevent a passing verdict. SQL access facts retain the
+execution site and declaration where available. Schema-qualified and quoted
+identifiers are recognized, CTE references respect statement scope and SQL
+examples in docstrings do not create accesses. Unsupported dynamic SQL remains
+visible as a coverage limitation. Comments are ignored. Tests and historical
+references may require explicit, reasoned waivers.
 
 In AI-Team, `scripts/dispatch/dispatch_state.py --set <job> status done` runs the
 checker against `HEAD` when the packet contains an `arch-contract` block. This is
@@ -101,10 +102,11 @@ For a bounded batch sweep without a server:
 | `--sweep-depth`, `--sweep-cap` | Bound recursive exploration per root |
 | `--neighbors`, `--timeout` | CBM page size and query timeout |
 | `--cache-dir` | Explicit cache; Linux default is under `~/.cache/architecture-pathway-audit/` |
-| `--refresh` | Reindex and drop expansions; use a new cache directory when changing Python versions |
+| `--refresh` | Reindex and drop cached expansions |
 | `--no-open`, `--port`, `--no-serve` | Browser launch, local port, or write artifacts and exit |
 | `--baseline` | Reviewed acknowledgements; default `.arch-audit/baseline.json` |
-| `--baseline-update` | Acknowledge **every** current finding and exit; use only after reviewing that exact set |
+| `--baseline-update` | Acknowledge the emitted findings on a completed sweep after review |
+| `--findings-offset` | Return the next evidence page using the previous report’s `next_findings_offset` |
 
 The scope suffix is appended to the CBM project name. Content changes trigger
 reindexing and invalidate affected expansions. The Python AST adapter resolves
@@ -119,13 +121,21 @@ hiding them; vanished IDs appear as `stale_ids`.
 
 ## Interpret coverage before findings
 
-Read `coverage` and `analysis_scope` in JSON: route discovery/expansion counts,
-parse failures, unresolved calls, incomplete pages, hub boundaries and finding
-caps. Graph rules use loaded neighborhoods; SQL/fingerprint rules also inspect
-AST definitions outside expanded routes. Bounded sweeps are not complete audits.
-For `--no-serve` without a sweep, an index failure can still exit successfully
-with empty findings; inspect stderr/stdout and reject a report whose analysis is
-still pending. The JSON report currently omits the index error itself.
+Read the JSON report’s `run`, `coverage` and `analysis_scope` fields together.
+The run identifies the current attempt, source digest, effective scope, analysis
+stage and errors. A batch run returns **2** when required analysis is incomplete
+or failed. A completed execution and a deliberate partial search can each
+return **0**. Inspect `run.status` to tell them apart. A completed zero means
+only that the declared static checks emitted no matching findings on the
+specified input. The legacy report format lacked this verdict.
+
+The report includes the number of findings before and after per-kind output
+bounds and the continuation offset for omitted evidence. To retrieve additional
+evidence, repeat the command against the same source and options, with
+`--findings-offset` set to the previous report’s `next_findings_offset`. Match
+source digest and settings before comparing pages. Known/stale baseline metadata
+and mechanical facts remain distinct from candidate findings. Semantic defects
+require source and behavioral review.
 
 Dynamic dispatch, unknown receiver types, callbacks, conditional registration and
 sub-app mounts limit coverage. Scope may exclude scripts, config, frontend code
