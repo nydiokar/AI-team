@@ -1,12 +1,12 @@
 ```yaml
 job_id: AGENT_114_CONSEQUENTIAL_DECISION_INTEGRATION
 created_at: "2026-11-13T13:35:52.954860+00:00"        # CANONICAL — set once at dispatch, never derive again
-status: ready              # ready | active | blocked | done | dead
+status: dead              # ready | active | blocked | done | dead
 owner: ""
 depends_on: [113]
 results_ref: DISPATCH_LOG.md#A114             # -> DISPATCH_LOG.md section with the verdict prose
 evidence: []                  # artifact paths that PROVE it ran (checked to exist)
-updated_at: "2026-11-17T09:40:09.742215+00:00"
+updated_at: "2026-11-26T10:20:01.902661+00:00"
 ```
 
 # DISPATCH — A114 · Integrate consequential decisions into actual SDK use
@@ -180,6 +180,20 @@ the executable GitHub handoff are recorded in A113's final adversarial review se
 - [ ] Complete operator visibility, operational bounds, migration and rollback evidence.
 - [ ] Merge; record deployment/worker/paid gates honestly and satisfy overall done criteria.
 
-## Closure
+## Closure — RETIRED 2026-11-26 (operator abstention, not completion)
 
-Not started. A113 authors this continuation only; it does not implement or activate it.
+The operator decided on **2026-11-26** not to use `CLAUDE_SDK_MAX_BUDGET_USD` at all: a USD budget
+cap is too restrictive for this workflow. This job's entire objective is the protected use of that
+setting, so the objective is **withdrawn** — not implemented, not activated, and not satisfied.
+Status is `dead`, not `done`.
+
+Live state at handoff: gateway `/health` reports `governor.sdk_max_budget_usd: null` (no cap), which
+is the desired abstained state; no flag write or restart is needed. Do not set, pin, enable or test
+this knob, and do not treat A114 as pending work. `docs/backend/ENV_FEATURE_FLAGS.md` records the
+abstention so no later agent follows the old `ops_flag.sh set CLAUDE_SDK_MAX_BUDGET_USD 2.5`
+instruction.
+
+The 2026-11-17 review evidence above remains historical: it explains why launch-only guards were
+inadequate for the *old* objective; it is not an acceptance proof and does not make this job a
+candidate for `done`. Full remaining-work handoff and 2026-11-26 Kanebra report:
+[issue #308](https://github.com/nydiokar/AI-team/issues/308).

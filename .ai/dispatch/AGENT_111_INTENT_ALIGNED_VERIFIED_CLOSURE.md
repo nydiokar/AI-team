@@ -213,7 +213,7 @@ lost response, concurrent close and crash between review and close cannot create
 | Existing work | Ownership under A111 |
 |---|---|
 | A102, A105 | Keep their deployment/natural acceptance gates in their packets. P4/P6 consume their evidence. |
-| A114 | Owns declared SDK-budget admission and actual boot consumption. A111 consumes its receipts and adds only bounded Case-level accounting/admission needed for this loop. No second policy or boot gate. |
+| A114 | **RETIRED 2026-11-26 — operator abstains from `CLAUDE_SDK_MAX_BUDGET_USD`.** Do not consume its budget/boot receipts; USD budget-cap enforcement is out of scope. A111 still owns bounded Case-level round/turn/time accounting from canonical usage. No second policy or boot gate. |
 | A116 | Owns authoritative review/membership reader repairs and audit-tool validity. Recheck its merged evidence; A111 owns current per-obligation acceptance and tests the integration, without redoing those repairs. |
 | A94 | Sole S1 client, battery runtime, decision log and replay work; scores are advisory and are not ground truth. Rebase stale two-wake/continuation assumptions onto A104. |
 | A95 | Sole semantic dispatch preflight, after A94 qualifies. Deterministic contract/authority checks in P1/P2 do not depend on a classifier. |
@@ -330,8 +330,10 @@ promotion evidence and A105 natural latency/observation evidence without changin
 or manufacturing paid proof turns. Worker promotion requires the operator's decision plus drain
 and ancestry checks. Gateway deploy follows the existing Docker workflow, never a global lock.
 
-Consume A114's current budget/boot receipts and A116's authoritative-reader evidence where
-applicable; unresolved dependencies block the affected activation claim, not unrelated stages.
+A114 is retired (2026-11-26 operator abstention from SDK USD budget caps) — do not wait on its
+budget/boot receipts; the USD-ceiling claim is withdrawn, not blocked. Consume A116's
+authoritative-reader evidence where applicable; unresolved dependencies block the affected
+activation claim, not unrelated stages.
 Prove round, per-turn, time and resource budgets at the owning layer; distinguish SDK API-dollar
 ceilings from subscription cost and whole-Case spend. Existing round caps/null SDK ceilings are
 not a verified all-backend Case budget. Reuse canonical usage and admission/cancellation for
