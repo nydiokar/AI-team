@@ -354,9 +354,9 @@ class Engine:
                     need = True
             if need:
                 t0: float = time.perf_counter()
-                log(f'Indexing ONLY {self.scope} into CBM project {self.project} '
+                log(f'Indexing ONLY {self.scope} into CBM project {self.index_project} '
                     f'({len(self.changed)} changed files)...')
-                res: Any = self.cbm.tool('index_repository', {'repo_path': str(self.scope), 'name': self.project},
+                res: Any = self.cbm.tool('index_repository', {'repo_path': str(self.scope), 'name': self.index_project},
                                          timeout=1800)
                 dt: float = time.perf_counter() - t0
                 if not isinstance(res, dict) or any(
@@ -398,7 +398,7 @@ class Engine:
 
     def index_status(self) -> dict[str, Any]:
         cbm: CBMClient = self._need_cbm()
-        args: dict[str, str] = {'project': self.project, 'format': 'json', 'diagnostics': 'summary'}
+        args: dict[str, str] = {'project': self.index_project, 'format': 'json', 'diagnostics': 'summary'}
         deadline: float | None = HTTP_DEADLINE.get()
         response: Any = cbm.tool('index_status', args, deadline=deadline) if deadline is not None else cbm.tool(
             'index_status', args,
@@ -407,8 +407,15 @@ class Engine:
             raise CBMError('CBM did not return an index status object')
         return response
 
+    @property
+    def index_project(self) -> str:
+        """Key native indexes by source and binary. Logical graph IDs remain stable."""
+        source_key = json.dumps([self.project, str(self.scope), self.run.source_sha256,
+                                 self.cache_identity['cbm_executable']]).encode()
+        return 'pathway-' + hashlib.sha256(source_key).hexdigest()[:48]
+
     def index_receipt(self, status: dict[str, Any]) -> dict[str, Any]:
-        if (status.get('status') != 'ready' or status.get('project') != self.project
+        if (status.get('status') != 'ready' or status.get('project') != self.index_project
                 or status.get('root_path') != str(self.scope) or not status.get('indexed_at')
                 or any(not isinstance(status.get(k), int) for k in ('nodes', 'edges'))):
             raise CBMError('CBM index status could not attest the selected project, root and generation')
@@ -423,8 +430,18 @@ class Engine:
         deadline: float | None = HTTP_DEADLINE.get()
         cbm: CBMClient = self._need_cbm()
         if deadline is None:
-            return cbm.query(self.project, cypher, page or self.page)
-        return cbm.query(self.project, cypher, page or self.page, deadline=deadline)
+            return cbm.query(self.index_project, cypher, page or self.page)
+        return cbm.query(self.index_project, cypher, page or self.page, deadline=deadline)
+
+    def logical_qn(self, qn: str) -> str:
+        prefix: str = self.index_project
+        return self.project + qn[len(prefix):] if qn.startswith(prefix + '.') else qn
+
+    def indexed_qn(self, qn: str) -> str:
+        return self.index_project + qn[len(self.project):] if qn.startswith(self.project + '.') else qn
+
+    def cbm_node(self, row: dict[str, Any]) -> dict[str, Any]:
+        return cbm_node({**row, 'q': self.logical_qn(str(row.get('q') or ''))})
 
     # ----------------------------------------------------- global CBM tables
     def symbols(self) -> dict[str, Any]:
@@ -433,7 +450,7 @@ class Engine:
                                + NODE_FIELDS.format(v='n'), page=20000)
             if not ok:
                 raise CBMError('symbol table exceeded the paging cap')
-            self.cache['symbols'] = [cbm_node(r) for r in rows]
+            self.cache['symbols'] = [self.cbm_node(r) for r in rows]
         return self._symbol_index()
 
     def _symbol_index(self) -> dict[str, Any]:
@@ -462,7 +479,7 @@ class Engine:
             rows, ok = self._q('MATCH (a)-[r:CALLS]->(b) RETURN b.qualified_name AS q, count(r) AS c', page=20000)
             if not ok:
                 raise CBMError('fan-in table exceeded the paging cap')
-            self.cache['fanin'] = {r['q']: _int(r['c']) or 0 for r in rows}
+            self.cache['fanin'] = {self.logical_qn(r['q']): _int(r['c']) or 0 for r in rows}
         return self.cache['fanin']
 
     def utility_threshold(self) -> int:
@@ -740,7 +757,7 @@ class Engine:
         nodes: dict[str, dict[str, Any]] = {}
         edges: list[dict[str, Any]] = []
         complete: bool = True
-        Q: str = cypher_str(qn)
+        Q: str = cypher_str(self.indexed_qn(qn))
         if direction == 'out':
             rows, ok = self._q(f'MATCH (a)-[r:{OUT_RELS}]->(b) WHERE a.qualified_name = {Q} RETURN type(r) AS t, '
                                f'properties(r) AS p, ' + NODE_FIELDS.format(v='b'))
@@ -751,7 +768,7 @@ class Engine:
                                + NODE_FIELDS.format(v='b'))
             complete = ok and ok2 and ok3
             for row in rows:
-                b: dict[str, Any] = cbm_node(row)
+                b: dict[str, Any] = self.cbm_node(row)
                 props: dict[str, Any] = _props(row.get('p'))
                 base: dict[str, Any] = {'file': me.get('file'), 'line': _int(props.get('line')), 'source': 'cbm'}
                 if self._map_cbm_route(qn, row['t'], props, b, nodes, edges, base):
@@ -760,12 +777,12 @@ class Engine:
                 edges.append({**base, 'from': qn, 'to': b['id'], 'type': row['t'], 'props': props,
                               **({'low_confidence': True} if _low(props) else {})})
             for row in impl:
-                b = cbm_node(row)
+                b = self.cbm_node(row)
                 nodes[b['id']] = b
                 edges.append({'from': qn, 'to': b['id'], 'type': 'OVERRIDDEN_BY', 'file': b['file'], 'line': b['line'],
                               'source': 'cbm', 'props': {'derived_from': 'OVERRIDE (implementation -> base)'}})
             for row in sim:
-                b = cbm_node(row)
+                b = self.cbm_node(row)
                 nodes[b['id']] = b
                 a, z = sorted([qn, b['id']])
                 edges.append({'from': a, 'to': z, 'type': 'SIMILAR_TO', 'file': None, 'line': None, 'source': 'cbm',
@@ -796,14 +813,14 @@ class Engine:
                                  + NODE_FIELDS.format(v='b')) if me.get('kind') in ('Method', None) else ([], True)
         complete = ok and ok2
         for row in rows:
-            a2: dict[str, Any] = cbm_node(row)
+            a2: dict[str, Any] = self.cbm_node(row)
             props = _props(row.get('p'))
             nodes[a2['id']] = a2
             edges.append({'from': a2['id'], 'to': qn, 'type': row['t'], 'file': a2['file'],
                           'line': _int(props.get('line')), 'source': 'cbm', 'props': props,
                           **({'low_confidence': True} if _low(props) else {})})
         for row in base_rows:
-            b = cbm_node(row)
+            b = self.cbm_node(row)
             nodes[b['id']] = b
             edges.append({'from': b['id'], 'to': qn, 'type': 'OVERRIDDEN_BY', 'file': me.get('file'),
                           'line': me.get('line'), 'source': 'cbm', 'props': {'derived_from': 'OVERRIDE'}})

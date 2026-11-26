@@ -414,7 +414,7 @@ class TestEngineOffline(unittest.TestCase):
         client = cbm_client.CBMClient(sys.executable)
         self.eng.cbm = client
         self.eng.changed = set()
-        status = {'project': self.eng.project, 'root_path': str(self.scope), 'status': 'ready',
+        status = {'project': self.eng.index_project, 'root_path': str(self.scope), 'status': 'ready',
                   'indexed_at': 'prior', 'nodes': 10, 'edges': 10}
         self.eng.cache['index'] = {'receipt': self.eng.index_receipt(status)}
         with patch.object(client, 'ensure_started'), patch.object(client, 'tool', side_effect=[
@@ -425,6 +425,22 @@ class TestEngineOffline(unittest.TestCase):
         self.assertEqual([call.args[0] for call in tool.call_args_list],
                          ['index_status', 'index_repository', 'index_status'])
         self.assertEqual(self.eng.stats['index_runs'], 1)
+
+    def test_native_index_names_are_content_bound_while_graph_ids_are_stable(self):
+        original = self.eng.index_project
+        raw_name = f'{original}.app.services.store.persist_order'
+        logical = self.eng.cbm_node({'q': raw_name})['id']
+        self.assertEqual(self.eng.indexed_qn(logical), raw_name)
+        store = self.scope / 'app/services/store.py'
+        source = store.read_text()
+        store.write_text(source.replace('return x', 'return 0'))
+        self.eng.sync_files()
+        self.assertNotEqual(self.eng.index_project, original)
+        self.assertNotEqual(self.eng.indexed_qn(logical), raw_name)
+        self.assertEqual(self.eng.logical_qn(self.eng.indexed_qn(logical)), logical)
+        store.write_text(source)
+        self.eng.sync_files()
+        self.assertEqual(self.eng.index_project, original)
 
     def test_incomplete_query_is_retried_and_caps_are_distinct(self):
         rid = self.rid('POST', '/v1/orders/a')

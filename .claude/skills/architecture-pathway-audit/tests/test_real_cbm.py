@@ -52,7 +52,7 @@ class TestRealCBM(unittest.TestCase):
         eng = self.engine()
         # id() is not supported by CBM 0.11: prove the failure surfaces as an error, never as a leaf
         with self.assertRaises(CBMError):
-            self.cbm.query(PROJECT, 'MATCH (a) WHERE id(a) = 1 RETURN a')
+            self.cbm.query(eng.index_project, 'MATCH (a) WHERE id(a) = 1 RETURN a')
         rA, rB, rC = (self.rid(eng, 'POST', p) for p in ('/v1/orders/a', '/v1/orders/{order_id}/b', '/v1/orders/c'))
         for r in (rA, rB, rC):
             eng.expand_bfs(r, 'out', 4, 100)
