@@ -238,3 +238,94 @@ def test_work_roster_empty_case_is_clean(client, db):
     roster = r.json()
     assert roster["counts"] == {"sessions": 0, "jobs": 0, "running_jobs": 0}
     assert roster["token_totals"]["total"] == 0
+
+
+@pytest.mark.parametrize("members", [199, 200, 201, 2000])
+def test_work_case_links_remain_reachable_and_summaries_complete(client, db, members):
+    case = db.create_flow_run("t-large-case", "execution")
+    db._conn().executemany(
+        """INSERT INTO flow_links (flow_run_id, entity_type, entity_id, role, created_at)
+           VALUES (?, 'session', ?, 'worker', 'now')""",
+        ((case, f"worker-{i:04}") for i in range(members)),
+    )
+    last = f"worker-{members - 1:04}"
+    db.register_job("last-worker-job", "gateway-host", "work", session_id=last)
+    base = f"/api/work/{case}"
+    detail = client.get(base, headers=_auth()).json()
+    roster = client.get(f"{base}/roster", headers=_auth()).json()
+    assert detail["counts"]["links"] == members
+    assert roster["counts"] == {"sessions": members, "jobs": 1, "running_jobs": 1}
+    assert [job["session_id"] for job in roster["jobs"]] == [last]
+    for suffix, field, items in (
+        ("", "ledger", lambda data: data["ledger"]["sessions"]),
+        ("/timeline", "evidence", lambda data: data["evidence"]),
+        ("/roster", "sessions", lambda data: data["sessions"]),
+    ):
+        seen = []
+        url = base + suffix
+        for _ in range(12):
+            response = client.get(url, headers=_auth())
+            assert response.status_code == 200
+            payload = response.json()
+            page = items(payload)
+            assert len(page) <= 200
+            seen.extend(row.get("entity_id") or row.get("session_id") for row in page)
+            cursor = payload["next_" + ("session" if field == "sessions" else "link") + "_cursor"]
+            if cursor is None:
+                break
+            url = base + suffix + f"?{'session' if field == 'sessions' else 'link'}_after={cursor}"
+        assert seen == [f"worker-{i:04}" for i in range(members)]
+
+
+def test_work_roster_jobs_page_with_stable_ties_and_historical_roles(client, db):
+    case = db.create_flow_run("roster", "execution")
+    db.create_flow_link(case, "session", "member", "worker")
+    db.create_flow_link(case, "session", "member", "reviewer")
+    db._conn().executemany(
+        """INSERT INTO jobs (id, session_id, node_id, label, status, started_at, created_at, updated_at)
+           VALUES (?, 'member', 'node', 'work', 'running', 'now', 'now', 'now')""",
+        ((f"job-{i:04}",) for i in range(201)),
+    )
+    url = f"/api/work/{case}/roster"
+    first = client.get(url, headers=_auth()).json()
+    assert first["counts"] == {"sessions": 1, "jobs": 201, "running_jobs": 201}
+    assert [member["role"] for member in first["sessions"]] == ["worker"]
+    assert [job["job_id"] for job in first["jobs"]] == [f"job-{i:04}" for i in range(200, 0, -1)]
+    last = client.get(url, headers=_auth(), params={"job_before": first["next_job_cursor"]}).json()
+    assert [job["job_id"] for job in last["jobs"]] == ["job-0000"]
+    assert last["next_job_cursor"] is None
+    assert last["counts"] == first["counts"]
+    assert client.get(url, headers=_auth(), params={"job_before": "invalid"}).status_code == 422
+    assert client.get(url, headers=_auth(), params={"session_after": 2**63}).status_code == 422
+
+
+def test_work_case_capacity_and_unavailable_db(client, db, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier, Event
+
+    cid = db.create_flow_run("bounded", "execution")
+    url = f"/api/work/{cid}/roster"
+    entered, release = Barrier(5), Event()
+    read_page = db.case_roster_session_page
+
+    def blocked_page(*args):
+        entered.wait(timeout=10)
+        assert release.wait(timeout=10)
+        return read_page(*args)
+
+    monkeypatch.setattr(db, "case_roster_session_page", blocked_page)
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        held = [pool.submit(client.get, url, headers=_auth()) for _ in range(4)]
+        try:
+            entered.wait(timeout=10)
+            rejected = client.get(url, headers=_auth())
+            assert rejected.status_code == 503
+            assert rejected.json()["detail"] == "case_read_busy"
+        finally:
+            release.set()
+        assert all(response.result().status_code == 200 for response in held)
+
+    monkeypatch.setattr(control_api, "_db", lambda: None)
+    unavailable = client.get(url, headers=_auth())
+    assert unavailable.status_code == 503
+    assert unavailable.json()["detail"] == "case_read_unavailable"

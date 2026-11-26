@@ -345,3 +345,20 @@ def test_projects_endpoint(client, seeded_db):
     assert r.status_code == 200
     paths = {p["repo_path"] for p in r.json()["projects"]}
     assert paths == {"/proj/a", "/proj/b"}
+
+
+def test_case_usage_attributes_members_past_display_window_without_role_double_count(seeded_db):
+    from src.control.cost_read_model import assemble_case_usage
+
+    db = seeded_db
+    cid = "case-0000000000000001"
+    original = assemble_case_usage(db, cid)
+    db._conn().execute("DELETE FROM flow_links WHERE flow_run_id = ? AND entity_id = ?", (cid, "wk-1"))
+    db._conn().executemany(
+        """INSERT INTO flow_links (flow_run_id, entity_type, entity_id, role, created_at)
+           VALUES (?, 'session', ?, 'worker', 'now')""",
+        ((cid, f"historical-{i:04}") for i in range(2000)),
+    )
+    db.create_flow_link(cid, "session", "wk-1", "worker")
+    db.create_flow_link(cid, "session", "wk-1", "reviewer")
+    assert assemble_case_usage(db, cid) == original

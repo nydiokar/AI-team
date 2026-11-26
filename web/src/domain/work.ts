@@ -80,6 +80,7 @@ export interface CaseCoverage {
 
 // ── Full case detail ───────────────────────────────────────────────────────
 export interface CaseDetail {
+  nextLinkCursor: string | null;
   summary: CaseSummary;
   ledger: CaseLedger;
   parent: CaseSummary | null;
@@ -101,6 +102,7 @@ export interface CaseEvent {
 }
 
 export interface CaseTimeline {
+  totalEventCount?: number;
   flowRunId: string;
   events: CaseEvent[];
   evidence: CaseLink[];
@@ -202,6 +204,8 @@ export interface RosterJob {
 }
 
 export interface CaseRoster {
+  nextSessionCursor?: string | null;
+  nextJobCursor?: string | null;
   flowRunId: string;
   sessions: RosterSession[];
   jobs: RosterJob[];

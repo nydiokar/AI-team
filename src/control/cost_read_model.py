@@ -15,6 +15,7 @@ silently dropped.
 """
 from __future__ import annotations
 
+from itertools import chain, groupby
 from typing import Any, Dict, List, Optional
 
 from src.services.pricing import TokenTotals, estimate_cost
@@ -217,32 +218,23 @@ def assemble_case_usage(
     flow = db.get_flow_run(flow_run_id)
     if flow is None:
         return None
-    links = db.list_flow_links(flow_run_id=flow_run_id, entity_type="session")
-    role_by_session: Dict[str, str] = {}
-    for link in links or []:
-        sid = link.get("entity_id")
-        if sid and sid not in role_by_session:
-            role_by_session[sid] = link.get("role") or "member"
-    rows = db.cost_case_rows(flow_run_id)
-    per_session: Dict[str, List[Dict[str, Any]]] = {}
-    for r in rows:
-        per_session.setdefault(r["session_id"], []).append(
-            _price(r, r.get("model") or "")
-        )
     session_rows: List[Dict[str, Any]] = []
     manager_rows: List[Dict[str, Any]] = []
     worker_rows: List[Dict[str, Any]] = []
-    for sid, priced_rows in sorted(per_session.items()):
+    for sid, rows in groupby(db.cost_case_rows(flow_run_id), key=lambda row: row["session_id"]):
+        first = next(rows)
+        role = first["role"]
+        priced_rows = [_price(row, row.get("model") or "") for row in chain((first,), rows)]
         item = _rollup(priced_rows)
         item.update({
             "session_id": sid,
-            "role": role_by_session.get(sid, "member"),
+            "role": role,
             "models": _dominant_models(priced_rows),
         })
         session_rows.append(item)
-        if item["role"] == "manager":
+        if role == "manager":
             manager_rows.append(item)
-        elif item["role"] == "worker":
+        elif role == "worker":
             worker_rows.append(item)
     mgr = _sum_aggregates(manager_rows)
     wk = _sum_aggregates(worker_rows)

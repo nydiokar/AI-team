@@ -152,6 +152,7 @@ export function toLedger(raw: RawCaseLedger | undefined | null): CaseLedger {
 
 export function toCaseDetail(raw: RawCaseDetailResponse): CaseDetail {
   return {
+    nextLinkCursor: raw.next_link_cursor ?? null,
     summary: toCaseSummary(raw.case),
     ledger: toLedger(raw.ledger),
     parent: raw.parent ? toCaseSummary(raw.parent) : null,
@@ -188,6 +189,7 @@ export function toCaseTimeline(raw: RawCaseTimelineResponse): CaseTimeline {
     flowRunId: raw.flow_run_id,
     events: (raw.events ?? []).map(toEvent),
     evidence: (raw.evidence ?? []).map(toLink),
+    ...(raw.total_event_count !== undefined && { totalEventCount: raw.total_event_count }),
     eventCount: raw.event_count ?? (raw.events?.length ?? 0),
   };
 }
@@ -255,6 +257,8 @@ function toRosterTokens(t: RawRosterTokens | undefined | null): RosterTokens {
 /** Translate the raw case-roster payload into the frontend CaseRoster shape. */
 export function toCaseRoster(raw: RawCaseRosterResponse): CaseRoster {
   return {
+    ...(raw.next_session_cursor && { nextSessionCursor: raw.next_session_cursor }),
+    ...(raw.next_job_cursor && { nextJobCursor: raw.next_job_cursor }),
     flowRunId: raw.flow_run_id,
     sessions: (raw.sessions ?? []).map((s) => ({
       sessionId: s.session_id ?? "",

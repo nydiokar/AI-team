@@ -324,3 +324,62 @@ def test_spec_body_capped_server_side(monkeypatch, client, db):
     r2 = client.post(f"/api/cases/{cid}/spec",
                      json={"spec_id": "spec-ok", "body": ok}, headers=_auth())
     assert r2.status_code == 200 and r2.json()["ok"] is True
+
+
+def test_decompose_uses_latest_applicable_review_past_history_window(db):
+    cid = db.open_case("Plan", "manager")
+    spec_id = "spec-new"
+    other_cid = db.open_case("Other plan", "other-manager")
+    db._conn().executemany(
+        """INSERT INTO flow_events
+           (flow_run_id, event_type, actor, entity_type, entity_id, payload_json, created_at)
+           VALUES (?, 'spec.review_scored', 'reviewer', 'artifact', ?, ?, 'now')""",
+        ((cid, spec_id if i % 2 else "unrelated", '{"passed":true}') for i in range(5000)),
+    )
+    db.append_flow_event(cid, "spec.review_scored", "reviewer", entity_id=spec_id,
+                         payload={"passed": False})
+    db.append_flow_event(cid, "spec.review_scored", "reviewer", entity_id="unrelated",
+                         payload={"passed": True})
+    db.append_flow_event(other_cid, "spec.review_scored", "reviewer", entity_id=spec_id,
+                         payload={"passed": True})
+    db.append_flow_event(cid, "spec.review_approved", "reviewer", entity_id=spec_id,
+                         payload={"passed": True})
+    tasks = [{"task_key": "a", "objective": "A"}]
+    assert db.latest_spec_review(cid, spec_id) == {"passed": False}
+    assert db.latest_spec_review(cid) == {"passed": True}
+    assert db.decompose_case(cid, spec_id, tasks)["reason"] == "spec_not_approved"
+    assert db.list_dag_tasks(cid) == []
+
+    db.append_flow_event(cid, "spec.review_scored", "reviewer", entity_id=spec_id,
+                         payload={"passed": True})
+    assert db.decompose_case(cid, spec_id, tasks)["ok"] is True
+
+    db.append_flow_event(cid, "spec.review_scored", "reviewer", entity_id=spec_id,
+                         payload={"passed": "false"})
+    assert db.decompose_case(cid, spec_id, tasks)["reason"] == "spec_not_approved"
+    db._conn().execute(
+        "UPDATE flow_events SET payload_json = 'not json' WHERE id = "
+        "(SELECT MAX(id) FROM flow_events)"
+    )
+    assert db.latest_spec_review(cid, spec_id) == {}
+    assert db.decompose_case(cid, spec_id, tasks)["reason"] == "spec_not_approved"
+
+
+def test_decompose_rechecks_review_in_the_publication_transaction(db, monkeypatch):
+    cid = db.open_case("Plan", "manager")
+    db.append_flow_event(cid, "spec.review_scored", "reviewer", entity_id="spec",
+                         payload={"passed": True})
+    topological_order = db_mod._topological_order
+
+    def reject_during_validation(keys: list[str], edges: dict[str, list[str]]) -> list[str] | None:
+        other_connection = MeshDB(str(db._path))
+        other_connection.append_flow_event(
+            cid, "spec.review_scored", "reviewer", entity_id="spec", payload={"passed": False},
+        )
+        return topological_order(keys, edges)
+
+    monkeypatch.setattr(db_mod, "_topological_order", reject_during_validation)
+    result = db.decompose_case(cid, "spec", [{"task_key": "task", "objective": "Task"}])
+    assert result["reason"] == "spec_not_approved"
+    assert db.list_dag_tasks(cid) == []
+    assert not db.has_flow_event(cid, "case.decomposed")

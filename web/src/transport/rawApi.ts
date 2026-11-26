@@ -775,6 +775,7 @@ export interface RawCaseLedger {
 
 // GET /api/work/{id} → work_read_model.build_case_detail
 export interface RawCaseDetailResponse {
+  next_link_cursor?: string | null;
   case: RawCaseSummary;
   record: Record<string, unknown>;
   ledger: RawCaseLedger;
@@ -804,6 +805,7 @@ export interface RawFlowEvent {
 
 // GET /api/work/{id}/timeline → work_read_model.build_case_timeline
 export interface RawCaseTimelineResponse {
+  total_event_count?: number;
   flow_run_id: string;
   events: RawFlowEvent[];
   evidence: RawFlowLink[];
@@ -1005,6 +1007,8 @@ export interface RawRosterJob {
 
 // GET /api/work/{id}/roster → work_read_model.build_case_roster
 export interface RawCaseRosterResponse {
+  next_session_cursor?: string | null;
+  next_job_cursor?: string | null;
   flow_run_id: string;
   sessions: RawRosterSession[];
   jobs: RawRosterJob[];

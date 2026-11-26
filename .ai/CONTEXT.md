@@ -104,7 +104,7 @@ Only jobs that are genuinely open. Everything merged/done is in git and the disp
 |---|---|---|---|---|
 | **A117** | `AGENT_117_TELEMETRY_CONTEXT_ECONOMICS.md` | — | **active** — PR #293 merged; gateway/task-server live `05fad0a` | Context/advice, recovery lineage and SDK estimates verified; worker activation/natural acceptance remain explicit gates. |
 | **A118** | `AGENT_118_OPENCODE_REPLY_RECOVERY.md` | — | **ready** — issue #298; implementation follows evidence/plan review | Reconstruct the reported OpenCode missing-reply incident, determine whether managed-turn ownership/correlation is structurally wrong, and repair the proven cause with end-to-end attribution and visibility regressions. |
-| **A116** | `AGENT_116_TRUSTWORTHY_ARCHITECTURE_AUDIT.md` | none; coordinate A111 | **ready — operator-approved 2026-11-16; issue #290** | Repair authoritative review/membership reads and make architecture-audit execution, coverage, counts and evaluation failure-honest; autonomous implementation, independent verification and scoped certification required. |
+| **A116** | `AGENT_116_TRUSTWORTHY_ARCHITECTURE_AUDIT.md` | none; coordinate A111 | **active — issue #290** | Repair authoritative review/membership reads and make architecture-audit execution, coverage, counts and evaluation failure-honest; autonomous implementation, independent verification and scoped certification required. |
 | **A114** | `AGENT_114_CONSEQUENTIAL_DECISION_INTEGRATION.md` | A113 proven; coordinate A111/A71/A75 | ready for offline implementation | Protect declared SDK-budget use at turn admission and SDK creation/reuse; prove owner authority, target-worker resolved inputs, recovery and visibility. Launch-only guards miss warm sends. A113 is an offline palette proof; production enforcement remains unactivated. |
 | **A111** | `AGENT_111_INTENT_ALIGNED_VERIFIED_CLOSURE.md` | staged gates in packet | **ready — operator-approved; issue #292** — implementation not started | P0–P6: failure/friction traces → inherited intent → evidence-bound closure → existing reviewer → recovery/bounds → measured quality/usability → useful hands-off proof. Coordinates A114/A116; reserved activation gates remain. |
 | **A105** | `AGENT_105_CROSS_PROCESS_TURN_SIGNAL.md` | A104 ✅ | **active** — PRs #280/#281 merged; live `7d39020`; natural acceptance pending | Shared bounded HTTP turn signal wakes scheduler, effects and inbox; polls remain recovery. Await three natural eligible completions ≤2s and 24h observation; no paid proof turn. |
@@ -126,6 +126,20 @@ Only jobs that are genuinely open. Everything merged/done is in git and the disp
 ---
 
 ## Recent shift notes
+
+**A116 ledger read boundaries.** Work detail, timeline and roster share four synchronous
+read slots; Case Cost has four separate slots. Admission lasts through JSON encoding.
+Roster/ledger pages are row-bounded; the older timeline event window and lineage limits
+still apply. Absolute bytes for historical command, summary, metadata, objective and event
+fields remain deferred to preserve old payloads. Case Cost still encodes one result per
+telemetry-bearing session because the existing lifetime usage response contract returns
+the complete breakdown; the DB cursor no longer materializes all raw model rows. Trust the
+existing operator workload envelope until lifetime usage has a paged client contract.
+The SQLite VM deadline is cooperative and the existing lock-wait budget is per lock.
+Native I/O, response transport/backpressure and ASGI worker-thread queue memory have no
+new hard bound. The existing authenticated decomposition receiver keeps its inherited
+request body/admission limits; the review guard and DAG publication now share a transaction.
+
 
 **2026-11-21 — #228 watched-job wake boundary.** The shared controller records launch
 Case on new jobs from running managed turns. A current Manager can subscribe to
