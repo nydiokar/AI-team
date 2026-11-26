@@ -71,11 +71,15 @@ def run_case(case: Case | None, corpus: Path, generation: Path, timeout: int, cb
                 raise ValueError(f'fixture git init exited {initialized}')
         returncode = _child(command, generation / f'{name}.log', timeout)
         raw: bytes = destination.read_bytes()
-        validate_report(json.loads(raw), graph=graph, returncode=returncode)
-        return Observation(status='completed', returncode=returncode, sha256=hashlib.sha256(raw).hexdigest())
+        report: dict = json.loads(raw)
+        run_id, source_sha = validate_report(report, graph=graph, returncode=returncode)
+        if graph and report.get('scope') != str(repo):
+            raise ValueError('explorer report covers a different fixture')
+        return Observation(status='completed', returncode=returncode, sha256=hashlib.sha256(raw).hexdigest(),
+                           run_id=run_id, source_sha256=source_sha)
     except subprocess.TimeoutExpired:
         error: str = f'child exceeded the {timeout}s deadline'
-    except (AttributeError, OSError, TypeError, ValueError) as exc:
+    except (AttributeError, KeyError, OSError, TypeError, ValueError) as exc:
         error = str(exc)
     return Observation(status='failed', returncode=returncode, error=error)
 
