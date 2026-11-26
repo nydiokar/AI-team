@@ -96,9 +96,12 @@ optional and not justified by present measurements. No worker restarted.
 
 ---
 
-## Active Work (current priorities; registry reconciled 2026-11-02)
+## Active Work (current priorities; registry reconciled 2026-11-26)
 
 Only jobs that are genuinely open. Everything merged/done is in git and the dispatch packets.
+Authoritative status is `scripts/dispatch/dispatch_state.py --audit`, not this table. Full remaining-job
+ledger with the 2026-11-26 read-only Kanebra findings:
+[issue #308](https://github.com/nydiokar/AI-team/issues/308).
 
 | Job | Packet | Depends on | Status | What it is |
 |---|---|---|---|---|
@@ -106,18 +109,16 @@ Only jobs that are genuinely open. Everything merged/done is in git and the disp
 | **A118** | `AGENT_118_OPENCODE_REPLY_RECOVERY.md` | — | **active** — issue #298; P0 evidence review in progress; no implementation merged | Reconstruct the reported OpenCode missing-reply incident, determine whether managed-turn ownership/correlation is structurally wrong, and repair the proven cause with end-to-end attribution and visibility regressions. |
 | **A119** | `AGENT_119_OPENCODE_V2_FOUNDATION.md` | — (coordinate A118/A102) | **ready** — Level 3; issue #310; no production cutover | Paid-free V2 contract probe + fake server and adoption/seam decisions for the later OpenCode refactor; V2 auth, route, prompt, message and event breaks confirmed offline. |
 | **A116** | `AGENT_116_TRUSTWORTHY_ARCHITECTURE_AUDIT.md` | none; coordinate A111 | **active — P1 ledger reads merged PR #302 `5a04f30` (2026-11-26); audit-tool stages + certification open; issue #290** | Repair authoritative review/membership reads and make architecture-audit execution, coverage, counts and evaluation failure-honest; autonomous implementation, independent verification and scoped certification required. |
-| **A114** | `AGENT_114_CONSEQUENTIAL_DECISION_INTEGRATION.md` | A113 proven; coordinate A111/A71/A75 | ready for offline implementation | Protect declared SDK-budget use at turn admission and SDK creation/reuse; prove owner authority, target-worker resolved inputs, recovery and visibility. Launch-only guards miss warm sends. A113 is an offline palette proof; production enforcement remains unactivated. |
-| **A111** | `AGENT_111_INTENT_ALIGNED_VERIFIED_CLOSURE.md` | staged gates in packet | **ready — operator-approved; issue #292** — implementation not started | P0–P6: failure/friction traces → inherited intent → evidence-bound closure → existing reviewer → recovery/bounds → measured quality/usability → useful hands-off proof. Coordinates A114/A116; reserved activation gates remain. |
+| **A111** | `AGENT_111_INTENT_ALIGNED_VERIFIED_CLOSURE.md` | staged gates in packet | **ready — operator-approved; issue #292** — implementation not started | P0–P6: failure/friction traces → inherited intent → evidence-bound closure → existing reviewer → recovery/bounds → measured quality/usability → useful hands-off proof. Coordinates A116 (A114 retired 2026-11-26 by SDK-budget abstention); reserved activation gates remain. |
 | **A105** | `AGENT_105_CROSS_PROCESS_TURN_SIGNAL.md` | A104 ✅ | **active** — PRs #280/#281 merged; live `7d39020`; natural acceptance pending (stale marker is this external gate, not missing engineering) | Shared bounded HTTP turn signal wakes scheduler, effects and inbox; polls remain recovery. Await three natural eligible completions ≤2s and 24h observation; no paid proof turn. |
 | **A102** | `AGENT_102_UNIFY_BACKEND_PATHWAYS.md` | — | **blocked** — S2 merged + gateway live (`7c6d01a`); worker promotion and natural S3 acceptance pending | One carrier-owned `TurnControl` and natural backend operations; shims, rollout gates and dead gateway session execution removed. Worker restart needs the operator decision and drain/ancestry checks; no paid proof turn. |
+| **A93** | `AGENT_93_QUOTA_DB_AUTO_PRUNING.md` | — | **blocked — live gate on Kanebra (code merged 2026-11-26)** | Bounded retention for both quota stores; 108 targeted tests green, but one real UTC-daily prune cycle on merged code is still required. Read-only Kanebra steps are in the packet; controller-side prune needs `QUOTA_COORDINATOR_ENABLED` on (A58 decision). |
 | **A94** | `AGENT_94_SYSTEM_ONE_CORE_DELIVERY_SCORECARD.md` | — | ready (Level 3) | S1 core + decision log + replay baseline + advisory wake scorecard. Operator inputs: read-only controller DB copy, `TYPESAFE_API_KEY`. |
 | **A95** | `AGENT_95_SYSTEM_ONE_DISPATCH_PREFLIGHT.md` | A94 | ready after A94 (Level 3) | Soft pre-flight on `dispatch_worker` (Manager can override). |
 | **A96** | `AGENT_96_SYSTEM_ONE_DELIVERY_BOUNCE.md` | A94 + measured precision | blocked | Bounce a clearly-not-ready delivery instead of waking the Manager. |
-| **A75** | `AGENT_75_DASHBOARD_TOKEN_NOT_IN_HTML.md` | A71 design | dispatched | Remove the control token from served dashboard HTML (`window` global); keep TokenGate working via a non-page-inspectable flow. Sequenced after A71's credential design. |
-| **A71** | `AGENT_71_MESH_PER_NODE_CREDENTIALS.md` | — | dispatched | Replace the single shared `WORKER_TOKEN` with gateway-issued per-node credentials bound to `node_id` on register/heartbeat/claim/result; refuse cross-node claims; stop spoofed incarnation-bump DoS. Flag-gated default OFF. Worker-side lands on surfaced redeploy (Horse). |
+| **A71** | `AGENT_71_MESH_PER_NODE_CREDENTIALS.md` | — | ready — PR #77 open/unmerged; worker redeploy operator-gated | Replace the single shared `WORKER_TOKEN` with gateway-issued per-node credentials bound to `node_id` on register/heartbeat/claim/result; refuse cross-node claims; stop spoofed incarnation-bump DoS. Flag-gated default OFF. Worker-side lands on surfaced redeploy (Horse). |
 | **A58** | `AGENT_58_QUOTA_COORDINATOR_ACTIVATION.md` | A61 | **blocked** | Activating the quota coordinator — blocked until A61's real Claude adapter is independently reviewed (A63). |
-| **A62** | `AGENT_62_RUNTIME_FLAG_REGISTRY_NONBOOLEAN.md` | — | dispatched | Extend `/api/flags` to numeric/string knobs; land `CLAUDE_SDK_MAX_TURNS`/`CLAUDE_SDK_MAX_BUDGET_USD` as first real numeric case. |
-| **A63** | `AGENT_63_QUOTA_COORDINATOR_INDEPENDENT_AUDIT.md` | — | dispatched | Independent audit of A61's commit — re-derive every gap claim from the tree, not from the packet. |
+| **A63** | `AGENT_63_QUOTA_COORDINATOR_INDEPENDENT_AUDIT.md` | — | ready — no written independent verdict exists; needs owner decision | Independent audit of A61's commit — re-derive every gap claim from the tree, not from the packet. |
 
 **Operator-gated validations still pending:**
 - Job 1 live activation: `CASE_CONTINUATION_ENABLED=1` + gateway restart (runbook in `manager.md`).
