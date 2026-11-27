@@ -18,7 +18,7 @@ Owner: Codex. [Issue #313](https://github.com/nydiokar/AI-team/issues/313)
 - [x] Recover the archived draft in isolation and review against current main.
 - [x] Carry attributed Codex failures through the worker, managed result commit, transcript API and UI.
 - [x] Preserve partial replies, legacy consumer fields, Claude classification and failure provenance.
-- [ ] Record targeted verification and the merged PR.
+- [x] Record targeted verification and the merged PR.
 - [ ] Activate and verify the merged revision on the gateway and both active Codex carriers after operator approval.
 
 ## Milestone
@@ -41,4 +41,6 @@ pnpm -C web typecheck
 
 ## Closure
 
-Code and deployment acceptance are tracked separately. Production activation requires a gateway and task-server deployment and loading the merged worker source on `kanebra` (PM2 `ai-team-worker-kanebra`) and `Horse` (PM2 `ai-team-worker`). At the 2026-11-27 check, `kanebra` was running this Codex session, its worker checkout carried A119 edits, and `Horse` reported idle through its heartbeat. Recheck both nodes and verify the actual remote service process before activation. The operator must authorize the worker restarts.
+[PR #315](https://github.com/nydiokar/AI-team/pull/315) merged to `main` as `804563b` at 17:41 UTC on 2026-11-27. Both GitHub CI jobs passed. The merged source, tests and Web UI matched the tested PR head. An isolated schema-generation check against the installed Codex binary confirmed the notification fields without starting a session.
+
+Production activation requires a gateway and task-server deployment and loading the merged worker source on `kanebra` (PM2 `ai-team-worker-kanebra`) and `Horse` (PM2 `ai-team-worker`). At 17:41 UTC on 2026-11-27 the gateway reported `b87acbf`. The `kanebra` worker reported `d3b5673` and was running this Codex session as task `task_11695516`. Its service checkout carried A119 edits. The `Horse` heartbeat reported idle on `85db88c`. Recheck both nodes and verify the actual remote service process before activation. The operator must authorize the worker restarts.
