@@ -368,3 +368,47 @@ def test_expired_spool_files_are_removed_before_replay(tmp_path, monkeypatch):
 
     assert sink.replay_spool() == 0
     assert not expired.exists()
+
+
+def _deferred_event(name: str, turn_id: str = "covered", **attributes):
+    return build_event(
+        name, turn_id=turn_id, session_id="coverage", invocation_id=f"inv-{turn_id}",
+        node_id="worker", emitter_process_instance_id="test", source="worker",
+        backend="claude", attributes=attributes,
+    )
+
+
+def test_slow_live_upload_does_not_block_ordinary_delivery(tmp_path, monkeypatch):
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    sink = BufferedHttpTelemetrySink(
+        "http://controller", "test", node_id="worker", spool_dir=tmp_path,
+        batch_size=1, flush_interval_ms=60_000,
+    )
+    entered, release, ordinary_done = threading.Event(), threading.Event(), threading.Event()
+
+    def upload(body):
+        if body["events"][0]["event_name"] == "model.request.usage":
+            entered.set()
+            assert release.wait(5)
+        return True
+
+    def ordinary():
+        sink.emit(_deferred_event("turn.completed", status="success"))
+        ordinary_done.set()
+
+    monkeypatch.setattr(sink, "_post_batch", upload)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        sink.emit_deferred(_deferred_event("model.request.usage", input_tokens=1))
+        live = pool.submit(sink.flush)
+        try:
+            assert entered.wait(3)
+            sink.emit_deferred(_deferred_event("model.request.usage", "other-live", input_tokens=2))
+            final = pool.submit(ordinary)
+            assert ordinary_done.wait(1), "live HTTP stalled ordinary worker telemetry"
+        finally:
+            release.set()
+        live.result(timeout=3)
+        final.result(timeout=3)
+    sink.flush()
