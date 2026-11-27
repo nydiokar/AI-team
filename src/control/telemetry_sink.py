@@ -104,7 +104,10 @@ class BufferedHttpTelemetrySink:
         self._lock = threading.Lock()
         self._flush_lock = threading.Lock()
         self._timer: threading.Timer | None = None
-        self._last_failure_retryable = True
+        self._live_timer: threading.Timer | None = None
+        self._live_flushing = False
+        self._post_state = threading.local()
+        self._spool_lock = threading.Lock()
 
     def emit(self, event: TelemetryEvent) -> None:
         filtered = filter_events_for_detail_level(
@@ -120,14 +123,14 @@ class BufferedHttpTelemetrySink:
             should_flush = len(self._events) >= self.batch_size
             if not should_flush and self._timer is None:
                 self._timer = threading.Timer(
-                    self.flush_interval_ms / 1000.0, self.flush
+                    self.flush_interval_ms / 1000.0, self._flush_ordinary
                 )
                 self._timer.daemon = True
                 timer_to_start = self._timer
         if timer_to_start is not None:
             timer_to_start.start()
         if should_flush:
-            self.flush()
+            self._flush_ordinary()
 
     def emit_deferred(self, event: TelemetryEvent) -> None:
         """Coalesce live usage without running HTTP/spool work on the SDK loop.
@@ -145,10 +148,7 @@ class BufferedHttpTelemetrySink:
             if key not in self._live_events and len(self._live_events) >= 200:
                 return
             self._live_events[key] = event
-            if self._timer is None:
-                self._timer = threading.Timer(self.flush_interval_ms / 1000.0, self.flush)
-                self._timer.daemon = True
-                timer_to_start = self._timer
+            timer_to_start = self._schedule_live_locked()
         if timer_to_start is not None:
             timer_to_start.start()
 
@@ -157,27 +157,55 @@ class BufferedHttpTelemetrySink:
             self.emit(event)
 
     def flush(self) -> None:
-        # One uploader per sink. A timer waiting here remains registered until
-        # it acquires the lock, so slow HTTP cannot create a thread per update.
-        with self._flush_lock:
-            self._flush_buffer()
+        self._flush_ordinary()
+        self._flush_deferred()
 
-    def _flush_buffer(self) -> None:
+    def _flush_ordinary(self) -> None:
+        with self._flush_lock:
+            with self._lock:
+                timer = self._timer
+                self._timer = None
+                if timer is not None:
+                    timer.cancel()
+                events = self._events
+                self._events = []
+            self._deliver(events)
+
+    def _schedule_live_locked(self) -> threading.Timer | None:
+        if self._live_timer is not None or self._live_flushing or not self._live_events:
+            return None
+        self._live_timer = threading.Timer(self.flush_interval_ms / 1000.0, self._flush_deferred)
+        self._live_timer.daemon = True
+        return self._live_timer
+
+    def _flush_deferred(self) -> None:
         with self._lock:
-            timer = self._timer
-            self._timer = None
-            if timer is not None:
-                timer.cancel()
-            if not self._events and not self._live_events:
+            if self._live_flushing:
                 return
-            events = [*self._live_events.values(), *self._events]
-            self._events = []
+            if self._live_timer is not None:
+                self._live_timer.cancel()
+                self._live_timer = None
+            if not self._live_events:
+                return
+            self._live_flushing = True
+            events = list(self._live_events.values())
             self._live_events = {}
+        try:
+            self._deliver(events)
+        finally:
+            with self._lock:
+                self._live_flushing = False
+                timer = self._schedule_live_locked()
+            if timer is not None:
+                timer.start()
+
+    def _deliver(self, events: list[TelemetryEvent]) -> None:
         for batch_events in self._split_batches(events):
             body = self._batch_body(batch_events)
             if not self._post_batch(body):
-                if self._last_failure_retryable:
-                    self._spool(body)
+                if getattr(self._post_state, "retryable", True):
+                    with self._spool_lock:
+                        self._spool(body)
                 else:
                     logger.error(
                         "event=telemetry_batch_rejected node_id=%s batch_id=%s",
@@ -204,7 +232,7 @@ class BufferedHttpTelemetrySink:
                 except OSError:
                     pass
                 replayed += 1
-            elif not self._last_failure_retryable:
+            elif not getattr(self._post_state, "retryable", True):
                 try:
                     path.unlink()
                 except OSError:
@@ -263,7 +291,7 @@ class BufferedHttpTelemetrySink:
         return batches
 
     def _post_batch(self, body: dict) -> bool:
-        self._last_failure_retryable = True
+        self._post_state.retryable = True
         if not self.base_url or not self.token:
             return False
         data = json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
@@ -283,7 +311,7 @@ class BufferedHttpTelemetrySink:
                 return True
             except urllib.error.HTTPError as exc:
                 if 400 <= exc.code < 500:
-                    self._last_failure_retryable = False
+                    self._post_state.retryable = False
                     logger.error(
                         "event=telemetry_upload_rejected node_id=%s status=%d",
                         self.node_id,
