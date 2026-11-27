@@ -6433,6 +6433,22 @@ class MeshDB:
         ).fetchall()
         return [dict(r) for r in rows]
 
+    def unconsumed_transcript_task_ids(self, session_id: str, task_ids: list[str]) -> set[str]:
+        """Exclude file entries when the durable queue says the turn never ran."""
+        blocked: set[str] = set()
+        with self.read_snapshot():
+            conn = self._conn()
+            for offset in range(0, len(task_ids), 500):
+                batch = task_ids[offset:offset + 500]
+                placeholders = ",".join("?" for _ in batch)
+                rows = conn.execute(
+                    f"SELECT id FROM mesh_tasks WHERE session_id = ? "
+                    f"AND id IN ({placeholders}) AND status IN ('queued', 'withdrawn')",
+                    (session_id, *batch),
+                )
+                blocked.update(row["id"] for row in rows)
+        return blocked
+
     def session_job_notices(self, session_id: str, limit: int = 200) -> list[dict[str, JsonValue]]:
         """One bounded operator notice per terminal job, including consumed history."""
         rows = self._conn().execute(

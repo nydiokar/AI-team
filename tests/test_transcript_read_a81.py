@@ -200,3 +200,46 @@ def test_transcript_boundary_rejects_fifth_read_and_allows_retry(monkeypatch):
             _TRANSCRIPT_READ_SLOTS.release()
     assert client.get(route, headers=headers).json() == {"messages": []}
     assert client.get(route, headers=headers, params={"limit": 1001}).status_code == 422
+
+
+
+def test_enrolled_transcript_recovers_completed_file_history_but_hides_unconsumed_rows(tmp_path, monkeypatch):
+    from src.control import db as db_module
+    from src.control.transcript import get_transcript
+    db = MeshDB(str(tmp_path / "mesh.db"))
+    db.upsert_session(_session("recovery"))
+    monkeypatch.setattr(db_module, "_db_instance", db)
+    enqueue_pre_cutover(
+        db, task_id="never-ran", session_id="recovery", machine_id="Horse",
+        backend="claude", action="resume_session", payload={"prompt": "hidden"},
+    )
+    with db._write() as conn:
+        conn.execute("UPDATE mesh_tasks SET status='withdrawn' WHERE id='never-ran'")
+    entries = [
+        {"task_id": task_id, "user_message": "question", "result_summary": reply,
+         "timestamp": "2026-11-05T12:00:00Z"}
+        for task_id, reply in (
+            ("old", "saved full response"), ("never-ran", "stale audit text"), ("prompt-only", ""),
+        )
+    ]
+    (tmp_path / "recovery.json").write_text(json.dumps({"task_history": entries}))
+    turns = get_transcript(tmp_path, tmp_path, "recovery")
+    assert turns is not None
+    assert [(turn["task_id"], turn["result"]) for turn in turns] == [("old", "saved full response")]
+    with db._write() as conn:
+        conn.execute("UPDATE mesh_tasks SET status='completed', reply_text='ledger reply' WHERE id='never-ran'")
+    turns = get_transcript(tmp_path, tmp_path, "recovery")
+    assert turns is not None
+    assert [(turn["task_id"], turn["result"]) for turn in turns] == [("never-ran", "ledger reply")]
+
+
+def test_enrolled_transcript_rejects_oversized_retained_snapshot(tmp_path, monkeypatch):
+    from src.control import db as db_module
+    from src.control.transcript import TranscriptRecoveryUnavailable, get_transcript
+
+    db = MeshDB(str(tmp_path / "mesh.db"))
+    db.upsert_session(_session("recovery"))
+    monkeypatch.setattr(db_module, "_db_instance", db)
+    (tmp_path / "recovery.json").write_bytes(b"x" * (1_048_576 + 1))
+    with pytest.raises(TranscriptRecoveryUnavailable):
+        get_transcript(tmp_path, tmp_path, "recovery")

@@ -318,7 +318,7 @@ def build_router(
         "/api/sessions/{session_id}/messages",
         responses={200: {"model": MessagesOut,
                          "description": "Transcript messages for the session."},
-                   503: {"description": "Concurrent transcript-read limit reached (read_at_capacity)."}},
+                   503: {"description": "Transcript read at capacity or retained history unavailable."}},
     )
     def api_session_messages(
         session_id: str,
@@ -338,6 +338,8 @@ def build_router(
             if turns is None:
                 raise HTTPException(status_code=404, detail="not_found")
             return JSONResponse({"messages": turns})
+        except _transcript.TranscriptRecoveryUnavailable:
+            raise HTTPException(status_code=503, detail={"ok": False, "reason": "transcript_recovery_unavailable"}) from None
         finally:
             _TRANSCRIPT_READ_SLOTS.release()
 
