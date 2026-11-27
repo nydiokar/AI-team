@@ -8,7 +8,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 from contract_check import Contract, check, load_contract, scan_python, scan_text  # noqa: E402
 
-PY = '''"""Module doc mentioning old_send."""
+PY = '''"""Module doc mentioning old_send. Example: SELECT * FROM example_outbox."""
 from pkg.legacy import old_send
 import json
 
@@ -52,6 +52,7 @@ class TestScan(unittest.TestCase):
         got = sorted((a['where'], a['table'], a['mode']) for a in acc)
         self.assertIn(('m.py::writer', 'outbox', 'write'), got)
         self.assertIn(('m.py::reader', 'outbox', 'read'), got)
+        self.assertFalse(any(table == 'example_outbox' for _, table, _ in got))
 
     def test_text_tokens(self):
         occ = scan_text('Call `old_send` then old_sender.\n', 'p.md')

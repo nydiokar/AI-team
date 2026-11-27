@@ -423,9 +423,12 @@ _SQL_READ: re.Pattern[str] = re.compile(r'\b(?:FROM|JOIN)\s+["`\[]?(\w+)', re.I)
 
 
 def _strings(fn: ast.AST) -> list[tuple[int, str]]:
-    """String constants (and the constant parts of f-strings) in a def body, excluding nested defs."""
+    """Collect SQL string candidates, excluding docstrings and nested definitions."""
     out: list[tuple[int, str]] = []
     stack: list[ast.AST] = list(getattr(fn, 'body', []))
+    if isinstance(fn, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+        if ast.get_docstring(fn, clean=False) is not None:
+            del stack[0]
     while stack:
         n: ast.AST = stack.pop()
         if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):

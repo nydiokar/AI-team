@@ -45,6 +45,16 @@ class TestExtraction(unittest.TestCase):
                                ('stale', 'write', 'delete', 'full'), ('log', 'read', 'select', 'newest_n'),
                                ('one', 'read', 'select', 'full')})
 
+    def test_sql_examples_in_docstrings_are_not_accesses(self):
+        source = (
+            'def read(conn):\n'
+            '    """Example: SELECT * FROM example_entries; DELETE FROM example_log."""\n'
+            '    conn.execute("SELECT * FROM actual_entries")\n'
+        )
+        accesses = data_access(fn(source))
+        self.assertEqual([(a['table'], a['mode'], a['line']) for a in accesses],
+                         [('actual_entries', 'read', 3)])
+
     def test_prose_is_not_sql(self):
         self.assertEqual(data_access(fn('def f():\n    return "read from the user and update the settings later"\n')), [])
 
