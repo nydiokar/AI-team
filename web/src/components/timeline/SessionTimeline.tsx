@@ -503,6 +503,7 @@ export function SessionTimeline({
 
         if (item.kind === "notice") {
           const Icon = NOTICE_ICON[item.notice.severity];
+          const failedTurn = item.notice.kind === "turn_failure";
           return (
             <div
               key={key}
@@ -512,9 +513,10 @@ export function SessionTimeline({
                 className={cn("size-3 shrink-0", NOTICE_TONE[item.notice.severity])}
               />
               <span className="text-[11px] font-medium text-ink-muted">
-                {item.notice.kind}
+                {failedTurn ? "Turn failed" : item.notice.kind}
               </span>
-              <span className="min-w-0 flex-1 truncate text-[12.5px] text-ink-muted">
+              <span className={cn("min-w-0 flex-1 text-[12.5px] text-ink-muted",
+                failedTurn ? "break-words" : "truncate")}>
                 {item.notice.text}
               </span>
               <span className="shrink-0 text-[10px] text-ink-muted">

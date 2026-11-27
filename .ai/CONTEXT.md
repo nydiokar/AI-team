@@ -57,6 +57,8 @@ Detail, Cost and System/API reads pass; browser-only failure/retry recovery pass
 passes in isolation. Do not manufacture a paid turn or historical replay to certify it.
 Evidence, exact PR/builds and limits: [`READ_PATH_BURNDOWN.md`](../docs/backend/READ_PATH_BURNDOWN.md).
 
+A120 transcript read bounds and deferrals (2026-11-27): four admitted reads through JSON serialization, 1,000 rows per read, and the existing ten-second cooperative SQLite VM budget. Full historical reply/file bytes and native I/O/slow-reader deadlines remain outside the bound to preserve legacy transcript recovery. New failure metadata is bounded. See the [A120 dispatch](dispatch/AGENT_120_UNIFIED_TURN_FAILURES.md).
+
 Read-boundary deferrals: four-slot admission includes serialization for jobs,
 sessions, both affiliation formats and task-server jobs/completion pages. Mixed
 16-read isolated RSS/PSS and 10× cardinality measurements are in the burndown;

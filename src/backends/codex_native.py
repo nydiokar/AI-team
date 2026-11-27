@@ -26,6 +26,7 @@ from pydantic import BaseModel, ConfigDict, Field, JsonValue
 from src.backends.codex_app_server import (
     CodexAppServerClient, CodexProtocolError, CodexRPCError, CodexRPCTimeout,
 )
+from src.backends.codex_failures import MISSING_TURN_REASON, codex_failure
 from src.backends.codex_ownership import CodexOwnership
 from src.control.telemetry_sink import NullTelemetrySink
 from src.core.interfaces import CodingBackend, ExecutionResult, Session, SessionStatus
@@ -841,6 +842,7 @@ class CodexBackend(CodingBackend):
         usage: dict[str, int] = {}
         seen_usage: set[str] = set()
         diagnostic: dict[str, JsonValue] = {}
+        notified_failure: tuple[str, str] | None = None
         file_changes: dict[str, dict] = {}
         identity: dict = {}
         awaiting_reply: queue.Queue[dict] | None = None
@@ -973,10 +975,16 @@ class CodexBackend(CodingBackend):
                     event = channel.get()
                 except queue.Empty:
                     continue
-                call.progress.touch()  # [A102] every native event feeds the carrier's clock
                 method = event["method"]
                 params = event["params"]
                 turn_id = params.get("turnId")
+                if method == "error":
+                    # A refusal is evidence only for the turn bound by the native
+                    # start response (or the compaction start notification).
+                    if active.turn_id and turn_id == active.turn_id and params.get("willRetry") is False:
+                        notified_failure = codex_failure(params.get("error")) or notified_failure
+                    continue
+                call.progress.touch()
                 if method in ("turn/started", "turn/completed"):
                     turn_id = params["turn"]["id"]
                     if compact and not active.turn_id and method == "turn/started":
@@ -1032,16 +1040,24 @@ class CodexBackend(CodingBackend):
                     active.status = turn["status"]
                     ownership.finish_managed(call.turn_uuid, active.status)
                     diagnostic = {"status": active.status, "error": turn.get("error"), "usage": usage}
-                    errors = [] if active.status == "completed" else [
-                        "cancelled" if active.status == "interrupted" else "codex_turn_failed"]
-                    # Existing consumers accept this generic result projection. No
-                    # RPC objects or native turn IDs escape through core fields.
+                    error_class, errors = "", []
+                    if active.status == "failed":
+                        error_class, reason = (
+                            codex_failure(turn.get("error")) or notified_failure
+                            or ("backend_error", MISSING_TURN_REASON)
+                        )
+                        errors = [reason]
+                    elif active.status == "interrupted":
+                        error_class, errors = "cancelled", ["cancelled"]
                     projection = {"type": "turn.completed", "usage": usage,
                                   "output": "\n".join(output.values()), **diagnostic}
+                    # Raw stdout is sent to the carrier and may become a stored
+                    # diagnostic tail. Expose only the normalized provider reason.
+                    stream = {**projection, "error": {"message": errors[0]} if errors else None}
                     result = ExecutionResult(active.status == "completed", projection["output"], native_id,
-                        files_modified=list(file_changes), errors=errors,
+                        files_modified=list(file_changes), errors=errors, error_class=error_class,
                         execution_time=time.monotonic() - started,
-                        parsed_output=projection, raw_stdout=json.dumps(projection),
+                        parsed_output=projection, raw_stdout=json.dumps(stream),
                         return_code=0 if active.status == "completed" else 1,
                         file_changes=list(file_changes.values()))
                     return result

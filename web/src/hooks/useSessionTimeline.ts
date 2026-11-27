@@ -86,7 +86,7 @@ export function useSessionTimeline(
       // until there is a finished exchange; a starting/working prompt is shown
       // on its card, never twice. (Waiting/withdrawn prompts never reach the
       // transcript at all — the backend filters them.)
-      if (queueIds.has(t.task_id) && !t.result) continue;
+      if (queueIds.has(t.task_id) && !t.result && !t.failure) continue;
       // Distinct anchors: the USER bubble is stamped when the turn STARTED (when
       // the message was sent); the ASSISTANT bubble when the reply LANDED (start +
       // time spent working). Older turns without the split fall back to the single
@@ -107,7 +107,7 @@ export function useSessionTimeline(
           },
         });
       }
-      if (t.result) {
+      if (t.result && (!t.failure || t.failure.has_reply)) {
         const u = t.usage;
         items.push({
           kind: "message",
@@ -127,6 +127,15 @@ export function useSessionTimeline(
                 reasoningOutputTokens: u.reasoning_output_tokens,
               }
             : null,
+        });
+      }
+      if (t.failure) {
+        items.push({
+          kind: "notice", at: completedAt,
+          notice: {
+            id: `${t.task_id}-failure`, sessionId, taskId: t.task_id, kind: "turn_failure",
+            text: t.failure.message, timestamp: completedAt, severity: "error",
+          },
         });
       }
     }

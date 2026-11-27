@@ -492,3 +492,19 @@ def test_mesh_error_detail_stdout_tail_is_not_error_text():
     assert result.raw_stderr == ""
     assert _classify(result) == "auth"
     assert "usage limit" not in TaskOrchestrator._short_failure_reason(result).lower()
+
+
+@pytest.mark.parametrize(("raw", "expected"), [
+    ("Retry at 4:30 PM. Authorization: Bearer test-only", "Retry at 4:30 PM. Authorization: Bearer [redacted]"),
+    ("Retry. api_key='secret value with spaces'", "Retry. api_key=[redacted]"),
+    ("HTTP 503. See https://host.test/path?token=hidden", "HTTP 503. See [redacted]"),
+    ("HTTP 500. Debug file /home/operator/path", "HTTP 500. Debug file [redacted]"),
+    ('HTTP 503 response body: {"diagnostic":"hidden"}', "HTTP 503"),
+    ('stdout_tail:\n{"message":"internal only"}', ""),
+    ("Traceback (most recent call last):\n  File /tmp/worker", ""),
+])
+def test_public_failure_summary_redacts_explicit_error_text(raw, expected):
+    from src.core.failure_markers import user_failure_message
+
+    assert user_failure_message(raw) == expected
+    assert user_failure_message(expected) == expected

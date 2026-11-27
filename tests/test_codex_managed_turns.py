@@ -99,7 +99,7 @@ def save(tid, turn):
         with open(STATE, "w") as fh:
             json.dump(data, fh)
 
-def complete(tid, turn_id, status, text=None):
+def complete(tid, turn_id, status, text=None, error=None):
     with lock:
         th = threads[tid]
         if th["active"] != turn_id:
@@ -111,7 +111,7 @@ def complete(tid, turn_id, status, text=None):
         th["status"] = "systemError" if status == "failed" else "idle"
         save(tid, {"id": turn_id, "status": status, "clientId": th.get("client")})
         note(tid, "turn/completed", turn={"id": turn_id, "items": [], "status": status,
-             "error": {"message": "failed"} if status == "failed" else None})
+             "error": error or ({"message": "failed"} if status == "failed" else None)})
 
 def run_turn(tid, turn_id, c, text):
     hold = c.get("hold")
@@ -133,7 +133,18 @@ def run_turn(tid, turn_id, c, text):
         note(tid, "item/completed", turnId="turn-foreign",
              item={"id": "f", "type": "agentMessage", "text": "not yours"})
         return  # our turn stays active natively (never completed by itself)
-    complete(tid, turn_id, c.get("final_status", "completed"), text)
+    if c.get("retry_error"):
+        note(tid, "error", turnId=turn_id, willRetry=True,
+             error={"message": "Temporary provider failure."})
+    if c.get("foreign_error"):
+        note(tid, "error", turnId="turn-previous", willRetry=False,
+             error={"message": "Foreign provider failure."})
+    if c.get("bound_error"):
+        note(tid, "error", turnId=turn_id, willRetry=False, error=c["bound_error"])
+    if c.get("bound_error") and c.get("foreign_error"):
+        note(tid, "error", turnId="turn-older", willRetry=False,
+             error={"message": "Late foreign provider failure."})
+    complete(tid, turn_id, c.get("final_status", "completed"), text, c.get("terminal_error"))
 
 for line in sys.stdin:
     req = json.loads(line)
@@ -337,6 +348,95 @@ def drop_turn(backend, session, turn_uuid):
 # --------------------------------------------------------------------------- #
 # Capability + happy path: attribution by write-ahead mapping, identity first
 # --------------------------------------------------------------------------- #
+@pytest.mark.parametrize(("control", "success", "error_class", "errors"), [
+    ({"retry_error": True}, True, "", []),
+    ({"foreign_error": True, "final_status": "failed"}, False, "backend_error",
+     ["Codex reported a failed turn without a provider reason."]),
+    ({"bound_error": {"message": "Try again after 3:46 AM.", "codexErrorInfo": "usageLimitExceeded"},
+      "retry_error": True, "foreign_error": True, "final_status": "failed"},
+     False, "usage_limit", ["Try again after 3:46 AM."]),
+    ({"bound_error": {"message": "Earlier error."}, "final_status": "failed",
+      "terminal_error": {"codexErrorInfo": "contextWindowExceeded"}},
+     False, "context_overflow", ["The context window is full. Use /compact or start a new session."]),
+    ({"bound_error": {"message": "Previous error notification."}, "final_status": "interrupted"},
+     False, "cancelled", ["cancelled"]),
+])
+def test_codex_turn_result_uses_only_bound_terminal_failure_evidence(h, control, success, error_class, errors):
+    h.ctl(**control)
+    result = run_turn(h.backend, h.session(), "test", own())
+    assert result.success is success
+    assert (result.error_class or "") == error_class
+    assert result.errors == errors
+    assert result.output
+
+
+def test_bound_codex_failure_reaches_authenticated_transcript(h, monkeypatch):
+    import asyncio
+
+    from fastapi.testclient import TestClient
+
+    from src.control import control_api, db as db_module, task_server
+    from src.orchestrator import TaskOrchestrator
+    from src.worker.agent import _execute_task
+
+    h.ctl(final_status="failed", bound_error={
+        "message": "Try again after 3:46 AM. Authorization: Bearer fixture-secret\nStack trace: internal-only",
+        "codexErrorInfo": "usageLimitExceeded", "additionalDetails": "provider-diagnostic",
+    }, foreign_error=True, retry_error=True)
+    db = db_module.MeshDB(str(h.tmp_path / "mesh.db"))
+    monkeypatch.setattr(db_module, "get_db", lambda: db)
+    monkeypatch.setattr(task_server, "get_db", lambda: db)
+    monkeypatch.setattr(task_server, "_worker_token", lambda: "worker-test")
+    monkeypatch.setattr(control_api, "_dashboard_token", lambda: "dashboard-test")
+    session = h.session()
+    session.machine_id = "Horse"
+    db.upsert_session(session)
+    db.enroll_session(session.session_id)
+    db.upsert_node(node_id="Horse", tailscale_ip="", api_port=9000, backends=["codex"],
+                   managed_backends=["codex"], max_concurrent=1, incarnation_id="inc-1")
+    db.enqueue_turn(
+        task_id="t-1", session_id=session.session_id, backend="codex", action="resume_session",
+        payload={"prompt": "Report progress.", "session": {
+            "session_id": session.session_id, "backend": "codex", "repo_path": h.repo,
+        }},
+        machine_id="Horse", turn_source="human", turn_kind="instruction",
+    )
+    db.activate_turn("t-1")
+    token = db.claim_turn("t-1", "Horse", "worker_daemon", "inc-1")
+    db.start_turn("t-1", token, incarnation_id="inc-1")
+    ownership = ManagedTurnOwnership(task_id="t-1", session_id=session.session_id, node_id="Horse",
+                                     claim_token=token, incarnation_id="inc-1", turn_uuid=uuid.uuid4().hex)
+    worker_result = asyncio.run(_execute_task(
+        db.get_task("t-1"), {"codex": h.backend}, node_id="Horse", ownership=ownership,
+    ))
+    reason = "Try again after 3:46 AM. Authorization: Bearer [redacted]"
+    assert worker_result["errors"] == [reason]
+    assert worker_result["error_class"] == "usage_limit"
+    assert worker_result["output"]
+    task_api = TestClient(task_server.app)
+    ledger = task_api.post(
+        "/tasks/t-1/result-managed", headers={"Authorization": "Bearer worker-test"},
+        json={**worker_result, "node_id": "Horse", "claim_token": token},
+    )
+    assert ledger.status_code == 200, ledger.text
+    assert ledger.json()["resolved_status"] == "failed"
+    stored = db.get_task("t-1")
+    assert stored["error"] == reason
+    assert stored["reply_text"] == worker_result["output"]
+    assert stored["error_class"] == "usage_limit"
+
+    dashboard = TestClient(control_api.build_control_api(TaskOrchestrator.__new__(TaskOrchestrator)))
+    response = dashboard.get(f"/api/sessions/{session.session_id}/messages",
+                             headers={"Authorization": "Bearer dashboard-test"})
+    assert response.status_code == 200, response.text
+    [turn] = response.json()["messages"]
+    assert turn["failure"] == {"message": reason, "has_reply": True}
+    assert turn["result"] == worker_result["output"]
+    for diagnostic in ("fixture-secret", "internal-only", "provider-diagnostic", "Foreign provider failure"):
+        assert diagnostic not in response.text
+        assert diagnostic not in stored["result"]
+
+
 def test_capability_and_attributed_turn_with_process_identity_before_submit(h):
     assert _protocol_available() is True
     seen: list[dict] = []

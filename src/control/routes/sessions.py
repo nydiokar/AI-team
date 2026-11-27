@@ -48,6 +48,7 @@ from src.control.routes._responses import CommandResult, TokenTotals
 
 _SESSIONS_READ_SLOTS = threading.BoundedSemaphore(4)
 _USAGE_READ_SLOTS = threading.BoundedSemaphore(4)
+_TRANSCRIPT_READ_SLOTS = threading.BoundedSemaphore(4)
 
 
 # --- OpenAPI response models (documentation only) ----------------------------
@@ -315,7 +316,8 @@ def build_router(
     @router.get(
         "/api/sessions/{session_id}/messages",
         responses={200: {"model": MessagesOut,
-                         "description": "Transcript messages for the session."}},
+                         "description": "Transcript messages for the session."},
+                   503: {"description": "Concurrent transcript-read limit reached (read_at_capacity)."}},
     )
     def api_session_messages(
         session_id: str,
@@ -326,12 +328,17 @@ def build_router(
         oldest→newest. 404 only on a path-traversal escape; a session with no turns
         yet returns ``{"messages": []}`` (a real empty conversation)."""
         from src.control import transcript as _transcript
-        turns = _transcript.get_transcript(
-            core._results_dir(), core._sessions_dir(), session_id, limit=limit
-        )
-        if turns is None:
-            raise HTTPException(status_code=404, detail="not_found")
-        return JSONResponse({"messages": turns})
+        if not _TRANSCRIPT_READ_SLOTS.acquire(blocking=False):
+            raise HTTPException(status_code=503, detail={"ok": False, "reason": "read_at_capacity"})
+        try:
+            turns = _transcript.get_transcript(
+                core._results_dir(), core._sessions_dir(), session_id, limit=limit
+            )
+            if turns is None:
+                raise HTTPException(status_code=404, detail="not_found")
+            return JSONResponse({"messages": turns})
+        finally:
+            _TRANSCRIPT_READ_SLOTS.release()
 
     @router.get(
         "/api/sessions/{session_id}/timeline",
