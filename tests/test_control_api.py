@@ -70,7 +70,7 @@ def test_session_usage_distinguishes_unknown_from_recorded_zero(client, monkeypa
 def test_messages_reports_unavailable_enrolled_recovery(client, monkeypatch):
     from src.control import transcript
 
-    def unavailable(*args):
+    def unavailable(*args, **kwargs):
         raise transcript.TranscriptRecoveryUnavailable
 
     monkeypatch.setattr(transcript, "get_transcript", unavailable)
