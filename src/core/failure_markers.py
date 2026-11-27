@@ -49,6 +49,43 @@ QUOTA_FAILURE_LABEL_MARKERS = ("rate_limit_event",) + USAGE_LIMIT_MARKERS + RATE
 UPSTREAM_STATUS_RE = re.compile(r"(?<![\w/.])50[34](?![\w/])")
 
 
+_ANSI_ESCAPE = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\))")
+_FAILURE_SECRET = re.compile(
+    r"""(?ix)
+    (\bbearer\s+|(?<![\w-])["']?(?:[\w-]*(?:token|api[_-]?key|secret|password|authorization))
+       ["']?\s*[:=]\s*(?:(?:bearer|basic)\s+)?)(?:"[^"]*"|'[^']*'|[^\s,;]+)
+    |\b(?:sk-(?:proj-)?|ghp_|github_pat_|xox[baprs]-)[A-Za-z0-9_-]+
+    |\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+
+    |\b(?:https?|wss?)://[^\s<>]+
+    |(?<![\w/])/(?:home|root|tmp|var|etc|run|opt|srv|usr)/[^\s,;)]+
+    """
+)
+_FAILURE_DIAGNOSTIC = re.compile(
+    r"(?i)^(?:[{\[]|traceback\b|stack trace\b|panic(?:ked)?\b|"
+    r"(?:raw_)?(?:stdout|stderr)(?:_tail)?:|(?:exit_code|error_class)=|"
+    r"\b(?:file\s+[\x22\x27]|at\s+/))"
+)
+
+
+def user_failure_message(value: object) -> str:
+    """Return a bounded public summary from an explicit error field."""
+    if not isinstance(value, str):
+        return ""
+    # Reject a truncated leading line so a partial credential cannot escape.
+    sample = _ANSI_ESCAPE.sub("", value[:4097]).lstrip()
+    lines = sample.splitlines(keepends=True)
+    if len(value) > 4097 and len(lines) <= 1 and not sample.endswith(("\n", "\r")):
+        return ""
+    line = lines[0].strip() if lines else ""
+    # Some providers append a serialized HTTP response to their summary.
+    line = re.split(r"(?i)\s+(?:response )?body\s*[:=]|\s+[{\[]\s*\x22", line, maxsplit=1)[0].strip()
+    if not line or len(line) > 1000 or _FAILURE_DIAGNOSTIC.match(line):
+        return ""
+    if any(ord(char) < 32 or ord(char) == 127 for char in line):
+        return ""
+    return _FAILURE_SECRET.sub(lambda match: (match[1] or "") + "[redacted]", line)
+
+
 def _is_error_event(obj: Any) -> bool:
     """True for a stream event of a RECOGNISED type that IS the failure, not
     the agent's narration: an ``is_error`` terminal result, a REJECTED

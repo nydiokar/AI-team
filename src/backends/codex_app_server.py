@@ -35,7 +35,7 @@ REQUEST_METHODS = frozenset({
 })
 CONSUMED_NOTIFICATIONS = frozenset({
     "turn/started", "turn/completed", "thread/tokenUsage/updated",
-    "item/started", "item/completed",
+    "item/started", "item/completed", "error",
 })
 
 
@@ -409,6 +409,14 @@ class CodexAppServerClient:
                     if method not in CONSUMED_NOTIFICATIONS:
                         continue
                     params = event.get("params", {})
+                    if method == "error" and not (
+                        isinstance(params, dict)
+                        and isinstance(params.get("threadId"), str)
+                        and isinstance(params.get("turnId"), str)
+                        and isinstance(params.get("error"), dict)
+                        and params.get("willRetry") is False
+                    ):
+                        continue
                     if not isinstance(params, dict) or not isinstance(params.get("threadId"), str):
                         raise CodexProtocolError(f"codex_invalid_native_event:{method}")
                     channel = self.channels.get(params["threadId"])

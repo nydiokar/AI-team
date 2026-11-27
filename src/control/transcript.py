@@ -28,6 +28,9 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from src.backends.codex_failures import LEGACY_TURN_FAILURE, MISSING_TURN_REASON
+from src.core.failure_markers import user_failure_message
+
 logger = logging.getLogger(__name__)
 
 _INDEX_NAME = "index.json"
@@ -219,6 +222,43 @@ def _load_artifact_index(results_dir: Path, session_id: str) -> Dict[str, Dict[s
 # saw: still waiting in the queue, or withdrawn while waiting.
 _UNCONSUMED_TURN_STATUSES = frozenset({"queued", "withdrawn"})
 
+_FAILED_TURN_STATUSES = frozenset({"failed", "failed_node_offline"})
+_NO_RECORDED_REASON = "The turn failed without a recorded reason."
+_GENERIC_REASONS = {"(failed)", "failed", "task failed", "worker reported failure"}
+_NO_OUTPUT_PLACEHOLDERS = {"(failed)", "(task failed — no output)", LEGACY_TURN_FAILURE}
+
+
+def _failed_turn(row: dict, reply: str) -> tuple[str, dict]:
+    """Keep the compatibility result while distinguishing a real reply."""
+    stored_output = row.get("has_stored_output")
+    result_error, recorded_error = row.get("result_error"), row.get("error")
+    reason = user_failure_message(result_error) or user_failure_message(recorded_error)
+    if stored_output is None:
+        has_reply = bool(reply) and reply not in (result_error, recorded_error, reason)
+        has_reply = has_reply and reply not in _NO_OUTPUT_PLACEHOLDERS
+    else:
+        has_reply = bool(reply and stored_output)
+    if row.get("error_class") == "cancelled" or reason == "cancelled":
+        reason = "The backend interrupted the turn."
+    elif row.get("status") == "failed_node_offline":
+        reason = "The worker went offline before returning the turn result."
+    elif row.get("backend") == "codex" and reason == LEGACY_TURN_FAILURE:
+        reason = MISSING_TURN_REASON
+        if stored_output is None and reply == "Claude failed":
+            has_reply = False
+    elif reason.startswith("backend error result (context_overflow)"):
+        # The existing ingestion guard recognized a legacy false success.
+        reason = "Session context full — use /compact or start a new session."
+        has_reply = False
+    elif row.get("backend") == "claude" and stored_output == 0:
+        # Preserve the existing Claude summary for a known reply-less result.
+        summary = user_failure_message(reply)
+        if summary and summary.casefold() not in (_GENERIC_REASONS | _NO_OUTPUT_PLACEHOLDERS):
+            reason = summary
+    if not reason or reason.casefold() in _GENERIC_REASONS:
+        reason = _NO_RECORDED_REASON
+    return (reply if has_reply else reason), {"message": reason, "has_reply": has_reply}
+
 
 def _turns_from_db(session_id: str, limit: int) -> Optional[List[Dict[str, Any]]]:
     """Project the session's task ledger into conversation turns.
@@ -236,8 +276,9 @@ def _turns_from_db(session_id: str, limit: int) -> Optional[List[Dict[str, Any]]
         db = get_db()
         if db is None:
             return None
-        rows = db.get_session_turns(session_id, limit=limit)
-        notices = db.session_job_notices(session_id, limit=limit)
+        with db.read_snapshot():
+            rows = db.get_session_turns(session_id, limit=limit)
+            notices = db.session_job_notices(session_id, limit=limit)
     except Exception as e:
         logger.debug("transcript_db_read_failed session_id=%s err=%s", session_id, e)
         return None
@@ -285,9 +326,14 @@ def _turns_from_db(session_id: str, limit: int) -> Optional[List[Dict[str, Any]]
         # Back-compat: a row enriched only via the legacy `result` JSON.
         if not result and r.get("result"):
             try:
-                result = (json.loads(r["result"]) or {}).get("output") or ""
-            except Exception:
-                result = ""
+                payload = json.loads(r["result"])
+                if isinstance(payload, dict) and isinstance(payload.get("output"), str):
+                    result = payload["output"].strip()
+            except (ValueError, TypeError, RecursionError):
+                pass
+        failure = None
+        if status in _FAILED_TURN_STATUSES:
+            result, failure = _failed_turn(r, result)
         if status == "cancelled":
             from src.backends.claude_driver import SALVAGE_ERROR_BANNER, _build_salvaged_reply
 
@@ -307,7 +353,7 @@ def _turns_from_db(session_id: str, limit: int) -> Optional[List[Dict[str, Any]]
         # chat never showed it. Skip it here too rather than render a blank user
         # turn with just a failure string. A FAILED turn that DOES have a prompt is
         # a real turn (user asked, it failed) and is kept.
-        if not instruction and not success:
+        if not instruction and not success and not (failure and r.get("action") == "proactive_turn"):
             continue
 
         files = []
@@ -345,6 +391,7 @@ def _turns_from_db(session_id: str, limit: int) -> Optional[List[Dict[str, Any]]
             "status": status,
             "instruction": "" if r.get("turn_kind") == "watched_job" else instruction,
             "result": result,
+            **({"failure": failure} if failure else {}),
             "file_count": len(files) if isinstance(files, (list, tuple)) else 0,
             "usage": usage,
         })

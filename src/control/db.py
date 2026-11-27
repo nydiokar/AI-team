@@ -6395,19 +6395,19 @@ class MeshDB:
         files, no NDJSON parsing. Rows lacking ``reply_text`` (not yet backfilled)
         are returned with ``reply_text=None`` so the caller can fall back.
         """
-        # Slim list projection (A81): only the columns the transcript LIST view
-        # actually renders. The large `parsed_output_json`/`file_changes_json`
-        # blobs (and unused `error_class`/`return_code`/`session_id`) are NOT read
-        # by either caller (`transcript._turns_from_db`, backfill script), so they
-        # are omitted to keep this per-poll read cheap. `reply_text` (full chat
-        # text), `result` (legacy fallback), `files_modified_json` (file_count) and
-        # `usage_json` (summary) are the fields that are consumed.
+        # Keep the transcript list projection slim. Read failure metadata
+        # from bounded fields and avoid duplicating the result blob when the
+        # row already has reply_text. Legacy rows can still supply their output.
         rows = self._conn().execute(
             """
-            SELECT * FROM (
-                SELECT id AS task_id, prompt, reply_text,
-                       files_modified_json, usage_json, status, result, action,
-                       created_at, completed_at, turn_kind
+            WITH recent AS (
+                SELECT id, prompt, reply_text, files_modified_json, usage_json,
+                       status, result, action, created_at, completed_at, turn_kind,
+                       backend, error, error_class,
+                       CASE WHEN status IN ('failed', 'failed_node_offline')
+                                 AND length(CAST(result AS BLOB)) <= 9 * 1024 * 1024
+                                 AND json_valid(result)
+                            THEN result END AS failure_result
                 FROM mesh_tasks
                 WHERE session_id = ?
                   AND status NOT IN ('queued', 'withdrawn')
@@ -6416,13 +6416,21 @@ class MeshDB:
                   )
                 ORDER BY created_at DESC
                 LIMIT ?
-            ) ORDER BY created_at ASC
+            )
+            SELECT id AS task_id, prompt, reply_text, files_modified_json, usage_json,
+                   status, CASE WHEN NOT length(trim(COALESCE(reply_text, ''), char(9,10,13,32)))
+                                THEN result END AS result,
+                   action, created_at, completed_at, turn_kind, backend, error_class,
+                   substr(error, 1, 4097) AS error,
+                   substr(failure_result ->> '$.errors[0]', 1, 4097) AS result_error,
+                   CASE WHEN json_type(failure_result, '$.output') = 'text'
+                        THEN length(trim(failure_result ->> '$.output', char(9,10,13,32))) > 0
+                        END AS has_stored_output
+            FROM recent
+            ORDER BY created_at ASC
             """,
             (session_id, limit),
         ).fetchall()
-        # [A104 I7] The NEWEST ``limit`` turns (returned oldest→newest), never-run
-        # rows (queued / withdrawn) excluded in SQL before the window is cut — an
-        # oldest-N window hid the latest reply once a session passed the limit.
         return [dict(r) for r in rows]
 
     def session_job_notices(self, session_id: str, limit: int = 200) -> list[dict[str, JsonValue]]:

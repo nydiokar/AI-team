@@ -313,6 +313,7 @@ export interface RawTranscriptTurn {
   status?: string;
   instruction: string;
   result: string;
+  failure?: { message: string; has_reply: boolean };
   file_count: number;
   /** Token usage for the turn (codex turn.completed); null when not reported. */
   usage: RawTokenUsage | null;

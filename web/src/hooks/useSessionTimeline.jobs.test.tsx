@@ -31,3 +31,27 @@ it("renders and updates one job system notice without user or agent bubbles", ()
     act(() => root.unmount());
   }
 });
+
+it("shows a failed turn's reason separately and keeps only genuine assistant output", () => {
+  const container = document.createElement("div");
+  const root = createRoot(container);
+  const reason = "Try again after 3:46 AM.";
+  const turn: RawTranscriptTurn = {
+    task_id: "failed-1", timestamp: "2026-11-27T13:08:00Z",
+    success: false, status: "failed", instruction: "Report progress.",
+    result: "I finished the first check.", failure: { message: reason, has_reply: true },
+    file_count: 0, usage: null,
+  };
+  try {
+    act(() => root.render(<Chat turn={turn} />));
+    expect(container.textContent).toContain("Agent");
+    expect(container.textContent).toContain(turn.result);
+    expect(container.textContent).toContain(`Turn failed${reason}`);
+    act(() => root.render(<Chat turn={{ ...turn, result: reason,
+      failure: { message: reason, has_reply: false } }} />));
+    expect(container.textContent).not.toContain("Agent");
+    expect(container.textContent?.split(reason)).toHaveLength(2);
+  } finally {
+    act(() => root.unmount());
+  }
+});
