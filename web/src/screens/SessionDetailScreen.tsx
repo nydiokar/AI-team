@@ -430,7 +430,11 @@ export function SessionCostPanel({ sessionId }: { sessionId: string }) {
             {state === "pending" ? "Usage pending — waiting for token counters." : "Usage unavailable — no token counters reported."}
           </p>
         ) : state === "partial" ? (
-          <p role="status" className="px-4 py-2 text-[11px] text-ink-muted">Recorded so far — work is still in flight.</p>
+          <p role="status" className="px-4 py-2 text-[11px] text-ink-muted">
+            {usage?.usage_reason === "incomplete_coverage"
+              ? "Recorded totals are incomplete. Some turns did not report full usage."
+              : "Recorded so far — work is still in flight."}
+          </p>
         ) : null}
         {hasUsage && t && cost && <>
         <CostRow label="Total tokens" value={compactTokens(t.total)} strong />

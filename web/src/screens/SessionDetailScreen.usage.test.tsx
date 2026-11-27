@@ -11,10 +11,11 @@ const container = document.createElement("div");
 const root = createRoot(container);
 afterEach(() => act(() => root.render(null)));
 
-function render(state: string, total = 0, isError = false) {
+function render(state: string, total = 0, isError = false, reason?: "incomplete_coverage") {
   read.mockReturnValue({
     data: {
       usage_state: state,
+      usage_reason: reason,
       tokens: { total, input: total, output: 0, cache_read: 0, cache_creation: 0 },
       cost: { known: false, reason: "unknown_model" },
     },
@@ -36,6 +37,12 @@ it("renders recorded zero and labels interim totals", () => {
   expect(container.textContent).toContain("Total tokens0");
   render("partial", 123);
   expect(container.textContent).toContain("Recorded so far");
+  expect(container.textContent).toContain("Total tokens123");
+});
+
+it("labels finished usage with missing counters as incomplete", () => {
+  render("partial", 123, false, "incomplete_coverage");
+  expect(container.textContent).toContain("Recorded totals are incomplete");
   expect(container.textContent).toContain("Total tokens123");
 });
 
