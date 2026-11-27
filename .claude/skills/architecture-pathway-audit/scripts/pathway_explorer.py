@@ -34,7 +34,7 @@ from cbm_client import CBMClient, CBMError, cypher_str, find_executable  # noqa:
 from pyast_adapter import call_sites, compose_routes, find_def, module_name, parse_file, resolve_module  # noqa: E402
 from structure import FLOW, LOW_CONFIDENCE, analyze  # noqa: E402
 
-SCHEMA: int = 9
+SCHEMA: int = 10
 OUT_RELS: str = 'CALLS|ASYNC_CALLS|HTTP_CALLS|SPAWNS|CALL_REFERENCE|HANDLES|CONFIGURES|WRITES'
 NODE_FIELDS: str = '{v}.qualified_name AS q, labels({v}) AS l, {v}.name AS n, {v}.file_path AS f, ' \
                    '{v}.start_line AS s, {v}.end_line AS e'
@@ -863,7 +863,9 @@ class Engine:
                         edges.append({'from': fn['id'], 'to': tid,
                                       'type': 'READS_TABLE' if a['mode'] == 'read' else 'WRITES_TABLE', 'file': rel,
                                       'line': a['line'], 'source': 'ast',
-                                      'props': {'op': a['op'], 'window': a['window']}})
+                                      'props': {'op': a['op'], 'window': a['window'],
+                                                'declaration_lines': a.get('declaration_lines', []),
+                                                'dynamic': a.get('dynamic', False)}})
         self._medium_memo = (key, nodes, edges)
         return nodes, edges
 

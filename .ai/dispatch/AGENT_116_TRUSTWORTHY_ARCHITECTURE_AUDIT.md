@@ -128,6 +128,19 @@ the code landed via #304.
 Still open: P0 F1/F2 and the full frozen corpus/reviewer, T3, T4, T5, and C1–C12 certification;
 status remains `active`. Exact commands and attribution are in the skill's `MEASUREMENTS.md`.
 
+### Reconciliation — 2026-11-27
+
+PR [#312](https://github.com/nydiokar/AI-team/pull/312) landed the docstring
+false-access fix. PR [#316](https://github.com/nydiokar/AI-team/pull/316) carries the
+recovered execution-site SQL slice and tests from the certification draft.
+Five recovered extractor witnesses failed on the earlier main, and 62 targeted
+checks passed on the candidate. [Issue #290](https://github.com/nydiokar/AI-team/issues/290)
+tracks the outstanding C1–C12 evidence. The unpublished source candidates
+are now available in the repository under
+`archive/a116-audit-certification`, `archive/a116-audit-outcomes`, and
+`archive/a116-audit-semantics`, including the overlapping T4 and T5 work.
+These branches preserve the earlier implementations for review.
+
 ## TYPE
 
 Implementation + audit, Level 3, already approved for autonomous execution. This authoring task creates the issue/packet and preserves evidence; the future executor owns P0–P4. Keep that distinction in registry state and GitHub issue state.

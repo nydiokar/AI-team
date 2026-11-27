@@ -86,7 +86,12 @@ def parse_file(source: str, rel: str) -> dict[str, Any]:
     mod: str = module_name(rel)
     is_pkg: bool = rel.replace('\\', '/').endswith('__init__.py')
     facts: dict[str, Any] = {'module': mod, 'imports': {}, 'defs': [], 'routers': {}, 'routes': [],
-                             'includes': [], 'returns': {}, 'mounts': [], 'router_args': [], 'cond_returns': {}}
+                             'includes': [], 'returns': {}, 'mounts': [], 'router_args': [], 'cond_returns': {},
+                             'sql_limitations': []}
+    bindings = sql_bindings(tree)
+    module_access, module_limits = sql_analysis(tree, bindings)
+    facts['module_access'] = module_access
+    facts['sql_limitations'].extend({'function': '<module>', **v} for v in module_limits)
     router_vars: set[str] = {t.id for n in ast.walk(tree) if isinstance(n, ast.Assign) and isinstance(n.value, ast.Call)
                              and (dotted(n.value.func) or '').split('.')[-1] in ROUTER_CTORS
                              for t in n.targets if isinstance(t, ast.Name)}
@@ -102,10 +107,11 @@ def parse_file(source: str, rel: str) -> dict[str, Any]:
                               'nested': scope_kind == 'function', 'parent': scope,
                               'params': [] if is_class else [a.arg for a in [*node.args.posonlyargs, *node.args.args,
                                                                              *node.args.kwonlyargs]]})
+        acc, limitations = sql_analysis(node, bindings)
+        if acc:
+            facts['defs'][-1]['access'] = acc
+        facts['sql_limitations'].extend({'function': qual, **v} for v in limitations)
         if not is_class:
-            acc: list[dict[str, Any]] = data_access(node)
-            if acc:
-                facts['defs'][-1]['access'] = acc
             fp: Optional[dict[str, Any]] = fingerprint(node)
             if fp:
                 facts['defs'][-1]['fp'] = fp
@@ -413,70 +419,280 @@ def find_def(tree: ast.Module, line: int) -> Optional[ast.AST]:
     return None
 
 
-_SQL_KEYWORDS: frozenset[str] = frozenset({'select', 'values', 'set', 'where', 'from', 'as', 'on', 'and', 'or', 'not', 'null',
-                                           'case', 'when', 'then', 'else', 'end', 'exists', 'in', 'is', 'by', 'limit'})
 _SQL_STMT: re.Pattern[str] = re.compile(r'\b(SELECT|INSERT|UPDATE|DELETE|REPLACE)\b', re.I)
-_SQL_INSERT: re.Pattern[str] = re.compile(r'\b(?:INSERT(?:\s+OR\s+\w+)?|REPLACE)\s+INTO\s+["`\[]?(\w+)', re.I)
-_SQL_UPDATE: re.Pattern[str] = re.compile(r'\bUPDATE\s+(?:OR\s+\w+\s+)?["`\[]?(\w+)["`\]]?\s+SET\b', re.I)
-_SQL_DELETE: re.Pattern[str] = re.compile(r'\bDELETE\s+FROM\s+["`\[]?(\w+)', re.I)
-_SQL_READ: re.Pattern[str] = re.compile(r'\b(?:FROM|JOIN)\s+["`\[]?(\w+)', re.I)
+_SQL_TOKENS: re.Pattern[str] = re.compile(
+    r"--[^\n]*|/\*.*?(?:\*/|$)|'(?:(?:'')|[^'])*'|"
+    r'"(?:""|[^"])*"|`(?:``|[^`])*`|\[[^\]]*\]|'
+    r'[\w$]*\x00[\w$]*|[\w$]+|[^\s]',
+    re.S,
+)
+_SQL_IDENTIFIER: re.Pattern[str] = re.compile(r'[a-z_\u0080-\uffff][\w$]*\Z', re.I)
+_SQL_SINKS: frozenset[str] = frozenset({'execute', 'executemany', 'executescript'})
+_SQL_DML: frozenset[str] = frozenset({'select', 'insert', 'update', 'delete', 'replace', 'values'})
+_SQL_CLAUSES: frozenset[str] = frozenset({
+    'where', 'group', 'having', 'order', 'limit', 'window', 'union', 'intersect', 'except', 'returning',
+})
+_SQL_RESERVED: frozenset[str] = _SQL_DML | _SQL_CLAUSES | {'from', 'join', 'into', 'set'}
+_SQL_DYNAMIC: str = '\x00'
+SqlBinding = tuple[str, frozenset[int]]
 
 
-def _strings(fn: ast.AST) -> list[tuple[int, str]]:
-    """Collect SQL string candidates, excluding docstrings and nested definitions."""
-    out: list[tuple[int, str]] = []
-    stack: list[ast.AST] = list(getattr(fn, 'body', []))
-    if isinstance(fn, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
-        if ast.get_docstring(fn, clean=False) is not None:
-            del stack[0]
+def _sql_scope_nodes(node: ast.AST) -> Iterable[ast.AST]:
+    stack: list[ast.AST] = list(reversed(getattr(node, 'body', [])))
     while stack:
-        n: ast.AST = stack.pop()
-        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        part: ast.AST = stack.pop()
+        yield part
+        if isinstance(part, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
             continue
-        if isinstance(n, ast.JoinedStr):
-            out.append((n.lineno, ' '.join(v.value if isinstance(v, ast.Constant) and isinstance(v.value, str) else '?'
-                                           for v in n.values)))
-            continue
-        if isinstance(n, ast.Constant) and isinstance(n.value, str) and len(n.value) > 12:
-            out.append((n.lineno, n.value))
-        stack.extend(ast.iter_child_nodes(n))
-    return sorted(out)
+        stack.extend(reversed(list(ast.iter_child_nodes(part))))
 
 
-def data_access(fn: ast.AST) -> list[dict[str, Any]]:
-    """SQL tables a def reads or writes, from SQL text in its string literals.
+def _sql_text(expr: ast.AST, bindings: dict[str, SqlBinding]) -> SqlBinding:
+    literal: Optional[str] = _const_str(expr)
+    if literal is not None:
+        return literal, frozenset()
+    if isinstance(expr, ast.Name):
+        return bindings.get(expr.id, (_SQL_DYNAMIC, frozenset()))
+    if isinstance(expr, ast.JoinedStr):
+        values: list[SqlBinding] = [
+            _sql_text(part.value if isinstance(part, ast.FormattedValue) else part, bindings)
+            if not isinstance(part, ast.FormattedValue) or (part.conversion == -1 and part.format_spec is None)
+            else (_SQL_DYNAMIC, frozenset())
+            for part in expr.values
+        ]
+    elif isinstance(expr, ast.BinOp) and isinstance(expr.op, ast.Add):
+        values = [_sql_text(expr.left, bindings), _sql_text(expr.right, bindings)]
+    else:
+        return _SQL_DYNAMIC, frozenset()
+    return ''.join(text for text, _ in values), frozenset().union(*(lines for _, lines in values))
 
-    Returns [{'table', 'mode': 'read'|'write', 'op': select|insert|update|delete, 'line', 'window'}] where window is
-    'oldest_n' (ORDER BY ASC/unordered + LIMIT), 'newest_n' (ORDER BY .. DESC LIMIT), 'bounded' or 'full'.
-    """
-    out: list[dict[str, Any]] = []
-    for line, text in _strings(fn):
-        if not _SQL_STMT.search(text):
+
+def _sql_bound_names(node: ast.AST, nodes: list[ast.AST]) -> dict[str, int]:
+    bound: dict[str, int] = {}
+
+    def bind(name: str) -> None:
+        bound[name] = bound.get(name, 0) + 1
+
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        for arg in ast.iter_child_nodes(node.args):
+            if isinstance(arg, ast.arg):
+                bind(arg.arg)
+    for part in nodes:
+        if isinstance(part, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+            bind(part.name)
+        elif isinstance(part, ast.Name) and isinstance(part.ctx, (ast.Store, ast.Del)):
+            bind(part.id)
+        elif isinstance(part, (ast.Import, ast.ImportFrom)):
+            for alias in part.names:
+                bind(alias.asname or alias.name.split('.')[0])
+        elif isinstance(part, (ast.ExceptHandler, ast.MatchAs, ast.MatchStar)) and part.name:
+            bind(part.name)
+        elif isinstance(part, ast.MatchMapping) and part.rest:
+            bind(part.rest)
+    return bound
+
+
+def _declare_sql(stmt: ast.AST, bound: dict[str, int], bindings: dict[str, SqlBinding]) -> None:
+    if not isinstance(stmt, (ast.Assign, ast.AnnAssign)) or stmt.value is None:
+        return
+    targets: list[ast.expr] = stmt.targets if isinstance(stmt, ast.Assign) else [stmt.target]
+    value, lines = _sql_text(stmt.value, bindings)
+    for target in targets:
+        if isinstance(target, ast.Name) and bound.get(target.id) == 1 and value != _SQL_DYNAMIC:
+            bindings[target.id] = value, lines | {stmt.lineno}
+
+
+def sql_bindings(tree: ast.Module) -> dict[str, SqlBinding]:
+    """Collect single-assignment, module-level string expressions in declaration order."""
+    bound: dict[str, int] = _sql_bound_names(tree, list(_sql_scope_nodes(tree)))
+    bindings: dict[str, SqlBinding] = {}
+    for stmt in tree.body:
+        _declare_sql(stmt, bound, bindings)
+    return bindings
+
+
+def _sql_name(token: str) -> Optional[str]:
+    if _SQL_DYNAMIC in token:
+        return None
+    first: str = token[:1]
+    # SQLite also accepts legacy single-quoted identifiers in table positions.
+    if first in ('"', "'", '`', '[') and len(token) >= 2:
+        return token[1:-1].replace(first * 2, first).lower()
+    lowered: str = token.lower()
+    return lowered if _SQL_IDENTIFIER.fullmatch(token) and lowered not in _SQL_RESERVED else None
+
+
+def _sql_tables(text: str) -> tuple[list[tuple[str, str, str]], set[str]]:
+    """Recognise SQLite DML table tokens and scoped CTE aliases without running SQL."""
+    tokens: list[str] = [t for t in _SQL_TOKENS.findall(text) if not t.startswith(('--', '/*'))]
+    pairs: dict[int, int] = {}
+    stack: list[int] = []
+    reasons: set[str] = set()
+    for i, token in enumerate(tokens):
+        if token == '(':
+            stack.append(i)
+        elif token == ')':
+            if not stack:
+                return [], {'unbalanced SQL parentheses'}
+            pairs[stack.pop()] = i
+    if stack:
+        return [], {'unbalanced SQL parentheses'}
+
+    accesses: list[tuple[str, str, str]] = []
+    words: list[str] = [t.lower() for t in tokens]
+
+    def at(i: int) -> str:
+        return words[i] if i < len(words) else ''
+
+    def top(lo: int, end: int) -> Iterable[int]:
+        i: int = lo
+        while i < end:
+            yield i
+            i = pairs.get(i, i) + 1
+
+    def table(i: int, end: int, op: str, window: str, ctes: set[str]) -> int:
+        if i < end and at(i) == '(':
+            if at(i + 1) not in ('select', 'with', 'values'):
+                reasons.add('unsupported parenthesized SQL relation')
+            return i
+        if i >= end:
+            reasons.add('missing SQL table expression')
+            return i
+        name: Optional[str] = _sql_name(tokens[i])
+        if name is None:
+            reasons.add('unresolved SQL table expression')
+            return i
+        qualified: bool = at(i + 1) == '.'
+        if qualified:
+            i += 2
+            name = _sql_name(tokens[i]) if i < end else None
+        if name is None:
+            reasons.add('unresolved qualified SQL table expression')
+        elif op == 'select' and at(i + 1) == '(':
+            reasons.add('SQL table-valued function')
+        elif op != 'select' or qualified or name not in ctes:
+            accesses.append((name, op, window))
+        return i
+
+    def statement(lo: int, end: int, inherited: set[str], depth: int) -> bool:
+        if lo >= end:
+            return True
+        if depth > 64:
+            reasons.add('SQL nesting limit')
+            return False
+        ctes: set[str] = set(inherited)
+        with_queries: list[tuple[int, int]] = []
+        if at(lo) == 'with':
+            lo += 1
+            if at(lo) == 'recursive':
+                lo += 1
+            while lo < end:
+                name: Optional[str] = _sql_name(tokens[lo])
+                if name is None:
+                    reasons.add('unsupported SQL CTE name')
+                    return False
+                lo = pairs.get(lo + 1, lo + 1) if at(lo + 1) == '(' else lo
+                if at(lo + 1) != 'as':
+                    reasons.add('unsupported SQL CTE declaration')
+                    return False
+                lo += 2
+                if at(lo) == 'not':
+                    lo += 1
+                if at(lo) == 'materialized':
+                    lo += 1
+                if lo not in pairs:
+                    reasons.add('unsupported SQL CTE body')
+                    return False
+                ctes.add(name)
+                with_queries.append((lo + 1, pairs[lo]))
+                lo = pairs[lo] + 1
+                if at(lo) != ',':
+                    break
+                lo += 1
+            for left, right in with_queries:
+                statement(left, right, ctes, depth + 1)
+
+        head: str = at(lo)
+        if head in ('insert', 'replace'):
+            target: int = lo + (3 if at(lo + 1) == 'or' else 1)
+            if at(target) == 'into':
+                table(target + 1, end, 'insert', 'full', ctes)
+        elif head == 'update':
+            table(lo + (3 if at(lo + 1) == 'or' else 1), end, 'update', 'full', ctes)
+        elif head == 'delete' and at(lo + 1) == 'from':
+            table(lo + 2, end, 'delete', 'full', ctes)
+
+        positions: list[int] = list(top(lo, end))
+        limit: Optional[int] = next((i for i in positions if at(i) == 'limit'), None)
+        if limit is None or at(limit + 1) == '-' or at(limit + 1) in ('0', '1') and at(limit + 2) != ',':
+            window: str = 'full'
+        else:
+            order: Optional[int] = next((i for i in positions if at(i) == 'order' and at(i + 1) == 'by'), None)
+            newest: bool = order is not None and any(at(i) == 'desc' and order < i < limit for i in positions)
+            window = 'newest_n' if newest else 'oldest_n'
+        select_seen: bool = False
+        tables_active: bool = False
+        consumed: int = -1
+        for i in positions:
+            token: str = at(i)
+            if token == 'with' and head in ('insert', 'replace'):
+                return statement(i, end, ctes, depth + 1)
+            if i in pairs:
+                statement(i + 1, pairs[i], ctes, depth + 1)
+            if token == 'select':
+                select_seen = True
+            if i <= consumed:
+                continue
+            if token in _SQL_CLAUSES:
+                tables_active = False
+            if ((token == 'from' and (select_seen or head == 'update'))
+                    or token == 'join' and tables_active or token == ',' and tables_active):
+                tables_active = True
+                consumed = table(i + 1, end, 'select', window, ctes)
+        return head in _SQL_DML
+
+    start: int = 0
+    for i in top(0, len(tokens)):
+        if tokens[i] == ';':
+            if not statement(start, i, set(), 0):
+                reasons.add('unsupported SQL statement')
+            start = i + 1
+    if not statement(start, len(tokens), set(), 0):
+        reasons.add('unsupported SQL statement')
+    return accesses, reasons
+
+
+def sql_analysis(node: ast.AST, module_bindings: dict[str, SqlBinding]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Attribute possible table accesses to execute calls, preserving declaration lines."""
+    nodes: list[ast.AST] = list(_sql_scope_nodes(node))
+    bound: dict[str, int] = _sql_bound_names(node, nodes)
+    bindings: dict[str, SqlBinding] = {name: value for name, value in module_bindings.items() if name not in bound}
+    accesses: list[dict[str, Any]] = []
+    limitations: list[dict[str, Any]] = []
+    direct_body: set[ast.AST] = set(getattr(node, 'body', []))
+    for part in nodes:
+        if part in direct_body:
+            _declare_sql(part, bound, bindings)
+        if not isinstance(part, ast.Call) or not isinstance(part.func, ast.Attribute) or part.func.attr not in _SQL_SINKS:
             continue
-        flat: str = ' '.join(text.split())
-        for rx, op in ((_SQL_INSERT, 'insert'), (_SQL_UPDATE, 'update'), (_SQL_DELETE, 'delete')):
-            for m in rx.finditer(flat):
-                if m.group(1).lower() not in _SQL_KEYWORDS:
-                    out.append({'table': m.group(1), 'mode': 'write', 'op': op, 'line': line, 'window': 'full'})
-        if re.search(r'\bSELECT\b', flat, re.I):
-            scan: str = _SQL_DELETE.sub(' ', flat)
-            lm: Optional[re.Match[str]] = re.search(r'\bLIMIT\s+(\d+)', flat, re.I)
-            # LIMIT 1 is a first/exists lookup, not a window over a growing set
-            limited: bool = bool(re.search(r'\bLIMIT\b', flat, re.I)) and not (lm and int(lm.group(1)) <= 1)
-            ordered_desc: bool = bool(re.search(r'\bORDER\s+BY\b[^;)]*\bDESC\b', flat, re.I))
-            window: str = ('newest_n' if ordered_desc else 'oldest_n') if limited else 'full'
-            for m in _SQL_READ.finditer(scan):
-                if m.group(1).lower() not in _SQL_KEYWORDS:
-                    out.append({'table': m.group(1), 'mode': 'read', 'op': 'select', 'line': line, 'window': window})
-    seen: set[tuple[str, str, str, str]] = set()
-    uniq: list[dict[str, Any]] = []
-    for a in out:
-        k: tuple[str, str, str, str] = (a['table'].lower(), a['mode'], a['op'], a['window'])
-        if k not in seen:
-            seen.add(k)
-            a['table'] = a['table'].lower()
-            uniq.append(a)
-    return uniq
+        sql: Optional[ast.AST] = part.args[0] if part.args else _kw(part, 'sql')
+        if sql is None:
+            continue
+        text, lines = _sql_text(sql, bindings)
+        tables, reasons = ([], set()) if text == _SQL_DYNAMIC else _sql_tables(text)
+        if _SQL_DYNAMIC in text:
+            reasons.add('dynamic SQL expression')
+        limitations.extend({'line': part.lineno, 'detail': reason} for reason in sorted(reasons))
+        for table, op, window in sorted(set(tables)):
+            accesses.append({'table': table, 'mode': 'read' if op == 'select' else 'write', 'op': op,
+                             'line': part.lineno, 'window': window, 'declaration_lines': sorted(lines),
+                             'dynamic': bool(reasons)})
+    return accesses, limitations
+
+
+def data_access(node: ast.AST) -> list[dict[str, Any]]:
+    """Possible SQL table access facts from a single lexical body."""
+    return sql_analysis(node, sql_bindings(node) if isinstance(node, ast.Module) else {})[0]
 
 
 MIN_FP_NODES: int = 12

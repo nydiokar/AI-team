@@ -15,7 +15,7 @@ A job (dispatch packet, design doc) states its intended end state as a fenced ``
 
 The check is a pure function of the files at the revision: Python via AST tokens (definitions, references,
 imports, string literals; docstrings are reported as notes, comments ignored), any other text file by identifier
-tokens per line, and SQL table access via `pyast_adapter.data_access`. No LLM, no graph service.
+tokens per line, and SQL table access via `pyast_adapter.sql_analysis`. No LLM, no graph service.
 
 Exit codes: 0 contract met, 1 completed check with violations, 2 invalid input or
 incomplete required analysis (wrong/empty scope, skipped or unparseable required input).
@@ -39,14 +39,14 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from pyast_adapter import data_access  # noqa: E402
+from pyast_adapter import sql_analysis, sql_bindings  # noqa: E402
 
 TOKEN: re.Pattern[str] = re.compile(r'[A-Za-z_][A-Za-z0-9_]*')
 BLOCK: re.Pattern[str] = re.compile(r'^```arch-contract[ \t]*\n(.*?)^```', re.M | re.S)
 MAX_BYTES: int = 2_000_000
 LIMITS: list[str] = [
     'Static only: names built at runtime (string concatenation, computed getattr) are not seen.',
-    'SQL is read from string literals inside a def or at module level; SQL assembled across functions is not seen.',
+    'SQL facts come from supported statements at execution sites. Unresolved SQL sites are counted in coverage.',
     'Python comments are ignored; docstring mentions are listed as notes, not violations.',
 ]
 
@@ -153,12 +153,21 @@ def _docstring_ids(tree: ast.AST) -> set[int]:
     return out
 
 
-def _accesses(tree: ast.Module, rel: str) -> list[dict[str, Any]]:
+def _accesses(
+    tree: ast.Module, rel: str, sql_coverage: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
 
+    bindings = sql_bindings(tree)
+
     def visit(node: ast.AST, qual: str) -> None:
-        for a in data_access(node):
-            out.append({'where': f'{rel}::{qual}', 'file': rel, 'table': a['table'], 'mode': a['mode'], 'line': a['line']})
+        accesses, limits = sql_analysis(node, bindings)
+        if sql_coverage is not None:
+            sql_coverage['total'] += len(limits)
+            examples = sql_coverage['examples']
+            examples.extend({'file': rel, 'function': qual, **item} for item in limits[:max(0, 100 - len(examples))])
+        for access in accesses:
+            out.append({'where': f'{rel}::{qual}', 'file': rel, **access})
         for child in _child_defs(node):
             visit(child, child.name if qual == '<module>' else f'{qual}.{child.name}')
     visit(tree, '<module>')
@@ -178,7 +187,9 @@ def _child_defs(node: ast.AST) -> list[ast.AST]:
     return sorted(found, key=lambda d: d.lineno)
 
 
-def _scan_parsed(tree: ast.Module, rel: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+def _scan_parsed(
+    tree: ast.Module, rel: str, sql_coverage: dict[str, Any] | None = None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     docs: set[int] = _docstring_ids(tree)
     occ: list[dict[str, Any]] = []
     for n in ast.walk(tree):
@@ -200,7 +211,7 @@ def _scan_parsed(tree: ast.Module, rel: str) -> tuple[list[dict[str, Any]], list
             kind: str = 'doc' if id(n) in docs else 'string'
             occ += [_occ(t, kind, rel, line) for t in sorted(set(TOKEN.findall(n.value)))]
     uniq: dict[tuple[str, str, int], dict[str, Any]] = {(o['token'], o['kind'], o['line']): o for o in occ}
-    return list(uniq.values()), _accesses(tree, rel)
+    return list(uniq.values()), _accesses(tree, rel, sql_coverage)
 
 
 def scan_python(source: str, rel: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
@@ -211,11 +222,13 @@ def scan_python(source: str, rel: str) -> tuple[list[dict[str, Any]], list[dict[
         return scan_text(source, rel), []
 
 
-def parse_python(source: str, rel: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]], Optional[str]]:
+def parse_python(
+    source: str, rel: str, sql_coverage: dict[str, Any] | None = None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], Optional[str]]:
     """Like scan_python, but surfaces a syntax failure instead of silently degrading to text.
     Unparseable Python loses AST-based SQL/ownership checks, so it is an analysis error."""
     try:
-        occ, acc = _scan_parsed(ast.parse(source), rel)
+        occ, acc = _scan_parsed(ast.parse(source), rel, sql_coverage)
         return occ, acc, None
     except SyntaxError as exc:
         return scan_text(source, rel), [], f'{type(exc).__name__}: {exc}'
@@ -259,6 +272,7 @@ def _allowed(acc: dict[str, Any], globs: list[str]) -> bool:
 def check(contract: Contract, repo: Path, rev: Optional[str]) -> dict[str, Any]:
     files: dict[str, bytes] = _files(repo, rev, contract.scope)
     cov: dict[str, Any] = {'files': 0, 'python': 0, 'text': 0, 'skipped': [], 'parse_errors': []}
+    cov['unresolved_sql'] = {'total': 0, 'examples': []}
     errors: list[str] = []
     occ: list[dict[str, Any]] = []
     acc: list[dict[str, Any]] = []
@@ -273,7 +287,7 @@ def check(contract: Contract, repo: Path, rev: Optional[str]) -> dict[str, Any]:
         cov['files'] += 1
         if path.endswith('.py'):
             cov['python'] += 1
-            o, a, parse_error = parse_python(text, path)
+            o, a, parse_error = parse_python(text, path, cov['unresolved_sql'])
             if parse_error:
                 cov['parse_errors'].append(path)
             occ += o

@@ -60,11 +60,13 @@ pending-state read models.
 
 Exit statuses: **0** no unwaived violations found; **1** violations; **2** invalid
 contract/input. Always inspect coverage: zero scanned files, skipped files and
-Python parse failures can invalidate a passing result. Static SQL extraction misses
-some queries, including schema-qualified table names and queries assembled
-elsewhere. SQL examples in docstrings can be mistaken for accesses. Python
-symbol mentions in docstrings are otherwise notes; comments are ignored. Other
-text files are scanned lexically. Tests and historical references may require
+Python parse failures can invalidate a passing result. SQL evidence identifies
+static execution sites, including supported schema-qualified and quoted table
+names, scoped CTEs, and shared string declarations. Docstring SQL does not
+generate store accesses. Contract JSON reports the count and up to 100 examples
+of unresolved SQL analysis notices. Reported accesses are static evidence.
+Python symbol mentions in docstrings are notes. Comments are ignored.
+Tests and historical references may require
 explicit, reasoned waivers.
 
 In AI-Team, `scripts/dispatch/dispatch_state.py --set <job> status done` runs the
