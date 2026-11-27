@@ -3,6 +3,8 @@ import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, expect, it, vi } from "vitest";
 import { SessionCostPanel } from "./SessionDetailScreen";
+import { SessionTurns } from "../components/timeline/SessionTurns";
+import type { RawTurn } from "../transport/rawApi";
 
 const { read } = vi.hoisted(() => ({ read: vi.fn() }));
 vi.mock("../hooks/useLiveData", () => ({ useSessionUsage: read }));
@@ -62,4 +64,20 @@ it("shows provider cost and priced-turn coverage separately from estimates", () 
   act(() => root.render(<SessionCostPanel sessionId="s" />));
   expect(container.textContent).toContain("SDK-reported estimate (1/2 turns)");
   expect(container.textContent).toContain("0.47");
+});
+
+
+it("keeps unknown context and total work separate from reported input", () => {
+  const turn: RawTurn = {
+    turn_id: "old", session_id: "s", task_id: "old", backend: "claude",
+    requested_model: null, observed_models: [], started_at: null, ended_at: null,
+    final_status: "success", timeout_status: "none", final_exit_code: null,
+    metrics: { input_tokens: 6, turn_exit_context_tokens: null, total_token_work: null },
+    coverage: {}, data_quality: [],
+  };
+  act(() => root.render(<SessionTurns turns={[turn]} loading={false} />));
+  act(() => container.querySelector("button")?.click());
+  expect(container.textContent).toContain("Turn token work-");
+  expect(container.textContent).toContain("Turn input6");
+  expect(container.textContent).toContain("Context usedUnavailable");
 });

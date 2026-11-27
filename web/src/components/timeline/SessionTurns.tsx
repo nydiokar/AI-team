@@ -119,7 +119,6 @@ function TurnCard({ turn }: { turn: RawTurn }) {
   const [open, setOpen] = useState(false);
   const m = turn.metrics;
   const model = turn.observed_models?.[0] ?? turn.requested_model ?? turn.backend ?? "-";
-  const turnWork = m.total_token_work ?? m.input_tokens ?? null;
 
   return (
     <div className="overflow-hidden">
@@ -149,14 +148,14 @@ function TurnCard({ turn }: { turn: RawTurn }) {
           {turn.ended_at && (
             <MetricRow label="Ended" value={relAgeFrom(turn.ended_at)} />
           )}
-          <MetricRow label="Context used" value={contextLabel(m)} />
+          <MetricRow label="Context used" value={contextTokens(m) == null ? "Unavailable" : contextLabel(m)} />
           {m.context_used_ratio != null && (
             <MetricRow label="Context filled" value={compactPercent(m.context_used_ratio)} />
           )}
           {m.context_remaining_tokens != null && (
             <MetricRow label="Context free" value={compactTokens(m.context_remaining_tokens)} />
           )}
-          <MetricRow label="Turn token work" value={compactTokens(turnWork)} />
+          <MetricRow label="Turn token work" value={compactTokens(m.total_token_work)} />
           <MetricRow label="Turn input" value={compactTokens(m.input_tokens)} />
           {m.uncached_input_tokens != null && (
             <MetricRow label="Uncached input" value={compactTokens(m.uncached_input_tokens)} />
