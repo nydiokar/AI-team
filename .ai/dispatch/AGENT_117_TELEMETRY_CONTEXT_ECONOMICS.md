@@ -283,6 +283,26 @@ retired: [RESUME_IN_PLACE_CACHE_WARM_SEC]
 - [ ] Natural receipts and advice-adequacy evidence complete.
 - [ ] Full closure recorded consistently in packet, ledger, CONTEXT and issue.
 
+### Recovered session-notice follow-up — 2026-11-28
+
+[PR #314](https://github.com/nydiokar/AI-team/pull/314) preserved valid conversation
+when a notice has malformed metadata, made final usage win over late live snapshots,
+and exposed incomplete usage for finished sessions. [PR #317](https://github.com/nydiokar/AI-team/pull/317)
+isolated ordinary telemetry delivery from deferred live uploads.
+[PR #319](https://github.com/nydiokar/AI-team/pull/319) restored bounded completed
+file-only history for enrolled sessions while hiding waiting and withdrawn entries.
+The expanded turn card now leaves total token work unknown when only input was
+reported, and labels missing context as unavailable. The regression reproduced
+the mislabeled input count against the preceding main and passed with 26 related
+Web UI tests and typecheck.
+
+The archived adapter and telemetry-store alternatives are superseded by the
+existing projection-version compatibility checks and the merged fixes above.
+Keep the existing rollout and natural-evidence gates open. See
+[issue #144](https://github.com/nydiokar/AI-team/issues/144) for the recovered
+witnesses and [A120](AGENT_120_UNIFIED_TURN_FAILURES.md) for attributed turn
+failures and worker activation.
+
 ## Closure
 
 **Engineering merged and gateway deployed on 2026-11-18.** Final code commit `ec52556`,
