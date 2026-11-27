@@ -67,6 +67,18 @@ def test_session_usage_distinguishes_unknown_from_recorded_zero(client, monkeypa
         assert response.json()["cost"]["known"] is False
 
 
+def test_messages_reports_unavailable_enrolled_recovery(client, monkeypatch):
+    from src.control import transcript
+
+    def unavailable(*args):
+        raise transcript.TranscriptRecoveryUnavailable
+
+    monkeypatch.setattr(transcript, "get_transcript", unavailable)
+    response = client.get("/api/sessions/recovery/messages", headers=_auth())
+    assert response.status_code == 503
+    assert response.json()["detail"]["reason"] == "transcript_recovery_unavailable"
+
+
 def test_session_usage_db_failure_is_not_zero_spend(client, monkeypatch):
     monkeypatch.setattr(control_api, "_db", lambda: None)
     response = client.get("/api/sessions/usage-session/usage", headers=_auth())

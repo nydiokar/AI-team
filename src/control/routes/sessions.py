@@ -318,7 +318,7 @@ def build_router(
         "/api/sessions/{session_id}/messages",
         responses={200: {"model": MessagesOut,
                          "description": "Transcript messages for the session."},
-                   503: {"description": "Concurrent transcript-read limit reached (read_at_capacity)."}},
+                   503: {"description": "Transcript read at capacity or retained history unavailable."}},
     )
     def api_session_messages(
         session_id: str,
