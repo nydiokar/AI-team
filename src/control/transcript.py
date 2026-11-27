@@ -24,9 +24,10 @@ from __future__ import annotations
 
 import json
 import logging
+import sqlite3
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from src.backends.codex_failures import LEGACY_TURN_FAILURE, MISSING_TURN_REASON
 from src.core.failure_markers import user_failure_message
@@ -34,6 +35,12 @@ from src.core.failure_markers import user_failure_message
 logger = logging.getLogger(__name__)
 
 _INDEX_NAME = "index.json"
+_MAX_ENROLLED_SNAPSHOT_BYTES = 1_048_576
+
+
+class TranscriptRecoveryUnavailable(Exception):
+    """The retained session snapshot could not be safely served."""
+
 
 
 def _shift_iso(ts: str, delta_seconds: float) -> str:
@@ -260,7 +267,9 @@ def _failed_turn(row: dict, reply: str) -> tuple[str, dict]:
     return (reply if has_reply else reason), {"message": reason, "has_reply": has_reply}
 
 
-def _turns_from_db(session_id: str, limit: int) -> Optional[List[Dict[str, Any]]]:
+def _turns_from_db(
+    session_id: str, limit: int,
+) -> List[Dict[str, Any]] | Literal["enrolled_empty"] | None:
     """Project the session's task ledger into conversation turns.
 
     Returns a turn list when the DB can serve the conversation, or ``None`` to
@@ -284,11 +293,9 @@ def _turns_from_db(session_id: str, limit: int) -> Optional[List[Dict[str, Any]]
         return None
 
     if not rows and not notices:
-        # An enrolled session with only waiting/withdrawn requests has an empty
-        # conversation. Do not resurrect audit messages through file fallback.
         session = db.get_session(session_id)
         if session and session.get("turn_queue_enrolled"):
-            return []
+            return "enrolled_empty"
         return None
     # Rows created before prompt-at-enqueue was added can still be in flight. The
     # session snapshot holds the exact current prompt, keyed by last_task_id; use
@@ -476,6 +483,48 @@ def _turn_from_history(
     }
 
 
+def _recover_enrolled_transcript(
+    session_path: Path, session_id: str, limit: int,
+) -> List[Dict[str, Any]]:
+    """Use bounded, positive completion evidence from this session's snapshot."""
+    from src.control.db import get_db
+
+    try:
+        with session_path.open("rb") as snapshot:
+            raw = snapshot.read(_MAX_ENROLLED_SNAPSHOT_BYTES + 1)
+    except FileNotFoundError:
+        return []
+    except OSError as exc:
+        raise TranscriptRecoveryUnavailable from exc
+    if len(raw) > _MAX_ENROLLED_SNAPSHOT_BYTES:
+        raise TranscriptRecoveryUnavailable
+    try:
+        record = json.loads(raw)
+    except (ValueError, RecursionError) as exc:
+        raise TranscriptRecoveryUnavailable from exc
+    if not isinstance(record, dict) or not isinstance(record.get("task_history", []), list):
+        raise TranscriptRecoveryUnavailable
+    entries = [
+        entry for entry in record.get("task_history", [])
+        if isinstance(entry, dict)
+        and all(isinstance(entry.get(key), str) and entry[key].strip()
+                for key in ("task_id", "timestamp", "result_summary"))
+        and isinstance(entry.get("user_message") or "", str)
+    ]
+    if not entries:
+        return []
+    try:
+        db = get_db()
+        if db is None:
+            raise TranscriptRecoveryUnavailable
+        blocked = db.unconsumed_transcript_task_ids(session_id, list(dict.fromkeys(e["task_id"] for e in entries)))
+    except (OSError, RuntimeError, sqlite3.Error) as exc:
+        raise TranscriptRecoveryUnavailable from exc
+    turns = [_turn_from_history(entry, {}) for entry in entries if entry["task_id"] not in blocked]
+    turns.sort(key=lambda turn: (turn["started_at"], turn["task_id"]))
+    return turns[-limit:] if limit else turns
+
+
 def get_transcript(
     results_dir: Path,
     sessions_dir: Path,
@@ -502,6 +551,8 @@ def get_transcript(
     # NDJSON parsing. Falls through to the file-stitching path only when the DB has
     # no usable rows for this session (old sessions not yet backfilled, or DB off).
     db_turns = _turns_from_db(session_id, limit)
+    if db_turns == "enrolled_empty":
+        return _recover_enrolled_transcript(session_path, session_id, limit)
     if db_turns is not None:
         return db_turns
 

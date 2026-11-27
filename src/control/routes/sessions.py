@@ -338,6 +338,8 @@ def build_router(
             if turns is None:
                 raise HTTPException(status_code=404, detail="not_found")
             return JSONResponse({"messages": turns})
+        except _transcript.TranscriptRecoveryUnavailable:
+            raise HTTPException(status_code=503, detail={"ok": False, "reason": "transcript_recovery_unavailable"}) from None
         finally:
             _TRANSCRIPT_READ_SLOTS.release()
 
