@@ -6446,12 +6446,12 @@ class MeshDB:
             # never by scanning every completion payload or issuing N+1 reads.
             "UNION ALL "
             "SELECT COALESCE(e.job_id,a.id) AS id, "
-            "substr(COALESCE(json_extract(e.payload,'$.label'), "
-            "json_extract(a.payload,'$.job.label'),a.id),1,512) AS label, "
-            "COALESCE(json_extract(e.payload,'$.status'), "
-            "json_extract(a.payload,'$.job.status'), "
+            "substr(COALESCE(json_extract(CASE WHEN json_valid(e.payload) THEN e.payload END,'$.label'), "
+            "json_extract(CASE WHEN json_valid(a.payload) THEN a.payload END,'$.job.label'),a.id),1,512) AS label, "
+            "COALESCE(json_extract(CASE WHEN json_valid(e.payload) THEN e.payload END,'$.status'), "
+            "json_extract(CASE WHEN json_valid(a.payload) THEN a.payload END,'$.job.status'), "
             "CASE WHEN a.status='failed' THEN 'failed' ELSE 'finished' END) AS status, "
-            "json_extract(e.payload,'$.exit_code') AS exit_code, "
+            "json_extract(CASE WHEN json_valid(e.payload) THEN e.payload END,'$.exit_code') AS exit_code, "
             "MIN(a.created_at) AS finished_at,e.consumed_at "
             "FROM mesh_tasks a LEFT JOIN job_completion_effects e ON e.job_id= "
             "CASE WHEN a.action='watched_job' THEN a.id ELSE substr(a.coalesce_key,9) END "
@@ -9814,6 +9814,40 @@ class MeshDB:
             )
             out[d["session_id"]] = d
         return out
+
+    def session_usage_incomplete(self, session_id: str) -> bool:
+        """Detect missing counters for this session with indexed, bounded-output reads."""
+        row = self._conn().execute(
+            """
+            SELECT EXISTS (
+                SELECT 1
+                FROM llm_turns t
+                WHERE t.session_id = ? AND t.started_at IS NOT NULL
+                  AND COALESCE(t.final_status, '') != 'withdrawn'
+                  AND NOT EXISTS (
+                    SELECT 1 FROM llm_model_requests r WHERE r.turn_id = t.turn_id
+                      AND r.is_duplicate = 0 AND (
+                        r.input_tokens IS NOT NULL OR r.output_tokens IS NOT NULL
+                        OR r.cache_read_tokens IS NOT NULL OR r.cache_creation_tokens IS NOT NULL
+                      )
+                  )
+            ) OR EXISTS (
+                SELECT 1
+                FROM llm_turns t JOIN llm_model_requests r ON r.turn_id = t.turn_id
+                WHERE t.session_id = ? AND r.is_duplicate = 0
+                  AND COALESCE(t.final_status, '') != 'withdrawn'
+                  AND COALESCE(r.usage_coverage, 'unknown') NOT IN ('complete', 'aggregate_only')
+            ) OR EXISTS (
+                SELECT 1 FROM mesh_tasks m
+                WHERE m.session_id = ? AND m.started_at IS NOT NULL
+                  AND m.status != 'withdrawn'
+                  AND m.action IN ('create_session', 'resume_session', 'compact_session', 'run_oneoff', 'proactive_turn')
+                  AND NOT EXISTS (SELECT 1 FROM llm_turns t WHERE t.turn_id = m.id)
+            )
+            """,
+            (session_id, session_id, session_id),
+        ).fetchone()
+        return bool(row[0])
 
     def session_provider_cost(self, session_id: str) -> Dict[str, Any]:
         """Sum normalized per-turn SDK estimates with honest partial coverage."""

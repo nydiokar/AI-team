@@ -163,6 +163,7 @@ class UsageOut(BaseModel):
     cost: CostEstimate
     provider_cost: dict
     usage_state: Literal["pending", "partial", "recorded", "unavailable"]
+    usage_reason: Literal["in_flight", "incomplete_coverage", "no_counters"] | None = None
 
 
 class InstructionsOut(BaseModel):
@@ -433,14 +434,18 @@ def build_router(
                     raw = db.get_session_token_totals([session_id]).get(session_id, {})
                     provider_cost = db.session_provider_cost(session_id)
                     active = session_id in db.live_task_sessions([session_id])
+                    incomplete = bool(raw) and not active and db.session_usage_incomplete(session_id)
                     session = orchestrator.session_service.store.get(session_id)
                     view = core._session_payload(session) if session is not None else None
             except Exception as e:
                 logger.warning("session_usage_totals_failed session_id=%s err=%s", session_id, e)
                 raise HTTPException(status_code=503, detail="session_usage_unavailable") from None
             model = (view.get("model") or view.get("default_model")) if view else None
-            state = ("partial" if active else "recorded") if raw else (
+            state = ("partial" if active or incomplete else "recorded") if raw else (
                 "pending" if active else "unavailable"
+            )
+            reason = "in_flight" if active else (
+                "incomplete_coverage" if incomplete else "no_counters" if not raw else None
             )
             totals = TokenTotals(
                 input=int(raw.get("input", 0) or 0),
@@ -451,7 +456,7 @@ def build_router(
             totals.total = totals.input + totals.output + totals.cache_read + totals.cache_creation
             cost = estimate_cost(model if raw else None, totals)
             return JSONResponse({
-                "session_id": session_id, "model": model, "usage_state": state,
+                "session_id": session_id, "model": model, "usage_state": state, "usage_reason": reason,
                 "tokens": totals.model_dump(), "cost": cost.model_dump(), "provider_cost": provider_cost,
             })
         finally:

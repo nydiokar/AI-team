@@ -369,6 +369,11 @@ def project_turn(events: Iterable[TelemetryEvent | Dict[str, Any]]) -> Dict[str,
                 request["started_at"] = event_time
                 request["status"] = "running"
             elif name == "model.request.usage":
+                if attrs.get("usage_source") == "claude.assistant.live" and request["usage_source"] in (
+                    "claude.result.usage", "claude.assistant.message.usage",
+                ):
+                    # Buffered live usage has lower authority, even with a later timestamp.
+                    continue
                 request["model"] = event.get("model") or request["model"]
                 if request["started_at"] is None:
                     request["started_at"] = event_time

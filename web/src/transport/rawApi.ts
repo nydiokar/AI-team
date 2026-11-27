@@ -90,6 +90,7 @@ export interface RawSessionUsage {
   provider_cost?: { usd: number | null; priced_turns: number; turns: number; coverage: "complete" | "partial" };
   session_id: string;
   usage_state?: "pending" | "partial" | "recorded" | "unavailable";
+  usage_reason?: "in_flight" | "incomplete_coverage" | "no_counters" | null;
   model: string | null;
   tokens: {
     input: number;

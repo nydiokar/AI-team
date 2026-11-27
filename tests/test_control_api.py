@@ -55,6 +55,7 @@ def test_session_usage_distinguishes_unknown_from_recorded_zero(client, monkeypa
         read_snapshot=nullcontext,
         get_session_token_totals=lambda ids: {"usage-session": totals} if totals else {},
         live_task_sessions=lambda ids: {"usage-session"} if active else set(),
+        session_usage_incomplete=lambda sid: False,
         session_provider_cost=lambda sid: {"usd": None, "priced_turns": 0, "turns": 0, "coverage": "partial"},
     )
     monkeypatch.setattr(control_api, "_db", lambda: db)
