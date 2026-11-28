@@ -193,6 +193,45 @@ For each touched gateway or explorer HTTP handler, record concurrency admission 
 - [ ] P4 C1–C12 passed, independent adversarial review blockers fixed, merged rerun and deployed app seams verified.
 - [ ] MEASUREMENTS/data/packet/issue/registry/CONTEXT closed on evidence; no false clean or false semantic score.
 
+### Acceptance and archive reconciliation
+
+Verified 2026-11-28 against [origin/main at 4f5741d](https://github.com/nydiokar/AI-team/commit/4f5741d). The archived baseline report matches the original SHA-256 recorded in issue #290. The gateway health endpoint reports build `4f5741d`; read-only acceptance still needs a fresh pass.
+
+| Criterion | Status | Evidence and remaining proof |
+| --- | --- | --- |
+| C1 | Partial | [#302](https://github.com/nydiokar/AI-team/pull/302) contains `5a04f30` (merge `c9d795b`), seven pinned-baseline failures and review of the resulting review/race/membership repairs. Repeat API/browser reads on the loaded build and link threshold, malformed evidence, rebind and LIMIT-2 witnesses. |
+| C2 | Partial | [#304](https://github.com/nydiokar/AI-team/pull/304) (`8d5d2b7)) covers incorrect/empty scope, invalid Python, skipped input, failed CBM indexing, paging and corrupt cache. Confirm timeout, partial query, required coverage and browser truth against the final producer. |
+| C3 | Open | Main emits run status but the reconciled counts, recoverable omission pages and baseline controls are in the archive. Verify clean/incomplete zero, 101+ and >40 in one kind through the CLI. |
+| C4 | Partial | [#312](https://github.com/nydiokar/AI-team/pull/312) excludes docstring examples. [#316](https://github.com/nydiokar/AI-team/pull/316) (`8d5469a)) adds qualified/quoted, CTE and shared-declaration execution attribution and unresolved SQL evidence. Credit 62 targeted tests, one real CBM fixture and [both CI jobs](https://github.com/nydiokar/AI-team/actions/runs/46043170341). Finish maintained ownership, negative controls and final integration. |
+| C5 | Partial | #304 and #316 have cache/error and SQL-facts schema changes. Prove normalized cold/warm parity and fresh graph evidence after source, parser and native index changes including caller additions and deletions. |
+| C6 | Open | Main's scorer counts entity touches. Integrate the frozen corpus and exact witness scorer with the report producer. Verify failed, incomplete, capped and benign outcomes, and publish misses and unknowns. |
+| C7 | Open | [Original snapshot evidence](https://github.com/nydiokar/AI-team/blob/244a397/.claude/skills/architecture-pathway-audit/MEASUREMENTS.md) covers snapshot rendering. Verify live browser route, expansion, source, failure and recovery with disposable processes. |
+| C8 | Partial | #304 covers refusal to mark done after incomplete scope. Recheck malformed/unsupported required analysis and preservation of valid contracts and waivers with the final checker. |
+| C9 | Partial | #302 packet evidence covers four admitted/96 rejected calls at 2,000 sessions and jobs, a 100,272-byte page and 0.95–1.45 MB traced Python peak. Measure the changed explorer handlers and document boundaries. |
+| C10 | Partial | #302 records independent application review. The recovered labels, audit implementation and certification matrix still require independent review and verified fixes. |
+| C11 | Open | [Pinned original](https://github.com/nydiokar/AI-team/blob/244a397/.claude/skills/architecture-pathway-audit/MEASUREMENTS.md) and the [repeat manifest](https://github.com/nydiokar/AI-team/blob/main/.claude/skills/architecture-pathway-audit/benchmark/measurements/2026-11-16.recheck.json) are preserved. Final merged-source raw outputs and normalized comparison are pending. |
+| C12 | Partial | The live build contains #302. Read back the loaded API/browser behavior and finish the registry and issue after certification. Tool-only changes do not require gateway deployment. |
+
+#### Archive disposition
+
+- [Certification `e2e552a`](https://github.com/nydiokar/AI-team/tree/e2e552a) supplies the shared corpus, scorer, ownership draft, report schema, evidence pages, coverage/cache work and tests. Preserve the landed #304 failure witnesses and dispatch guard when integrating its divergent implementation. Its SQL adapter matches `8d5469a` exactly.
+- [Outcomes `622f797`](https://github.com/nydiokar/AI-team/commit/622f797) supplies content-bound native project naming and translates qualified names back to stable logical graph IDs. Test it against CBM 0.11.0 and preserve stable evidence and clean process shutdown. The earlier common changes are covered by certification.
+- [Semantics `b35548d`](https://github.com/nydiokar/AI-team/commit/b35548d) has patch-equivalent corpus, extraction and scoring commits. Certification supplies those changes and the later producer work. The application commit is already in #302.
+
+#### Issue checklist status at takeover
+
+- [ ] Pinned baseline and frozen controls — partial. #302 and #304 reproduced pinned failures. Freeze and independently review the portable archive labels before detector tuning.
+- [ ] Authoritative reads and UI/API trace — implementation merged in #302. Repeat the read-only browser/API trace and link the full regression witnesses.
+- [ ] Adverse analysis inputs and coverage/freshness — partial in #304 and #316. Complete the integrated matrix in C2, C3 and C5.
+- [ ] Benign and unresolved controls — partial. #302 preserves requester ambiguity, #312 and #316 cover docstrings/CTEs and execution attribution. Verify lifecycle, external writer, migration and narrow waiver cases with the maintained contract.
+- [ ] Zero, capped counts, baselines and cold/warm equality — open under C3 and C5.
+- [ ] CLI, interactive browser and request boundaries — open for the explorer. #302 recorded bounds for application reads.
+- [ ] Targeted offline, real CBM and committed corpus — partial. #316 supplied the targeted and real fixture evidence above. Run both again with the committed corpus and integrated producer.
+- [ ] Independent implementation review — partial for #302 only. Review final audit behavior and rerun findings.
+- [ ] Merged-source manifests, denominators and residuals — baseline preserved. Final run and comparison are open.
+- [ ] Merge, gateway identity and live read-back — #302 is merged and its code is in the loaded build. Final audit PR, live read-back and closure remain open.
+- [ ] Registry and issue closure — open until all C1–C12 have evidence.
+
 ### Authoring verification — 2026-11-16
 
 Issue #290 is published; this packet, human ledger and Active Work entry identify
