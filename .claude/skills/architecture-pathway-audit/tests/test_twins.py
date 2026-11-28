@@ -78,8 +78,9 @@ class TestBaseline(unittest.TestCase):
             eng.baseline_path = d / 'b.json'
             eng.baseline_path.write_text(json.dumps({'acknowledged': [
                 {'id': 'k1', 'reason': 'fine', 'owner': 'me'}, {'id': 'gone', 'reason': 'x'}]}), encoding='utf-8')
-            res = {'findings': [{'id': 'k1'}, {'id': 'n1'}], 'scope': {}}
-            eng.apply_baseline(res)
+            res = {'findings': [{'id': 'k1'}, {'id': 'n1'}],
+                   'scope': {'counts_by_kind': {'example': 2}}, 'matching_acknowledgements': ['k1']}
+            eng.apply_baseline(res, eng.read_baseline())
             self.assertEqual([f['status'] for f in res['findings']], ['known', 'new'])
             self.assertEqual(res['scope']['baseline'], {'file': str(eng.baseline_path), 'known': 1, 'new': 1,
                                                        'stale_ids': ['gone']})

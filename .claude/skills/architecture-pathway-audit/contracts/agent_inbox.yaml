@@ -1,0 +1,14 @@
+# The inbox module owns the store. It serves lifecycle, recovery, audit and
+# pending-state reads. tests/test_a104_single_pending_source.py separately
+# guards the pending_for read model and its producer/activation callers.
+scope: [src, scripts]
+stores:
+  agent_inbox:
+    readers: &inbox_owners
+      - src/control/agent_inbox.py
+      - src/control/db.py::_get_migrations
+      - scripts/a104_seed_inbox.py
+    writers: *inbox_owners
+  inbox_wait_filters:
+    readers: *inbox_owners
+    writers: *inbox_owners

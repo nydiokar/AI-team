@@ -58,16 +58,20 @@ constraint permits that access; an empty list permits nobody. Choose constraints
 around actual responsibilities: lifecycle queries are not necessarily competing
 pending-state read models.
 
-Exit statuses: **0** no unwaived violations found; **1** violations; **2** invalid
-contract/input. Always inspect coverage: zero scanned files, skipped files and
-Python parse failures can invalidate a passing result. SQL evidence identifies
-static execution sites, including supported schema-qualified and quoted table
-names, scoped CTEs, and shared string declarations. Docstring SQL does not
-generate store accesses. Contract JSON reports the count and up to 100 examples
-of unresolved SQL analysis notices. Reported accesses are static evidence.
-Python symbol mentions in docstrings are notes. Comments are ignored.
-Tests and historical references may require
-explicit, reasoned waivers.
+For AI-Team inbox ownership, use `contracts/agent_inbox.yaml` with
+`tests/test_a104_single_pending_source.py`. The contract checks store access.
+The repository test checks that wake production and activation consult
+`pending_for` and agree on message state.
+
+Exit statuses: **0** completed applicable checks with no unwaived violations;
+**1** completed checks with violations; **2** invalid or incomplete required
+analysis. Required scope paths that resolve to no scanned files, skipped input
+and Python parse errors prevent a passing verdict. SQL access facts retain the
+execution site and declaration where available. Schema-qualified and quoted
+identifiers are recognized, CTE references respect statement scope and SQL
+examples in docstrings do not create accesses. Unsupported dynamic SQL remains
+visible as a coverage limitation. Comments are ignored. Tests and historical
+references may require explicit, reasoned waivers.
 
 In AI-Team, `scripts/dispatch/dispatch_state.py --set <job> status done` runs the
 checker against `HEAD` when the packet contains an `arch-contract` block. This is
@@ -82,8 +86,8 @@ preserve historical intent and need not match a maintained packet's later waiver
 
 Indexes only `src/`, serves `http://127.0.0.1:8766/` and opens a browser. In the 2D
 explorer, select a route, expand downstream/upstream and inspect Coverage alongside
-the evidence. Ctrl+C stops the explorer; check CBM's separate daemon lifecycle
-after a disposable run.
+the evidence. Ctrl+C stops the explorer; CBM 0.11.0 uses a session-managed daemon that stops with its last session.
+Use a disposable native cache for a test run.
 
 For a bounded batch sweep without a server:
 
@@ -98,13 +102,15 @@ For a bounded batch sweep without a server:
 | `--sweep-depth`, `--sweep-cap` | Bound recursive exploration per root |
 | `--neighbors`, `--timeout` | CBM page size and query timeout |
 | `--cache-dir` | Explicit cache; Linux default is under `~/.cache/architecture-pathway-audit/` |
-| `--refresh` | Reindex and drop expansions; use a new cache directory when changing Python versions |
+| `--refresh` | Reindex and drop cached expansions |
 | `--no-open`, `--port`, `--no-serve` | Browser launch, local port, or write artifacts and exit |
 | `--baseline` | Reviewed acknowledgements; default `.arch-audit/baseline.json` |
-| `--baseline-update` | Acknowledge **every** current finding and exit; use only after reviewing that exact set |
+| `--baseline-update` | Acknowledge the emitted findings on a completed sweep after review |
+| `--findings-offset` | Return the next evidence page using the previous report’s `next_findings_offset` |
 
-The scope suffix is appended to the CBM project name. Content changes trigger
-reindexing and invalidate affected expansions. The Python AST adapter resolves
+The logical project name identifies graph nodes. Native indexes are keyed by source, scope and CBM binary identity. Parser or
+tool changes discard the explorer cache. A new native index generation discards
+adjacency but keeps AST facts whose file contents match. The Python AST adapter resolves
 router prefixes, factories and `include_router` chains, supplementing CBM's graph
 with nested-function calls and SQL accesses. Findings retain evidence provenance.
 
@@ -116,21 +122,26 @@ hiding them; vanished IDs appear as `stale_ids`.
 
 ## Interpret coverage before findings
 
-Read `coverage` and `analysis_scope` in JSON: route discovery/expansion counts,
-parse failures, unresolved calls, incomplete pages, hub boundaries and finding
-caps. Graph rules use loaded neighborhoods; SQL/fingerprint rules also inspect
-AST definitions outside expanded routes. Bounded sweeps are not complete audits.
-Every report now carries a `run` object: `status` (`complete` / `incomplete` /
-`failed`), `required_analysis_complete`, typed `errors`, capability gaps, source
-and identity digests, and cache invalidation reason. It is shared by JSON, the
-browser banner/coverage pane and the `--no-serve` CLI exit code (0 complete, 2
-incomplete/failed). Findings count never drives that exit code: a bounded
-zero-finding scan is clean only when required analysis actually completed.
-Artifacts are published atomically, so a failed run cannot leave an old clean
-report looking fresh. Candidate counts are still structural leads, never
-semantic verdicts. `contract_check.py` follows the same rule: exit 0 only over
-applicable completed checks, 1 for completed checks with violations, 2 for a
-wrong/empty scope, skipped/binary/oversize required input or unparseable Python.
+Read the JSON report’s `run`, `coverage` and `analysis_scope` fields together.
+The run identifies the current attempt, source digest, effective scope, analysis
+stage and errors. The JSON report is the canonical artifact. Match its
+`run.id` to the run shown in the HTML snapshot before using that snapshot as
+evidence. A batch run returns **2** when required analysis is incomplete
+or failed, including a deliberately bounded partial batch. Exit **0** means the
+declared sweep completed. An interactive server can show partial coverage and
+continue to serve. Inspect `run.status` and finding omissions together. A completed zero means
+only that the declared static checks emitted no matching findings on the
+specified input. Consumers should read `run.required_analysis_complete` and check the report counts.
+
+The report includes the number of findings before and after per-kind output
+bounds and the continuation offset for omitted evidence. To retrieve additional
+evidence, repeat the command against the same source and options, with
+`--findings-offset` set to the previous report’s `next_findings_offset`. Match
+source digest and settings before comparing pages. Known/stale baseline metadata
+and mechanical facts remain distinct from candidate findings. Baseline updates
+require a completed, unpaged result. SQL candidates disclose capped per-finding samples; the canonical
+JSON provides the checked SQL edges for reviewing omitted source evidence.
+Semantic defects require source and behavioral review.
 
 Dynamic dispatch, unknown receiver types, callbacks, conditional registration and
 sub-app mounts limit coverage. Scope may exclude scripts, config, frontend code
@@ -147,8 +158,21 @@ coding-agent CLI:
 ```
 
 `test_real_cbm.py` exercises the real binary, expansion, cache reuse/invalidation
-and competing-path detection. It skips when CBM is missing; a skip does not prove
-compatibility. The benchmark runner/scorer require an external corpus containing
-`base/`, `variants/`, `controls/` and `GROUND_TRUTH.json`. The scorer's `CAUGHT`
-label measures entity touches, not verified defect recall. Results, reviewed
-findings, reproductions and experience belong in [MEASUREMENTS.md](MEASUREMENTS.md).
+and competing-path detection. It skips when CBM is missing.
+
+Run and score the bundled corpus using the verified CBM release and a disposable
+results directory. The runner records one manifest per invocation and returns
+nonzero if any required analysis fails or omits findings.
+
+```bash
+audit_dir=.claude/skills/architecture-pathway-audit/benchmark
+audit_out=$(mktemp -d)
+.venv/bin/python "$audit_dir/run_corpus.py" "$audit_dir/corpus" "$audit_out"
+.venv/bin/python "$audit_dir/score.py" "$audit_dir/corpus" "$audit_out"
+```
+
+The exact source labels identify candidate localization independently from
+verified contract violations. Structural facts never count as localization.
+Benign controls have their own flagged and unknown counts. See
+`tests/test_benchmark.py` for independent SQLite replay of the ledger witnesses
+and [MEASUREMENTS.md](MEASUREMENTS.md) for results.

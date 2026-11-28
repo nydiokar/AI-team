@@ -127,10 +127,11 @@ def test_done_passes_when_the_arch_contract_is_met(tmp_path: Path) -> None:
     assert dispatch._read_yaml_block(packet)["status"] == "done"
 
 
-def test_done_is_refused_when_the_contract_scope_is_incomplete(tmp_path: Path) -> None:
+@pytest.mark.parametrize('scope', ['no_such_dir', 'scripts/dispatch, no_such_dir'])
+def test_done_is_refused_when_the_contract_scope_is_incomplete(tmp_path: Path, scope: str) -> None:
     dispatch = _module()
     packet = _packet(dispatch, tmp_path,
-                     "```arch-contract\nscope: [no_such_dir]\nretired: [set_field]\n```\n")
+                     f"```arch-contract\nscope: [{scope}]\nretired: [unused_sentinel]\n```\n")
 
     with pytest.raises(SystemExit, match="arch-contract"):
         dispatch.set_field("GATED_JOB", "status", "done")

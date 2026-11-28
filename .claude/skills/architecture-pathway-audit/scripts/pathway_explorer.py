@@ -24,14 +24,18 @@ import threading
 import time
 import webbrowser
 from collections import Counter, deque
+from contextlib import contextmanager
+from contextvars import ContextVar
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any, Callable, Optional
+from socket import socket
+from typing import Any, Callable, Iterator, Optional, cast
 from urllib.parse import parse_qs, urlparse
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from cbm_client import CBMClient, CBMError, cypher_str, find_executable  # noqa: E402
 from pyast_adapter import call_sites, compose_routes, find_def, module_name, parse_file, resolve_module  # noqa: E402
+from run_result import AuditRun, RunError, atomic_json, atomic_text  # noqa: E402
 from structure import FLOW, LOW_CONFIDENCE, analyze  # noqa: E402
 
 SCHEMA: int = 10
@@ -48,6 +52,15 @@ BUILTIN_TYPE_METHODS: frozenset[str] = frozenset(
 BUILTIN_NAMES: frozenset[str] = frozenset(dir(builtins))
 SPAWN_KINDS: frozenset[str] = frozenset({'spawned_call', 'spawn_ref'})
 MAX_CANDIDATE_EDGES: int = 6
+MAX_SOURCE_BYTES: int = 2_000_000
+MAX_HTTP_CONCURRENCY: int = 4
+MAX_QUERY_BYTES: int = 8192
+EXPANSION_BUDGET_SECONDS: float = 20.0
+HTTP_DEADLINE: ContextVar[float | None] = ContextVar('http_deadline', default=None)
+
+
+class AuditStaleError(CBMError):
+    """An analysis input changed while the run was active."""
 
 
 def log(msg: str) -> None:
@@ -92,30 +105,29 @@ def _low(props: dict[str, Any]) -> bool:
 def scan_files(scope: Path) -> dict[str, tuple[int, int]]:
     """rel -> (size, mtime_ns) for every code file under scope."""
     out: dict[str, tuple[int, int]] = {}
-    for directory, dirs, files in os.walk(scope):
+    def raise_walk_error(exc: OSError) -> None:
+        raise exc
+
+    for directory, dirs, files in os.walk(scope, onerror=raise_walk_error):
         dirs[:] = sorted(d for d in dirs if d not in SKIP_DIRS)
         for name in sorted(files):
             p: Path = Path(directory) / name
-            if p.suffix.lower() not in CODE_EXTS:
+            if p.suffix.lower() not in CODE_EXTS and name not in {'.gitignore', '.cbmignore'}:
                 continue
-            try:
-                st: os.stat_result = p.stat()
-            except OSError:
-                continue
+            st: os.stat_result = p.lstat()
             out[p.relative_to(scope).as_posix()] = (st.st_size, st.st_mtime_ns)
     return out
 
 
 def sha256(p: Path) -> str:
-    return hashlib.sha256(p.read_bytes()).hexdigest()
+    with p.open('rb') as stream:
+        return hashlib.file_digest(stream, 'sha256').hexdigest()
 
 
-def _atomic_text(path: Path, text: str) -> None:
-    """Publish a whole artifact or none: a failed run must never leave a prior clean report fresh."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp: Path = path.with_name(path.name + '.tmp')
-    tmp.write_text(text, encoding='utf-8')
-    tmp.replace(path)
+def render_snapshot(state: dict[str, Any]) -> str:
+    template: str = Path(__file__).with_name('viewer.html').read_text(encoding='utf-8')
+    payload: str = json.dumps(state, ensure_ascii=False).replace('<', '\\u003c')
+    return template.replace('/*__INITIAL_STATE__*/null', payload)
 
 
 def cbm_node(row: dict[str, Any]) -> dict[str, Any]:
@@ -141,7 +153,8 @@ class Engine:
     """Holds the scoped graph cache and serves bounded on-demand expansions (shared by HTTP threads)."""
 
     def __init__(self, scope: Path, project: str, cache_dir: Path, out: Path, report: Path,
-                 cbm: Optional[CBMClient], page: int = 200) -> None:
+                 cbm: Optional[CBMClient], page: int = 200, run: AuditRun | None = None,
+                 findings_offset: int = 0) -> None:
         self.scope: Path = scope.resolve()
         self.project: str = project
         self.dir: Path = cache_dir.resolve()
@@ -151,10 +164,24 @@ class Engine:
         self.report: Path = report
         self.cbm: Optional[CBMClient] = cbm
         self.baseline_path: Optional[Path] = None
+        self.findings_offset: int = findings_offset
         self.page: int = page
         self.lock: threading.RLock = threading.RLock()
         self.ready: threading.Event = threading.Event()
         self.ready_error: Optional[str] = None
+        self.run: AuditRun = run or AuditRun(requested_scope=[str(self.scope)])
+        self.sweep: dict[str, Any] | None = None
+        self.sweep_entries: set[str] = set()
+        self.skipped: dict[str, str] = {}
+        self.cache_identity: dict[str, Any] = {
+            'parser': platform.python_version(),
+            'cbm_cache_dir': os.getenv('CBM_CACHE_DIR') or os.getenv('XDG_CACHE_HOME'),
+            'tools': {name: sha256(Path(__file__).with_name(name)) for name in
+                      ('cbm_client.py', 'pathway_explorer.py', 'pyast_adapter.py', 'structure.py')},
+            'cbm_executable': sha256(Path(cbm.exe).resolve()) if cbm else None,
+            'page_size': page,
+        }
+        self.cache_state: str = 'missing'
         self.stats: dict[str, Any] = {'cache_hits': 0, 'cache_misses': 0, 'index_runs': 0, 'index_seconds': 0.0,
                                       'expansions': 0, 'last_expand_ms': None, 'ast_reparsed_files': 0}
         self.trees: dict[str, ast.Module] = {}
@@ -162,198 +189,260 @@ class Engine:
         self.version: int = 0
         self._findings_memo: tuple[int, dict[str, Any]] = (-1, {})
         self._medium_memo: Optional[tuple[tuple[int, int], dict[str, dict[str, Any]], list[dict[str, Any]]]] = None
-        self.identity: dict[str, Any] = {'schema': SCHEMA, 'project': project, 'scope': str(self.scope),
-                                         'python': platform.python_version(), 'parser': 'stdlib-ast'}
-        self.cache_error: Optional[str] = None
-        self.cache_reason: Optional[str] = None
         self.cache: dict[str, Any] = self._load()
         self.changed: set[str] = set()
         self.inventory: dict[str, Any] = {}
 
     # ------------------------------------------------------------------ cache
     def _load(self) -> dict[str, Any]:
-        empty: dict[str, Any] = {**self.identity, 'files': {}, 'facts': {}, 'entries': {}, 'nodes': {},
-                                 'symbols': None, 'fanin': None, 'cbm_routes': None, 'index': None,
-                                 'index_token': 0}
+        empty: dict[str, Any] = {'schema': SCHEMA, 'identity': self.cache_identity,
+                                 'project': self.project, 'scope': str(self.scope), 'files': {},
+                                 'facts': {}, 'entries': {}, 'nodes': {}, 'symbols': None, 'fanin': None,
+                                 'cbm_routes': None, 'index': None, 'index_token': 0}
         try:
             d: dict[str, Any] = json.loads(self.cache_path.read_text(encoding='utf-8'))
         except FileNotFoundError:
             return empty
-        except (OSError, ValueError) as exc:
-            self.cache_error = f'corrupt cache {self.cache_path}: {exc}'
+        except (OSError, ValueError):
+            self.cache_state = 'invalid'
             return empty
-        if any(d.get(k) != v for k, v in self.identity.items()):
-            self.cache_reason = f'cache identity mismatch (expected {self.identity}, found ' \
-                                + str({k: d.get(k) for k in self.identity}) + ')'
+        if not isinstance(d, dict):
+            self.cache_state = 'invalid'
             return empty
+        if (d.get('schema') != SCHEMA or d.get('project') != self.project or d.get('scope') != str(self.scope)
+                or d.get('identity') != self.cache_identity):
+            self.cache_state = 'identity_changed'
+            return empty
+        if any(key not in d or not isinstance(d[key], dict) for key in ('files', 'facts', 'entries', 'nodes')):
+            self.cache_state = 'invalid'
+            return empty
+        self.cache_state = 'reused'
         return d
 
-    def source_digest(self) -> str:
-        payload: str = ''.join(f'{rel}\0{(meta or {}).get("sha", "")}\n'
-                               for rel, meta in sorted(self.cache['files'].items()))
-        return hashlib.sha256(payload.encode('utf-8')).hexdigest()
-
-    def run_status(self) -> dict[str, Any]:
-        """One typed outcome shared by JSON, HTML and the CLI. Candidate count never drives it."""
-        errors: list[str] = []
-        hard_failure: bool = False
-        if self.cache_error:
-            errors.append(self.cache_error)
-            hard_failure = True
-        if self.ready_error:
-            errors.append(self.ready_error)
-            hard_failure = True
-        elif not self.ready.is_set():
-            errors.append('CBM index did not reach ready state; analysis is still pending')
-            hard_failure = True
-        elif self.cbm is not None:
-            for key in ('symbols', 'fanin', 'cbm_routes'):
-                if self.cache.get(key) is None:
-                    errors.append(f'required CBM {key} table was not loaded')
-                    hard_failure = True
-        parse_errors: list[str] = [rel for rel, f in self.cache['facts'].items() if f.get('parse_error')]
-        if parse_errors:
-            errors.append(f'{len(parse_errors)} required python file(s) unparseable: ' + ', '.join(parse_errors[:5]))
-        incomplete: list[str] = sorted(k for k, e in self.cache['entries'].items() if not e.get('complete', True))
-        if incomplete:
-            errors.append(f'{len(incomplete)} expansion(s) truncated by row caps: ' + ', '.join(incomplete[:5]))
-        status: str = 'failed' if hard_failure else ('incomplete' if errors else 'complete')
-        unresolved: int = sum(len(e.get('unresolved', [])) for e in self.cache['entries'].values())
-        return {'status': status, 'required_analysis_complete': not errors, 'errors': errors,
-                'capability_gaps': ['bounded static analysis; not full repository or runtime coverage',
-                                    f'{unresolved} unresolved/ambiguous call target(s) in loaded entries'],
-                'identity': {**self.identity, 'source_digest': self.source_digest(),
-                             'cbm_version': self.cbm.version if self.cbm else ''},
-                'cache_invalidation_reason': self.cache_reason,
-                'artifact': {'written_at': time.strftime('%Y-%m-%dT%H:%M:%S'), 'project': self.project,
-                             'scope': str(self.scope), 'ready': self.ready.is_set(),
-                             'ready_error': self.ready_error}}
-
-    def persist(self) -> None:
-        tmp: Path = self.cache_path.with_suffix('.tmp')
-        tmp.write_text(json.dumps(self.cache, ensure_ascii=False, separators=(',', ':')), encoding='utf-8')
-        tmp.replace(self.cache_path)
+    def persist(self, *, verify_source: bool = False) -> None:
         st: dict[str, Any] = self.state()
-        _atomic_text(self.report, json.dumps({'project': self.project, 'scope': str(self.scope),
-                                              'run': st['run'], 'coverage': st['coverage'],
-                                              'analysis_scope': st['analysis_scope'], 'findings': st['findings'],
-                                              'stats': st['stats'], 'routes': st['routes']},
-                                             ensure_ascii=False, indent=1))
-        _atomic_text(self.out, self.render_html(st))
+        if verify_source and st['run']['status'] in ('completed', 'partial'):
+            self.assert_generation_current()
+        atomic_text(self.cache_path, json.dumps(self.cache, ensure_ascii=False, separators=(',', ':')))
+        atomic_text(self.out, self.render_html(st))
+        atomic_json(self.report, {k: st[k] for k in (
+            'project', 'scope', 'run', 'coverage', 'analysis_scope', 'findings', 'stats', 'routes',
+        )} | {'snapshot_path': str(self.out),
+              'sql_edges': [e for e in st['edges'] if e['type'] in ('READS_TABLE', 'WRITES_TABLE')]})
 
     def render_html(self, st: Optional[dict[str, Any]] = None) -> str:
-        template: str = Path(__file__).with_name('viewer.html').read_text(encoding='utf-8')
-        payload: str = json.dumps(st or self.state(), ensure_ascii=False).replace('<', '\\u003c')
-        return template.replace('/*__INITIAL_STATE__*/null', payload)
+        return render_snapshot(st or self.state())
 
     # ------------------------------------------------------- source tracking
-    def sync_files(self) -> set[str]:
-        """Detect added/removed/content-changed files; re-parse only changed Python files."""
-        now: dict[str, tuple[int, int]] = scan_files(self.scope)
-        old: dict[str, dict[str, Any]] = self.cache['files']
-        changed: set[str] = set(old) - set(now)
-        new_files: dict[str, dict[str, Any]] = {}
-        for rel, (size, mtime) in now.items():
-            prev: Optional[dict[str, Any]] = old.get(rel)
-            if prev and prev['size'] == size and prev['mtime_ns'] == mtime:
-                new_files[rel] = prev
+    def source_blobs(self) -> Iterator[tuple[str, bytes | None, str | None]]:
+        for rel, (size, _) in scan_files(self.scope).items():
+            path: Path = self.scope / rel
+            if path in (self.out, self.report, self.baseline_path) or path.is_relative_to(self.dir):
                 continue
-            digest: str = sha256(self.scope / rel)
-            new_files[rel] = {'size': size, 'mtime_ns': mtime, 'sha': digest}
-            if not prev or prev['sha'] != digest:
-                changed.add(rel)
-        self.cache['files'] = new_files
+            if path.is_symlink() or not path.is_file():
+                yield rel, None, 'not a regular in-scope file'
+                continue
+            if size > MAX_SOURCE_BYTES:
+                yield rel, None, f'exceeds {MAX_SOURCE_BYTES} bytes'
+                continue
+            with path.open('rb') as stream:
+                data: bytes = stream.read(MAX_SOURCE_BYTES + 1)
+            if len(data) > MAX_SOURCE_BYTES or b'\0' in data:
+                yield rel, None, 'binary or oversized source'
+                continue
+            yield rel, data, None
+
+    def sync_files(self) -> set[str]:
+        """Hash and parse the same bytes, retaining facts only for present sources."""
+        old: dict[str, dict[str, Any]] = self.cache['files']
         facts: dict[str, Any] = self.cache['facts']
-        for rel in sorted(changed | {r for r in new_files if r.endswith('.py') and r not in facts}):
-            facts.pop(rel, None)
-            self.trees.pop(rel, None)
-            if rel.endswith('.py') and rel in new_files:
+        changed: set[str] = set()
+        new_files: dict[str, dict[str, Any]] = {}
+        self.skipped = {}
+        for rel, data, omission in self.source_blobs():
+            if data is None:
+                self.skipped[rel] = omission or 'source unavailable'
+                continue
+            digest: str = hashlib.sha256(data).hexdigest()
+            new_files[rel] = {'sha': digest}
+            prior: dict[str, Any] = old.get(rel) or {}
+            if prior.get('sha') != digest:
+                changed.add(rel)
+                self.trees.pop(rel, None)
+            if rel.endswith(('.py', '.pyi')) and (rel in changed or rel not in facts):
                 try:
-                    facts[rel] = parse_file((self.scope / rel).read_text(encoding='utf-8-sig'), rel)
+                    facts[rel] = parse_file(data.decode('utf-8-sig'), rel)
                 except (SyntaxError, UnicodeDecodeError, ValueError) as exc:
                     facts[rel] = {'module': module_name(rel), 'imports': {}, 'defs': [], 'routers': {}, 'routes': [],
                                   'includes': [], 'returns': {}, 'mounts': [], 'router_args': [],
                                   'parse_error': f'{type(exc).__name__}: {exc}'}
                 self.stats['ast_reparsed_files'] += 1
+        removed: set[str] = set(old) - set(new_files)
+        for rel in removed:
+            facts.pop(rel, None)
+            self.trees.pop(rel, None)
+        changed.update(removed)
+        self.cache['files'] = new_files
         self.changed = changed
         self.inventory = compose_routes({r: f for r, f in facts.items()})
+        if new_files:
+            self.run.effective_scope = [str(self.scope)]
+        identity = {rel: info['sha'] for rel, info in sorted(new_files.items())}
+        self.run.source_sha256 = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
         return changed
 
-    def invalidate(self, changed: set[str]) -> int:
-        """Drop cached expansions that may be affected by changed files.
+    def assert_source_unchanged(self) -> None:
+        paths: set[str] = set()
+        skipped: dict[str, str] = {}
+        for rel, data, omission in self.source_blobs():
+            deadline: float | None = HTTP_DEADLINE.get()
+            if deadline is not None and time.monotonic() >= deadline:
+                raise TimeoutError('Source freshness check exceeded the request deadline')
+            if data is None:
+                skipped[rel] = omission or 'source unavailable'
+                continue
+            paths.add(rel)
+            if self.cache['files'].get(rel, {}).get('sha') != hashlib.sha256(data).hexdigest():
+                raise AuditStaleError(f'Source changed during analysis: {rel}')
+        if paths != set(self.cache['files']) or skipped != self.skipped:
+            raise AuditStaleError('Source inventory changed during analysis')
 
-        * an 'out' entry is dropped if its node or any neighbour lives in a changed file, or it had
-          unresolved calls (a new definition may now resolve them);
-        * every 'in' entry is dropped: a new caller can appear in any changed file;
-        * global CBM tables (symbols, fan-in, routes) are re-read lazily.
-        """
-        if not changed:
-            return 0
-        entries: dict[str, Any] = self.cache['entries']
-        drop: list[str] = [k for k, e in entries.items()
-                           if k.startswith('in|') or set(e['files']) & changed or e.get('unresolved')]
-        for k in drop:
-            del entries[k]
-        self.cache['symbols'] = self.cache['fanin'] = self.cache['cbm_routes'] = None
-        self.cache['nodes'] = {k: v for k, v in self.cache['nodes'].items() if v.get('file') not in changed}
+    def assert_generation_current(self) -> None:
+        self.assert_source_unchanged()
+        if self.cbm is not None and self.index_receipt(self.index_status()) != self.cache['index']['receipt']:
+            raise AuditStaleError('CBM index generation changed during analysis')
+
+    def verify_live_state(self) -> None:
+        if self.ready.is_set() and not self.ready_error and self.cbm is not None:
+            self.assert_generation_current()
+
+    def read_verified_source(self, rel: str) -> bytes:
+        path: Path = (self.scope / rel).resolve()
+        expected: str | None = self.cache['files'].get(rel, {}).get('sha')
+        if not expected or not path.is_relative_to(self.scope) or not path.is_file():
+            raise AuditStaleError(f'Source missing or unavailable since analysis: {rel}')
+        with path.open('rb') as stream:
+            blob: bytes = stream.read(MAX_SOURCE_BYTES + 1)
+        if len(blob) > MAX_SOURCE_BYTES or hashlib.sha256(blob).hexdigest() != expected:
+            raise AuditStaleError(f'Source changed since analysis: {rel}')
+        return blob
+
+    def invalidate(self, changed: set[str]) -> int:
+        """Keep content-matched AST facts and discard adjacency from the previous source."""
+        return self.reset_index_graph() if changed else 0
+
+    def reset_index_graph(self) -> int:
+        dropped: int = len(self.cache['entries'])
+        self.cache.update(entries={}, nodes={}, symbols=None, fanin=None, cbm_routes=None)
         self.nested_index = None
         self.version += 1
-        return len(drop)
+        return dropped
 
     def ensure_index(self) -> None:
         """Background: (re)index the scoped CBM project only when needed, then mark ready."""
         try:
-            assert self.cbm is not None
-            self.cbm.ensure_started()
-            need: bool = bool(self.changed) or not self.cache.get('index')
+            if self.cbm is None:
+                raise CBMError('CBM executable unavailable')
+            self.run.stage = 'index'
+            self.cbm.ensure_started(init_timeout=self.cbm.timeout)
+            index: dict[str, Any] = self.cache.get('index') or {}
+            need: bool = bool(self.changed) or not index.get('receipt')
             if not need:
                 try:
-                    st: Any = self.cbm.tool('index_status', {'project': self.project, 'format': 'json'})
-                    need = str((st or {}).get('status')) not in ('ready', 'indexed')
+                    st: dict[str, Any] = self.index_status()
+                    need = self.index_receipt(st) != index['receipt']
                 except CBMError:
                     need = True
             if need:
                 t0: float = time.perf_counter()
-                log(f'Indexing ONLY {self.scope} into CBM project {self.project} '
+                log(f'Indexing ONLY {self.scope} into CBM project {self.index_project} '
                     f'({len(self.changed)} changed files)...')
-                res: Any = self.cbm.tool('index_repository', {'repo_path': str(self.scope), 'name': self.project},
+                res: Any = self.cbm.tool('index_repository', {'repo_path': str(self.scope), 'name': self.index_project},
                                          timeout=1800)
                 dt: float = time.perf_counter() - t0
+                if not isinstance(res, dict) or any(
+                    not isinstance(res.get(k), int) or res[k] < 0 for k in ('nodes', 'edges')
+                ):
+                    raise CBMError('index_repository returned incomplete index metadata')
+                st = self.index_status()
+                receipt: dict[str, Any] = self.index_receipt(st)
                 with self.lock:
                     self.stats['index_runs'] += 1
                     self.stats['index_seconds'] += dt
                     self.cache['index'] = {'at': time.strftime('%Y-%m-%dT%H:%M:%S'), 'seconds': round(dt, 2),
-                                           'nodes': (res or {}).get('nodes'), 'edges': (res or {}).get('edges')}
+                                           'nodes': res['nodes'], 'edges': res['edges'], 'receipt': receipt}
                     self.cache['index_token'] = int(self.cache.get('index_token') or 0) + 1
-                    self.cache['symbols'] = self.cache['fanin'] = self.cache['cbm_routes'] = None
-                    self.persist()
+                    self.reset_index_graph()
                 log(f'CBM index ready in {dt:.1f}s: {(res or {}).get("nodes")} nodes, {(res or {}).get("edges")} edges')
             else:
                 log('CBM index reused (no source changes since last run).')
+            assert self.cache.get('index') is not None
+            self.cache['index']['coverage'] = {
+                key: st.get(key) for key in ('parse_partial', 'parse_unusable', 'skipped', 'not_indexed')
+            }
             with self.lock:  # warm the global tables so the first click is not the slow one
                 t1: float = time.perf_counter()
-                self.ready.set()
+                self.run.stage = 'graph inventory'
                 self.symbols()
                 self.fanin()
                 self.cbm_routes()
                 self.nested_callers()
                 self.version += 1
+                self.run.stage = 'analysis'
                 log(f'CBM statistics + nested-call index warmed in {time.perf_counter() - t1:.1f}s')
-        except (CBMError, OSError, AssertionError) as exc:
+        except (CBMError, OSError, ValueError, TypeError, KeyError, subprocess.SubprocessError) as exc:
             self.ready_error = f'CBM unavailable: {exc}'
+            self.run.fail(self.run.stage, self.ready_error)
             log('ERROR ' + self.ready_error)
         finally:
             self.ready.set()
 
+    def index_status(self) -> dict[str, Any]:
+        cbm: CBMClient = self._need_cbm()
+        args: dict[str, str] = {'project': self.index_project, 'format': 'json', 'diagnostics': 'summary'}
+        deadline: float | None = HTTP_DEADLINE.get()
+        response: Any = cbm.tool('index_status', args, deadline=deadline) if deadline is not None else cbm.tool(
+            'index_status', args,
+        )
+        if not isinstance(response, dict):
+            raise CBMError('CBM did not return an index status object')
+        return response
+
+    @property
+    def index_project(self) -> str:
+        """Key native indexes by source and binary. Logical graph IDs remain stable."""
+        source_key = json.dumps([self.project, str(self.scope), self.run.source_sha256,
+                                 self.cache_identity['cbm_executable'], self.cache_identity['cbm_cache_dir']]).encode()
+        return 'pathway-' + hashlib.sha256(source_key).hexdigest()[:48]
+
+    def index_receipt(self, status: dict[str, Any]) -> dict[str, Any]:
+        if (status.get('status') != 'ready' or status.get('project') != self.index_project
+                or status.get('root_path') != str(self.scope) or not status.get('indexed_at')
+                or any(not isinstance(status.get(k), int) for k in ('nodes', 'edges'))):
+            raise CBMError('CBM index status could not attest the selected project, root and generation')
+        return {key: status[key] for key in ('project', 'root_path', 'indexed_at', 'nodes', 'edges')}
+
     def _need_cbm(self) -> CBMClient:
-        if not self.ready.wait(1800):
-            raise CBMError('CBM index is still building')
         if self.ready_error or self.cbm is None:
             raise CBMError(self.ready_error or 'CBM disabled')
         return self.cbm
 
     def _q(self, cypher: str, page: Optional[int] = None) -> tuple[list[dict[str, Any]], bool]:
-        return self._need_cbm().query(self.project, cypher, page or self.page)
+        deadline: float | None = HTTP_DEADLINE.get()
+        cbm: CBMClient = self._need_cbm()
+        if deadline is None:
+            return cbm.query(self.index_project, cypher, page or self.page)
+        return cbm.query(self.index_project, cypher, page or self.page, deadline=deadline)
+
+    def logical_qn(self, qn: str) -> str:
+        prefix: str = self.index_project
+        return self.project + qn[len(prefix):] if qn.startswith(prefix + '.') else qn
+
+    def indexed_qn(self, qn: str) -> str:
+        return self.index_project + qn[len(self.project):] if qn.startswith(self.project + '.') else qn
+
+    def cbm_node(self, row: dict[str, Any]) -> dict[str, Any]:
+        return cbm_node({**row, 'q': self.logical_qn(str(row.get('q') or ''))})
 
     # ----------------------------------------------------- global CBM tables
     def symbols(self) -> dict[str, Any]:
@@ -362,7 +451,7 @@ class Engine:
                                + NODE_FIELDS.format(v='n'), page=20000)
             if not ok:
                 raise CBMError('symbol table exceeded the paging cap')
-            self.cache['symbols'] = [cbm_node(r) for r in rows]
+            self.cache['symbols'] = [self.cbm_node(r) for r in rows]
         return self._symbol_index()
 
     def _symbol_index(self) -> dict[str, Any]:
@@ -389,7 +478,9 @@ class Engine:
     def fanin(self) -> dict[str, int]:
         if self.cache.get('fanin') is None:
             rows, ok = self._q('MATCH (a)-[r:CALLS]->(b) RETURN b.qualified_name AS q, count(r) AS c', page=20000)
-            self.cache['fanin'] = {r['q']: _int(r['c']) or 0 for r in rows}
+            if not ok:
+                raise CBMError('fan-in table exceeded the paging cap')
+            self.cache['fanin'] = {self.logical_qn(r['q']): _int(r['c']) or 0 for r in rows}
         return self.cache['fanin']
 
     def utility_threshold(self) -> int:
@@ -404,18 +495,22 @@ class Engine:
 
     def cbm_routes(self) -> list[dict[str, Any]]:
         if self.cache.get('cbm_routes') is None:
-            rows, _ = self._q('MATCH (r:Route) RETURN r.qualified_name AS q', page=20000)
-            client, _ = self._q('MATCH (a)-[:HTTP_CALLS]->(r:Route) RETURN DISTINCT r.qualified_name AS q', page=20000)
+            rows, routes_complete = self._q('MATCH (r:Route) RETURN r.qualified_name AS q', page=20000)
+            client, targets_complete = self._q('MATCH (a)-[:HTTP_CALLS]->(r:Route) RETURN DISTINCT r.qualified_name AS q', page=20000)
+            if not routes_complete or not targets_complete:
+                raise CBMError('route cross-check exceeded the paging cap')
             cs: set[str] = {r['q'] for r in client}
-            self.cache['cbm_routes'] = [{'qn': r['q'], 'client_target': r['q'] in cs} for r in rows]
+            self.cache['cbm_routes'] = [{'qn': self.logical_qn(r['q']), 'client_target': r['q'] in cs} for r in rows]
         return self.cache['cbm_routes']
 
     # ------------------------------------------------------------- AST nodes
     def _tree(self, rel: str) -> Optional[ast.Module]:
+        if rel not in self.cache['facts']:
+            return None
         if rel not in self.trees:
             try:
-                self.trees[rel] = ast.parse((self.scope / rel).read_text(encoding='utf-8-sig'), filename=rel)
-            except (OSError, SyntaxError, ValueError):
+                self.trees[rel] = ast.parse(self.read_verified_source(rel).decode('utf-8-sig'), filename=rel)
+            except (SyntaxError, ValueError):
                 return None
         return self.trees[rel]
 
@@ -663,7 +758,7 @@ class Engine:
         nodes: dict[str, dict[str, Any]] = {}
         edges: list[dict[str, Any]] = []
         complete: bool = True
-        Q: str = cypher_str(qn)
+        Q: str = cypher_str(self.indexed_qn(qn))
         if direction == 'out':
             rows, ok = self._q(f'MATCH (a)-[r:{OUT_RELS}]->(b) WHERE a.qualified_name = {Q} RETURN type(r) AS t, '
                                f'properties(r) AS p, ' + NODE_FIELDS.format(v='b'))
@@ -674,7 +769,7 @@ class Engine:
                                + NODE_FIELDS.format(v='b'))
             complete = ok and ok2 and ok3
             for row in rows:
-                b: dict[str, Any] = cbm_node(row)
+                b: dict[str, Any] = self.cbm_node(row)
                 props: dict[str, Any] = _props(row.get('p'))
                 base: dict[str, Any] = {'file': me.get('file'), 'line': _int(props.get('line')), 'source': 'cbm'}
                 if self._map_cbm_route(qn, row['t'], props, b, nodes, edges, base):
@@ -683,12 +778,12 @@ class Engine:
                 edges.append({**base, 'from': qn, 'to': b['id'], 'type': row['t'], 'props': props,
                               **({'low_confidence': True} if _low(props) else {})})
             for row in impl:
-                b = cbm_node(row)
+                b = self.cbm_node(row)
                 nodes[b['id']] = b
                 edges.append({'from': qn, 'to': b['id'], 'type': 'OVERRIDDEN_BY', 'file': b['file'], 'line': b['line'],
                               'source': 'cbm', 'props': {'derived_from': 'OVERRIDE (implementation -> base)'}})
             for row in sim:
-                b = cbm_node(row)
+                b = self.cbm_node(row)
                 nodes[b['id']] = b
                 a, z = sorted([qn, b['id']])
                 edges.append({'from': a, 'to': z, 'type': 'SIMILAR_TO', 'file': None, 'line': None, 'source': 'cbm',
@@ -719,14 +814,14 @@ class Engine:
                                  + NODE_FIELDS.format(v='b')) if me.get('kind') in ('Method', None) else ([], True)
         complete = ok and ok2
         for row in rows:
-            a2: dict[str, Any] = cbm_node(row)
+            a2: dict[str, Any] = self.cbm_node(row)
             props = _props(row.get('p'))
             nodes[a2['id']] = a2
             edges.append({'from': a2['id'], 'to': qn, 'type': row['t'], 'file': a2['file'],
                           'line': _int(props.get('line')), 'source': 'cbm', 'props': props,
                           **({'low_confidence': True} if _low(props) else {})})
         for row in base_rows:
-            b = cbm_node(row)
+            b = self.cbm_node(row)
             nodes[b['id']] = b
             edges.append({'from': b['id'], 'to': qn, 'type': 'OVERRIDDEN_BY', 'file': me.get('file'),
                           'line': me.get('line'), 'source': 'cbm', 'props': {'derived_from': 'OVERRIDE'}})
@@ -777,7 +872,7 @@ class Engine:
             raise ValueError('direction must be out|in')
         key: str = f'{direction}|{nid}'
         with self.lock:
-            if key in self.cache['entries'] and not force:
+            if key in self.cache['entries'] and self.cache['entries'][key].get('complete') and not force:
                 self.stats['cache_hits'] += 1
                 return self.cache['entries'][key], True
             t0: float = time.perf_counter()
@@ -799,7 +894,11 @@ class Engine:
             self.version += 1
             return entry, False
 
-    def expand_bfs(self, nid: str, direction: str, depth: int, cap: int, candidates: bool = False) -> dict[str, Any]:
+    def expand_bfs(
+        self, nid: str, direction: str, depth: int, cap: int, candidates: bool = False,
+        deadline: float | None = None,
+        visited_entries: set[str] | None = None,
+    ) -> dict[str, Any]:
         """Bounded BFS expansion; reports truncation explicitly. `candidates` also follows CANDIDATE_CALL
         edges (interactive exploration); sweeps leave it off so analysis input stays factual."""
         follow: frozenset[str] = FLOW | {'REGISTERS', 'INCLUDES'} | ({'CANDIDATE_CALL'} if candidates else frozenset())
@@ -807,13 +906,20 @@ class Engine:
         q: deque[tuple[str, int]] = deque([(nid, 0)])
         hits = misses = 0
         truncated: bool = False
+        incomplete: bool = False
+        depth_limited: bool = False
+        timed_out: bool = False
         while q:
+            if deadline is not None and time.monotonic() >= deadline:
+                timed_out = True
+                break
             cur, d = q.popleft()
             entry, hit = self.expand(cur, direction)
+            if visited_entries is not None:
+                visited_entries.add(f'{direction}|{cur}')
             hits += hit
             misses += not hit
-            if d + 1 > depth:
-                continue
+            incomplete |= not entry['complete']
             kinds: dict[str, str] = {n['id']: n['kind'] for n in entry['nodes']}
             for e in entry['edges']:
                 nxt: str = e['to'] if direction == 'out' else e['from']
@@ -821,12 +927,33 @@ class Engine:
                     continue
                 if kinds.get(nxt) in ('External', 'HttpEndpoint', 'EnvVar', 'Variable', 'Class'):
                     continue
+                if d >= depth:
+                    depth_limited = True
+                    continue
                 if len(seen) >= cap:
                     truncated = True
                     break
                 seen.add(nxt)
                 q.append((nxt, d + 1))
-        return {'visited': len(seen), 'cache_hits': hits, 'cbm_expansions': misses, 'truncated': truncated}
+        return {'visited': len(seen), 'cache_hits': hits, 'cbm_expansions': misses, 'truncated': truncated,
+                'incomplete_adjacency': incomplete, 'depth_limited': depth_limited, 'timed_out': timed_out}
+
+    def sweep_paths(self, depth: int, cap: int, roots: str) -> None:
+        routes: list[str] = [r['id'] for r in self.inventory['routes']]
+        orphans: list[str] = self.orphan_roots() if roots == 'all' else []
+        self.sweep_entries.clear()
+        self.version += 1
+        self.sweep = {'root_selection': roots, 'configured_depth': depth, 'configured_node_cap': cap,
+                      'route_roots': len(routes), 'non_http_roots': len(orphans), 'expanded_roots': 0,
+                      'depth_limited_roots': 0, 'node_limited_roots': 0, 'incomplete_adjacency_roots': 0}
+        self.run.stage = 'sweep'
+        for nid in routes + orphans:
+            res: dict[str, Any] = self.expand_bfs(nid, 'out', depth, cap, visited_entries=self.sweep_entries)
+            self.sweep['expanded_roots'] += 1
+            self.sweep['depth_limited_roots'] += res['depth_limited']
+            self.sweep['node_limited_roots'] += res['truncated']
+            self.sweep['incomplete_adjacency_roots'] += res['incomplete_adjacency']
+        self.run.stage = 'analysis'
 
     # ------------------------------------------------------------------ state
     def twin_facts(self) -> list[dict[str, Any]]:
@@ -853,9 +980,13 @@ class Engine:
         edges: list[dict[str, Any]] = []
         if self.cache.get('symbols') is not None:
             for rel, f in sorted(self.cache['facts'].items()):
-                for d in f['defs']:
-                    for a in d.get('access', []):
-                        fn: dict[str, Any] = self.def_node(rel, d)
+                owners: list[tuple[dict[str, Any], list[dict[str, Any]]]] = [
+                    (self.def_node(rel, d), d['access']) for d in f['defs'] if d.get('access')
+                ]
+                if f.get('module_access'):
+                    owners.append((self.module_node(rel), f['module_access']))
+                for fn, accesses in owners:
+                    for a in accesses:
                         tid: str = f'table::{a["table"]}'
                         nodes[fn['id']] = fn
                         nodes[tid] = {'id': tid, 'kind': 'Table', 'label': a['table'], 'qn': tid, 'file': '', 'line': None,
@@ -864,24 +995,29 @@ class Engine:
                                       'type': 'READS_TABLE' if a['mode'] == 'read' else 'WRITES_TABLE', 'file': rel,
                                       'line': a['line'], 'source': 'ast',
                                       'props': {'op': a['op'], 'window': a['window'],
-                                                'declaration_lines': a.get('declaration_lines', []),
-                                                'dynamic': a.get('dynamic', False)}})
+                                                'declaration_lines': a['declaration_lines'], 'dynamic': a['dynamic']}})
         self._medium_memo = (key, nodes, edges)
         return nodes, edges
 
-    def graph(self) -> tuple[dict[str, dict[str, Any]], list[dict[str, Any]], list[str]]:
-        nodes: dict[str, dict[str, Any]] = dict(self.cache['nodes'])
+    def graph(self, entry_keys: set[str] | None = None) -> tuple[dict[str, dict[str, Any]], list[dict[str, Any]], list[str]]:
+        entries: dict[str, Any] = self.cache['entries']
+        if entry_keys is None:
+            nodes: dict[str, dict[str, Any]] = dict(self.cache['nodes'])
+        else:
+            entries = {k: entries[k] for k in sorted(entry_keys)}
+            nodes = {n['id']: n for entry in entries.values() for n in entry['nodes']}
         for r in self.inventory.get('routes', []):
             nodes.setdefault(r['id'], self.route_node(r))
-        edges: dict[tuple[str, str, str], dict[str, Any]] = {}
-        for entry in self.cache['entries'].values():
+        edges: dict[tuple[Any, ...], dict[str, Any]] = {}
+        for entry in entries.values():
             for e in entry['edges']:
                 edges.setdefault((e['from'], e['to'], e['type']), e)
         mn, me = self.medium_graph()
         for k, v in mn.items():
             nodes.setdefault(k, v)
         for e in me:
-            edges.setdefault((e['from'], e['to'], e['type']), e)
+            props: dict[str, Any] = e['props']
+            edges.setdefault((e['from'], e['to'], e['type'], e['file'], e['line'], props['op'], props['window']), e)
         return nodes, list(edges.values()), [r['id'] for r in self.inventory.get('routes', [])]
 
     def twin_nodes(self) -> dict[str, dict[str, Any]]:
@@ -889,28 +1025,35 @@ class Engine:
                 {'id': t['id'], 'kind': 'Function', 'label': t['name'], 'file': t['file'], 'line': t['line'],
                  'component': t['id'].rsplit('.', 1)[0], 'source': 'ast'} for t in self.twin_facts()}
 
-    def apply_baseline(self, res: dict[str, Any]) -> None:
-        """Tag findings acknowledged in the committed baseline as known; report stale baseline ids."""
+    def read_baseline(self) -> dict[str, Any]:
+        if not self.baseline_path or not self.baseline_path.exists():
+            return {}
+        value: Any = json.loads(self.baseline_path.read_text(encoding='utf-8'))
+        if not isinstance(value, dict) or not isinstance(value.get('acknowledged'), list):
+            raise ValueError('baseline must contain an acknowledged list')
         ack: dict[str, Any] = {}
-        if self.baseline_path and self.baseline_path.is_file():
-            try:
-                ack = {a['id']: a for a in json.loads(self.baseline_path.read_text(encoding='utf-8')).get('acknowledged', [])}
-            except (OSError, ValueError, KeyError, TypeError):
-                ack = {}
-        ids: set[str] = {f['id'] for f in res['findings']}
+        for item in value['acknowledged']:
+            if not isinstance(item, dict) or not isinstance(item.get('id'), str) or item['id'] in ack:
+                raise ValueError('baseline entries must have unique string IDs')
+            ack[item['id']] = item
+        return ack
+
+    def apply_baseline(self, res: dict[str, Any], ack: dict[str, Any]) -> None:
+        """Tag acknowledgements across the full result, including omitted evidence pages."""
+        known: set[str] = set(res['matching_acknowledgements'])
         for f in res['findings']:
             f['status'] = 'known' if f['id'] in ack else 'new'
             if f['id'] in ack:
                 f['acknowledged'] = {k: ack[f['id']].get(k) for k in ('reason', 'owner', 'at')}
         res['scope']['baseline'] = {'file': str(self.baseline_path) if self.baseline_path else None,
-                                    'known': sum(1 for f in res['findings'] if f['status'] == 'known'),
-                                    'new': sum(1 for f in res['findings'] if f['status'] == 'new'),
-                                    'stale_ids': sorted(set(ack) - ids)}
+                                    'known': len(known),
+                                    'new': sum(res['scope']['counts_by_kind'].values()) - len(known),
+                                    'stale_ids': sorted(set(ack) - known)}
 
     def findings(self) -> dict[str, Any]:
         if self._findings_memo[0] == self.version:
             return self._findings_memo[1]
-        nodes, edges, roots = self.graph()
+        nodes, edges, roots = self.graph(self.sweep_entries if self.sweep is not None else None)
         ext: set[str] = {k for k, n in nodes.items() if n['kind'] in ('External', 'HttpEndpoint')}
         by_qn: dict[str, dict[str, Any]] = self._symbol_index()['by_qn'] if self.cache.get('symbols') else {}
         for n in nodes.values():
@@ -918,15 +1061,19 @@ class Engine:
                 n['owner_kind'] = (by_qn.get(n['component']) or {}).get('kind', 'unknown')
         fan: dict[str, int] = self.cache.get('fanin') or {}
         nodes.update(self.twin_nodes())
+        ack: dict[str, Any] = self.read_baseline()
         res: dict[str, Any] = analyze(nodes, [e for e in edges if e['to'] not in ext], roots, fan,
-                                      self.utility_threshold(), self.twin_facts())
-        self.apply_baseline(res)
+                                      self.utility_threshold(), self.twin_facts(),
+                                      findings_offset=self.findings_offset, acknowledged=frozenset(ack))
+        self.apply_baseline(res, ack)
         self._findings_memo = (self.version, res)
         return res
 
     def coverage(self, nodes: dict[str, dict[str, Any]], edges: list[dict[str, Any]]) -> dict[str, Any]:
         routes: list[dict[str, Any]] = self.inventory.get('routes', [])
         entries: dict[str, Any] = self.cache['entries']
+        if self.sweep is not None:
+            entries = {key: entries[key] for key in sorted(self.sweep_entries)}
         unresolved: Counter[str] = Counter()
         for k, e in entries.items():
             for u in e.get('unresolved', []):
@@ -951,7 +1098,21 @@ class Engine:
                           'cbm_only_server': sorted(q for q in set(cbm_set) - ast_set if not cbm_set[q]),
                           'cbm_only_client_http_targets': sorted(q for q in set(cbm_set) - ast_set if cbm_set[q])})
         parse_errors: list[str] = [f"{rel}: {f['parse_error']}" for rel, f in self.cache['facts'].items() if f.get('parse_error')]
+        native_files: set[str] = {n['file'] for n in self.cache.get('symbols') or () if n['file']}
+        required_python: set[str] = {rel for rel, facts in self.cache['facts'].items() if facts.get('defs')}
         return {
+            'source_files': len(self.cache['files']),
+            'skipped_files': self.skipped,
+            'unindexed_python': sorted(required_python - native_files) if self.cbm is not None else [],
+            'cbm_index_coverage': (self.cache.get('index') or {}).get('coverage'),
+            'sql_limitations': [
+                {'file': rel, **limitation}
+                for rel, facts in sorted(self.cache['facts'].items())
+                for limitation in facts.get('sql_limitations', [])
+            ],
+            'excluded_directory_names': sorted(SKIP_DIRS),
+            'source_extensions': sorted(CODE_EXTS),
+            'sweep': self.sweep,
             'routes_discovered': len(routes),
             'routes_by_status': dict(Counter(r['status'] for r in routes)),
             'routes_conditional_registration': sum(1 for r in routes if r.get('conditional_registration')),
@@ -980,24 +1141,54 @@ class Engine:
     def state(self) -> dict[str, Any]:
         with self.lock:
             nodes, edges, roots = self.graph()
-            fr: dict[str, Any] = self.findings() if self.cache.get('fanin') is not None else \
+            fr: dict[str, Any] = self.findings() if self.ready.is_set() and not self.ready_error and \
+                self.run.status != 'failed' and self.cache.get('fanin') is not None else \
                 {'findings': [], 'scope': {'note': 'CBM statistics not loaded yet; analysis pending first expansion.'}}
-            cov: dict[str, Any] = self.coverage(nodes, edges)
+            if self.sweep is None:
+                cov = self.coverage(nodes, edges)
+            else:
+                sweep_nodes, sweep_edges, _ = self.graph(self.sweep_entries)
+                cov = self.coverage(sweep_nodes, sweep_edges)
+            run: AuditRun = self.run.model_copy(deep=True)
+            if self.ready_error and run.status != 'failed':
+                run.fail('index', self.ready_error)
+            if self.ready.is_set() and run.status != 'failed':
+                for key in ('parse_errors', 'incomplete_entries', 'skipped_files', 'unindexed_python'):
+                    if cov[key]:
+                        run.errors.append(RunError(stage='coverage', detail=f'{len(cov[key])} {key.replace("_", " ")}'))
+                native: dict[str, Any] = cov['cbm_index_coverage'] or {}
+                for key in ('parse_partial', 'parse_unusable', 'skipped'):
+                    count: Any = (native[key] or {}).get('count') if isinstance(native.get(key), dict) else None
+                    if self.cbm is not None and (type(count) is not int or count != 0):
+                        run.errors.append(RunError(stage='index coverage',
+                                                   detail=f'CBM {key} count is {count!r}; expected zero'))
+                if self.sweep and self.sweep['incomplete_adjacency_roots']:
+                    run.errors.append(RunError(stage='sweep', detail='some root adjacency queries exceeded the row cap'))
+                if self.cache_state == 'invalid':
+                    run.errors.append(RunError(stage='cache', detail='invalid cache discarded; rerun using the rebuilt cache'))
+                if run.errors:
+                    run.status = 'incomplete'
+                elif (not self.sweep or self.sweep['depth_limited_roots'] or self.sweep['node_limited_roots']
+                      or fr['scope'].get('depth_limited_roots')):
+                    run.status = 'partial'
+                else:
+                    run.status = 'completed'
             cbm_stats: dict[str, Any] = {'cbm_calls': self.cbm.calls if self.cbm else 0,
                                          'cbm_query_seconds': round(self.cbm.call_seconds, 2) if self.cbm else 0,
                                          'cbm_version': self.cbm.version if self.cbm else ''}
             unresolved: dict[str, list[dict[str, Any]]] = {k.split('|', 1)[1]: e['unresolved']
                                                            for k, e in self.cache['entries'].items()
                                                            if k.startswith('out|') and e.get('unresolved')}
-            return {'project': self.project, 'scope': str(self.scope), 'nodes': list(nodes.values()), 'edges': edges,
+            return {'project': self.project, 'scope': str(self.scope), 'run': run.model_dump(mode='json'),
+                    'nodes': list(nodes.values()), 'edges': edges,
                     'routes': [{k: r[k] for k in ('id', 'method', 'path', 'app', 'status', 'handler_status', 'file',
                                                   'line', 'mount_chain', 'cbm_route_qn', 'handler',
                                                   'conditional_registration')}
                                for r in self.inventory.get('routes', [])],
                     'expanded': sorted(self.cache['entries']), 'unresolved': unresolved,
                     'findings': fr['findings'], 'analysis_scope': fr['scope'], 'coverage': cov,
-                    'stats': {**self.stats, **cbm_stats, 'index': self.cache.get('index')},
-                    'run': self.run_status(),
+                    'stats': {**self.stats, **cbm_stats, 'index': self.cache.get('index'),
+                              'cache': {'schema': SCHEMA, 'identity': self.cache_identity, 'state': self.cache_state}},
                     'ready': self.ready.is_set(), 'ready_error': self.ready_error}
 
     def delta(self, before_nodes: set[str], before_edges: set[tuple[str, str, str]]) -> dict[str, Any]:
@@ -1011,13 +1202,12 @@ class Engine:
         n: Optional[dict[str, Any]] = self.graph()[0].get(nid)
         if not n or not n.get('file'):
             raise KeyError('node has no source file')
-        p: Path = (self.scope / n['file']).resolve()
-        if not p.is_relative_to(self.scope) or not p.is_file():
-            raise KeyError('source outside scope')
-        lines: list[str] = p.read_text(encoding='utf-8-sig', errors='replace').splitlines()
+        blob: bytes = self.read_verified_source(n['file'])
+        lines: list[str] = blob.decode('utf-8-sig', errors='replace').splitlines()
         start: int = max(1, (n.get('line') or 1))
         end: int = min(len(lines), max(start, n.get('end_line') or start) , start + 79)
-        return {'file': n['file'], 'abs': str(p), 'start': start, 'end': end, 'text': '\n'.join(lines[start - 1:end])}
+        return {'file': n['file'], 'abs': str(self.scope / n['file']), 'start': start, 'end': end,
+                'text': '\n'.join(lines[start - 1:end])}
 
     def search(self, q: str) -> list[dict[str, Any]]:
         ql: str = q.lower()
@@ -1031,8 +1221,6 @@ class Engine:
 
 # ---------------------------------------------------------------------- HTTP
 class Handler(BaseHTTPRequestHandler):
-    engine: Engine
-
     def log_message(self, *args: Any) -> None:
         pass
 
@@ -1045,13 +1233,23 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(b)
 
     def do_GET(self) -> None:  # noqa: N802
-        u = urlparse(self.path)
-        p: dict[str, list[str]] = parse_qs(u.query)
-        arg: Callable[[str, str], str] = lambda k, d='': p.get(k, [d])[0]
-        eng: Engine = self.engine
+        eng: Engine = cast(ExplorerServer, self.server).engine
         try:
+            if len(self.path) > MAX_QUERY_BYTES:
+                self.send({'error': 'Request target exceeds limit', 'kind': 'invalid_request'}, 414)
+                return
+            u = urlparse(self.path)
+            p: dict[str, list[str]] = parse_qs(u.query, max_num_fields=8, errors='strict')
+            if any(len(values) != 1 for values in p.values()):
+                raise ValueError('Repeated query parameters')
+            arg: Callable[[str, str], str] = lambda k, d='': p.get(k, [d])[0]
+            if u.path in ('/api/expand', '/api/search') and eng.ready_error:
+                self.send({'error': eng.ready_error, 'kind': 'index_unavailable'}, 503)
+                return
             if u.path == '/':
-                b: bytes = eng.render_html().encode('utf-8')
+                with graph_request(eng):
+                    eng.verify_live_state()
+                    b: bytes = eng.render_html().encode('utf-8')
                 self.send_response(200)
                 self.send_header('Content-Type', 'text/html; charset=utf-8')
                 self.send_header('Content-Length', str(len(b)))
@@ -1061,37 +1259,122 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_response(204)
                 self.end_headers()
             elif u.path == '/api/state':
-                self.send(eng.state())
+                with graph_request(eng):
+                    eng.verify_live_state()
+                    state: dict[str, Any] = eng.state()
+                self.send(state)
             elif u.path == '/api/expand':
                 nid: str = arg('id')
-                depth: int = max(1, min(6, int(arg('depth', '1'))))
+                depth: int = int(arg('depth', '1'))
                 dirs: list[str] = ['out', 'in'] if arg('dir', 'both') == 'both' else [arg('dir')]
-                with eng.lock:
+                if not nid or not 1 <= depth <= 6 or any(d not in ('out', 'in') for d in dirs):
+                    raise ValueError('Expansion requires an ID, depth 1..6 and direction in|out|both')
+                with graph_request(eng) as deadline:
+                    eng.verify_live_state()
                     nodes, edges, _ = eng.graph()
+                    if nid not in nodes and nid not in eng.symbols()['by_qn']:
+                        raise KeyError('unknown node')
                     bn: set[str] = set(nodes)
                     be: set[tuple[str, str, str]] = {(e['from'], e['to'], e['type']) for e in edges}
                     t0: float = time.perf_counter()
-                    runs: list[dict[str, Any]] = [eng.expand_bfs(nid, d, depth if d == 'out' else 1, 400, candidates=True)
+                    runs: list[dict[str, Any]] = [eng.expand_bfs(nid, d, depth if d == 'out' else 1, 400, candidates=True,
+                                                                deadline=deadline)
                                                for d in dirs]
-                    eng.persist()
+                    if any(run['timed_out'] for run in runs):
+                        raise TimeoutError('Expansion exceeded the request deadline')
+                    eng.persist(verify_source=True)
                     res: dict[str, Any] = eng.delta(bn, be)
                 res['request'] = {'id': nid, 'dirs': dirs, 'depth': depth, 'runs': runs,
                                   'ms': round((time.perf_counter() - t0) * 1000, 1)}
                 self.send(res)
             elif u.path == '/api/source':
-                self.send(eng.source(arg('id')))
+                with graph_request(eng):
+                    result: dict[str, Any] = eng.source(arg('id'))
+                self.send(result)
             elif u.path == '/api/search':
-                self.send({'results': eng.search(arg('q'))})
+                q: str = arg('q')
+                if not q or len(q) > 256:
+                    raise ValueError('Search text must contain 1..256 characters')
+                with graph_request(eng):
+                    eng.verify_live_state()
+                    matches: list[dict[str, Any]] = eng.search(q)
+                self.send({'results': matches})
             else:
                 self.send({'error': 'Not found'}, 404)
         except KeyError as exc:
             self.send({'error': str(exc), 'kind': 'not_found'}, 404)
-        except (CBMError, TimeoutError, ValueError, OSError) as exc:
+        except ValueError as exc:
+            self.send({'error': str(exc), 'kind': 'invalid_request'}, 400)
+        except (BrokenPipeError, ConnectionResetError):
+            return
+        except TimeoutError as exc:
+            self.send({'error': str(exc), 'kind': 'timeout'}, 504)
+        except AuditStaleError as exc:
+            with eng.lock:
+                eng.run.fail('freshness', str(exc))
+                eng.ready_error = str(exc)
+                eng.persist()
+                failed_run = eng.run.model_dump(mode='json')
+            self.send({'error': str(exc), 'kind': 'stale_input', 'run': failed_run}, 409)
+        except (CBMError, OSError) as exc:
             log(f'ERROR {self.path}: {exc}')
-            self.send({'error': str(exc), 'kind': 'cbm_error' if isinstance(exc, CBMError) else 'error'}, 500)
+            self.send({'error': str(exc), 'kind': 'unavailable'}, 503)
 
 
-def main(argv: Optional[list[str]] = None) -> int:
+@contextmanager
+def graph_request(eng: Engine) -> Iterator[float]:
+    deadline: float = time.monotonic() + EXPANSION_BUDGET_SECONDS
+    if not eng.lock.acquire(timeout=2.0):
+        raise TimeoutError('Explorer graph is busy')
+    token = HTTP_DEADLINE.set(deadline)
+    try:
+        yield deadline
+    finally:
+        HTTP_DEADLINE.reset(token)
+        eng.lock.release()
+
+
+class ExplorerServer(ThreadingHTTPServer):
+    """Admit a bounded number of loopback requests, including network writes."""
+
+    daemon_threads = False
+    request_queue_size = 128
+
+    def __init__(self, port: int, engine: Engine) -> None:
+        self.engine: Engine = engine
+        self.slots: threading.BoundedSemaphore = threading.BoundedSemaphore(MAX_HTTP_CONCURRENCY)
+        super().__init__(('127.0.0.1', port), Handler)
+
+    def process_request(self, request: socket, client_address: tuple[str, int]) -> None:
+        request.settimeout(10)
+        if not self.slots.acquire(blocking=False):
+            body: bytes = b'{"error":"Explorer is busy","kind":"overloaded"}'
+            try:
+                request.settimeout(0.1)
+                request.sendall(
+                    b'HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\n'
+                    b'Content-Type: application/json\r\nContent-Length: ' +
+                    str(len(body)).encode() + b'\r\n\r\n' + body,
+                )
+            except OSError:
+                pass
+            finally:
+                self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            self.slots.release()
+            raise
+
+    def process_request_thread(self, request: socket, client_address: tuple[str, int]) -> None:
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self.slots.release()
+
+
+def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description='Interactive execution-path explorer (CBM + FastAPI AST adapter)')
     ap.add_argument('--repo', default='.')
     ap.add_argument('--scope', default='src', help='Folder (relative to --repo) to index and analyse; "." for all')
@@ -1108,6 +1391,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     ap.add_argument('--roots', choices=('routes', 'all'), default='routes',
                     help='Sweep roots: API routes only, or also every unreferenced public callable (non-HTTP entry points)')
     ap.add_argument('--sweep-cap', type=int, default=400, help='Max nodes visited per route during a sweep')
+    ap.add_argument('--findings-offset', type=int, default=0,
+                    help='Skip this many findings per kind; use the previous report’s next_findings_offset')
     ap.add_argument('--baseline', default='.arch-audit/baseline.json',
                     help='Committed acknowledgements: {"acknowledged": [{"id","reason","owner","at"}]}; matching findings show as known')
     ap.add_argument('--baseline-update', action='store_true',
@@ -1118,129 +1403,125 @@ def main(argv: Optional[list[str]] = None) -> int:
     ap.add_argument('--no-open', action='store_true')
     ap.add_argument('--no-serve', action='store_true', help='Write HTML/JSON and exit')
     a = ap.parse_args(argv)
-    if not 1 <= a.neighbors <= 5000:
-        ap.error('--neighbors must be 1..5000')
     t_start: float = time.perf_counter()
     repo: Path = Path(a.repo).resolve()
     scope: Path = (repo / a.scope).resolve()
-    if not scope.is_dir() or not scope.is_relative_to(repo):
-        ap.error('Scope must be an existing directory inside --repo')
-    scope_id: str = scope.relative_to(repo).as_posix()
-    project: str = a.project if scope_id == '.' else a.project + '-' + re.sub(r'[^A-Za-z0-9]+', '-', scope_id).strip('-')
-    ident: str = hashlib.sha256((str(scope) + '\n' + project).encode()).hexdigest()[:16]
-    cache_dir: Path = Path(a.cache_dir) if a.cache_dir else \
-        Path(os.getenv('LOCALAPPDATA') or Path.home() / '.cache') / 'architecture-pathway-audit' / ident
-    log(f'Scope {scope} -> CBM project {project}; cache {cache_dir}')
-    cbm: CBMClient = CBMClient(find_executable(a.cbm), timeout=a.timeout, log=log)
-    eng: Engine = Engine(scope, project, cache_dir, repo / a.out, repo / a.report, cbm, page=a.neighbors)
-    if a.refresh:
-        eng.cache['entries'] = {}
-        eng.cache['index'] = None
-    eng.baseline_path = repo / a.baseline
-    changed: set[str] = eng.sync_files()
-    dropped: int = eng.invalidate(changed) if eng.cache.get('index') else 0
-    first: bool = not eng.cache.get('index')
-    log(f'Routes: {len(eng.inventory["routes"])} discovered via AST in {time.perf_counter() - t_start:.2f}s; '
-        f'{len(changed)} changed files{" (first run)" if first else ""}; {dropped} cached expansions invalidated; '
-        f'{len(eng.cache["entries"])} reused.')
-    threading.Thread(target=eng.ensure_index, daemon=True, name='cbm-index').start()
+    report: Path = repo / a.report
+    out: Path = repo / a.out
+    baseline: Path = repo / a.baseline
+    run = AuditRun(requested_scope=[a.scope])
+    if len({report.resolve(), out.resolve(), baseline.resolve()}) != 3:
+        ap.error('Report, snapshot and baseline must use distinct paths')
+    cbm: CBMClient | None = None
+    eng: Engine | None = None
 
-    def ready_or_fail() -> bool:
-        eng.ready.wait()
-        if eng.ready_error:
-            log('ERROR ' + eng.ready_error + ' — publishing a nonpassing artifact')
-            eng.persist()
-            log('ANALYSIS NOT COMPLETE (' + eng.run_status()['status'] + '): ' + str(eng.report))
-            cbm.close()
-            return False
-        return True
+    def publish_startup() -> None:
+        from html import escape
+        detail: str = run.errors[-1].detail if run.errors else 'Analysis has not completed.'
+        atomic_json(report, {'project': a.project, 'scope': str(scope), 'run': run.model_dump(mode='json'),
+                             'coverage': {}, 'analysis_scope': {}, 'findings': [], 'routes': [],
+                             'snapshot_path': str(out)})
+        atomic_text(out, f'<!doctype html><html lang="en"><meta charset="utf-8">'
+                    f'<title>Execution Path Explorer</title><h1>Analysis {run.status}</h1><p>{escape(detail)}</p>'
+                    f'<p>Run {run.id} · {run.started_at.isoformat()}</p></html>')
 
-    if a.sweep_depth > 0:
-        if not ready_or_fail():
-            return 2
-        t0: float = time.perf_counter()
-        try:
-            eng.symbols()
-            eng.fanin()
-            eng.cbm_routes()
-            hits = misses = visited = trunc = 0
-            sweep_ids: list[str] = [r['id'] for r in eng.inventory['routes']] + (eng.orphan_roots() if a.roots == 'all' else [])
-            for rid in sweep_ids:
-                res: dict[str, Any] = eng.expand_bfs(rid, 'out', a.sweep_depth, a.sweep_cap)
-                hits += res['cache_hits']
-                misses += res['cbm_expansions']
-                visited += res['visited']
-                trunc += res['truncated']
-            log(f'Sweep depth {a.sweep_depth}: {len(sweep_ids)} roots, {visited} node visits, '
-                f'{misses} expansions fetched, {hits} cache hits, {trunc} truncated, {time.perf_counter() - t0:.1f}s')
-        except (CBMError, OSError, subprocess.SubprocessError) as exc:
-            eng.ready_error = f'sweep failed: {exc}'
-            log('ERROR ' + eng.ready_error + ' — publishing a nonpassing artifact')
-            eng.persist()
-            cbm.close()
-            return 2
-    elif not first and not changed:
-        pass
-    if a.baseline_update:
-        if not ready_or_fail():
-            return 2
-        eng.fanin()
-        cur: dict[str, Any] = {x['id']: x for x in eng.findings()['findings']}
-        old: dict[str, Any] = json.loads(eng.baseline_path.read_text(encoding='utf-8')) if eng.baseline_path.is_file() else {}
-        have: list[dict[str, Any]] = old.get('acknowledged', [])
-        seen: set[str] = {x['id'] for x in have}
-        stamp: str = time.strftime('%Y-%m-%d')
-        have += [{'id': i, 'kind': x['kind'], 'anchor': x['anchor'], 'reason': 'baselined: reviewed, accepted for now',
-                  'owner': '', 'at': stamp} for i, x in sorted(cur.items()) if i not in seen]
-        eng.baseline_path.parent.mkdir(parents=True, exist_ok=True)
-        eng.baseline_path.write_text(json.dumps({'acknowledged': have}, indent=1), encoding='utf-8')
-        log(f'Baseline {eng.baseline_path}: {len(have)} acknowledged ({len(have) - len(seen)} added)')
-        cbm.close()
-        return 0
-    if a.no_serve:
-        if not ready_or_fail():
-            return 2
-        try:
-            eng.fanin()
-            eng.cbm_routes()
-        except (CBMError, OSError, subprocess.SubprocessError) as exc:
-            eng.ready_error = f'required table load failed: {exc}'
-            eng.persist()
-            cbm.close()
-            return 2
-        eng.persist()
-        st: dict[str, Any] = eng.state()
-        run: dict[str, Any] = st['run']
-        log(f'Wrote {eng.out} and {eng.report}: {len(st["nodes"])} nodes, {len(st["edges"])} edges, '
-            f'{len(st["findings"])} findings, {st["stats"]["cbm_calls"]} CBM calls, '
-            f'analysis={run["status"]}, total {time.perf_counter() - t_start:.1f}s')
-        cbm.close()
-        if not run['required_analysis_complete']:
-            log('ERROR required analysis incomplete: ' + '; '.join(run['errors']))
-            return 2
-        return 0
-    Handler.engine = eng
-    server: ThreadingHTTPServer = ThreadingHTTPServer(('127.0.0.1', a.port), Handler)
-    url: str = f'http://127.0.0.1:{a.port}/'
-    log(f'Explorer {url} ready in {time.perf_counter() - t_start:.2f}s (CBM warms in background). Ctrl+C to stop.')
-    log(f'Snapshot: {eng.out} | Findings: {eng.report}')
-    if not a.no_open:
-        webbrowser.open(url)
     try:
-        server.serve_forever(poll_interval=0.3)
+        publish_startup()
+        if not 1 <= a.neighbors <= 5000 or not 1 <= a.timeout <= 300:
+            raise ValueError('--neighbors must be 1..5000 and --timeout must be 1..300')
+        if a.sweep_depth < 0 or a.sweep_cap < 1 or a.findings_offset < 0:
+            raise ValueError('Sweep depth/offset must be nonnegative and sweep cap must be positive')
+        if not scope.is_dir() or not scope.is_relative_to(repo):
+            raise ValueError('Scope must be an existing directory inside --repo')
+        scope_id: str = scope.relative_to(repo).as_posix()
+        project: str = a.project if scope_id == '.' else a.project + '-' + re.sub(
+            r'[^A-Za-z0-9]+', '-', scope_id,
+        ).strip('-')
+        project += '-' + hashlib.sha256(str(scope).encode()).hexdigest()[:16]
+        ident: str = hashlib.sha256((str(scope) + '\n' + project).encode()).hexdigest()[:16]
+        cache_dir: Path = Path(a.cache_dir) if a.cache_dir else \
+            Path(os.getenv('LOCALAPPDATA') or Path.home() / '.cache') / 'architecture-pathway-audit' / ident
+        log(f'Scope {scope} -> CBM project {project}; cache {cache_dir}')
+        run.stage = 'dependency'
+        cbm = CBMClient(find_executable(a.cbm), timeout=a.timeout, log=log)
+        eng = Engine(scope, project, cache_dir, out, report, cbm, page=a.neighbors, run=run,
+                     findings_offset=a.findings_offset)
+        if a.refresh:
+            eng.cache.update({'entries': {}, 'nodes': {}, 'index': None})
+            eng.cache_state = 'refresh_requested'
+        eng.baseline_path = baseline
+        run.stage = 'source inventory'
+        changed: set[str] = eng.sync_files()
+        if not eng.cache['files']:
+            raise ValueError('No supported source files in the requested scope')
+        dropped: int = eng.invalidate(changed) if eng.cache.get('index') else 0
+        log(f'Routes: {len(eng.inventory["routes"])} discovered via AST; {len(changed)} changed files; '
+            f'{dropped} cached expansions invalidated; {len(eng.cache["entries"])} reused.')
+        eng.ensure_index()
+        if a.sweep_depth and not eng.ready_error:
+            eng.sweep_paths(a.sweep_depth, a.sweep_cap, a.roots)
+        st: dict[str, Any] = eng.state()
+        eng.persist(verify_source=True)
+        status: str = st['run']['status']
+        log(f'{status}: wrote {eng.out} and {eng.report}; {len(st["findings"])} emitted findings; '
+            f'{st["stats"]["cbm_calls"]} CBM calls; {time.perf_counter() - t_start:.1f}s')
+        for error in st['run']['errors']:
+            log(f'{error["stage"]}: {error["detail"]}')
+        if a.baseline_update:
+            if status != 'completed' or any(st['analysis_scope']['omitted_by_kind'].values()):
+                raise ValueError('A complete, unpaged sweep is required to update the baseline')
+            old: dict[str, Any] = eng.read_baseline()
+            stamp: str = time.strftime('%Y-%m-%d', time.gmtime())
+            for item in st['findings']:
+                old.setdefault(item['id'], {'id': item['id'], 'kind': item['kind'], 'anchor': item['anchor'],
+                                             'reason': 'acknowledged by --baseline-update',
+                                             'owner': '', 'at': stamp})
+            atomic_json(baseline, {'acknowledged': list(old.values())})
+            eng.version += 1
+            eng.persist(verify_source=True)
+            return 0
+        if a.no_serve:
+            if status != 'completed':
+                log(f'ANALYSIS NOT COMPLETE ({status})')
+                return 2
+            return 0
+        serve(eng, a.port, a.no_open)
+        return 2 if eng.state()['run']['status'] in ('failed', 'incomplete') else 0
     except KeyboardInterrupt:
-        pass
+        run.fail(run.stage, 'Analysis interrupted')
+        publish_startup()
+        return 130
+    except (CBMError, OSError, ValueError, TypeError, KeyError, subprocess.SubprocessError) as exc:
+        run.fail(run.stage, str(exc))
+        print(f'ERROR [{run.stage}]: {exc}', file=sys.stderr)
+        try:
+            if eng is not None:
+                eng.persist()
+            else:
+                publish_startup()
+        except (OSError, ValueError, TypeError, KeyError) as publish_error:
+            print(f'ERROR publishing full report: {publish_error}', file=sys.stderr)
+            publish_startup()
+        return 2
     finally:
-        server.server_close()
-        with eng.lock:
-            eng.persist()
-        cbm.close()
-    return 0
+        if cbm is not None:
+            cbm.close()
+
+
+def serve(eng: Engine, port: int, no_open: bool) -> None:
+    url: str = f'http://127.0.0.1:{port}/'
+    with ExplorerServer(port, eng) as server:
+        log(f'Explorer {url} ready. Ctrl+C to stop.')
+        if not no_open:
+            webbrowser.open(url)
+        try:
+            server.serve_forever(poll_interval=0.3)
+        except KeyboardInterrupt:
+            pass
+        finally:
+            with eng.lock:
+                eng.persist(verify_source=True)
 
 
 if __name__ == '__main__':
-    try:
-        sys.exit(main())
-    except (CBMError, OSError, subprocess.SubprocessError) as e:
-        print('ERROR:', e, file=sys.stderr)
-        sys.exit(2)
+    sys.exit(main())

@@ -138,7 +138,7 @@ class TestExplorerFailureHonest(unittest.TestCase):
         saved = json.loads(self.report.read_text(encoding='utf-8'))
         self.assertEqual(saved['run']['status'], 'failed')
         self.assertFalse(saved['run']['required_analysis_complete'])
-        self.assertIn('fake failure', ' '.join(saved['run']['errors']))
+        self.assertIn('fake failure', ' '.join(error['detail'] for error in saved['run']['errors']))
         self.assertIn('fake failure', self.out.read_text(encoding='utf-8'))  # browser state carries it
 
     def test_row_capped_expansion_is_incomplete(self):
@@ -151,24 +151,25 @@ class TestExplorerFailureHonest(unittest.TestCase):
         saved = json.loads(self.report.read_text(encoding='utf-8'))
         self.assertEqual(saved['run']['status'], 'incomplete')
         self.assertFalse(saved['run']['required_analysis_complete'])
-        self.assertIn('row caps', ' '.join(saved['run']['errors']))
+        self.assertIn('incomplete entries', ' '.join(error['detail'] for error in saved['run']['errors']))
 
     def test_clean_run_is_complete(self):
         eng = self.engine()
         eng.cache['symbols'] = []
         eng.cache['fanin'] = {}
         eng.cache['cbm_routes'] = []
+        eng.sweep_paths(1, 10, 'all')
         eng.persist()
         saved = json.loads(self.report.read_text(encoding='utf-8'))
-        self.assertEqual(saved['run']['status'], 'complete')
+        self.assertEqual(saved['run']['status'], 'completed')
         self.assertTrue(saved['run']['required_analysis_complete'])
-        self.assertTrue(saved['run']['identity']['source_digest'])
+        self.assertTrue(saved['run']['source_sha256'])
 
     def test_corrupt_cache_is_explicit_not_silent(self):
         self.cache.mkdir(parents=True)
         (self.cache / 'pathway_cache.json').write_text('{broken', encoding='utf-8')
         eng = self.engine()
-        self.assertIn('corrupt cache', eng.run_status()['errors'][0])
+        self.assertEqual(eng.cache_state, 'invalid')
 
     def test_cache_identity_mismatch_is_reported(self):
         self.cache.mkdir(parents=True)
@@ -177,7 +178,7 @@ class TestExplorerFailureHonest(unittest.TestCase):
                 'symbols': None, 'fanin': None, 'cbm_routes': None, 'index': None, 'index_token': 0}
         (self.cache / 'pathway_cache.json').write_text(json.dumps(body), encoding='utf-8')
         eng = self.engine()  # sync_files repopulates the fresh cache; stale entries must not survive
-        self.assertIn('cache identity mismatch', eng.cache_reason or '')
+        self.assertEqual(eng.cache_state, 'identity_changed')
         self.assertEqual(eng.cache['entries'], {})
         self.assertIsNone(eng.cache['index'])
 
@@ -196,11 +197,25 @@ class TestExplorerFailureHonest(unittest.TestCase):
         self.assertEqual(saved['run']['status'], 'failed')
         self.assertIn('ANALYSIS NOT COMPLETE', out.getvalue())
 
+    def test_no_serve_unresponsive_cbm_returns_two_with_fresh_artifact(self):
+        import pathway_explorer as pe
+        fake = Path(self.tmp.name) / 'stalled-cbm'
+        fake.write_text('#!/bin/sh\nexec sleep 30\n', encoding='utf-8')
+        fake.chmod(0o755)
+        self.report.write_text('{"run":{"status":"completed"}}')
+        code = pe.main(['--repo', str(self.scope), '--scope', '.', '--project', 'timeout-fixture', '--cbm', str(fake), '--timeout', '1',
+                        '--no-serve', '--out', str(self.out), '--report', str(self.report),
+                        '--cache-dir', str(self.cache)])
+        saved = json.loads(self.report.read_text(encoding='utf-8'))
+        self.assertEqual(code, 2)
+        self.assertEqual(saved['run']['status'], 'failed')
+        self.assertIn('timed out', saved['run']['errors'][0]['detail'])
+
     def test_viewer_surfaces_run_status(self):
         viewer = (SCRIPTS / 'viewer.html').read_text(encoding='utf-8')
         self.assertIn("'run'", viewer)
-        self.assertIn('ANALYSIS NOT COMPLETE', viewer)
-        self.assertIn('Analysis status', viewer)
+        self.assertIn('S.run?.status', viewer)
+        self.assertIn('runNotice()', viewer)
 
 
 if __name__ == '__main__':

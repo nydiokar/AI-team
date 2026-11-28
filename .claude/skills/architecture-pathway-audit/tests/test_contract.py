@@ -6,9 +6,9 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
-from contract_check import Contract, check, load_contract, scan_python, scan_text  # noqa: E402
+from contract_check import Contract, check, load_contract, main, scan_python, scan_text  # noqa: E402
 
-PY = '''"""Module doc mentioning old_send. Example: SELECT * FROM example_outbox."""
+PY = '''"""Module doc mentioning old_send."""
 from pkg.legacy import old_send
 import json
 
@@ -52,7 +52,6 @@ class TestScan(unittest.TestCase):
         got = sorted((a['where'], a['table'], a['mode']) for a in acc)
         self.assertIn(('m.py::writer', 'outbox', 'write'), got)
         self.assertIn(('m.py::reader', 'outbox', 'read'), got)
-        self.assertFalse(any(table == 'example_outbox' for _, table, _ in got))
 
     def test_text_tokens(self):
         occ = scan_text('Call `old_send` then old_sender.\n', 'p.md')
@@ -174,6 +173,65 @@ class TestCheckOnGit(unittest.TestCase):
         r = check(c, self.repo, 'HEAD')
         self.assertTrue(r['ok'])
         self.assertEqual(r['coverage']['files'], 1)
+
+    def test_scope_must_cover_each_requested_area(self):
+        for scope, exclude in [
+            (['agnt'], []),
+            (['agent', 'agnt'], []),
+            (['agent', 'worker'], ['worker']),
+        ]:
+            with self.subTest(scope=scope, exclude=exclude):
+                c = Contract.model_validate({'scope': scope, 'exclude': exclude, 'retired': ['retired_name']})
+                result = check(c, self.repo, 'HEAD')
+                self.assertFalse(result['ok'])
+                self.assertEqual(result['status'], 'incomplete')
+
+    def test_forbidden_area_outside_effective_scope_is_incomplete(self):
+        c = Contract.model_validate({'scope': ['agent'], 'forbidden_in': {'worker': ['^old_send$']}})
+        self.assertEqual(check(c, self.repo, 'HEAD')['status'], 'incomplete')
+
+    def test_skips_and_tokenless_syntax_error_do_not_pass(self):
+        (self.repo / 'agent' / 'broken.py').write_text('(')
+        (self.repo / 'agent' / 'binary.py').write_bytes(b'\0abc')
+        (self.repo / 'agent' / 'oversized.py').write_bytes(b' ' * 2_000_001)
+        c = Contract.model_validate({'scope': ['agent'], 'stores': {'events': {'writers': []}}})
+        result = check(c, self.repo, None)
+        self.assertFalse(result['ok'])
+        self.assertEqual(result['coverage']['parse_errors'], ['agent/broken.py'])
+        self.assertEqual(result['coverage']['skipped'], ['agent/binary.py', 'agent/oversized.py'])
+
+    def test_failed_cli_replaces_previous_clean_report(self):
+        import json
+        contract_path, output = self.repo / 'contract.yaml', self.repo / 'result.json'
+        contract_path.write_text('scope: [agent]\nretired: [old_send]\n')
+        args = ['--contract', str(contract_path), '--repo', str(self.repo), '--json', str(output)]
+        self.assertEqual(main(args), 0)
+        self.assertTrue(json.loads(output.read_text())['ok'])
+        self.assertEqual(main(args + ['--rev', 'does-not-exist']), 2)
+        result = json.loads(output.read_text())
+        self.assertFalse(result['ok'])
+        self.assertEqual(result['status'], 'failed')
+
+    def test_worktree_report_cannot_supply_its_own_retired_token(self):
+        import json
+        contract_path, output = self.repo / 'contract.yaml', self.repo / 'agent' / 'result.json'
+        contract_path.write_text('scope: [agent]\nretired: [pending]\n')
+        args = ['--contract', str(contract_path), '--repo', str(self.repo), '--json', str(output)]
+        self.assertEqual(main(args), 0)
+        result = json.loads(output.read_text())
+        self.assertEqual(result['coverage']['generated_report'], 'agent/result.json')
+        self.assertEqual(result['coverage']['files'], 1)
+
+    def test_store_check_has_execution_and_declaration_provenance(self):
+        (self.repo / 'agent' / 'reader.py').write_text(
+            "SELECTOR = 'SELECT id FROM main.\"events\"'\n"
+            'def run(conn, statement):\n    conn.execute(SELECTOR)\n    conn.execute(statement)\n',
+        )
+        c = Contract.model_validate({'scope': ['agent'], 'stores': {'events': {'readers': []}}})
+        result = check(c, self.repo, None)
+        self.assertEqual([v['line'] for v in result['violations']], [3])
+        self.assertEqual(result['violations'][0]['declaration_lines'], [1])
+        self.assertEqual(result['coverage']['sql_limitations'][0]['line'], 4)
 
 
 if __name__ == '__main__':

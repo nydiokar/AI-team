@@ -15,12 +15,9 @@ A job (dispatch packet, design doc) states its intended end state as a fenced ``
 
 The check is a pure function of the files at the revision: Python via AST tokens (definitions, references,
 imports, string literals; docstrings are reported as notes, comments ignored), any other text file by identifier
-tokens per line, and SQL table access via `pyast_adapter.sql_analysis`. No LLM, no graph service.
+tokens per line, and SQL table access via `pyast_adapter.data_access`. No LLM, no graph service.
 
-Exit codes: 0 contract met, 1 completed check with violations, 2 invalid input or
-incomplete required analysis (wrong/empty scope, skipped or unparseable required input).
-Every nonpassing code refuses dispatch closure; a zero-result run is only clean when the
-applicable checks actually completed over the declared scope.
+Exit codes: 0 contract met, 1 violations, 2 contract or input error.
 """
 from __future__ import annotations
 
@@ -32,21 +29,22 @@ import re
 import subprocess
 import sys
 from fnmatch import fnmatch
-from pathlib import Path
-from typing import Any, Optional
+from pathlib import Path, PurePosixPath
+from typing import Any, Iterator, Optional
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from pyast_adapter import sql_analysis, sql_bindings  # noqa: E402
+from run_result import AuditRun, RunError, atomic_json  # noqa: E402
 
 TOKEN: re.Pattern[str] = re.compile(r'[A-Za-z_][A-Za-z0-9_]*')
 BLOCK: re.Pattern[str] = re.compile(r'^```arch-contract[ \t]*\n(.*?)^```', re.M | re.S)
 MAX_BYTES: int = 2_000_000
 LIMITS: list[str] = [
     'Static only: names built at runtime (string concatenation, computed getattr) are not seen.',
-    'SQL facts come from supported statements at execution sites. Unresolved SQL sites are counted in coverage.',
+    'SQL checks cover supported static statements at execution sites; unresolved forms are listed in coverage.',
     'Python comments are ignored; docstring mentions are listed as notes, not violations.',
 ]
 
@@ -55,6 +53,12 @@ class StoreRule(BaseModel):
     model_config = ConfigDict(extra='forbid')
     writers: Optional[list[str]] = None
     readers: Optional[list[str]] = None
+
+    @model_validator(mode='after')
+    def _requires_constraint(self) -> StoreRule:
+        if self.readers is None and self.writers is None:
+            raise ValueError('store rule needs an explicit reader or writer constraint')
+        return self
 
 
 class Waiver(BaseModel):
@@ -98,10 +102,10 @@ class Contract(BaseModel):
 
     @field_validator('scope')
     @classmethod
-    def _nonempty_scope(cls, v: list[str]) -> list[str]:
-        if not v or any(not isinstance(s, str) or not s.strip() for s in v):
-            raise ValueError('scope must declare at least one non-empty path ("." means the whole repo)')
-        return v
+    def _nonempty_scope(cls, paths: list[str]) -> list[str]:
+        if not paths or any(not path.strip() for path in paths):
+            raise ValueError('scope must declare at least one non-empty path')
+        return paths
 
     @field_validator('retired_patterns')
     @classmethod
@@ -119,14 +123,18 @@ class Contract(BaseModel):
 
     @model_validator(mode='after')
     def _asserts_something(self) -> 'Contract':
-        if not (self.retired or self.retired_patterns or self.forbidden_in or self.stores):
+        if not (self.retired or self.retired_patterns or any(self.forbidden_in.values()) or self.stores):
             raise ValueError('contract asserts nothing (no retired, retired_patterns, forbidden_in or stores)')
         return self
 
 
 def load_contract(path: Path) -> Contract:
     """Contract from a .md packet (its single ```arch-contract block) or a plain YAML file."""
-    text: str = path.read_text(encoding='utf-8')
+    return parse_contract(path, path.read_bytes())
+
+
+def parse_contract(path: Path, data: bytes) -> Contract:
+    text: str = data.decode('utf-8')
     if path.suffix.lower() == '.md':
         blocks: list[str] = BLOCK.findall(text)
         if len(blocks) != 1:
@@ -153,21 +161,16 @@ def _docstring_ids(tree: ast.AST) -> set[int]:
     return out
 
 
-def _accesses(
-    tree: ast.Module, rel: str, sql_coverage: dict[str, Any] | None,
-) -> list[dict[str, Any]]:
+def _accesses(tree: ast.Module, rel: str, sql_limits: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
-
     bindings = sql_bindings(tree)
 
     def visit(node: ast.AST, qual: str) -> None:
         accesses, limits = sql_analysis(node, bindings)
-        if sql_coverage is not None:
-            sql_coverage['total'] += len(limits)
-            examples = sql_coverage['examples']
-            examples.extend({'file': rel, 'function': qual, **item} for item in limits[:max(0, 100 - len(examples))])
         for access in accesses:
             out.append({'where': f'{rel}::{qual}', 'file': rel, **access})
+        if sql_limits is not None:
+            sql_limits.extend({'file': rel, 'function': qual, **item} for item in limits)
         for child in _child_defs(node):
             visit(child, child.name if qual == '<module>' else f'{qual}.{child.name}')
     visit(tree, '<module>')
@@ -187,9 +190,17 @@ def _child_defs(node: ast.AST) -> list[ast.AST]:
     return sorted(found, key=lambda d: d.lineno)
 
 
-def _scan_parsed(
-    tree: ast.Module, rel: str, sql_coverage: dict[str, Any] | None = None,
+def scan_python(
+    source: str, rel: str, *, parse_errors: list[str] | None = None,
+    sql_limits: list[dict[str, Any]] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Token and SQL evidence. A text fallback contributes diagnostics only."""
+    try:
+        tree: ast.Module = ast.parse(source, filename=rel)
+    except SyntaxError:
+        if parse_errors is not None:
+            parse_errors.append(rel)
+        return scan_text(source, rel), []
     docs: set[int] = _docstring_ids(tree)
     occ: list[dict[str, Any]] = []
     for n in ast.walk(tree):
@@ -211,54 +222,56 @@ def _scan_parsed(
             kind: str = 'doc' if id(n) in docs else 'string'
             occ += [_occ(t, kind, rel, line) for t in sorted(set(TOKEN.findall(n.value)))]
     uniq: dict[tuple[str, str, int], dict[str, Any]] = {(o['token'], o['kind'], o['line']): o for o in occ}
-    return list(uniq.values()), _accesses(tree, rel, sql_coverage)
-
-
-def scan_python(source: str, rel: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """(identifier occurrences, SQL table accesses). Unparseable files degrade to a text scan."""
-    try:
-        return _scan_parsed(ast.parse(source), rel)
-    except SyntaxError:
-        return scan_text(source, rel), []
-
-
-def parse_python(
-    source: str, rel: str, sql_coverage: dict[str, Any] | None = None,
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]], Optional[str]]:
-    """Like scan_python, but surfaces a syntax failure instead of silently degrading to text.
-    Unparseable Python loses AST-based SQL/ownership checks, so it is an analysis error."""
-    try:
-        occ, acc = _scan_parsed(ast.parse(source), rel, sql_coverage)
-        return occ, acc, None
-    except SyntaxError as exc:
-        return scan_text(source, rel), [], f'{type(exc).__name__}: {exc}'
+    return list(uniq.values()), _accesses(tree, rel, sql_limits)
 
 
 def _git(repo: Path, *args: str, data: Optional[bytes] = None) -> bytes:
-    return subprocess.run(['git', '-C', str(repo), *args], input=data, check=True, capture_output=True).stdout
+    return subprocess.run(['git', '-C', str(repo), *args], input=data, check=True, capture_output=True, timeout=60).stdout
 
 
-def _files(repo: Path, rev: Optional[str], scope: list[str]) -> dict[str, bytes]:
-    """{path: content} for every tracked file under scope at rev (or in the working tree when rev is None)."""
-    spec: list[str] = [s for s in scope if s not in ('.', '')]
+def _files(repo: Path, rev: Optional[str], scope: list[str]) -> Iterator[tuple[str, bytes | None]]:
+    """Bounded blobs for every selected path. None denotes unsupported input."""
+    spec: list[str] = [] if '.' in scope else scope
     if rev is None:
-        names: list[str] = [p for p in _git(repo, 'ls-files', '-z', '-co', '--exclude-standard', '--', *spec)
+        names: list[str] = [p for p in _git(repo, '--literal-pathspecs', 'ls-files', '-z', '-co', '--exclude-standard', '--', *spec)
                             .decode('utf-8').split('\0') if p]
-        return {p: (repo / p).read_bytes() for p in names if (repo / p).is_file()}
-    names = [p for p in _git(repo, 'ls-tree', '-r', '-z', '--name-only', rev, '--', *spec).decode('utf-8').split('\0') if p]
-    out: dict[str, bytes] = {}
-    raw: bytes = _git(repo, 'cat-file', '--batch', data=''.join(f'{rev}:{p}\n' for p in names).encode('utf-8'))
-    pos: int = 0
-    for p in names:
-        nl: int = raw.index(b'\n', pos)
-        head: list[bytes] = raw[pos:nl].split()
-        if len(head) != 3:  # '<obj> missing' (e.g. a submodule entry)
-            pos = nl + 1
-            continue
-        size: int = int(head[2])
-        out[p] = raw[nl + 1:nl + 1 + size]
-        pos = nl + 1 + size + 1
-    return out
+        for rel in sorted(set(names)):
+            path: Path = repo / rel
+            if path.is_symlink() or not path.resolve().is_relative_to(repo):
+                yield rel, None
+            elif path.is_file():
+                with path.open('rb') as stream:
+                    data: bytes = stream.read(MAX_BYTES + 1)
+                yield rel, data if len(data) <= MAX_BYTES else None
+            elif path.exists():
+                yield rel, None
+        return
+    records: list[str] = _git(
+        repo, '--literal-pathspecs', 'ls-tree', '-r', '-z', '-l', rev, '--', *spec,
+    ).decode().split('\0')
+    entries: list[tuple[str, str | None]] = []
+    for record in filter(None, records):
+        meta, path = record.split('\t', 1)
+        mode, object_type, oid, size = meta.split()
+        allowed = object_type == 'blob' and mode in ('100644', '100755') and int(size) <= MAX_BYTES
+        entries.append((path, oid if allowed else None))
+    entries.sort()
+    for start in range(0, len(entries), 16):
+        batch = entries[start:start + 16]
+        oids = ''.join(f'{oid}\n' for _, oid in batch if oid is not None).encode('ascii')
+        raw: bytes = _git(repo, 'cat-file', '--batch', data=oids) if oids else b''
+        pos: int = 0
+        for path, oid in batch:
+            if oid is None:
+                yield path, None
+                continue
+            nl: int = raw.index(b'\n', pos)
+            head: list[bytes] = raw[pos:nl].split()
+            if len(head) != 3 or head[:2] != [oid.encode(), b'blob']:
+                raise ValueError(f'Git blob unavailable: {path}')
+            blob_end: int = nl + 1 + int(head[2])
+            yield path, raw[nl + 1:blob_end]
+            pos = blob_end + 1
 
 
 def _excluded(path: str, exclude: list[str]) -> bool:
@@ -269,43 +282,63 @@ def _allowed(acc: dict[str, Any], globs: list[str]) -> bool:
     return any(fnmatch(acc['file'], g) or fnmatch(acc['where'], g) for g in globs)
 
 
-def check(contract: Contract, repo: Path, rev: Optional[str]) -> dict[str, Any]:
-    files: dict[str, bytes] = _files(repo, rev, contract.scope)
-    cov: dict[str, Any] = {'files': 0, 'python': 0, 'text': 0, 'skipped': [], 'parse_errors': []}
-    cov['unresolved_sql'] = {'total': 0, 'examples': []}
-    errors: list[str] = []
+def check(
+    contract: Contract, repo: Path, rev: Optional[str], *, run: AuditRun | None = None,
+    generated_report: str | None = None,
+) -> dict[str, Any]:
+    run = run or AuditRun()
+    run.requested_scope = contract.scope
+    run.stage = 'coverage'
+    scope: list[str] = [
+        PurePosixPath(path).as_posix() for path in contract.scope
+        if path.strip() and not PurePosixPath(path).is_absolute() and '..' not in PurePosixPath(path).parts
+    ]
+    files = _files(repo, rev, scope) if scope else iter(())
+    cov: dict[str, Any] = {'files': 0, 'python': 0, 'text': 0, 'skipped': [], 'parse_errors': [],
+                           'excluded': [], 'uncovered_scopes': [], 'uncovered_forbidden_areas': [],
+                           'sql_limitations': [], 'generated_report': generated_report}
     occ: list[dict[str, Any]] = []
     acc: list[dict[str, Any]] = []
-    for path in sorted(files):
-        if _excluded(path, contract.exclude):
+    scanned: list[str] = []
+    source = hashlib.sha256()
+    for path, blob in files:
+        if path == generated_report or _excluded(path, contract.exclude):
+            cov['excluded'].append(path)
             continue
-        blob: bytes = files[path]
-        if len(blob) > MAX_BYTES or b'\0' in blob[:8192]:
+        if blob is None:
             cov['skipped'].append(path)
             continue
-        text: str = blob.decode('utf-8-sig', errors='replace')  # a BOM is legal Python source but not ast.parse input
+        source.update(json.dumps(path).encode() + b'\0' + hashlib.sha256(blob).digest())
+        if len(blob) > MAX_BYTES or b'\0' in blob:
+            cov['skipped'].append(path)
+            continue
+        try:
+            text: str = blob.decode('utf-8-sig')  # Strip a legal Python BOM before AST parsing.
+        except UnicodeError:
+            cov['skipped'].append(path)
+            continue
+        scanned.append(path)
         cov['files'] += 1
-        if path.endswith('.py'):
+        if path.endswith(('.py', '.pyi')):
             cov['python'] += 1
-            o, a, parse_error = parse_python(text, path, cov['unresolved_sql'])
-            if parse_error:
-                cov['parse_errors'].append(path)
+            o, a = scan_python(text, path, parse_errors=cov['parse_errors'], sql_limits=cov['sql_limitations'])
             occ += o
             acc += a
         else:
             cov['text'] += 1
             occ += scan_text(text, path)
 
-    if cov['files'] == 0:
-        errors.append(f'no files scanned in declared scope {contract.scope!r}')
-    if cov['skipped']:
-        errors.append(f'{len(cov["skipped"])} required input(s) skipped (binary/oversize): '
-                      + ', '.join(cov['skipped'][:5]))
-    if cov['parse_errors']:
-        errors.append(f'{len(cov["parse_errors"])} python file(s) unparseable (AST checks lost): '
-                      + ', '.join(cov['parse_errors'][:5]))
-    digest: str = hashlib.sha256(''.join(f'{p}\0' + hashlib.sha256(files[p]).hexdigest()
-                                         for p in sorted(files)).encode('utf-8')).hexdigest()
+    run.source_sha256 = source.hexdigest()
+    run.effective_scope = [s for s in scope if any(s == '.' or p == s or p.startswith(s + '/') for p in scanned)]
+    cov['uncovered_scopes'] = [
+        path for path in contract.scope if PurePosixPath(path).as_posix() not in run.effective_scope or not path.strip()
+    ]
+    cov['uncovered_forbidden_areas'] = [a for a in contract.forbidden_in if not any(_excluded(p, [a]) for p in scanned)]
+    if not scanned:
+        run.errors.append(RunError(stage='coverage', detail='no files scanned'))
+    for kind in ('uncovered_scopes', 'uncovered_forbidden_areas', 'skipped', 'parse_errors'):
+        if cov[kind]:
+            run.errors.append(RunError(stage='coverage', detail=f'{kind}: {", ".join(cov[kind])}'))
 
     retired: set[str] = set(contract.retired)
     pats: list[tuple[str, re.Pattern[str]]] = [(p, re.compile(p)) for p in contract.retired_patterns]
@@ -325,7 +358,8 @@ def check(contract: Contract, repo: Path, rev: Optional[str]) -> dict[str, Any]:
         if globs is not None and not _allowed(a, globs):
             role: str = 'writers' if a['mode'] == 'write' else 'readers'
             hits.append({'rule': f'store:{a["table"]}:{role}', 'token': a['table'], 'kind': a['mode'],
-                         'file': a['file'], 'line': a['line'], 'where': a['where']})
+                         'file': a['file'], 'line': a['line'], 'where': a['where'],
+                         'declaration_lines': a['declaration_lines'], 'dynamic': a['dynamic']})
 
     violations: list[dict[str, Any]] = []
     waived: list[dict[str, Any]] = []
@@ -339,13 +373,15 @@ def check(contract: Contract, repo: Path, rev: Optional[str]) -> dict[str, Any]:
             waived.append({**h, 'reason': w.reason})
         else:
             violations.append(h)
-    status: str = 'incomplete' if errors else ('violations' if violations else 'pass')
-    return {'ok': not violations and not errors, 'status': status, 'analysis_complete': not errors,
-            'analysis_errors': errors, 'source_digest': digest,
+    run.status = 'incomplete' if run.errors else 'completed'
+    run.stage = 'coverage' if run.errors else 'assertions'
+    status = 'incomplete' if run.errors else ('violations' if violations else 'pass')
+    return {'ok': status == 'pass', 'status': status, 'run': run.model_dump(mode='json'),
+            'analysis_complete': run.required_analysis_complete,
+            'analysis_errors': [error.detail for error in run.errors], 'source_digest': run.source_sha256,
             'scope': {'requested': contract.scope, 'exclusions': contract.exclude,
                       'files_scanned': cov['files'], 'files_skipped': len(cov['skipped'])},
-            'rev': rev, 'violations': violations, 'waived': waived, 'notes': notes,
-            'coverage': cov, 'limits': LIMITS}
+            'rev': rev, 'violations': violations, 'waived': waived, 'notes': notes, 'coverage': cov, 'limits': LIMITS}
 
 
 def _report(r: dict[str, Any], contract_path: str, per_rule: int) -> str:
@@ -353,15 +389,15 @@ def _report(r: dict[str, Any], contract_path: str, per_rule: int) -> str:
     lines: list[str] = [
         f'contract: {contract_path}',
         f'revision: {r["rev_sha"]}',
-        f'scope:    {r["scope"]["requested"]!r} (excluded {r["scope"]["exclusions"]!r})',
-        f'digest:   {r["source_digest"]}',
         f'scanned:  {cov["files"]} files ({cov["python"]} python, {cov["text"]} text); '
-        f'skipped {len(cov["skipped"])} binary/oversize; {len(cov["parse_errors"])} python files unparseable (text-scanned)',
+        f'skipped {len(cov["skipped"])} unsupported input; {len(cov["parse_errors"])} Python parse errors; '
+        f'{len(cov["sql_limitations"])} unresolved SQL sites (see --json)',
         '',
-        ('REQUIRED ANALYSIS INCOMPLETE: ' + '; '.join(r['analysis_errors']) if not r['analysis_complete'] else
+        ('REQUIRED ANALYSIS INCOMPLETE' if r['status'] == 'incomplete' else
          'CONTRACT MET' if r['ok'] else f'CONTRACT NOT MET: {len(r["violations"])} violation(s)')
         + f'; {len(r["waived"])} waived; {len(r["notes"])} docstring note(s)',
     ]
+    lines += [f'  {error["stage"]}: {error["detail"]}' for error in r['run']['errors']]
     by_rule: dict[str, list[dict[str, Any]]] = {}
     for v in r['violations']:
         by_rule.setdefault(v['rule'], []).append(v)
@@ -390,19 +426,41 @@ def main(argv: Optional[list[str]] = None) -> int:
     ap.add_argument('--per-rule', type=int, default=25, help='max occurrences printed per rule')
     args = ap.parse_args(argv)
     repo: Path = Path(args.repo).resolve()
+    run = AuditRun()
+    output: Path | None = Path(args.json) if args.json else None
+    def publish(result: dict[str, Any]) -> None:
+        if output is not None:
+            atomic_json(output, result)
     try:
-        contract: Contract = load_contract(Path(args.contract))
-        r: dict[str, Any] = check(contract, repo, args.rev)
-        r['rev_sha'] = (_git(repo, 'rev-parse', args.rev).decode().strip() if args.rev else 'working tree')
-    except (ValueError, OSError, subprocess.CalledProcessError) as e:
+        if output and output.resolve() == Path(args.contract).resolve():
+            raise ValueError('report and contract must use distinct paths')
+        publish({'ok': False, 'status': run.status, 'run': run.model_dump(mode='json')})
+        contract_path = Path(args.contract)
+        contract_bytes: bytes = contract_path.read_bytes()
+        contract: Contract = parse_contract(contract_path, contract_bytes)
+        run.requested_scope = contract.scope
+        revision: str | None = (_git(repo, 'rev-parse', '--verify', '--end-of-options', args.rev)
+                                .decode().strip()) if args.rev else None
+        generated: str | None = (
+            output.resolve().relative_to(repo).as_posix()
+            if revision is None and output and output.resolve().is_relative_to(repo) else None
+        )
+        r: dict[str, Any] = check(contract, repo, revision, run=run, generated_report=generated)
+        r['contract_sha256'] = hashlib.sha256(contract_bytes).hexdigest()
+        r['rev'] = args.rev
+        r['rev_sha'] = revision or 'working tree'
+        publish(r)
+    except (ValueError, OSError, subprocess.SubprocessError, yaml.YAMLError) as e:
+        run.fail(run.stage, str(e))
+        if output and output.resolve() != Path(args.contract).resolve():
+            try:
+                publish({'ok': False, 'status': run.status, 'run': run.model_dump(mode='json')})
+            except OSError as publish_error:
+                print(f'contract report error: {publish_error}', file=sys.stderr)
         print(f'contract check error: {e}', file=sys.stderr)
         return 2
     print(_report(r, args.contract, args.per_rule))
-    if args.json:
-        Path(args.json).write_text(json.dumps(r, indent=1), encoding='utf-8')
-    if not r['analysis_complete']:
-        return 2
-    return 0 if r['ok'] else 1
+    return 0 if r['ok'] else 2 if r['status'] == 'incomplete' else 1
 
 
 if __name__ == '__main__':
