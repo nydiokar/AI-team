@@ -203,7 +203,7 @@ class TestExplorerFailureHonest(unittest.TestCase):
         fake.write_text('#!/bin/sh\nexec sleep 30\n', encoding='utf-8')
         fake.chmod(0o755)
         self.report.write_text('{"run":{"status":"completed"}}')
-        code = pe.main(['--repo', str(self.scope), '--scope', '.', '--cbm', str(fake), '--timeout', '1',
+        code = pe.main(['--repo', str(self.scope), '--scope', '.', '--project', 'timeout-fixture', '--cbm', str(fake), '--timeout', '1',
                         '--no-serve', '--out', str(self.out), '--report', str(self.report),
                         '--cache-dir', str(self.cache)])
         saved = json.loads(self.report.read_text(encoding='utf-8'))

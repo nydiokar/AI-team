@@ -41,6 +41,7 @@ jobs:
           # still gets its own temp DB, seeded from a once-per-session migrated
           # template (tests/conftest.py::_migrated_db_template).
           pytest --tb=short -n auto --durations=15
+          pytest .claude/skills/architecture-pathway-audit/tests --tb=short
 
   isolated-docker:
     runs-on: ubuntu-latest
