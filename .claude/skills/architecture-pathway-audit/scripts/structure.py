@@ -14,7 +14,7 @@ not by name, so legitimate fan-out to helpers is not reported as an anomaly.
 from __future__ import annotations
 
 import hashlib
-from collections import defaultdict, deque
+from collections import Counter, defaultdict, deque
 from typing import Any, Iterable, Optional
 
 FLOW: frozenset[str] = frozenset({'HANDLES', 'CALLS', 'ASYNC_CALLS', 'HTTP_CALLS', 'SPAWNS', 'CALL_REFERENCE',
@@ -22,6 +22,7 @@ FLOW: frozenset[str] = frozenset({'HANDLES', 'CALLS', 'ASYNC_CALLS', 'HTTP_CALLS
 MAX_DEPTH: int = 12
 LOW_CONFIDENCE: float = 0.3  # CBM resolution confidence below this is a name guess (e.g. suffix_match 0.09)
 MAX_FINDINGS_PER_KIND: int = 40
+SQL_EVIDENCE_SAMPLE_SIZE: int = 6
 FOOTPRINT_MIN_CALLEES: int = 4
 FOOTPRINT_JACCARD: float = 0.85
 FOCUS_TABLES: int = 3  # an operation/reader touching more tables than this is not one focused fact-recording step
@@ -108,7 +109,8 @@ HUB_MIN_READERS: int = 10  # a medium read by at least this many functions AND i
 
 def analyze(nodes: dict[str, dict[str, Any]], edges: list[dict[str, Any]], roots: list[str],
             fanin: dict[str, int], utility_threshold: int,
-            twins: Optional[list[dict[str, Any]]] = None) -> dict[str, Any]:
+            twins: Optional[list[dict[str, Any]]] = None, *,
+            findings_offset: int = 0, acknowledged: frozenset[str] = frozenset()) -> dict[str, Any]:
     """Return {'findings': [...], 'scope': {...}} for the loaded graph."""
     succ: dict[str, list[str]] = defaultdict(list)
     emap: dict[tuple[str, str], dict[str, Any]] = {}
@@ -137,6 +139,7 @@ def analyze(nodes: dict[str, dict[str, Any]], edges: list[dict[str, Any]], roots
     live_roots: list[str] = [r for r in roots if r in succ]
     reach: dict[str, dict[str, Optional[str]]] = {}
     depth: dict[str, dict[str, int]] = {}
+    depth_limited_roots: int = 0
     for r in live_roots:
         parent: dict[str, Optional[str]] = {r: None}
         d: dict[str, int] = {r: 0}
@@ -150,14 +153,23 @@ def analyze(nodes: dict[str, dict[str, Any]], edges: list[dict[str, Any]], roots
                     parent[k] = n
                     d[k] = d[n] + 1
                     q.append(k)
+        depth_limited_roots += any(
+            d[n] == MAX_DEPTH and not utility(n) and any(k not in parent for k in succ.get(n, []))
+            for n in parent
+        )
         reach[r] = parent
         depth[r] = d
     findings: list[dict[str, Any]] = []
     per_kind: dict[str, int] = defaultdict(int)
+    per_level: dict[str, int] = defaultdict(int)
+    matching_acknowledgements: set[str] = set()
 
     def add(f: dict[str, Any]) -> None:
-        per_kind[f['kind']] += 1  # counted even when capped, so truncation is reported, not silent
-        if per_kind[f['kind']] > MAX_FINDINGS_PER_KIND:
+        per_kind[f['kind']] += 1
+        per_level[f['level']] += 1
+        if f['id'] in acknowledged:
+            matching_acknowledgements.add(f['id'])
+        if not findings_offset < per_kind[f['kind']] <= findings_offset + MAX_FINDINGS_PER_KIND:
             return
         f.setdefault('semantic_verification', 'not performed (requires source review by an agent or human)')
         findings.append(f)
@@ -305,7 +317,7 @@ def analyze(nodes: dict[str, dict[str, Any]], edges: list[dict[str, Any]], roots
             jac: float = len(inter) / len(sig[a] | sig[b])
             if jac >= 0.6 and sig[a] - sig[b] and sig[b] - sig[a]:
                 pairs.append((jac, a, b))
-    for jac, a, b in sorted(pairs, reverse=True)[:MAX_FINDINGS_PER_KIND]:
+    for jac, a, b in sorted(pairs, reverse=True):
         add({'id': _fid('OVERLAPPING_PATHS', [a, b]), 'kind': 'OVERLAPPING_PATHS', 'level': 'candidate',
              'anchor': a, 'related': [b],
              'title': f'Two handlers share {jac:.0%} of their downstream components',
@@ -377,10 +389,11 @@ def analyze(nodes: dict[str, dict[str, Any]], edges: list[dict[str, Any]], roots
     def tname(t: str) -> str:
         return str(nodes.get(t, {}).get('label') or t)
 
-    def acc_ev(es: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        return [{'path': [e['from'], e['to']], 'edges': [{'from': e['from'], 'to': e['to'], 'type': e['type'],
-                                                          'file': e.get('file'), 'line': e.get('line'), 'source': 'ast',
-                                                          'props': e.get('props')}]} for e in es[:6]]
+    def acc_ev(es: list[dict[str, Any]]) -> dict[str, Any]:
+        sampled: list[dict[str, Any]] = [
+            {'path': [e['from'], e['to']], 'edges': [e]} for e in es[:SQL_EVIDENCE_SAMPLE_SIZE]
+        ]
+        return {'evidence': sampled, 'evidence_total': len(es), 'evidence_omitted': len(es) - len(sampled)}
     # M1. Orphaned medium: written but never read, or read but never written, within the analysed scope.
     for t in sorted(set(t_readers) | set(t_writers)):
         if bool(t_readers[t]) != bool(t_writers[t]):
@@ -389,7 +402,7 @@ def analyze(nodes: dict[str, dict[str, Any]], edges: list[dict[str, Any]], roots
                  'related': sorted({e['from'] for e in (t_writers[t] or t_readers[t])}),
                  'title': f'Table {tname(t)} is {side} in scope',
                  'detail': 'May be consumed/produced outside the analysed scope (other process, migration, '
-                           'dynamic SQL) or be dead/void state.', 'evidence': acc_ev(t_writers[t] or t_readers[t])})
+                           'dynamic SQL) or be dead/void state.', **acc_ev(t_writers[t] or t_readers[t])})
     # M2. Oldest-N window over an append-only medium: the newest entries become unreachable as it grows.
     for t in sorted(t_readers):
         ws: list[dict[str, Any]] = t_writers.get(t, [])
@@ -401,7 +414,7 @@ def analyze(nodes: dict[str, dict[str, Any]], edges: list[dict[str, Any]], roots
                      'title': f'{len({e["from"] for e in bad})} reader(s) take the oldest-N rows of append-only {tname(t)}',
                      'detail': 'The table is only ever inserted into; LIMIT without ORDER BY .. DESC returns the oldest '
                                'rows, so state derived from it silently degrades as the table grows.',
-                     'evidence': acc_ev(bad)})
+                     **acc_ev(bad)})
     # M3. Co-written, separately read: tables written together by one operation (within 2 call levels) that have
     #     readers of only one of them, on both sides. Two stores of one fact with split readers can disagree.
     direct_w: dict[str, set[str]] = defaultdict(set)
@@ -444,7 +457,7 @@ def analyze(nodes: dict[str, dict[str, Any]], edges: list[dict[str, Any]], roots
         ry: list[str] = sorted(r for r in focused if y in direct_r[r] and x not in direct_r[r] and y not in direct_w.get(r, ()))
         if rx and ry:
             split.append((len(rx) + len(ry), x, y, rx, ry))
-    for _, x, y, rx, ry in sorted(split, key=lambda t: (t[0], t[1], t[2]))[:MAX_FINDINGS_PER_KIND]:  # fewest readers first
+    for _, x, y, rx, ry in sorted(split, key=lambda t: (t[0], t[1], t[2])):  # fewest readers first
         add({'id': _fid('SPLIT_READERS', x, y), 'kind': 'SPLIT_READERS', 'level': 'candidate', 'anchor': x,
              'related': [y, *rx[:6], *ry[:6]],
              'title': f'{tname(x)} and {tname(y)} are written together but read apart',
@@ -536,9 +549,17 @@ def analyze(nodes: dict[str, dict[str, Any]], edges: list[dict[str, Any]], roots
         f.setdefault('tags', [])
     order: dict[str, int] = {'candidate': 0, 'fact': 1}
     findings.sort(key=lambda f: (order[f['level']], any(t.startswith('hub_medium') for t in f['tags']), f['kind'], f['anchor'], f['id']))
-    return {'findings': findings,
+    emitted_by_kind: dict[str, int] = dict(Counter(f['kind'] for f in findings))
+    return {'findings': findings, 'matching_acknowledgements': sorted(matching_acknowledgements),
             'scope': {'roots_with_loaded_paths': len(live_roots), 'max_depth': MAX_DEPTH,
+                      'depth_limited_roots': depth_limited_roots,
                       'counts_by_kind': dict(sorted(per_kind.items())),
+                      'counts_by_level': dict(sorted(per_level.items())),
+                      'emitted_by_kind': emitted_by_kind,
+                      'omitted_by_kind': {k: v - emitted_by_kind.get(k, 0) for k, v in sorted(per_kind.items())},
+                      'findings_offset': findings_offset,
+                      'next_findings_offset': findings_offset + MAX_FINDINGS_PER_KIND if
+                      any(v > findings_offset + MAX_FINDINGS_PER_KIND for v in per_kind.values()) else None,
                       'capped_kinds': sorted(k for k, v in per_kind.items() if v > MAX_FINDINGS_PER_KIND),
                       'cap_per_kind': MAX_FINDINGS_PER_KIND,
                       'utility_fanin_threshold': utility_threshold,

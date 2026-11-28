@@ -52,7 +52,7 @@ class TestRealCBM(unittest.TestCase):
         eng = self.engine()
         # id() is not supported by CBM 0.11: prove the failure surfaces as an error, never as a leaf
         with self.assertRaises(CBMError):
-            self.cbm.query(PROJECT, 'MATCH (a) WHERE id(a) = 1 RETURN a')
+            self.cbm.query(eng.index_project, 'MATCH (a) WHERE id(a) = 1 RETURN a')
         rA, rB, rC = (self.rid(eng, 'POST', p) for p in ('/v1/orders/a', '/v1/orders/{order_id}/b', '/v1/orders/c'))
         for r in (rA, rB, rC):
             eng.expand_bfs(r, 'out', 4, 100)
@@ -83,7 +83,7 @@ class TestRealCBM(unittest.TestCase):
         res = eng2.expand_bfs(rA, 'out', 4, 100)
         self.assertEqual(res['cbm_expansions'], 0)
         self.assertEqual(self.cbm.calls, calls_before)
-        # modify one file: only affected entries are dropped, and the new call appears after re-index
+        # modify one file: previous graph entries are dropped, and the new call appears after re-index
         legacy = self.scope / 'app/services/legacy.py'
         legacy.write_text('from app.services import store\n\n\ndef audit_hook(x):\n    return x\n\n\n'
                           'def write_order(x):\n    audit_hook(x)\n    return store.persist_order(x)\n', encoding='utf-8')
@@ -93,13 +93,28 @@ class TestRealCBM(unittest.TestCase):
         dropped = eng3.invalidate(changed)
         kept_submit_out = f'out|{submit["id"]}' in eng3.cache['entries']
         self.assertGreater(dropped, 0)
-        self.assertTrue(kept_submit_out, 'entry unrelated to the changed file must survive')
+        self.assertFalse(kept_submit_out, 'adjacency must come from the new index generation')
         eng3.ensure_index()
         self.assertEqual(eng3.stats['index_runs'], 1)
         eng3.expand_bfs(rC, 'out', 4, 100)
         n3, e3, _ = eng3.graph()
         labels = {(n3[e['from']]['label'], n3[e['to']]['label']) for e in e3 if e['type'] == 'CALLS'}
         self.assertIn(('write_order', 'audit_hook'), labels)
+
+        # An additional file changes upstream evidence without touching the callee.
+        newcomer = self.scope / 'app/newcomer.py'
+        # Derive the real module from the native symbol instead of hardcoding the fixture layout.
+        submit_module = submit['file'].removesuffix('.py').replace('/', '.')
+        newcomer.write_text(f'import {submit_module} as target\n\ndef new_caller(x):\n    return target.submit(x)\n')
+        eng4 = self.engine()
+        incoming, _ = eng4.expand(submit['id'], 'in')
+        self.assertTrue(any(edge['from'].endswith('.new_caller') for edge in incoming['edges']))
+        eng4.persist(verify_source=True)
+        newcomer.unlink()
+        eng5 = self.engine()
+        incoming, _ = eng5.expand(submit['id'], 'in')
+        self.assertFalse(any(edge['from'].endswith('.new_caller') for edge in incoming['edges']))
+        self.assertFalse(any(node['id'].endswith('.new_caller') for node in eng5.symbols()['by_qn'].values()))
 
 
 if __name__ == '__main__':

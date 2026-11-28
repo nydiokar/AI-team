@@ -1,12 +1,17 @@
 """Unit tests (no CBM process): AST route adapter, structural rules, CBM paging, cache invalidation."""
 import importlib.util
 import json
+import subprocess
 import sys
 import tempfile
 import textwrap
 import threading
+import tracemalloc
 import unittest
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from http.client import HTTPConnection
 from pathlib import Path
+from unittest.mock import patch
 
 SCRIPTS = Path(__file__).resolve().parents[1] / 'scripts'
 sys.path.insert(0, str(SCRIPTS))
@@ -220,6 +225,31 @@ class TestStructure(unittest.TestCase):
         finally:
             structure.MAX_FINDINGS_PER_KIND = structure_cap
 
+    def test_101_findings_are_counted_and_every_page_is_recoverable(self):
+        root = 'writer'
+        nodes = {root: {'kind': 'Function'}}
+        edges = []
+        for i in range(101):
+            table = f'table::t{i:03}'
+            nodes[table] = {'kind': 'Table'}
+            edges.append(self.e(root, table, 'WRITES_TABLE'))
+        # One structural fact per medium. Replaying reversed graph order must
+        # preserve every item, including the page boundaries and known counts.
+        first = structure.analyze(nodes, edges, [], {}, 10)
+        kind = next(iter(first['scope']['counts_by_kind']))
+        self.assertEqual(first['scope']['counts_by_kind'][kind], 101)
+        self.assertEqual(first['scope']['emitted_by_kind'][kind], 40)
+        self.assertEqual(first['scope']['omitted_by_kind'][kind], 61)
+        second = structure.analyze(nodes, list(reversed(edges)), [], {}, 10, findings_offset=40)
+        third = structure.analyze(nodes, edges, [], {}, 10, findings_offset=80)
+        ids = {f['id'] for page in (first, second, third) for f in page['findings']}
+        self.assertEqual(len(ids), 101)
+        self.assertIsNone(third['scope']['next_findings_offset'])
+        known = third['findings'][0]['id']
+        repeat = structure.analyze(nodes, edges, [], {}, 10, acknowledged=frozenset({known}))
+        self.assertEqual(repeat['matching_acknowledgements'], [known])
+        self.assertNotIn(known, {f['id'] for f in repeat['findings']})
+
 
 class FakeCBM(cbm_client.CBMClient):
     def __init__(self, pages):
@@ -234,8 +264,10 @@ class FakeCBM(cbm_client.CBMClient):
 
 class TestCBMClient(unittest.TestCase):
     def test_cursor_paging_and_total_check(self):
-        c = FakeCBM([{'columns': ['q'], 'rows': [['a']], 'has_more': True, 'next_cursor': 'C1', 'total': 2, 'total_relation': 'eq'},
-                     {'columns': ['q'], 'rows': [['b']], 'has_more': False}])
+        c = FakeCBM([{'columns': ['q'], 'rows': [['a']], 'has_more': True, 'truncated': True, 'next_cursor': 'C1',
+                      'next_offset': 1, 'total': 2, 'returned': 1, 'total_relation': 'eq'},
+                     {'columns': ['q'], 'rows': [['b']], 'has_more': False, 'truncated': False,
+                      'offset': 1, 'total': 2, 'returned': 1, 'total_relation': 'eq'}])
         rows, ok = c.query('p', 'MATCH (n) RETURN n.qualified_name AS q')
         self.assertEqual([r['q'] for r in rows], ['a', 'b'])
         self.assertTrue(ok)
@@ -243,15 +275,24 @@ class TestCBMClient(unittest.TestCase):
         self.assertGreaterEqual(c.seen[0]['max_output_tokens'], 20000)
 
     def test_row_cap_reported_not_silent(self):
-        c = FakeCBM([{'columns': ['q'], 'rows': [['a']], 'has_more': True, 'next_offset': 1}] * 3)
+        c = FakeCBM([
+            {'columns': ['q'], 'rows': [['a']], 'has_more': True, 'truncated': True, 'offset': offset,
+             'next_offset': offset + 1, 'returned': 1, 'total': 3, 'total_relation': 'eq'}
+            for offset in range(3)
+        ])
         rows, ok = c.query('p', 'q', page=1, max_pages=2)
         self.assertFalse(ok)
         self.assertEqual(len(rows), 2)
 
     def test_empty_page_with_has_more_raises(self):
-        c = FakeCBM([{'columns': ['q'], 'rows': [], 'has_more': True}])
-        with self.assertRaises(cbm_client.CBMError):
+        c = FakeCBM([{'columns': ['q'], 'rows': [], 'has_more': True, 'truncated': True,
+                      'returned': 0, 'total': 1, 'total_relation': 'eq'}])
+        with self.assertRaisesRegex(cbm_client.CBMError, 'empty page'):
             c.query('p', 'q')
+
+    def test_missing_paging_metadata_cannot_be_a_clean_leaf(self):
+        with self.assertRaisesRegex(cbm_client.CBMError, 'malformed paging metadata'):
+            FakeCBM([{'rows': []}]).query('p', 'q')
 
     def test_error_result_raises(self):
         with self.assertRaises(cbm_client.CBMError):
@@ -301,7 +342,7 @@ class TestEngineOffline(unittest.TestCase):
         self.assertIn(('REGISTERS', 'build_router'), kinds)
         self.assertIn(('INCLUDES', 'main'), kinds)  # module-level app composes the factory
 
-    def test_cache_reuse_and_targeted_invalidation(self):
+    def test_cache_reuse_and_generation_invalidation(self):
         self.eng.expand_bfs(self.rid('POST', '/v1/orders/c'), 'out', 3, 100)
         self.eng.expand_bfs(self.rid('POST', '/v1/orders/a'), 'out', 3, 100)
         self.eng.persist()
@@ -317,7 +358,22 @@ class TestEngineOffline(unittest.TestCase):
         self.assertGreater(dropped, 0)
         keys = set(again.cache['entries'])
         self.assertFalse(any('legacy' in k for k in keys))
-        self.assertTrue(any(k.startswith('out|') and 'submit' in k for k in keys), keys)  # untouched work kept
+        self.assertEqual(keys, set())
+
+    def test_unrelated_interactive_cache_does_not_change_sweep_coverage(self):
+        self.eng.sweep_paths(12, 600, 'routes')
+        expected = self.eng.state()
+        self.eng.cache['entries']['in|unrelated'] = {'edges': [], 'complete': False}
+        actual = self.eng.state()
+        self.assertEqual(actual['coverage'], expected['coverage'])
+        self.assertEqual(actual['run']['status'], expected['run']['status'])
+        self.assertEqual(actual['findings'], expected['findings'])
+
+    def test_ignore_policy_bytes_are_part_of_source_identity(self):
+        previous = self.eng.run.source_sha256
+        (self.scope / '.cbmignore').write_text('app/services/legacy.py\n')
+        self.assertEqual(self.eng.sync_files(), {'.cbmignore'})
+        self.assertNotEqual(self.eng.run.source_sha256, previous)
 
     def test_touch_without_content_change_is_not_a_change(self):
         p = self.scope / 'app/services/store.py'
@@ -342,6 +398,176 @@ class TestEngineOffline(unittest.TestCase):
         html = self.eng.out.read_text(encoding='utf-8')
         self.assertIn('Execution Path Explorer', html)
         self.assertNotIn('/*__INITIAL_STATE__*/null', html)
+
+    def test_fanin_and_route_queries_cannot_certify_truncated_paging(self):
+        self.eng.cache['fanin'] = None
+        with patch.object(self.eng, '_q', return_value=([], False)):
+            with self.assertRaises(cbm_client.CBMError):
+                self.eng.fanin()
+            with self.assertRaises(cbm_client.CBMError):
+                self.eng.cbm_routes()
+
+    def test_source_hash_detects_same_size_same_timestamp_edit(self):
+        import os
+        path = self.scope / 'app/services/store.py'
+        stamp = path.stat()
+        path.write_text(path.read_text().replace('return x', 'return 0'))
+        os.utime(path, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
+        self.assertEqual(self.eng.sync_files(), {'app/services/store.py'})
+
+    def test_changed_source_prevents_final_artifact_and_oversize_drops_old_facts(self):
+        path = self.scope / 'app/services/store.py'
+        path.write_bytes(b' ' * (pe.MAX_SOURCE_BYTES + 1))
+        with self.assertRaisesRegex(cbm_client.CBMError, 'Source inventory changed'):
+            self.eng.persist(verify_source=True)
+        self.assertIn('app/services/store.py', self.eng.sync_files())
+        self.assertNotIn('app/services/store.py', self.eng.cache['facts'])
+        self.assertIn('app/services/store.py', self.eng.coverage({}, [])['skipped_files'])
+
+    def test_distinct_sql_execution_lines_survive_graph_merge(self):
+        path = self.scope / 'app/ledger.py'
+        path.write_text('QUERY = "SELECT * FROM test ORDER BY id ASC LIMIT 2"\n'
+                        'def read(conn):\n'
+                        '    conn.execute("SELECT * FROM test")\n'
+                        '    conn.execute(QUERY)\n')
+        self.eng.sync_files()
+        _, edges, _ = self.eng.graph()
+        reads = [e for e in edges if e['to'] == 'table::test']
+        self.assertEqual([e['line'] for e in reads], [3, 4])
+        self.assertEqual(reads[1]['props']['declaration_lines'], [1])
+
+    def test_ready_index_with_different_generation_is_rebuilt(self):
+        client = cbm_client.CBMClient(sys.executable)
+        self.eng.cbm = client
+        self.eng.changed = set()
+        status = {'project': self.eng.index_project, 'root_path': str(self.scope), 'status': 'ready',
+                  'indexed_at': 'prior', 'nodes': 10, 'edges': 10}
+        self.eng.cache['index'] = {'receipt': self.eng.index_receipt(status)}
+        with patch.object(client, 'ensure_started'), patch.object(client, 'tool', side_effect=[
+            {**status, 'indexed_at': 'foreign'}, {'nodes': 10, 'edges': 10}, status,
+        ]) as tool, patch.object(self.eng, '_q', return_value=([], True)):
+            self.eng.ensure_index()
+        self.assertIsNone(self.eng.ready_error)
+        self.assertEqual([call.args[0] for call in tool.call_args_list],
+                         ['index_status', 'index_repository', 'index_status'])
+        self.assertEqual(self.eng.stats['index_runs'], 1)
+
+    def test_native_index_names_are_content_bound_while_graph_ids_are_stable(self):
+        original = self.eng.index_project
+        raw_name = f'{original}.app.services.store.persist_order'
+        logical = self.eng.cbm_node({'q': raw_name})['id']
+        self.assertEqual(self.eng.indexed_qn(logical), raw_name)
+        store = self.scope / 'app/services/store.py'
+        source = store.read_text()
+        store.write_text(source.replace('return x', 'return 0'))
+        self.eng.sync_files()
+        self.assertNotEqual(self.eng.index_project, original)
+        self.assertNotEqual(self.eng.indexed_qn(logical), raw_name)
+        self.assertEqual(self.eng.logical_qn(self.eng.indexed_qn(logical)), logical)
+        store.write_text(source)
+        self.eng.sync_files()
+        self.assertEqual(self.eng.index_project, original)
+
+    def test_incomplete_query_is_retried_and_caps_are_distinct(self):
+        rid = self.rid('POST', '/v1/orders/a')
+        route, _ = self.eng.expand(rid)
+        route['complete'] = False
+        self.assertFalse(self.eng.expand(rid)[1])
+        self.assertTrue(self.eng.expand_bfs(rid, 'out', 0, 100)['depth_limited'])
+        self.assertTrue(self.eng.expand_bfs(rid, 'out', 3, 1)['truncated'])
+
+    def test_browser_http_boundary_retains_admission_through_work(self):
+        entered = threading.Event()
+        release = threading.Event()
+        original_state = self.eng.state
+
+        def blocked_state() -> dict:
+            entered.set()
+            assert release.wait(10)
+            return original_state()
+
+        with pe.ExplorerServer(0, self.eng) as server, ThreadPoolExecutor(max_workers=100) as pool:
+            serving = threading.Thread(target=server.serve_forever, kwargs={'poll_interval': 0.05})
+            serving.start()
+            def get(path: str) -> tuple[int, dict]:
+                conn = HTTPConnection('127.0.0.1', server.server_port, timeout=10)
+                try:
+                    conn.request('GET', path)
+                    response = conn.getresponse()
+                    return response.status, json.loads(response.read())
+                finally:
+                    conn.close()
+            try:
+                self.assertEqual(get('/api/expand?id=old&depth=900')[0], 400)
+                self.assertEqual(get('/api/expand?id=missing')[0], 404)
+                status, state = get('/api/state')
+                self.assertEqual(status, 200)
+                self.assertEqual(state['run']['status'], 'partial')
+                self.eng.ready_error = 'fixture index unavailable'
+                self.assertEqual(get('/api/search?q=submit'), (
+                    503, {'error': self.eng.ready_error, 'kind': 'index_unavailable'},
+                ))
+                self.eng.ready_error = None
+                with patch.object(self.eng, 'state', side_effect=blocked_state):
+                    tracemalloc.start()
+                    tasks = [pool.submit(get, '/api/state') for _ in range(100)]
+                    self.assertTrue(entered.wait(5))
+                    # Four requests retain slots while state is unavailable. The
+                    # other 96 must finish without waiting for release.
+                    pending = set(tasks)
+                    rejected = []
+                    for _ in range(96):
+                        done, pending = wait(pending, timeout=3, return_when=FIRST_COMPLETED)
+                        self.assertTrue(done or len(rejected) == 96)
+                        rejected.extend(f.result() for f in done)
+                        if len(rejected) == 96:
+                            break
+                    self.assertEqual(len(rejected), 96)
+                    self.assertTrue(all(code == 503 and body['kind'] == 'overloaded' for code, body in rejected))
+                    peak = tracemalloc.get_traced_memory()[1]
+                    self.assertLess(peak, 16 * 1024 * 1024)
+                    print(f'100 simultaneous requests: 4 admitted, 96 overloaded; Python peak {peak} bytes')
+                    release.set()
+                    self.assertTrue(all(f.result()[0] == 200 for f in pending))
+            finally:
+                tracemalloc.stop()
+                release.set()
+                server.shutdown()
+                serving.join(5)
+
+    def test_cache_identity_and_corruption_are_visible(self):
+        self.eng.persist()
+        with patch.object(pe.platform, 'python_version', return_value='3.13.0-test'):
+            newer = pe.Engine(self.scope, 'fixture', self.eng.dir, self.eng.out, self.eng.report, None)
+        self.assertEqual(newer.cache_state, 'identity_changed')
+        self.assertFalse(newer.cache['facts'])
+        self.eng.cache_path.write_text('{bad')
+        recovered = pe.Engine(self.scope, 'fixture', self.eng.dir, self.eng.out, self.eng.report, None)
+        recovered.sync_files()
+        recovered.ready.set()
+        self.assertEqual(recovered.cache_state, 'invalid')
+        self.assertEqual(recovered.state()['run']['status'], 'incomplete')
+
+
+class TestExplorerCLI(unittest.TestCase):
+    def test_missing_dependency_and_bad_scope_invalidate_clean_artifacts(self):
+        with tempfile.TemporaryDirectory() as d:
+            repo = Path(d)
+            (repo / 'app.py').write_text('def example():\n    return 1\n')
+            report, html = repo / 'out.json', repo / 'out.html'
+            args = [sys.executable, str(SCRIPTS / 'pathway_explorer.py'), '--repo', d,
+                    '--cache-dir', str(repo / 'cache'), '--project', 'test', '--no-serve',
+                    '--cbm', str(repo / 'missing-cbm'), '--out', 'out.html', '--report', 'out.json']
+            for scope in ('.', 'typo'):
+                with self.subTest(scope=scope):
+                    report.write_text('{"status": "completed", "findings": []}')
+                    html.write_text('stale clean snapshot')
+                    run = subprocess.run([*args, '--scope', scope], capture_output=True, timeout=10)
+                    self.assertEqual(run.returncode, 2, run.stderr)
+                    result = json.loads(report.read_text())
+                    self.assertEqual(result['run']['status'], 'failed')
+                    self.assertTrue(result['run']['errors'])
+                    self.assertNotIn('stale clean snapshot', html.read_text())
 
 
 if __name__ == '__main__':
