@@ -372,6 +372,142 @@ Two initial attempts had completed page assertions but aborted during Node shutd
 those were not counted as passing runs. No worker environment was changed. No new HTTP handler, DB migration,
 queue consumer or production deployment was introduced by these documentation changes.
 
+## 2026-11-28 — A116 certification
+
+[A116](../../../.ai/dispatch/AGENT_116_TRUSTWORTHY_ARCHITECTURE_AUDIT.md) was
+certified from merged `bd651cd` via [#321](https://github.com/nydiokar/AI-team/pull/321). The
+[measurement manifest](benchmark/measurements/2026-11-28.certification.json)
+links the original report, the cold and warm final JSON, every final output page
+and the corpus reports. Gzip files preserve the exact report bytes. The manifest
+records the SHA-256 of each uncompressed JSON report.
+
+[PR #302](https://github.com/nydiokar/AI-team/pull/302) records seven tests that
+failed on `49c4dfa` and passed with the ledger reads repaired. Independent replay
+compiled the untouched pinned review/link methods and reproduced both original
+defects. The final Work and Cost tests covered the consuming Work API and case
+usage, cursor exhaustion and 199/200/201/2,000-member cases. The loaded gateway
+`4f5741d` returned Work detail, timeline, roster and case usage. Chromium rendered
+the production mobile Work panes using their actual API requests. The follow-up audit
+PR changed tooling, tests and CI. The running containers were healthy with their
+existing build and did not require recreation.
+
+The final tests used Python 3.12.16 and real Linux ARM64
+CBM 0.11.0. The release archive matched the published checksum.
+The binaries were run in a disposable native cache. The corpus label commit
+`820ffb2` preceded the detector integration. Independent SQLite replay validated
+the exact labels, including later review verdict reversals, the 201st worker
+role and the correct LIMIT-2 ambiguity decision.
+
+| Measurement | Pinned baseline | Merged bounded sweep |
+| --- | ---: | ---: |
+| Routes | 141 | 144 |
+| Roots | 766 | 804 |
+| Loaded graph nodes / edges | 2,112 / 6,299 | 2,179 / 6,730 |
+| Counted patterns / first page emitted | 698 / 280 | 720 / 276 |
+| Cold / warm wall seconds | 152.3 / 22.6 | 160.1 / 13.9 |
+
+The source and tool changed across the two revisions. Timing and count changes
+describe those executions. The merged cold and warm runs used identical
+source bytes and settings. They matched exactly in routes, findings, coverage,
+analysis scope and SQL edges. Native calls fell from 4,721 to
+1 on the warm run. Exit 2 on both reflects the configured
+depth limit on 110 roots. The structural rule layer also
+discloses its own traversal limit. The pages cover all 720 counted patterns
+within that declared scope. Coverage of native Python files confirms presence of
+required files. Definition-level completeness inside those files remains outside
+the supported guarantee.
+
+The residual `TRUNCATED_WINDOW` observations are still useful for inspection.
+`flow_events` points to display/history readers and a review reader whose actual
+closure caller requests newest-first with limit 1. The latest scored
+decomposition verdict is now selected directly by Case, event type and spec.
+`flow_links` points to the generic display reader, the roster cursor reader and
+the intentional LIMIT-2 ambiguity reader. Roster and Cost aggregates use complete
+Case membership. The raw report lists the precise sites and retains all other
+structural patterns for independent source review.
+
+The [corpus archive](benchmark/measurements/2026-11-28.corpus-evidence.tar.gz)
+contains each runner manifest, score and raw producer report for the normal,
+missing-binary, partial and capped cases. The normal score saw two defect
+localizations among three independently reviewed flagged graph witnesses and
+two matching violations among two emitted contract violations. In the six
+labels, graph localization was 2/2, contract defect recall was 2/2, and benign
+noise was 1/2 (one graph flag, zero policy flags). There were no misses or
+unknowns in that run. These are fixture denominators. A precision estimate for
+the repository-wide patterns would require reviewed labels for those patterns.
+On the missing-binary probe three graph cases became unknown. A depth-zero
+requester control and a 42-candidate capped control each became unknown. Both
+the runner and scorer exited 1 for all three adverse runs.
+
+The 113-candidate cardinality probe generated private SQL reader/writer pairs
+from the membership fixture with a separate table per pair. Actual CLI offsets
+0/40/80 recovered 40/40/33 distinct items, offset 120 emitted zero with all 113
+omissions declared, and a known item first emitted on page 2 counted as known
+on every page. Baseline update refused the capped result. A real graph sweep
+with node cap 1 emitted zero and returned 2. A working copy with all Python
+ignored by CBM disclosed six missing required Python definition files and
+also returned 2.
+
+Independent review reproduced stale live state after a source edit, relaxed
+frozen-policy substitution, an inconsistent zero, a timed-out expansion
+returning success, unrelated incomplete warm adjacency and malformed paging.
+The post-fix review repeated source and policy substitutions, the 504 expansion,
+the warm-cache probe and malformed-page and missing-file checks. The final
+Chromium run went through the CLI route/expansion/source handlers, observed
+503 and persisted failed status for an unavailable index, observed 409 plus
+a failed browser state after mutation, then reran on a fresh native index.
+Subprocess timeout cleanup was independently checked with an owned,
+TERM-ignoring descendant. The session-managed native daemon and browser
+processes exited after the disposable checks.
+
+### Commands and request boundaries
+
+```bash
+audit=.claude/skills/architecture-pathway-audit
+python -m pytest -s --tb=short "$audit/tests" tests/test_dispatch_state.py
+python -m pytest --tb=short tests/test_control_api_work.py tests/test_cost_read_model.py tests/test_spec_authoring_decompose.py tests/test_a104_single_pending_source.py
+python -m pytest --tb=short tests/test_case_closure.py tests/test_turn_queue_sender.py -k 'rework or rebind or close'
+python "$audit/scripts/contract_check.py" --contract "$audit/contracts/agent_inbox.yaml" --rev HEAD --json /tmp/a116-inbox.json
+python "$audit/scripts/contract_check.py" --contract .ai/dispatch/AGENT_102_UNIFY_BACKEND_PATHWAYS.md --rev HEAD --json /tmp/a116-a102.json
+python "$audit/benchmark/run_corpus.py" "$audit/benchmark/corpus" "$RESULTS" --cbm "$CBM_BIN" --timeout 100
+python "$audit/benchmark/score.py" "$audit/benchmark/corpus" "$RESULTS"
+python "$audit/scripts/pathway_explorer.py" --repo . --scope src --project a116-certification --cbm "$CBM_BIN" --roots all --sweep-depth 6 --sweep-cap 600 --no-serve --cache-dir "$AUDIT_CACHE" --out "$RESULTS/pathways.html" --report "$RESULTS/findings.json" --baseline "$RESULTS/no-acknowledgements.json"
+```
+
+Set `CBM_BIN` to the verified binary, `CBM_CACHE_DIR` to a disposable native
+cache and `RESULTS` / `AUDIT_CACHE` outside the source scope. Use a fresh
+explorer cache for the cold run, the same paths for the warm run and then
+offsets 40/80/120/160/200 to reproduce the published pages. Use `--no-open`
+and loopback serving in Chromium to check route click, `/api/expand`, node
+source, a stale-source edit and a restarted server. The manifest records exact
+test summaries, per-case failures, and the tested command settings.
+
+Explorer sockets retain four admission permits through response transmission.
+In the isolated 100-call check 96 returned 503 and the four admitted calls
+completed. The sample peaked at 967,731 traced Python bytes. On this
+full-source fixture a single state response encoded 7,075,426
+bytes and peaked at 37,129,009 additional traced Python bytes.
+Four times that sample is 148,516,036 bytes
+for comparable concurrently retained work, excluding the loaded cache, native
+memory and socket buffers. It is a sample envelope for trusted local scopes.
+Arbitrary larger repositories may produce larger state/snapshot payloads.
+
+The loopback server admits GET requests without consuming bodies, bounds the
+request target to 8,192 characters and eight singular query fields, validates
+identifiers and expansion directions/depth, and uses the standard HTTP parser
+limits for headers. Source is checked against the versioned bytes, with a
+2 MB source-file bound and at most 80 returned lines. Search returns at most
+40 results. Expansion is limited to 400 nodes per direction and depth six,
+with paged native adjacency. Graph lock acquisition waits up to two seconds.
+Expansion and CBM operations have a cooperative 20-second request budget and
+socket reads/writes have a 10-second per-operation timeout. Native blocking IO,
+serialization over growing graph state, slow connection progress and inherited
+stdlib header parsing do not have an independent cumulative deadline. Unknown
+nodes return 404, malformed query fields 400, oversized targets 414, stale
+evidence 409, timeouts 504 and unavailable CBM 503. All stress work was
+isolated from the running gateway. The Case read boundary and 2,000-by-2,000
+measurement remain in the dispatch packet.
+
 ## Historical measurement retained from the previous README
 
 Reported on **2026-10-09** for `src/`: 130 routes, 3,077 CBM nodes, about 13.7k

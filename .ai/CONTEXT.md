@@ -1,6 +1,6 @@
 # AI-Team Gateway — Hot Context
 
-**Last Updated:** 2026-11-26
+**Last Updated:** 2026-11-28
 **Branch policy:** `main` for docs-only; `feat/<slug>` + PR + self-merge for any `src/` or config
 change. Restart the **gateway** freely when deploying merged code. Never restart a worker/node-carrier
 without surfacing it to the operator first.
@@ -110,7 +110,6 @@ ledger with the 2026-11-26 read-only Kanebra findings:
 | **A117** | `AGENT_117_TELEMETRY_CONTEXT_ECONOMICS.md` | — | **active** — PR #293 merged; gateway/task-server live `05fad0a` | Context/advice, recovery lineage and SDK estimates verified; worker activation/natural acceptance remain explicit gates. |
 | **A118** | `AGENT_118_OPENCODE_REPLY_RECOVERY.md` | — | **active** — issue #298; P0 evidence review in progress; no implementation merged | Reconstruct the reported OpenCode missing-reply incident, determine whether managed-turn ownership/correlation is structurally wrong, and repair the proven cause with end-to-end attribution and visibility regressions. |
 | **A119** | `AGENT_119_OPENCODE_V2_FOUNDATION.md` | — (coordinate A118/A102) | **ready** — Level 3; issue #310; no production cutover | Paid-free V2 contract probe + fake server and adoption/seam decisions for the later OpenCode refactor; V2 auth, route, prompt, message and event breaks confirmed offline. |
-| **A116** | `AGENT_116_TRUSTWORTHY_ARCHITECTURE_AUDIT.md` | none; coordinate A111 | **active — P1 ledger reads merged PR #302 `5a04f30` (2026-11-26); audit-tool stages + certification open; issue #290** | Repair authoritative review/membership reads and make architecture-audit execution, coverage, counts and evaluation failure-honest; autonomous implementation, independent verification and scoped certification required. |
 | **A111** | `AGENT_111_INTENT_ALIGNED_VERIFIED_CLOSURE.md` | staged gates in packet | **ready — operator-approved; issue #292** — implementation not started | P0–P6: failure/friction traces → inherited intent → evidence-bound closure → existing reviewer → recovery/bounds → measured quality/usability → useful hands-off proof. Coordinates A116 (A114 retired 2026-11-26 by SDK-budget abstention); reserved activation gates remain. |
 | **A105** | `AGENT_105_CROSS_PROCESS_TURN_SIGNAL.md` | A104 ✅ | **active** — PRs #280/#281 merged; live `7d39020`; natural acceptance pending (stale marker is this external gate, not missing engineering) | Shared bounded HTTP turn signal wakes scheduler, effects and inbox; polls remain recovery. Await three natural eligible completions ≤2s and 24h observation; no paid proof turn. |
 | **A102** | `AGENT_102_UNIFY_BACKEND_PATHWAYS.md` | — | **blocked** — S2 merged + gateway live (`7c6d01a`); worker promotion and natural S3 acceptance pending | One carrier-owned `TurnControl` and natural backend operations; shims, rollout gates and dead gateway session execution removed. Worker restart needs the operator decision and drain/ancestry checks; no paid proof turn. |
@@ -130,6 +129,16 @@ ledger with the 2026-11-26 read-only Kanebra findings:
 ---
 
 ## Recent shift notes
+
+**2026-11-28 — A116 audit certified (`bd651cd`, PR #321).** Explorer requests share four
+loopback admission slots through socket writes, a 2-second graph-lock wait and a
+20-second cooperative work budget. The socket's 10-second timeout applies to each
+blocking operation. Source files and per-kind findings are bounded. Graph and
+HTML payloads scale with the loaded repository and can still allocate during
+serialization. Native IO and slow progress lack a cumulative hard deadline. Keep
+the explorer on loopback for trusted local scopes. The archived measurements
+include a 100-call test and full-source payload sample. Current gateway
+`4f5741d` passes #302 read-back. [certification manifest](https://github.com/nydiokar/AI-team/blob/main/.claude/skills/architecture-pathway-audit/benchmark/measurements/2026-11-28.certification.json)
 
 **2026-11-26 — OpenCode V2 foundation authored (A119).** The installed CLI is `v2.4.2` while
 the live adapter still speaks V1 unprefixed routes; a spawned V2 `serve` returns `401` to

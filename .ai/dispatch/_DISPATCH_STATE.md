@@ -5,7 +5,6 @@
 | status | job_id | created | updated | depends_on | proof | flags |
 |---|---|---|---|---|---|---|
 | active | AGENT_105_CROSS_PROCESS_TURN_SIGNAL | 2026-10-09 | 2026-11-06 | — | ✓ | STALE_21d |
-| active | AGENT_116_TRUSTWORTHY_ARCHITECTURE_AUDIT | 2026-11-16 | 2026-11-26 | — | ✓ |  |
 | active | AGENT_117_TELEMETRY_CONTEXT_ECONOMICS | 2026-11-17 | 2026-11-18 | — | ✓ |  |
 | active | AGENT_118_OPENCODE_REPLY_RECOVERY | 2026-11-18 | 2026-11-18 | — | — |  |
 | ready | A115_AGENT_DISCOVERY_FOR_DELEGATION | 2026-11-15 | 2026-11-15 | — | — |  |
@@ -35,6 +34,7 @@
 | done | AGENT_109_WATCHED_JOB_CONSUMPTION | 2026-11-04 | 2026-11-05 | — | ✓ |  |
 | done | AGENT_10_M3_CLAUDE_TELEMETRY | 2026-07-03 | 2026-08-03 | — | ✓ |  |
 | done | AGENT_110_LLM_TURN_LIFECYCLE | 2026-11-04 | 2026-11-05 | — | ✓ |  |
+| done | AGENT_116_TRUSTWORTHY_ARCHITECTURE_AUDIT | 2026-11-16 | 2026-11-28 | — | ✓ |  |
 | done | AGENT_11_MESH_AFFINITY_ROUTING | 2026-07-03 | 2026-08-03 | — | ✓ |  |
 | done | AGENT_12_HARNESS_SELFTEST | 2026-07-03 | 2026-08-03 | — | ✓ |  |
 | done | AGENT_13_LOOP_CONFIG_MAP | 2026-07-03 | 2026-08-03 | — | ✓ |  |

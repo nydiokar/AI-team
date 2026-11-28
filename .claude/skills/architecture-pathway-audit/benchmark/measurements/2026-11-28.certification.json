@@ -1,0 +1,1312 @@
+{
+  "schema_version": 1,
+  "date": "2026-11-28",
+  "issue": 290,
+  "implementation_pr": 321,
+  "merged_revision": "bd651cdb0251fc225ab61982347aea73dca25121",
+  "frozen_corpus_commit": "820ffb2d105e1fa35733cb9a7fc115efafee54cc",
+  "baseline": {
+    "revision": "49c4dfa62d34e84d891c5730897d2b72cd0155d9",
+    "published_pr": 289,
+    "raw_report": "2026-11-16.findings.json.gz",
+    "uncompressed_sha256": "02945b003b3517e1e4dd6ce82faf4d7f95004540455227dded9e5a7e03f8a24a",
+    "findings_emitted": 280,
+    "patterns_before_caps": 698,
+    "cold_seconds": 152.3,
+    "warm_seconds": 22.6
+  },
+  "environment": {
+    "python": "3.12.16",
+    "platform": "Linux aarch64",
+    "cbm": "0.11.0",
+    "cbm_archive_sha256": "d62eeb224d5ee3eba3070938ec62cf1033f10b041ec1c4b2fb67f7aef390cc7b",
+    "cbm_binary_sha256": "403d0fab6204e712916701936a3229dd472bad05080c757ea5177318a80fdbfe"
+  },
+  "command_options": [
+    "--repo",
+    ".",
+    "--scope",
+    "src",
+    "--project",
+    "a116-certification",
+    "--roots",
+    "all",
+    "--sweep-depth",
+    "6",
+    "--sweep-cap",
+    "600",
+    "--no-serve"
+  ],
+  "reports": {
+    "cold": {
+      "report": "2026-11-28.merged.cold.findings.json.gz",
+      "uncompressed_sha256": "bda8a0562ea421c0a37b802e6b07aef43ac7895e810ac4c78a87360830049207",
+      "run_id": "4d83f2557f96499a8bc0aef88759e586",
+      "source_sha256": "f1b50fab38711cd913b743d7c63fa777fe122055f1e57b4d97b2a00c2021d73a",
+      "exit": 2,
+      "status": "partial",
+      "wall_seconds": 160.1,
+      "native_calls": 4721,
+      "index_runs": 1,
+      "findings_offset": 0,
+      "next_findings_offset": 40,
+      "findings_emitted": 276,
+      "emitted_by_kind": {
+        "BEHAVIOURAL_TWIN": 20,
+        "BYPASS": 40,
+        "CONFIG_DIVERGENCE": 2,
+        "DUPLICATE_IMPLEMENTATION": 13,
+        "MULTIPLE_WRITERS": 2,
+        "ORPHAN_MEDIUM": 4,
+        "OVERLAPPING_PATHS": 22,
+        "PACKAGE_CYCLE": 10,
+        "SAME_FOOTPRINT": 13,
+        "SIBLING_OVERLAP": 40,
+        "SPLIT_READERS": 28,
+        "TRUNCATED_WINDOW": 2,
+        "CONVERGENCE": 40,
+        "DIVERGE_REJOIN": 40
+      },
+      "omitted_by_kind": {
+        "BEHAVIOURAL_TWIN": 0,
+        "BYPASS": 123,
+        "CONFIG_DIVERGENCE": 0,
+        "CONVERGENCE": 176,
+        "DIVERGE_REJOIN": 139,
+        "DUPLICATE_IMPLEMENTATION": 0,
+        "MULTIPLE_WRITERS": 0,
+        "ORPHAN_MEDIUM": 0,
+        "OVERLAPPING_PATHS": 0,
+        "PACKAGE_CYCLE": 0,
+        "SAME_FOOTPRINT": 0,
+        "SIBLING_OVERLAP": 6,
+        "SPLIT_READERS": 0,
+        "TRUNCATED_WINDOW": 0
+      }
+    },
+    "warm": {
+      "report": "2026-11-28.merged.warm.findings.json.gz",
+      "uncompressed_sha256": "554c3639f0e4916765213e5dfd841c9253892e6591fc2dbd334b6c2b20a9ffc4",
+      "run_id": "707cc5abd3944316b070583258b254f3",
+      "source_sha256": "f1b50fab38711cd913b743d7c63fa777fe122055f1e57b4d97b2a00c2021d73a",
+      "exit": 2,
+      "status": "partial",
+      "wall_seconds": 13.9,
+      "native_calls": 1,
+      "index_runs": 0,
+      "findings_offset": 0,
+      "next_findings_offset": 40,
+      "findings_emitted": 276,
+      "emitted_by_kind": {
+        "BEHAVIOURAL_TWIN": 20,
+        "BYPASS": 40,
+        "CONFIG_DIVERGENCE": 2,
+        "DUPLICATE_IMPLEMENTATION": 13,
+        "MULTIPLE_WRITERS": 2,
+        "ORPHAN_MEDIUM": 4,
+        "OVERLAPPING_PATHS": 22,
+        "PACKAGE_CYCLE": 10,
+        "SAME_FOOTPRINT": 13,
+        "SIBLING_OVERLAP": 40,
+        "SPLIT_READERS": 28,
+        "TRUNCATED_WINDOW": 2,
+        "CONVERGENCE": 40,
+        "DIVERGE_REJOIN": 40
+      },
+      "omitted_by_kind": {
+        "BEHAVIOURAL_TWIN": 0,
+        "BYPASS": 123,
+        "CONFIG_DIVERGENCE": 0,
+        "CONVERGENCE": 176,
+        "DIVERGE_REJOIN": 139,
+        "DUPLICATE_IMPLEMENTATION": 0,
+        "MULTIPLE_WRITERS": 0,
+        "ORPHAN_MEDIUM": 0,
+        "OVERLAPPING_PATHS": 0,
+        "PACKAGE_CYCLE": 0,
+        "SAME_FOOTPRINT": 0,
+        "SIBLING_OVERLAP": 6,
+        "SPLIT_READERS": 0,
+        "TRUNCATED_WINDOW": 0
+      }
+    },
+    "40": {
+      "report": "2026-11-28.merged.40.findings.json.gz",
+      "uncompressed_sha256": "9fafe6cb13e269b787cd60fdfc4d13e3dd33a962556014d977690c6bae424d8f",
+      "run_id": "1357983c4e14478a802620c2cb7c3474",
+      "source_sha256": "f1b50fab38711cd913b743d7c63fa777fe122055f1e57b4d97b2a00c2021d73a",
+      "exit": 2,
+      "status": "partial",
+      "wall_seconds": 13.8,
+      "native_calls": 1,
+      "index_runs": 0,
+      "findings_offset": 40,
+      "next_findings_offset": 80,
+      "findings_emitted": 126,
+      "emitted_by_kind": {
+        "BYPASS": 40,
+        "SIBLING_OVERLAP": 6,
+        "CONVERGENCE": 40,
+        "DIVERGE_REJOIN": 40
+      },
+      "omitted_by_kind": {
+        "BEHAVIOURAL_TWIN": 20,
+        "BYPASS": 123,
+        "CONFIG_DIVERGENCE": 2,
+        "CONVERGENCE": 176,
+        "DIVERGE_REJOIN": 139,
+        "DUPLICATE_IMPLEMENTATION": 13,
+        "MULTIPLE_WRITERS": 2,
+        "ORPHAN_MEDIUM": 4,
+        "OVERLAPPING_PATHS": 22,
+        "PACKAGE_CYCLE": 10,
+        "SAME_FOOTPRINT": 13,
+        "SIBLING_OVERLAP": 40,
+        "SPLIT_READERS": 28,
+        "TRUNCATED_WINDOW": 2
+      }
+    },
+    "80": {
+      "report": "2026-11-28.merged.80.findings.json.gz",
+      "uncompressed_sha256": "b280a955ff63e3ae68d601279b528ab24040eef7114615971c4ee4a1ad5226d7",
+      "run_id": "113d071e72be4693bb517529e13a87bd",
+      "source_sha256": "f1b50fab38711cd913b743d7c63fa777fe122055f1e57b4d97b2a00c2021d73a",
+      "exit": 2,
+      "status": "partial",
+      "wall_seconds": 13.9,
+      "native_calls": 1,
+      "index_runs": 0,
+      "findings_offset": 80,
+      "next_findings_offset": 120,
+      "findings_emitted": 120,
+      "emitted_by_kind": {
+        "BYPASS": 40,
+        "CONVERGENCE": 40,
+        "DIVERGE_REJOIN": 40
+      },
+      "omitted_by_kind": {
+        "BEHAVIOURAL_TWIN": 20,
+        "BYPASS": 123,
+        "CONFIG_DIVERGENCE": 2,
+        "CONVERGENCE": 176,
+        "DIVERGE_REJOIN": 139,
+        "DUPLICATE_IMPLEMENTATION": 13,
+        "MULTIPLE_WRITERS": 2,
+        "ORPHAN_MEDIUM": 4,
+        "OVERLAPPING_PATHS": 22,
+        "PACKAGE_CYCLE": 10,
+        "SAME_FOOTPRINT": 13,
+        "SIBLING_OVERLAP": 46,
+        "SPLIT_READERS": 28,
+        "TRUNCATED_WINDOW": 2
+      }
+    },
+    "120": {
+      "report": "2026-11-28.merged.120.findings.json.gz",
+      "uncompressed_sha256": "0982f69beac9a07fed5b21853f0db5abbfc40fd3f32c24cbc3ce4f9ce3bca144",
+      "run_id": "df6b6e3371f643ffafa8200e0914e7dd",
+      "source_sha256": "f1b50fab38711cd913b743d7c63fa777fe122055f1e57b4d97b2a00c2021d73a",
+      "exit": 2,
+      "status": "partial",
+      "wall_seconds": 13.7,
+      "native_calls": 1,
+      "index_runs": 0,
+      "findings_offset": 120,
+      "next_findings_offset": 160,
+      "findings_emitted": 120,
+      "emitted_by_kind": {
+        "BYPASS": 40,
+        "CONVERGENCE": 40,
+        "DIVERGE_REJOIN": 40
+      },
+      "omitted_by_kind": {
+        "BEHAVIOURAL_TWIN": 20,
+        "BYPASS": 123,
+        "CONFIG_DIVERGENCE": 2,
+        "CONVERGENCE": 176,
+        "DIVERGE_REJOIN": 139,
+        "DUPLICATE_IMPLEMENTATION": 13,
+        "MULTIPLE_WRITERS": 2,
+        "ORPHAN_MEDIUM": 4,
+        "OVERLAPPING_PATHS": 22,
+        "PACKAGE_CYCLE": 10,
+        "SAME_FOOTPRINT": 13,
+        "SIBLING_OVERLAP": 46,
+        "SPLIT_READERS": 28,
+        "TRUNCATED_WINDOW": 2
+      }
+    },
+    "160": {
+      "report": "2026-11-28.merged.160.findings.json.gz",
+      "uncompressed_sha256": "a030c4769626feb4eb3b7c3aabf94cc325901d120f9b5a9e05ad494ccba1a906",
+      "run_id": "15c899bc83ef4522b7f7fb6a36438738",
+      "source_sha256": "f1b50fab38711cd913b743d7c63fa777fe122055f1e57b4d97b2a00c2021d73a",
+      "exit": 2,
+      "status": "partial",
+      "wall_seconds": 13.8,
+      "native_calls": 1,
+      "index_runs": 0,
+      "findings_offset": 160,
+      "next_findings_offset": 200,
+      "findings_emitted": 62,
+      "emitted_by_kind": {
+        "BYPASS": 3,
+        "CONVERGENCE": 40,
+        "DIVERGE_REJOIN": 19
+      },
+      "omitted_by_kind": {
+        "BEHAVIOURAL_TWIN": 20,
+        "BYPASS": 160,
+        "CONFIG_DIVERGENCE": 2,
+        "CONVERGENCE": 176,
+        "DIVERGE_REJOIN": 160,
+        "DUPLICATE_IMPLEMENTATION": 13,
+        "MULTIPLE_WRITERS": 2,
+        "ORPHAN_MEDIUM": 4,
+        "OVERLAPPING_PATHS": 22,
+        "PACKAGE_CYCLE": 10,
+        "SAME_FOOTPRINT": 13,
+        "SIBLING_OVERLAP": 46,
+        "SPLIT_READERS": 28,
+        "TRUNCATED_WINDOW": 2
+      }
+    },
+    "200": {
+      "report": "2026-11-28.merged.200.findings.json.gz",
+      "uncompressed_sha256": "d37ea08a437b1d8fb7e6f19f12f8b6d9aad05b2bcbf491de5e815221b2600a9a",
+      "run_id": "0c28b3883f0347fcb61b6d879a8d9757",
+      "source_sha256": "f1b50fab38711cd913b743d7c63fa777fe122055f1e57b4d97b2a00c2021d73a",
+      "exit": 2,
+      "status": "partial",
+      "wall_seconds": 13.7,
+      "native_calls": 1,
+      "index_runs": 0,
+      "findings_offset": 200,
+      "next_findings_offset": null,
+      "findings_emitted": 16,
+      "emitted_by_kind": {
+        "CONVERGENCE": 16
+      },
+      "omitted_by_kind": {
+        "BEHAVIOURAL_TWIN": 20,
+        "BYPASS": 163,
+        "CONFIG_DIVERGENCE": 2,
+        "CONVERGENCE": 200,
+        "DIVERGE_REJOIN": 179,
+        "DUPLICATE_IMPLEMENTATION": 13,
+        "MULTIPLE_WRITERS": 2,
+        "ORPHAN_MEDIUM": 4,
+        "OVERLAPPING_PATHS": 22,
+        "PACKAGE_CYCLE": 10,
+        "SAME_FOOTPRINT": 13,
+        "SIBLING_OVERLAP": 46,
+        "SPLIT_READERS": 28,
+        "TRUNCATED_WINDOW": 2
+      }
+    }
+  },
+  "cold_warm_exact_fields": [
+    "routes",
+    "findings",
+    "coverage",
+    "analysis_scope",
+    "sql_edges"
+  ],
+  "declared_source_coverage": {
+    "source_files": 111,
+    "unindexed_python": [],
+    "parse_errors": [],
+    "skipped_files": {},
+    "cbm_index_coverage": {
+      "parse_partial": {
+        "files": [],
+        "count": 0,
+        "truncated": false
+      },
+      "parse_unusable": {
+        "files": [],
+        "count": 0,
+        "truncated": false
+      },
+      "skipped": {
+        "files": [],
+        "count": 0,
+        "truncated": false
+      },
+      "not_indexed": {
+        "dirs": [
+          "__pycache__",
+          "backends/__pycache__",
+          "bridges/__pycache__",
+          "control/__pycache__",
+          "control/routes/__pycache__"
+        ],
+        "dirs_count": 10,
+        "files": [],
+        "files_count": 0,
+        "truncated": true,
+        "dirs_omitted": 5,
+        "note": "Purposely not indexed \u2014 excluded BY DESIGN via gitignore/.cbmignore/skip-lists (see each file's reason). Not an error: change the ignore rules and re-index to include them."
+      }
+    },
+    "routes_discovered": 144,
+    "routes_expanded": 144,
+    "loaded_nodes": 2179,
+    "loaded_edges": 6730,
+    "sweep": {
+      "root_selection": "all",
+      "configured_depth": 6,
+      "configured_node_cap": 600,
+      "route_roots": 144,
+      "non_http_roots": 660,
+      "expanded_roots": 804,
+      "depth_limited_roots": 110,
+      "node_limited_roots": 0,
+      "incomplete_adjacency_roots": 0
+    }
+  },
+  "counts_by_level": {
+    "candidate": 325,
+    "fact": 395
+  },
+  "counts_by_kind": {
+    "BEHAVIOURAL_TWIN": 20,
+    "BYPASS": 163,
+    "CONFIG_DIVERGENCE": 2,
+    "CONVERGENCE": 216,
+    "DIVERGE_REJOIN": 179,
+    "DUPLICATE_IMPLEMENTATION": 13,
+    "MULTIPLE_WRITERS": 2,
+    "ORPHAN_MEDIUM": 4,
+    "OVERLAPPING_PATHS": 22,
+    "PACKAGE_CYCLE": 10,
+    "SAME_FOOTPRINT": 13,
+    "SIBLING_OVERLAP": 46,
+    "SPLIT_READERS": 28,
+    "TRUNCATED_WINDOW": 2
+  },
+  "unique_finding_ids_across_warm_pages": 720,
+  "remaining_truncated_window_witnesses": {
+    "table::flow_events": [
+      [
+        "control/db.py",
+        7534,
+        "control.db.MeshDB.list_flow_events"
+      ],
+      [
+        "control/db.py",
+        7508,
+        "control.db.MeshDB.list_flow_events_of_types"
+      ]
+    ],
+    "table::flow_links": [
+      [
+        "control/db.py",
+        6916,
+        "control.db.MeshDB.case_roster_session_page"
+      ],
+      [
+        "control/db.py",
+        6887,
+        "control.db.MeshDB.list_flow_links"
+      ],
+      [
+        "control/db.py",
+        8173,
+        "control.db.MeshDB.resolve_dispatch_requester"
+      ]
+    ]
+  },
+  "count_and_baseline_fixture": {
+    "pages": [
+      {
+        "offset": 0,
+        "count": 40,
+        "next": 40,
+        "totals": {
+          "TRUNCATED_WINDOW": 113
+        },
+        "emitted": {
+          "TRUNCATED_WINDOW": 40
+        },
+        "omitted": {
+          "TRUNCATED_WINDOW": 73
+        },
+        "source": "e14920eb8d20f52503325a0813cc6e938fa5623f15664280911a342f49a6a222",
+        "native_calls": 6
+      },
+      {
+        "offset": 40,
+        "count": 40,
+        "next": 80,
+        "totals": {
+          "TRUNCATED_WINDOW": 113
+        },
+        "emitted": {
+          "TRUNCATED_WINDOW": 40
+        },
+        "omitted": {
+          "TRUNCATED_WINDOW": 73
+        },
+        "source": "e14920eb8d20f52503325a0813cc6e938fa5623f15664280911a342f49a6a222",
+        "native_calls": 1
+      },
+      {
+        "offset": 80,
+        "count": 33,
+        "next": null,
+        "totals": {
+          "TRUNCATED_WINDOW": 113
+        },
+        "emitted": {
+          "TRUNCATED_WINDOW": 33
+        },
+        "omitted": {
+          "TRUNCATED_WINDOW": 80
+        },
+        "source": "e14920eb8d20f52503325a0813cc6e938fa5623f15664280911a342f49a6a222",
+        "native_calls": 1
+      },
+      {
+        "offset": 120,
+        "count": 0,
+        "next": null,
+        "totals": {
+          "TRUNCATED_WINDOW": 113
+        },
+        "emitted": {},
+        "omitted": {
+          "TRUNCATED_WINDOW": 113
+        },
+        "source": "e14920eb8d20f52503325a0813cc6e938fa5623f15664280911a342f49a6a222",
+        "native_calls": 1
+      }
+    ],
+    "total_unique": 113,
+    "known_on_later_page": "993404ee1975",
+    "capped_report_rejected_by_scorer": true,
+    "capped_baseline_update_rc": 2
+  },
+  "native_input_caps": {
+    "native-node-cap": {
+      "run": {
+        "id": "03b282a7f10b4e38900a0f92d7d600a5",
+        "started_at": "2026-11-28T08:42:30.819082Z",
+        "python": "3.12.16",
+        "status": "partial",
+        "stage": "analysis",
+        "requested_scope": [
+          "."
+        ],
+        "effective_scope": [
+          "/dev/shm/ai-team-a116-takeover/native-input-caps/repo"
+        ],
+        "source_sha256": "37089358ad10524aa4ac90ef4837cacd4e011b61e6d525c610955aa3964da618",
+        "errors": [],
+        "required_analysis_complete": false
+      },
+      "coverage": {
+        "source_files": 9,
+        "skipped_files": {},
+        "unindexed_python": [],
+        "cbm_index_coverage": {
+          "parse_partial": {
+            "files": [],
+            "count": 0,
+            "truncated": false
+          },
+          "parse_unusable": {
+            "files": [],
+            "count": 0,
+            "truncated": false
+          },
+          "skipped": {
+            "files": [],
+            "count": 0,
+            "truncated": false
+          },
+          "not_indexed": {
+            "dirs": [],
+            "dirs_count": 0,
+            "files": [],
+            "files_count": 0,
+            "truncated": false
+          }
+        },
+        "sql_limitations": [],
+        "excluded_directory_names": [
+          ".arch-audit",
+          ".cache",
+          ".claude",
+          ".codebase-memory",
+          ".git",
+          ".next",
+          ".pytest_cache",
+          ".venv",
+          "__pycache__",
+          "build",
+          "coverage",
+          "dist",
+          "node_modules",
+          "target",
+          "venv"
+        ],
+        "source_extensions": [
+          ".cfg",
+          ".cjs",
+          ".ini",
+          ".js",
+          ".json",
+          ".jsx",
+          ".mjs",
+          ".ps1",
+          ".py",
+          ".pyi",
+          ".sh",
+          ".sql",
+          ".toml",
+          ".ts",
+          ".tsx",
+          ".yaml",
+          ".yml"
+        ],
+        "sweep": {
+          "root_selection": "all",
+          "configured_depth": 1,
+          "configured_node_cap": 1,
+          "route_roots": 9,
+          "non_http_roots": 3,
+          "expanded_roots": 12,
+          "depth_limited_roots": 0,
+          "node_limited_roots": 10,
+          "incomplete_adjacency_roots": 0
+        },
+        "routes_discovered": 9,
+        "routes_by_status": {
+          "router_not_mounted": 1,
+          "registered": 8
+        },
+        "routes_conditional_registration": 1,
+        "routes_loaded_in_selector": 9,
+        "routes_expanded": 9,
+        "handlers": {
+          "nested_ast_only": 6,
+          "cbm_symbol": 3
+        },
+        "route_cross_check_vs_cbm": {
+          "available": true,
+          "cbm_route_nodes": 4,
+          "ast_route_keys": 8,
+          "matched": 0,
+          "ast_only": [
+            "__route__GET__/extra",
+            "__route__GET__/never-mounted",
+            "__route__GET__/sys/health",
+            "__route__PATCH__/v1/orders/c",
+            "__route__POST__/v1/orders/a",
+            "__route__POST__/v1/orders/c",
+            "__route__POST__/v1/orders/{}/b",
+            "__route__PUT__/legacy"
+          ],
+          "cbm_only_server": [
+            "__route__ANY__/legacy",
+            "__route__GET__/health",
+            "__route__POST__/a",
+            "__route__POST__/{}/b"
+          ],
+          "cbm_only_client_http_targets": []
+        },
+        "route_limitations": [
+          {
+            "kind": "conditional_registration",
+            "file": "app/routes/health.py",
+            "line": 13,
+            "detail": "GET /never-mounted is registered under a branch or after a conditional early return; it may be absent at runtime"
+          }
+        ],
+        "apps": [
+          "app/main.py::app"
+        ],
+        "loaded_nodes": 18,
+        "loaded_edges": 11,
+        "edge_sources": {
+          "cbm": 2,
+          "ast": 9
+        },
+        "edge_types": {
+          "HANDLES": 11
+        },
+        "expanded_entries": 12,
+        "incomplete_entries": [],
+        "unresolved_calls": {
+          "ambiguous_builtin_name": 1
+        },
+        "parse_errors": [],
+        "cbm_limitations": [
+          "CBM 0.11 does not index nested function bodies; nested handlers are linked by the AST adapter (edge source=ast).",
+          "CBM Route nodes are keyed by METHOD+path only and ignore include_router prefixes; the route inventory is AST-derived.",
+          "Calls on objects of unknown type resolve only when the method name is unique in scope (strategy=unique_method_name); otherwise listed as ambiguous."
+        ],
+        "complete_repository_audit": false
+      },
+      "analysis_scope": {
+        "roots_with_loaded_paths": 9,
+        "max_depth": 12,
+        "depth_limited_roots": 0,
+        "counts_by_kind": {},
+        "counts_by_level": {},
+        "emitted_by_kind": {},
+        "omitted_by_kind": {},
+        "findings_offset": 0,
+        "next_findings_offset": null,
+        "capped_kinds": [],
+        "cap_per_kind": 40,
+        "utility_fanin_threshold": 10,
+        "hubs": [],
+        "note": "Computed only over expanded neighbourhoods; absence of a finding is not evidence of absence.",
+        "baseline": {
+          "file": "/dev/shm/ai-team-a116-takeover/native-input-caps/repo/.arch-audit/baseline.json",
+          "known": 0,
+          "new": 0,
+          "stale_ids": []
+        }
+      }
+    },
+    "fully-ignored": {
+      "run": {
+        "id": "6dbc4781bf454bb883de329b2efadad2",
+        "started_at": "2026-11-28T08:42:39.786525Z",
+        "python": "3.12.16",
+        "status": "incomplete",
+        "stage": "analysis",
+        "requested_scope": [
+          "."
+        ],
+        "effective_scope": [
+          "/dev/shm/ai-team-a116-takeover/native-input-caps/repo"
+        ],
+        "source_sha256": "184ac38f06c6357a81e9ad64def15020a0ea45ef0ea0d7677adf35d885a7d9c3",
+        "errors": [
+          {
+            "stage": "coverage",
+            "detail": "6 unindexed python"
+          }
+        ],
+        "required_analysis_complete": false
+      },
+      "coverage": {
+        "source_files": 10,
+        "skipped_files": {},
+        "unindexed_python": [
+          "app/main.py",
+          "app/routes/health.py",
+          "app/routes/orders.py",
+          "app/services/checkout.py",
+          "app/services/legacy.py",
+          "app/services/store.py"
+        ],
+        "cbm_index_coverage": {
+          "parse_partial": {
+            "files": [],
+            "count": 0,
+            "truncated": false
+          },
+          "parse_unusable": {
+            "files": [],
+            "count": 0,
+            "truncated": false
+          },
+          "skipped": {
+            "files": [],
+            "count": 0,
+            "truncated": false
+          },
+          "not_indexed": {
+            "dirs": [],
+            "dirs_count": 0,
+            "files": [
+              {
+                "path": "app/__init__.py",
+                "reason": "cbmignore"
+              },
+              {
+                "path": "app/main.py",
+                "reason": "cbmignore"
+              },
+              {
+                "path": "app/routes/__init__.py",
+                "reason": "cbmignore"
+              },
+              {
+                "path": "app/routes/health.py",
+                "reason": "cbmignore"
+              },
+              {
+                "path": "app/routes/orders.py",
+                "reason": "cbmignore"
+              }
+            ],
+            "files_count": 9,
+            "truncated": true,
+            "files_omitted": 4,
+            "note": "Purposely not indexed \u2014 excluded BY DESIGN via gitignore/.cbmignore/skip-lists (see each file's reason). Not an error: change the ignore rules and re-index to include them."
+          }
+        },
+        "sql_limitations": [],
+        "excluded_directory_names": [
+          ".arch-audit",
+          ".cache",
+          ".claude",
+          ".codebase-memory",
+          ".git",
+          ".next",
+          ".pytest_cache",
+          ".venv",
+          "__pycache__",
+          "build",
+          "coverage",
+          "dist",
+          "node_modules",
+          "target",
+          "venv"
+        ],
+        "source_extensions": [
+          ".cfg",
+          ".cjs",
+          ".ini",
+          ".js",
+          ".json",
+          ".jsx",
+          ".mjs",
+          ".ps1",
+          ".py",
+          ".pyi",
+          ".sh",
+          ".sql",
+          ".toml",
+          ".ts",
+          ".tsx",
+          ".yaml",
+          ".yml"
+        ],
+        "sweep": {
+          "root_selection": "all",
+          "configured_depth": 6,
+          "configured_node_cap": 400,
+          "route_roots": 9,
+          "non_http_roots": 0,
+          "expanded_roots": 9,
+          "depth_limited_roots": 0,
+          "node_limited_roots": 0,
+          "incomplete_adjacency_roots": 0
+        },
+        "routes_discovered": 9,
+        "routes_by_status": {
+          "router_not_mounted": 1,
+          "registered": 8
+        },
+        "routes_conditional_registration": 1,
+        "routes_loaded_in_selector": 9,
+        "routes_expanded": 9,
+        "handlers": {
+          "nested_ast_only": 6,
+          "module_level": 3
+        },
+        "route_cross_check_vs_cbm": {
+          "available": true,
+          "cbm_route_nodes": 0,
+          "ast_route_keys": 8,
+          "matched": 0,
+          "ast_only": [
+            "__route__GET__/extra",
+            "__route__GET__/never-mounted",
+            "__route__GET__/sys/health",
+            "__route__PATCH__/v1/orders/c",
+            "__route__POST__/v1/orders/a",
+            "__route__POST__/v1/orders/c",
+            "__route__POST__/v1/orders/{}/b",
+            "__route__PUT__/legacy"
+          ],
+          "cbm_only_server": [],
+          "cbm_only_client_http_targets": []
+        },
+        "route_limitations": [
+          {
+            "kind": "conditional_registration",
+            "file": "app/routes/health.py",
+            "line": 13,
+            "detail": "GET /never-mounted is registered under a branch or after a conditional early return; it may be absent at runtime"
+          }
+        ],
+        "apps": [
+          "app/main.py::app"
+        ],
+        "loaded_nodes": 21,
+        "loaded_edges": 17,
+        "edge_sources": {
+          "ast": 17
+        },
+        "edge_types": {
+          "CALLS": 8,
+          "HANDLES": 9
+        },
+        "expanded_entries": 21,
+        "incomplete_entries": [],
+        "unresolved_calls": {},
+        "parse_errors": [],
+        "cbm_limitations": [
+          "CBM 0.11 does not index nested function bodies; nested handlers are linked by the AST adapter (edge source=ast).",
+          "CBM Route nodes are keyed by METHOD+path only and ignore include_router prefixes; the route inventory is AST-derived.",
+          "Calls on objects of unknown type resolve only when the method name is unique in scope (strategy=unique_method_name); otherwise listed as ambiguous."
+        ],
+        "complete_repository_audit": false
+      },
+      "analysis_scope": {
+        "roots_with_loaded_paths": 9,
+        "max_depth": 12,
+        "depth_limited_roots": 0,
+        "counts_by_kind": {
+          "BYPASS": 1,
+          "CONVERGENCE": 2,
+          "DIVERGE_REJOIN": 1
+        },
+        "counts_by_level": {
+          "candidate": 1,
+          "fact": 3
+        },
+        "emitted_by_kind": {
+          "BYPASS": 1,
+          "CONVERGENCE": 2,
+          "DIVERGE_REJOIN": 1
+        },
+        "omitted_by_kind": {
+          "BYPASS": 0,
+          "CONVERGENCE": 0,
+          "DIVERGE_REJOIN": 0
+        },
+        "findings_offset": 0,
+        "next_findings_offset": null,
+        "capped_kinds": [],
+        "cap_per_kind": 40,
+        "utility_fanin_threshold": 10,
+        "hubs": [],
+        "note": "Computed only over expanded neighbourhoods; absence of a finding is not evidence of absence.",
+        "baseline": {
+          "file": "/dev/shm/ai-team-a116-takeover/native-input-caps/repo/.arch-audit/baseline.json",
+          "known": 0,
+          "new": 4,
+          "stale_ids": []
+        }
+      }
+    }
+  },
+  "corpus": {
+    "archive": "2026-11-28.corpus-evidence.tar.gz",
+    "archive_sha256": "19e41308ac517530604220fe72eac65ddc91c4aa3e5e0b62d83b881b92e590d4",
+    "manifests": {
+      "completed": {
+        "manifest_sha256": "1b4df362fe789a22760f2aec380109903874b5e116baa59819509047aae42686",
+        "generation": "run-3095e4eaa8df4f4681e323127ca374a2",
+        "runner_exit": 0,
+        "scorer_exit": 0
+      },
+      "failed": {
+        "manifest_sha256": "1d2ff419c2c33d921f512c5c5c13e88d524fcb75aaab4d87300e4f45e1b2287e",
+        "generation": "run-2ac0c177e6274a7aab766e4539a68023",
+        "runner_exit": 1,
+        "scorer_exit": 1
+      },
+      "incomplete": {
+        "manifest_sha256": "286983a443c4be46637c7d0015eb64ec350d768ce753c822f3930a8c92c0b5cf",
+        "generation": "run-ee09dbe587bf47439d9e809094ba812e",
+        "runner_exit": 1,
+        "scorer_exit": 1
+      },
+      "capped": {
+        "manifest_sha256": "302d000e191847dcbc6031653e4ee48f17ed1ed8e4d63c8c59a9def552b42f12",
+        "generation": "run-0038e990955b4e83bd7866ea02f024e5",
+        "runner_exit": 1,
+        "scorer_exit": 1
+      }
+    },
+    "scores": {
+      "completed": {
+        "status": "completed",
+        "corpus_sha256": "dc66298a478650110a26b1c4945d11e8566214c78267ed5490906b8ceefc769d",
+        "candidate_localization": {
+          "matched": 2,
+          "evaluated": 2,
+          "labeled": 2,
+          "unknown": 0
+        },
+        "verified_contract_defect_recall": {
+          "matched": 2,
+          "evaluated": 2,
+          "labeled": 2,
+          "unknown": 0
+        },
+        "benign_controls_flagged": {
+          "matched": 1,
+          "evaluated": 2,
+          "labeled": 2,
+          "unknown": 0
+        },
+        "cases": [
+          {
+            "id": "latest-review",
+            "classification": "defect",
+            "engine": "graph",
+            "result": "localized",
+            "candidate_or_violation_count": 1
+          },
+          {
+            "id": "case-membership",
+            "classification": "defect",
+            "engine": "graph",
+            "result": "localized",
+            "candidate_or_violation_count": 1
+          },
+          {
+            "id": "retired-import",
+            "classification": "defect",
+            "engine": "contract",
+            "result": "verified_violation",
+            "candidate_or_violation_count": 1
+          },
+          {
+            "id": "pending-bypass",
+            "classification": "defect",
+            "engine": "contract",
+            "result": "verified_violation",
+            "candidate_or_violation_count": 1
+          },
+          {
+            "id": "requester-ambiguity",
+            "classification": "benign",
+            "engine": "graph",
+            "result": "flagged",
+            "candidate_or_violation_count": 1
+          },
+          {
+            "id": "inbox-lifecycle",
+            "classification": "benign",
+            "engine": "contract",
+            "result": "unflagged",
+            "candidate_or_violation_count": 0
+          }
+        ]
+      },
+      "failed": {
+        "status": "incomplete",
+        "corpus_sha256": "dc66298a478650110a26b1c4945d11e8566214c78267ed5490906b8ceefc769d",
+        "candidate_localization": {
+          "matched": 0,
+          "evaluated": 0,
+          "labeled": 2,
+          "unknown": 2
+        },
+        "verified_contract_defect_recall": {
+          "matched": 2,
+          "evaluated": 2,
+          "labeled": 2,
+          "unknown": 0
+        },
+        "benign_controls_flagged": {
+          "matched": 0,
+          "evaluated": 1,
+          "labeled": 2,
+          "unknown": 1
+        },
+        "cases": [
+          {
+            "id": "latest-review",
+            "classification": "defect",
+            "engine": "graph",
+            "result": "unknown",
+            "error": "baseline unavailable: required analysis did not complete"
+          },
+          {
+            "id": "case-membership",
+            "classification": "defect",
+            "engine": "graph",
+            "result": "unknown",
+            "error": "baseline unavailable: required analysis did not complete"
+          },
+          {
+            "id": "retired-import",
+            "classification": "defect",
+            "engine": "contract",
+            "result": "verified_violation",
+            "candidate_or_violation_count": 1
+          },
+          {
+            "id": "pending-bypass",
+            "classification": "defect",
+            "engine": "contract",
+            "result": "verified_violation",
+            "candidate_or_violation_count": 1
+          },
+          {
+            "id": "requester-ambiguity",
+            "classification": "benign",
+            "engine": "graph",
+            "result": "unknown",
+            "error": "baseline unavailable: required analysis did not complete"
+          },
+          {
+            "id": "inbox-lifecycle",
+            "classification": "benign",
+            "engine": "contract",
+            "result": "unflagged",
+            "candidate_or_violation_count": 0
+          }
+        ]
+      },
+      "incomplete": {
+        "status": "incomplete",
+        "corpus_sha256": "dc66298a478650110a26b1c4945d11e8566214c78267ed5490906b8ceefc769d",
+        "candidate_localization": {
+          "matched": 2,
+          "evaluated": 2,
+          "labeled": 2,
+          "unknown": 0
+        },
+        "verified_contract_defect_recall": {
+          "matched": 2,
+          "evaluated": 2,
+          "labeled": 2,
+          "unknown": 0
+        },
+        "benign_controls_flagged": {
+          "matched": 0,
+          "evaluated": 1,
+          "labeled": 2,
+          "unknown": 1
+        },
+        "cases": [
+          {
+            "id": "latest-review",
+            "classification": "defect",
+            "engine": "graph",
+            "result": "localized",
+            "candidate_or_violation_count": 1
+          },
+          {
+            "id": "case-membership",
+            "classification": "defect",
+            "engine": "graph",
+            "result": "localized",
+            "candidate_or_violation_count": 1
+          },
+          {
+            "id": "retired-import",
+            "classification": "defect",
+            "engine": "contract",
+            "result": "verified_violation",
+            "candidate_or_violation_count": 1
+          },
+          {
+            "id": "pending-bypass",
+            "classification": "defect",
+            "engine": "contract",
+            "result": "verified_violation",
+            "candidate_or_violation_count": 1
+          },
+          {
+            "id": "requester-ambiguity",
+            "classification": "benign",
+            "engine": "graph",
+            "result": "unknown",
+            "error": "required analysis did not complete"
+          },
+          {
+            "id": "inbox-lifecycle",
+            "classification": "benign",
+            "engine": "contract",
+            "result": "unflagged",
+            "candidate_or_violation_count": 0
+          }
+        ]
+      },
+      "capped": {
+        "status": "incomplete",
+        "corpus_sha256": "e00518ce7831ee5d1e74f25932680ba0a93a0e3341b51bba6682055d1baacfdd",
+        "candidate_localization": {
+          "matched": 2,
+          "evaluated": 2,
+          "labeled": 2,
+          "unknown": 0
+        },
+        "verified_contract_defect_recall": {
+          "matched": 2,
+          "evaluated": 2,
+          "labeled": 2,
+          "unknown": 0
+        },
+        "benign_controls_flagged": {
+          "matched": 0,
+          "evaluated": 1,
+          "labeled": 2,
+          "unknown": 1
+        },
+        "cases": [
+          {
+            "id": "latest-review",
+            "classification": "defect",
+            "engine": "graph",
+            "result": "localized",
+            "candidate_or_violation_count": 1
+          },
+          {
+            "id": "case-membership",
+            "classification": "defect",
+            "engine": "graph",
+            "result": "localized",
+            "candidate_or_violation_count": 1
+          },
+          {
+            "id": "retired-import",
+            "classification": "defect",
+            "engine": "contract",
+            "result": "verified_violation",
+            "candidate_or_violation_count": 1
+          },
+          {
+            "id": "pending-bypass",
+            "classification": "defect",
+            "engine": "contract",
+            "result": "verified_violation",
+            "candidate_or_violation_count": 1
+          },
+          {
+            "id": "requester-ambiguity",
+            "classification": "benign",
+            "engine": "graph",
+            "result": "unknown",
+            "error": "graph report has omitted or inconsistent finding counts"
+          },
+          {
+            "id": "inbox-lifecycle",
+            "classification": "benign",
+            "engine": "contract",
+            "result": "unflagged",
+            "candidate_or_violation_count": 0
+          }
+        ]
+      }
+    },
+    "reviewed_graph_flags": {
+      "defect_localizations": 2,
+      "benign_flags": 1
+    },
+    "reviewed_contract_violations": {
+      "labeled_defects": 2,
+      "benign_flags": 0
+    }
+  },
+  "contracts": {
+    "maintained_inbox": {
+      "revision": "bd651cdb0251fc225ab61982347aea73dca25121",
+      "status": "pass",
+      "files": 152,
+      "waived": 0,
+      "violations": 0,
+      "unresolved_sql_count": 180
+    },
+    "maintained_a102": {
+      "revision": "bd651cdb0251fc225ab61982347aea73dca25121",
+      "status": "pass",
+      "files": 436,
+      "waived": 7,
+      "violations": 0,
+      "unresolved_sql_count": 310
+    },
+    "frozen_a102_on_current": {
+      "revision": "f181c87ab5a411c6ea6fc7eba6dec17423b20ac5",
+      "status": "violations",
+      "files": 392,
+      "waived": 0,
+      "violations": 7,
+      "unresolved_sql_count": 291
+    },
+    "frozen_a104_on_current": {
+      "revision": "f181c87ab5a411c6ea6fc7eba6dec17423b20ac5",
+      "status": "violations",
+      "files": 610,
+      "waived": 0,
+      "violations": 34,
+      "unresolved_sql_count": 310
+    },
+    "historical_a102": {
+      "revision": "c64a4a76db44f6bc6e819199969f0b3fbc9c7b1a",
+      "status": "violations",
+      "files": 324,
+      "waived": 0,
+      "violations": 343,
+      "unresolved_sql_count": 187
+    },
+    "historical_a84": {
+      "revision": "645ab3811cf0b5a22079ba6c6917ebabf678e7a2",
+      "status": "violations",
+      "files": 133,
+      "waived": 0,
+      "violations": 29,
+      "unresolved_sql_count": 125
+    }
+  },
+  "tests": {
+    "audit_and_dispatch_merged": "117 passed, 5 subtests passed in 41.06s",
+    "application_merged": "78 passed, 1 warning in 57.82s",
+    "application_rework_and_rebind": "25 passed, 38 deselected in 6.22s",
+    "explorer_saturation": "..................................100 simultaneous requests: 4 admitted, 96 overloaded; Python peak 967731 bytes",
+    "browser_explorer_merged": [
+      "Actual CLI served failed index and returned structured 503 in Chromium.",
+      "broken: CLI exit 2, persisted run failed",
+      "Actual CLI expansion and source worked in Chromium (stale).",
+      "stale: CLI exit 2, persisted run failed",
+      "Actual CLI expansion and source worked in Chromium (recovered).",
+      "recovered: CLI exit 0, persisted run partial"
+    ],
+    "browser_gateway_merged": [
+      "Deployed mobile Case Work rendered live roster, ledger and timeline; each API returned 200."
+    ],
+    "large_explorer_serialization_sample": [
+      {
+        "operation": "state",
+        "encoded_bytes": 7075426,
+        "python_peak_bytes": 37129009,
+        "four_same_size_incremental_bound": 148516036
+      },
+      {
+        "operation": "snapshot",
+        "encoded_bytes": 7119413,
+        "python_peak_bytes": 35611454,
+        "four_same_size_incremental_bound": 142445816
+      }
+    ]
+  },
+  "loaded_gateway": {
+    "sha": "4f5741d",
+    "api": [
+      "detail",
+      "timeline",
+      "roster",
+      "case usage"
+    ],
+    "malformed_cursor": 422,
+    "both_containers_healthy": true,
+    "runtime_diff_since_loaded_build": false,
+    "worker_restart": false
+  },
+  "real_cbm_executable_identity_change": {
+    "previous_cache": "reused",
+    "new_cache": "identity_changed",
+    "source_sha256": "67af76589ae83611df88bd9d6b0d3fe466ed43ca23f89e26cb4db599d6bd0614",
+    "old_native_project": "pathway-5741b00ddc5fb5d74ad03ba2a612f4403fc8aa5f261a2b10",
+    "new_native_project": "pathway-6630840658dfebbc8ac61d9d1920e694d10cba392c81aefb",
+    "old_binary_sha256": "403d0fab6204e712916701936a3229dd472bad05080c757ea5177318a80fdbfe",
+    "new_binary_sha256": "dbb6dc709349594df756e13b61995dcf9fd44ea14e95cdc96070b9bfe62883ca",
+    "version": "0.11.0",
+    "index_runs": 1
+  }
+}

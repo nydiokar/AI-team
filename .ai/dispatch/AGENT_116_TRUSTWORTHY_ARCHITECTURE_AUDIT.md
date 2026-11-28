@@ -1,18 +1,18 @@
 ```yaml
 job_id: AGENT_116_TRUSTWORTHY_ARCHITECTURE_AUDIT
 created_at: "2026-11-16T13:15:02.851908+00:00"        # CANONICAL — set once at dispatch, never derive again
-status: active              # ready | active | blocked | done | dead
+status: done              # ready | active | blocked | done | dead
 owner: codex
 depends_on: []
 results_ref: DISPATCH_LOG.md#A116             # -> DISPATCH_LOG.md section with the verdict prose
-evidence: ["tests/test_control_api_work.py","tests/test_cost_read_model.py","tests/test_spec_authoring_decompose.py"]                  # artifact paths that PROVE it ran (checked to exist)
-updated_at: "2026-11-26T09:10:46.467971+00:00"
+evidence: ["tests/test_control_api_work.py","tests/test_cost_read_model.py","tests/test_spec_authoring_decompose.py","tests/test_dispatch_state.py",".claude/skills/architecture-pathway-audit/benchmark/measurements/2026-11-28.certification.json"]                  # artifact paths that PROVE it ran (checked to exist)
+updated_at: "2026-11-28T08:52:09.225794+00:00"
 ```
 
 # DISPATCH — A116 · Trustworthy architecture audit and authoritative ledger reads
 
 **Level:** 3 (agent acceptance decisions, service/read boundaries, breadth) · **Type:** code + audit + certification
-**Authored:** 2026-11-16 · **Packet state:** active; P1 application reads merged in PR #302 (`5a04f30`, 2026-11-26); audit-tool stages and C1–C12 certification in progress
+**Authored:** 2026-11-16 · **Packet state:** done on 2026-11-28, with C1–C12 evidenced at the scoped capability limits below
 **Issue:** [#290](https://github.com/nydiokar/AI-team/issues/290)
 **Depends on:** none; coordinate with A111 acceptance work and current read-path changes, do not wait for their unrelated stages.
 **Branch:** fresh `feat/a116-<stage>` from current `origin/main` in an isolated worktree; PR, review, push and self-merge each coherent stage. No unrelated branch carried forward.
@@ -186,51 +186,51 @@ For each touched gateway or explorer HTTP handler, record concurrency admission 
 
 ## Milestone (burndown)
 
-- [ ] P0 frozen executable baseline witnesses, benign controls, labels and independent plan review.
+- [x] P0 frozen executable baseline witnesses, benign controls, labels and independent plan review.
 - [x] P1 authoritative latest-review and complete membership consumers repaired, bounded and proven through downstream seams (PR #302 `5a04f30`, 2026-11-26).
-- [ ] P2 failure-honest CLI/JSON/browser/dispatch outcomes, freshness, coverage/count/cache identity.
-- [ ] P3 supported SQL extraction/ownership, maintained responsibility-correct guards and honest portable evaluation.
-- [ ] P4 C1–C12 passed, independent adversarial review blockers fixed, merged rerun and deployed app seams verified.
-- [ ] MEASUREMENTS/data/packet/issue/registry/CONTEXT closed on evidence; no false clean or false semantic score.
+- [x] P2 failure-honest CLI/JSON/browser/dispatch outcomes, freshness, coverage/count/cache identity.
+- [x] P3 supported SQL extraction/ownership, maintained responsibility-correct guards and honest portable evaluation.
+- [x] P4 C1–C12 passed, independent adversarial review blockers fixed, merged rerun and deployed app seams verified.
+- [x] MEASUREMENTS/data/packet/issue/registry/CONTEXT closed on evidence; no false clean or false semantic score.
 
-### Acceptance and archive reconciliation
+### Final acceptance — 2026-11-28
 
-Verified 2026-11-28 against [origin/main at 4f5741d](https://github.com/nydiokar/AI-team/commit/4f5741d). The archived baseline report matches the original SHA-256 recorded in issue #290. The gateway health endpoint reports build `4f5741d`; read-only acceptance still needs a fresh pass.
+Merged audit implementation `bd651cd`. [certification manifest](https://github.com/nydiokar/AI-team/blob/main/.claude/skills/architecture-pathway-audit/benchmark/measurements/2026-11-28.certification.json)
 
-| Criterion | Status | Evidence and remaining proof |
+| Criterion | Status | Evidence |
 | --- | --- | --- |
-| C1 | Partial | [#302](https://github.com/nydiokar/AI-team/pull/302) contains `5a04f30` (merge `c9d795b`), seven pinned-baseline failures and review of the resulting review/race/membership repairs. Repeat API/browser reads on the loaded build and link threshold, malformed evidence, rebind and LIMIT-2 witnesses. |
-| C2 | Partial | [#304](https://github.com/nydiokar/AI-team/pull/304) (`8d5d2b7)) covers incorrect/empty scope, invalid Python, skipped input, failed CBM indexing, paging and corrupt cache. Confirm timeout, partial query, required coverage and browser truth against the final producer. |
-| C3 | Open | Main emits run status but the reconciled counts, recoverable omission pages and baseline controls are in the archive. Verify clean/incomplete zero, 101+ and >40 in one kind through the CLI. |
-| C4 | Partial | [#312](https://github.com/nydiokar/AI-team/pull/312) excludes docstring examples. [#316](https://github.com/nydiokar/AI-team/pull/316) (`8d5469a)) adds qualified/quoted, CTE and shared-declaration execution attribution and unresolved SQL evidence. Credit 62 targeted tests, one real CBM fixture and [both CI jobs](https://github.com/nydiokar/AI-team/actions/runs/46043170341). Finish maintained ownership, negative controls and final integration. |
-| C5 | Partial | #304 and #316 have cache/error and SQL-facts schema changes. Prove normalized cold/warm parity and fresh graph evidence after source, parser and native index changes including caller additions and deletions. |
-| C6 | Open | Main's scorer counts entity touches. Integrate the frozen corpus and exact witness scorer with the report producer. Verify failed, incomplete, capped and benign outcomes, and publish misses and unknowns. |
-| C7 | Open | [Original snapshot evidence](https://github.com/nydiokar/AI-team/blob/244a397/.claude/skills/architecture-pathway-audit/MEASUREMENTS.md) covers snapshot rendering. Verify live browser route, expansion, source, failure and recovery with disposable processes. |
-| C8 | Partial | #304 covers refusal to mark done after incomplete scope. Recheck malformed/unsupported required analysis and preservation of valid contracts and waivers with the final checker. |
-| C9 | Partial | #302 packet evidence covers four admitted/96 rejected calls at 2,000 sessions and jobs, a 100,272-byte page and 0.95–1.45 MB traced Python peak. Measure the changed explorer handlers and document boundaries. |
-| C10 | Partial | #302 records independent application review. The recovered labels, audit implementation and certification matrix still require independent review and verified fixes. |
-| C11 | Open | [Pinned original](https://github.com/nydiokar/AI-team/blob/244a397/.claude/skills/architecture-pathway-audit/MEASUREMENTS.md) and the [repeat manifest](https://github.com/nydiokar/AI-team/blob/main/.claude/skills/architecture-pathway-audit/benchmark/measurements/2026-11-16.recheck.json) are preserved. Final merged-source raw outputs and normalized comparison are pending. |
-| C12 | Partial | The live build contains #302. Read back the loaded API/browser behavior and finish the registry and issue after certification. Tool-only changes do not require gateway deployment. |
+| C1 | Verified | Pinned untouched methods reproduce stale review and omitted membership. [#302](https://github.com/nydiokar/AI-team/pull/302) records seven pinned failures including its threshold/race witnesses. The merged application run covered 199/200/201/2,000, mixed-spec review, malformed evidence, role history and API cursors. 78 passed, 1 warning in 57.82s. A separate close/rework and rebind run passed 25. Chromium and authenticated reads proved the deployed Work seams. [certification manifest](https://github.com/nydiokar/AI-team/blob/main/.claude/skills/architecture-pathway-audit/benchmark/measurements/2026-11-28.certification.json) |
+| C2 | Verified | [#304](https://github.com/nydiokar/AI-team/pull/304) covers wrong, empty and excluded scopes, invalid and unsupported input, and corrupt cache. The final suite rejects malformed/partial CBM paging, times out a stalled child and replaces the prior artifact. Real CBM changes to ignore policy removed six required Python files and yielded incomplete status. Node-cap zero returned 2. [certification manifest](https://github.com/nydiokar/AI-team/blob/main/.claude/skills/architecture-pathway-audit/benchmark/measurements/2026-11-28.certification.json) |
+| C3 | Verified | The clean corpus base emitted zero with completed status. The real node-cap fixture also emitted zero and returned 2 with partial status. The 113-finding fixture reconciled pages of 40/40/33, plus an empty offset past the end. The scorer rejected omissions and known/stale counts held across pages. [certification manifest](https://github.com/nydiokar/AI-team/blob/main/.claude/skills/architecture-pathway-audit/benchmark/measurements/2026-11-28.certification.json) |
+| C4 | Verified | [#312](https://github.com/nydiokar/AI-team/pull/312) and [#316](https://github.com/nydiokar/AI-team/pull/316) cover qualified/quoted, CTE and execution-site attribution and unsupported SQL diagnostics. #316 passed 62 targeted tests, the real fixture and both CI jobs. The maintained ownership contract passed over 152 files with 180 unresolved sites disclosed. G07 guards pending authority. The maintained A102 contract retained seven narrow waivers. [measurements and run commands](https://github.com/nydiokar/AI-team/blob/main/.claude/skills/architecture-pathway-audit/MEASUREMENTS.md#2026-11-28--a116-certification) |
+| C5 | Verified | Merged cold and warm outputs matched exactly on findings, routes, coverage, analysis scope and SQL edges. Native identity changed for source and CBM binary changes, parser identity reset AST cache, different receipts discarded graph cache, and real CBM verified added then deleted caller/symbol evidence. [certification manifest](https://github.com/nydiokar/AI-team/blob/main/.claude/skills/architecture-pathway-audit/benchmark/measurements/2026-11-28.certification.json) |
+| C6 | Verified | The actual frozen CLI/scorer pipeline localized 2/2 graph defects and verified 2/2 contract violations. One of two benign controls was flagged, the intentional LIMIT-2 read. Normal execution had zero misses and zero unknowns. Missing, incomplete and capped child results returned nonpassing and left affected controls unknown. [frozen labels](https://github.com/nydiokar/AI-team/blob/main/.claude/skills/architecture-pathway-audit/benchmark/corpus/GROUND_TRUTH.json) [certification manifest](https://github.com/nydiokar/AI-team/blob/main/.claude/skills/architecture-pathway-audit/benchmark/measurements/2026-11-28.certification.json) |
+| C7 | Verified | Chromium used the real CLI server to expand a route and fetch source. An unavailable index produced 503 and failed status. Edited source produced 409 and persisted failed status. Restart on a fresh index restored expansion and source with declared partial interactive coverage. Test-owned sessions exited. [certification manifest](https://github.com/nydiokar/AI-team/blob/main/.claude/skills/architecture-pathway-audit/benchmark/measurements/2026-11-28.certification.json) |
+| C8 | Verified | Checker exits 0/1/2 remain supported. Existing dispatch refusal tests covered absent scope and mixed valid/missing scope. Completed violations refuse closure, and valid assertions and explicit waivers still pass. Dispatch automatically runs declared arch-contracts. The explorer result is evidenced separately for A116. [certification manifest](https://github.com/nydiokar/AI-team/blob/main/.claude/skills/architecture-pathway-audit/benchmark/measurements/2026-11-28.certification.json) |
+| C9 | Verified | [#302](https://github.com/nydiokar/AI-team/pull/302) bounded the 2,000-session and 2,000-job roster fixture to four admitted and 96 rejected calls. Explorer saturation also admitted four and rejected 96, with 967,731 bytes traced in the fixture. Full-state serialization produced 7,075,426 bytes and peaked at 37,129,009 traced Python bytes for one response. Deadlines, resource failures and limits are documented. [measurements and run commands](https://github.com/nydiokar/AI-team/blob/main/.claude/skills/architecture-pathway-audit/MEASUREMENTS.md#2026-11-28--a116-certification) |
+| C10 | Verified | Independent baseline/label review reproduced F1, F2 and the benign controls. Integration review reproduced false zero, substituted policy, stale live source, timeout, unrelated cached adjacency, malformed pages and missing coverage. Independent recheck passed the fixed probes, followed by the merged test runs. [#321](https://github.com/nydiokar/AI-team/pull/321) [measurements and run commands](https://github.com/nydiokar/AI-team/blob/main/.claude/skills/architecture-pathway-audit/MEASUREMENTS.md#2026-11-28--a116-certification) |
+| C11 | Verified | Merged `bd651cd` scanned 111 files, discovered 144 routes and expanded 804 roots. The declared limit left 110 roots depth-limited. The published pages contain all 720 reported patterns, including the residual bounded-reader candidates. The original and final raw reports and denominators are linked. [certification manifest](https://github.com/nydiokar/AI-team/blob/main/.claude/skills/architecture-pathway-audit/benchmark/measurements/2026-11-28.certification.json) |
+| C12 | Verified | Both CI jobs passed before [#321](https://github.com/nydiokar/AI-team/pull/321) merged. Healthy gateway and task-server on `4f5741d` exposed the #302 API/browser behavior. No deployable source differs between that build and the audit merge, so the tool-only changes required no gateway recreation. The worker processes and A119 checkout were preserved. [certification manifest](https://github.com/nydiokar/AI-team/blob/main/.claude/skills/architecture-pathway-audit/benchmark/measurements/2026-11-28.certification.json) |
 
 #### Archive disposition
 
-- [Certification `e2e552a`](https://github.com/nydiokar/AI-team/tree/e2e552a) supplies the shared corpus, scorer, ownership draft, report schema, evidence pages, coverage/cache work and tests. Preserve the landed #304 failure witnesses and dispatch guard when integrating its divergent implementation. Its SQL adapter matches `8d5469a` exactly.
-- [Outcomes `622f797`](https://github.com/nydiokar/AI-team/commit/622f797) supplies content-bound native project naming and translates qualified names back to stable logical graph IDs. Test it against CBM 0.11.0 and preserve stable evidence and clean process shutdown. The earlier common changes are covered by certification.
-- [Semantics `b35548d`](https://github.com/nydiokar/AI-team/commit/b35548d) has patch-equivalent corpus, extraction and scoring commits. Certification supplies those changes and the later producer work. The application commit is already in #302.
+- [Certification `e2e552a`](https://github.com/nydiokar/AI-team/tree/e2e552a) supplied the corpus, scorer, run model, reports, maintained contract and tests. The integration retained the landed #304 failure witnesses and guard. The archived SQL extractor was identical to #316.
+- [Outcomes `622f797`](https://github.com/nydiokar/AI-team/commit/622f797) supplied source-bound native projects and stable logical graph IDs. The integration rechecks receipts, normalizes route inventory and drops adjacency on a generation change.
+- [Semantics `b35548d`](https://github.com/nydiokar/AI-team/commit/b35548d) overlaps certification. The common corpus and scorer came from certification. Its application commit was already in #302.
 
-#### Issue checklist status at takeover
+#### Implementation and certification checklist
 
-- [ ] Pinned baseline and frozen controls — partial. #302 and #304 reproduced pinned failures. Freeze and independently review the portable archive labels before detector tuning.
-- [ ] Authoritative reads and UI/API trace — implementation merged in #302. Repeat the read-only browser/API trace and link the full regression witnesses.
-- [ ] Adverse analysis inputs and coverage/freshness — partial in #304 and #316. Complete the integrated matrix in C2, C3 and C5.
-- [ ] Benign and unresolved controls — partial. #302 preserves requester ambiguity, #312 and #316 cover docstrings/CTEs and execution attribution. Verify lifecycle, external writer, migration and narrow waiver cases with the maintained contract.
-- [ ] Zero, capped counts, baselines and cold/warm equality — open under C3 and C5.
-- [ ] CLI, interactive browser and request boundaries — open for the explorer. #302 recorded bounds for application reads.
-- [ ] Targeted offline, real CBM and committed corpus — partial. #316 supplied the targeted and real fixture evidence above. Run both again with the committed corpus and integrated producer.
-- [ ] Independent implementation review — partial for #302 only. Review final audit behavior and rerun findings.
-- [ ] Merged-source manifests, denominators and residuals — baseline preserved. Final run and comparison are open.
-- [ ] Merge, gateway identity and live read-back — #302 is merged and its code is in the loaded build. Final audit PR, live read-back and closure remain open.
-- [ ] Registry and issue closure — open until all C1–C12 have evidence.
+- [x] Pinned baseline and frozen controls. Independent SQLite replay reproduced both original app defects, their benign controls and the two deterministic contract witnesses.
+- [x] Authoritative reads and UI/API trace. Mixed-spec, malformed, threshold, 10×, rework, role and rebind evidence is linked in C1.
+- [x] Adverse analysis inputs and freshness. C2 and C5 cover declared bounds, invalid inputs, timeouts, failed/backing index, malformed pages and cache changes.
+- [x] Benign and unresolved controls. C4 and C6 cover lifecycle, migration/ownership, negative-test waivers, intentional LIMIT-2 and unsupported SQL.
+- [x] Zero, caps, baselines and cold/warm equality. C3 and C5 contain reconciled complete, partial and paged evidence.
+- [x] CLI, interactive browser and boundaries. C7 and C9 contain real browser recovery and isolated concurrency/serialization evidence.
+- [x] Targeted offline, real CBM and committed corpus. The merged run used Python 3.12.16 and verified CBM 0.11.0.
+- [x] Independent implementation review. Reviewed fixtures and fixes for all reproduced blockers.
+- [x] Merged-source manifests, denominators and residual candidates. The manifest links every raw output page, the corpus score and the preserved baseline.
+- [x] Merge, gateway identity and live read-back. The active gateway contains #302 and passed read-back. The final audit PR affects tools and CI.
+- [x] Registry and issue closure. The A116 registry records the final certification.
 
 ### Report, cache, ownership and corpus integration — 2026-11-28
 
@@ -251,10 +251,6 @@ required files. The post-fix probes passed. The application read-back on gateway
 `4f5741d` passed for Work detail, roster, timeline and Case usage. Chromium
 rendered the live mobile Work panes.
 
-The merged-source rerun and publication of the raw reports and certification
-manifest are in progress. [Issue #290](https://github.com/nydiokar/AI-team/issues/290)
-and the dispatch remain open until those artifacts are verified.
-
 ### Authoring verification — 2026-11-16
 
 Issue #290 is published; this packet, human ledger and Active Work entry identify
@@ -272,7 +268,12 @@ unrelated handoff. This is an explained registry baseline, not A116 certificatio
 
 ## Closure
 
-Partial. P1 authoritative review/membership reads merged in PR #302 (`5a04f30`, 2026-11-26) with the boundary measurements recorded below. P0 frozen witnesses, P2–P4 audit-tool stages, C1–C12 certification and deployment verification remain open; no final semantic score or full closure is claimed.
+C1–C12 verified on 2026-11-28. The application passes its isolated durable-row,
+consumer and deployed read tests. The audit works within its declared static
+Python/SQLite and depth/adjacency limits. The merged depth-six repository sweep
+reported a partial result with 720 patterns across its pages. The complete
+frozen corpus is the measure of localization, deterministic contract recall and
+benign noise. [certification manifest](https://github.com/nydiokar/AI-team/blob/main/.claude/skills/architecture-pathway-audit/benchmark/measurements/2026-11-28.certification.json) [measurements and run commands](https://github.com/nydiokar/AI-team/blob/main/.claude/skills/architecture-pathway-audit/MEASUREMENTS.md#2026-11-28--a116-certification)
 
 ### Authoritative ledger reads
 
