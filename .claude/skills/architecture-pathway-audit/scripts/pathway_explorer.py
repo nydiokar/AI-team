@@ -1098,9 +1098,12 @@ class Engine:
                           'cbm_only_server': sorted(q for q in set(cbm_set) - ast_set if not cbm_set[q]),
                           'cbm_only_client_http_targets': sorted(q for q in set(cbm_set) - ast_set if cbm_set[q])})
         parse_errors: list[str] = [f"{rel}: {f['parse_error']}" for rel, f in self.cache['facts'].items() if f.get('parse_error')]
+        native_files: set[str] = {n['file'] for n in self.cache.get('symbols') or () if n['file']}
+        required_python: set[str] = {rel for rel, facts in self.cache['facts'].items() if facts.get('defs')}
         return {
             'source_files': len(self.cache['files']),
             'skipped_files': self.skipped,
+            'unindexed_python': sorted(required_python - native_files) if self.cbm is not None else [],
             'cbm_index_coverage': (self.cache.get('index') or {}).get('coverage'),
             'sql_limitations': [
                 {'file': rel, **limitation}
@@ -1150,7 +1153,7 @@ class Engine:
             if self.ready_error and run.status != 'failed':
                 run.fail('index', self.ready_error)
             if self.ready.is_set() and run.status != 'failed':
-                for key in ('parse_errors', 'incomplete_entries', 'skipped_files'):
+                for key in ('parse_errors', 'incomplete_entries', 'skipped_files', 'unindexed_python'):
                     if cov[key]:
                         run.errors.append(RunError(stage='coverage', detail=f'{len(cov[key])} {key.replace("_", " ")}'))
                 native: dict[str, Any] = cov['cbm_index_coverage'] or {}

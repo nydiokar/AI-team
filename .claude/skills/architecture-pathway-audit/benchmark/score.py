@@ -171,7 +171,7 @@ def validate_report(report: dict, *, graph: bool, returncode: int) -> tuple[str,
                        for key in ('expanded_roots', 'route_roots', 'non_http_roots'))
                 or not stats.get('index') or not stats.get('cbm_version')
                 or not coverage.get('source_files') or coverage.get('parse_errors') != []
-                or coverage.get('incomplete_entries') != [] or coverage.get('skipped_files') != {}
+                or coverage.get('unindexed_python') != [] or coverage.get('incomplete_entries') != [] or coverage.get('skipped_files') != {}
                 or sweep.get('root_selection') != 'all'
                 or sweep.get('expanded_roots') != sweep['route_roots'] + sweep['non_http_roots']
                 or any(sweep.get(key) != 0 for key in

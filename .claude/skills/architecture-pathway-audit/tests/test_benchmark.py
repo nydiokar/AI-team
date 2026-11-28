@@ -72,7 +72,7 @@ def graph_report(*findings: dict, status: str = 'completed') -> dict:
                            'findings_offset': 0, 'next_findings_offset': None}, 'findings': list(findings),
         'stats': {'index': {'nodes': 2, 'edges': 1, 'receipt': {'root_path': '/fixture', 'project': 'fixture'}},
                   'cbm_version': '0.11.0'},
-        'coverage': {'source_files': 1, 'parse_errors': [], 'incomplete_entries': [], 'skipped_files': {},
+        'coverage': {'source_files': 1, 'parse_errors': [], 'incomplete_entries': [], 'unindexed_python': [], 'skipped_files': {},
                      'cbm_index_coverage': {key: {'count': 0} for key in ('parse_partial', 'parse_unusable', 'skipped')},
                      'sweep': {'root_selection': 'all', 'expanded_roots': 1, 'route_roots': 0, 'non_http_roots': 1,
                                'depth_limited_roots': 0, 'node_limited_roots': 0, 'incomplete_adjacency_roots': 0}},

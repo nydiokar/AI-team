@@ -197,6 +197,20 @@ class TestExplorerFailureHonest(unittest.TestCase):
         self.assertEqual(saved['run']['status'], 'failed')
         self.assertIn('ANALYSIS NOT COMPLETE', out.getvalue())
 
+    def test_no_serve_unresponsive_cbm_returns_two_with_fresh_artifact(self):
+        import pathway_explorer as pe
+        fake = Path(self.tmp.name) / 'stalled-cbm'
+        fake.write_text('#!/bin/sh\nexec sleep 30\n', encoding='utf-8')
+        fake.chmod(0o755)
+        self.report.write_text('{"run":{"status":"completed"}}')
+        code = pe.main(['--repo', str(self.scope), '--scope', '.', '--cbm', str(fake), '--timeout', '1',
+                        '--no-serve', '--out', str(self.out), '--report', str(self.report),
+                        '--cache-dir', str(self.cache)])
+        saved = json.loads(self.report.read_text(encoding='utf-8'))
+        self.assertEqual(code, 2)
+        self.assertEqual(saved['run']['status'], 'failed')
+        self.assertIn('timed out', saved['run']['errors'][0]['detail'])
+
     def test_viewer_surfaces_run_status(self):
         viewer = (SCRIPTS / 'viewer.html').read_text(encoding='utf-8')
         self.assertIn("'run'", viewer)
