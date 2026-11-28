@@ -232,6 +232,29 @@ Verified 2026-11-28 against [origin/main at 4f5741d](https://github.com/nydiokar
 - [ ] Merge, gateway identity and live read-back — #302 is merged and its code is in the loaded build. Final audit PR, live read-back and closure remain open.
 - [ ] Registry and issue closure — open until all C1–C12 have evidence.
 
+### Report, cache, ownership and corpus integration — 2026-11-28
+
+[PR #321](https://github.com/nydiokar/AI-team/pull/321) merged as
+[`bd651cd`](https://github.com/nydiokar/AI-team/commit/bd651cd). Both the
+[Python](https://github.com/nydiokar/AI-team/actions/runs/46126944098/job/140923519259)
+and [isolated Docker](https://github.com/nydiokar/AI-team/actions/runs/46126944098/job/140923519031)
+jobs passed. The final PR head passed 117 targeted tests and five subtests with
+real CBM 0.11.0. Unchanged cold/warm runs matched exactly across findings,
+coverage, routes, analysis scope and SQL evidence. The CLI reached all 113
+findings in the cardinality fixture. The scorer rejected failed, partial and
+capped observations. Both graph defects localized, both contract violations
+matched, the LIMIT-2 control was flagged and the lifecycle control was unflagged.
+
+Independent review tested inconsistent totals, replacement policy, stale source,
+timeout responses, unrelated warm adjacency, malformed CBM pages and omitted
+required files. The post-fix probes passed. The application read-back on gateway
+`4f5741d` passed for Work detail, roster, timeline and Case usage. Chromium
+rendered the live mobile Work panes.
+
+The merged-source rerun and publication of the raw reports and certification
+manifest are in progress. [Issue #290](https://github.com/nydiokar/AI-team/issues/290)
+and the dispatch remain open until those artifacts are verified.
+
 ### Authoring verification — 2026-11-16
 
 Issue #290 is published; this packet, human ledger and Active Work entry identify
